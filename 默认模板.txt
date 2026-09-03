@@ -1,0 +1,8 @@
+http://{{domain}}.beuaya.com/get.php?username={{Username}}&password={{Password}}&type=m3u_plus&output=mpegts
+
+👤 Username: {{Username}}
+🔑 Password: {{Password}}
+🔗 DNS (URL): http://{{DNS}}
+📺 Samsung & LG DNS (IPTV Smarters): http://{{domain}}.yufengsmart.com
+📦 Package: {{Package}}
+📅 Expiry Date: {{Package}}

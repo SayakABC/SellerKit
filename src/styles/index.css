@@ -1,0 +1,283 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   WorkBuddy 风格设计令牌（Phase 2 统一视觉语言）
+   - 灰白黑冷色调：浅灰画布 + 白色面板，石墨灰黑主色，
+     浅灰选中底 + 冷灰强调，轻边框，圆角卡片，充足留白
+   ============================================================ */
+:root {
+  --wb-bg: #f6f7f9;            /* 应用画布（内容区底色） */
+  --wb-surface: #ffffff;       /* 导航 / 顶栏 / 卡片表面 */
+  --wb-surface-2: #fbfcfd;     /* 次级表面（输入框 / 标签底） */
+  --wb-border: #e8eaed;        /* 轻边框 */
+  --wb-text: #1f2328;          /* 主文字 */
+  --wb-text-muted: #8a909a;    /* 次要文字 */
+  --wb-primary: #2b2f36;       /* 石墨灰黑主色（WorkBuddy 灰白黑冷色调） */
+  --wb-primary-hover: #171a1f; /* 主色悬浮 */
+  --wb-primary-soft: #eff1f4;  /* 主色浅底（选中态） */
+  --wb-primary-contrast: #ffffff; /* 主色背景上的文字色 */
+  --wb-success: #16a34a;       /* 成功 */
+  --wb-success-soft: #e9f7ee;  /* 成功浅底 */
+  --wb-warning: #b45309;       /* 警告 */
+  --wb-warning-soft: #fdf1e3;  /* 警告浅底 */
+  --wb-danger: #dc2626;        /* 危险 */
+  --wb-danger-soft: #fdecec;   /* 危险浅底 */
+  --wb-accent: #5a6472;        /* 衍生字段强调色（冷灰） */
+  --wb-accent-soft: #eef1f4;   /* 强调浅底 */
+  --wb-hover: #e8ebf0;         /* 悬浮底 */
+  --wb-overlay: rgba(23, 26, 33, 0.4); /* 弹层遮罩 */
+  --wb-radius: 12px;
+
+  /* Tailwind 默认灰阶 / white 的主题化映射（RGB 三元组，供 tailwind.config 引用） */
+  --tw-surface: 255 255 255;   /* 对应 white */
+  --tw-gray-50: 249 250 251;
+  --tw-gray-100: 243 244 246;
+  --tw-gray-200: 229 231 235;
+  --tw-gray-300: 209 213 219;
+  --tw-gray-400: 156 163 175;
+  --tw-gray-500: 107 114 128;
+  --tw-gray-600: 75 85 99;
+  --tw-gray-700: 55 65 81;
+  --tw-gray-800: 31 41 55;
+  --tw-gray-900: 17 24 39;
+}
+
+/* ===== 深色主题（外观切换） ===== */
+[data-theme='dark'] {
+  --wb-bg: #15171c;
+  --wb-surface: #1d2027;
+  --wb-surface-2: #252932;
+  --wb-border: #2c313b;
+  --wb-text: #e6e8ec;
+  --wb-text-muted: #9aa1ad;
+  --wb-primary: #e4e7eb;       /* 冷白灰主色（深色下提亮） */
+  --wb-primary-hover: #ffffff; /* 主色悬浮（深色下更亮） */
+  --wb-primary-soft: #2a2e33;  /* 主色浅底（选中态） */
+  --wb-primary-contrast: #15171c; /* 主色背景上的文字色 */
+  --wb-success: #4ade80;
+  --wb-success-soft: rgba(74, 222, 128, 0.14);
+  --wb-warning: #fbbf24;
+  --wb-warning-soft: rgba(251, 191, 36, 0.14);
+  --wb-danger: #f87171;
+  --wb-danger-soft: rgba(248, 113, 113, 0.14);
+  --wb-accent: #a6afbb;        /* 冷灰强调（深色下提亮） */
+  --wb-accent-soft: rgba(166, 175, 187, 0.14);
+  --wb-hover: #272c36;
+  --wb-overlay: rgba(0, 0, 0, 0.6); /* 弹层遮罩（深色下更重） */
+  --wb-radius: 12px;
+
+  /* 深色下的 Tailwind 灰阶 / white 映射 */
+  --tw-surface: 30 31 34;      /* white → 深色表面 */
+  --tw-gray-50: 42 45 49;
+  --tw-gray-100: 47 50 54;
+  --tw-gray-200: 55 58 63;     /* 边框 */
+  --tw-gray-300: 75 79 85;
+  --tw-gray-400: 110 116 124;  /* 次要文字 */
+  --tw-gray-500: 150 156 166;
+  --tw-gray-600: 175 181 191;
+  --tw-gray-700: 205 209 215;  /* 主文字 */
+  --tw-gray-800: 222 225 230;
+  --tw-gray-900: 232 234 237;  /* 最亮文字 */
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* 通用卡片工具类：业务模块可作为白色面板承载内容 */
+.wb-card {
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius);
+}
+
+/* 弹层菜单项（账户菜单 / 下拉） */
+.wb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border-radius: 0.5rem;
+  color: var(--wb-text-muted);
+  transition: background-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+}
+.wb-menu-item:hover {
+  background: var(--wb-hover);
+  color: var(--wb-text);
+}
+
+/* ============================================================
+   自定义标题栏（与侧边栏同源，主题切换同步换肤）
+   - 整条为拖拽区（-webkit-app-region: drag）
+   - 按钮 / 控件需标记为 no-drag，否则无法点击
+   ============================================================ */
+.wb-titlebar {
+  height: 38px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  background: var(--wb-surface);
+  /* WorkBuddy 风格：顶栏与内容区用背景色差（白 vs 浅灰画布）区分，不画分割线 */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+/* macOS：避让左上角红黄绿交通灯 */
+.wb-titlebar--mac {
+  padding-left: 78px;
+}
+.wb-titlebar-spacer {
+  flex: 1;
+  -webkit-app-region: drag;
+}
+.wb-titlebar-btn {
+  -webkit-app-region: no-drag;
+  width: 32px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--wb-text-muted);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.wb-titlebar-btn:hover {
+  background: var(--wb-hover);
+  color: var(--wb-text);
+}
+.wb-titlebar-controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+.wb-winbtn {
+  width: 38px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--wb-text-muted);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.wb-winbtn:hover {
+  background: var(--wb-hover);
+  color: var(--wb-text);
+}
+.wb-winbtn--close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--wb-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wb-text-muted);
+}
+
+.drop-zone-active {
+  border-color: var(--wb-primary) !important;
+  background-color: var(--wb-primary-soft) !important;
+}
+
+.toast-enter-active {
+  animation: slideIn 0.3s ease-out;
+}
+
+.toast-leave-active {
+  animation: slideOut 0.3s ease-in;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideOut {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* ============================================================
+   输入控件统一主题化
+   - 背景 / 文字 / 占位符随 --wb-* 变量，浅色与深色主题自动适配
+   - 放在 @layer components：低于 utilities 层，
+     组件已有的 bg-transparent 等类仍可覆盖
+   ============================================================ */
+@layer components {
+  input[type='text'],
+  input[type='search'],
+  input:not([type]),
+  textarea,
+  select {
+    background-color: var(--wb-surface-2);
+    color: var(--wb-text);
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--wb-text-muted);
+  }
+  /* select 下拉选项跟随主题 */
+  select option {
+    background-color: var(--wb-surface);
+    color: var(--wb-text);
+  }
+  /* 原生 checkbox / radio 选中色跟随主色 */
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: var(--wb-primary);
+  }
+  /* 通用输入控件（.wb-input）：
+     - 供各模块设置面板统一使用（如订单归类引擎设置）
+     - 文字缩小到 text-sm 并补充边框/圆角/focus 态，与其余面板协调 */
+  .wb-input {
+    width: 100%;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    border: 1px solid var(--wb-border);
+    border-radius: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .wb-input:focus {
+    outline: none;
+    border-color: var(--wb-primary);
+    box-shadow: 0 0 0 1px var(--wb-primary);
+  }
+}
+
+/* 深色主题：原生控件（select 箭头 / 滚动条 / 日期等）跟随深色 */
+[data-theme='dark'] {
+  color-scheme: dark;
+}

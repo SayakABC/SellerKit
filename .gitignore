@@ -1,0 +1,30 @@
+# ============ 依赖与构建产物 ============
+node_modules/
+dist/
+release/
+.vite/
+*.log
+
+# ============ 系统文件 ============
+.DS_Store
+Thumbs.db
+
+# ============ AI 工具本地数据（不入库） ============
+.workbuddy/
+.codebuddy/
+
+# ============ 环境变量 ============
+# 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example
+.env
+.env.*
+!.env.example
+
+# ============ 构建期自动生成 ============
+# vite.config.ts 在每次 dev/build 时重新生成
+src/registry.generated.ts
+
+# ============ 临时 / 测试文件 ============
+# 临时调试脚本（验证 app.name / userData），可删除
+debug-name.js
+# 测试导出的 Excel 数据文件
+导出测试.xlsx

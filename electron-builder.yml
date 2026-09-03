@@ -1,0 +1,49 @@
+appId: com.sellerkit.app
+productName: SellerKit
+buildVersion: 1.0.0
+directories:
+  output: release
+files:
+  - dist/**/*
+  - "!node_modules/**/{test,tests,__tests__,spec}/**"
+  - "!node_modules/**/*.md"
+  - "!node_modules/**/*.ts"
+extraResources:
+  - from: 默认模板.txt
+    to: 默认模板.txt
+afterPack: ./scripts/afterPack.js
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  category: public.app-category.utilities
+  icon: build/icons/mac/icon.icns
+  artifactName: "${productName}-${version}-mac-${arch}.${ext}"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  asar: true
+  asarUnpack:
+    - "**/*.node"
+  extendInfo:
+    CFBundleDisplayName: SellerKit
+    CFBundleName: SellerKit
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: build/icons/win/icon.ico
+  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: "SellerKit"

@@ -164,6 +164,7 @@
     <SettingsModal
       v-if="settingsOpen"
       :modules="sortedMetas"
+      :manager="pm"
       :initial-category="settingsInitial.category"
       :initial-tab="settingsInitial.tab"
       @close="settingsOpen = false"
@@ -172,6 +173,7 @@
       :open="paletteOpen"
       :modules="navMetas"
       :commands="activeCommands"
+      :plugin-commands="pluginCommands"
       :active-module-id="activeId"
       @close="paletteOpen = false"
       @select-module="activate"
@@ -183,7 +185,7 @@
 
 <script setup lang="ts">
 import { shallowRef, ref, computed, onMounted, onUnmounted } from 'vue';
-import { enabledModuleMetas, moduleViewLoaders } from '@/registry.generated';
+import { createBuiltinPluginManager } from './plugin';
 import TitleBar from './components/TitleBar.vue';
 import ToastHost from './components/ToastHost.vue';
 import CommandPalette from './components/CommandPalette.vue';
@@ -192,34 +194,68 @@ import { useModuleStorage } from './services/storage';
 import { initTheme, useTheme } from './services/theme';
 import { toast } from './services/toast';
 import { ipc } from './services/ipc';
-import type { ModuleMeta, ModuleDefinition, ModuleCommand } from './types';
+import type { ModuleCommand, ModuleMeta } from './types';
 
-const metas = enabledModuleMetas as ModuleMeta[];
-const sortedMetas = [...metas].sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
+// 插件体系入口：从 registry 发现内建插件；贡献点注册表是侧栏 / 视图切换 / ⌘K 命令的单一数据源
+const pm = createBuiltinPluginManager();
+// 侧栏数据源：ref 承载（pm.sortedMetas 为 getter——启停插件后 refreshMetas() 重取即得最新列表）
+const sortedMetas = ref<ModuleMeta[]>(pm.sortedMetas);
+/** 重新从插件管理器拉取侧栏列表（插件停用/启用后调用，驱动侧栏/⌘K 即时更新） */
+function refreshMetas() {
+  sortedMetas.value = pm.sortedMetas;
+}
 // 导航入口列表：过滤 navHidden 模块（保留代码与跨模块跳转激活能力，仅不在侧边栏/⌘K 直接列出）
-const navMetas = sortedMetas.filter((m) => !m.navHidden);
+const navMetas = computed(() => sortedMetas.value.filter((m) => !m.navHidden));
 
 const activeId = ref<string>('');
 const activeView = shallowRef<any>(null);
-const activeDef = shallowRef<ModuleDefinition | null>(null);
 const collapsed = ref(false);
 const paletteOpen = ref(false);
 const menuOpen = ref(false);
 const hoveredAppearance = ref(false);
 const settingsOpen = ref(false);const settingsInitial = ref<{ category?: string; tab?: string }>({});
 
-const activeMeta = computed(() => sortedMetas.find((m) => m.id === activeId.value) || null);
+const activeMeta = computed(() => sortedMetas.value.find((m) => m.id === activeId.value) || null);
 /** 业务流来源模块（switch-module 跨模块跳转时记录），TitleBar 据此显示「返回」入口 */
 const backId = ref<string>('');
-const backMeta = computed(() => sortedMetas.find((m) => m.id === backId.value) || null);
+const backMeta = computed(() => sortedMetas.value.find((m) => m.id === backId.value) || null);
 const appVersion = ref('');
-const activeCommands = computed<ModuleCommand[]>(() => activeDef.value?.commands ?? []);
+// ⌘K 命令数据源：当前活跃插件经贡献注册表暴露的命令（激活时由插件管理器填充）
+const activeCommands = ref<ModuleCommand[]>([]);
+// Phase 3：已激活外置插件（后台贡献型，无视图）的命令 → ⌘K「外置插件命令」区
+const pluginCommands = ref<ModuleCommand[]>([]);
+// onStateChange 退订函数（onUnmounted 清理）
+let stopStateWatch: (() => void) | null = null;
+
+/** 刷新外置插件命令区（外置插件激活/停用/卸载/扫描后调用） */
+function refreshPluginCommands() {
+  pluginCommands.value = pm.getPluginCommands();
+}
+
+/** Phase 3：扫描 <userData>/plugins 并激活 activationEvents 含 onStartup 的外置插件（失败只提示，不阻塞主流程） */
+async function discoverAndStartExternalPlugins() {
+  try {
+    const found = await pm.discoverExternal();
+    for (const e of found.errors) toast.error(`外置插件 ${e.id} 加载失败: ${e.error}`);
+    const started = await pm.activateStartupPlugins();
+    for (const e of started.errors) toast.error(`外置插件 ${e.id} 启动失败: ${e.error}`);
+    refreshPluginCommands();
+    if (started.activated.length > 0) {
+      toast.success(`外置插件就绪：${started.activated.length} 个已激活`);
+    }
+  } catch (e) {
+    toast.error(`外置插件扫描失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 // 外壳级持久化：记住上次活动模块与侧边栏状态（独立命名空间，不影响业务模块数据）
 const shellStorage = useModuleStorage<{
   lastActiveModuleId?: string;
   collapsed?: boolean;
 }>('app-shell');
+
+// 插件启停状态：随宿主分发视图插件的"运行时按包启停"持久化（独立命名空间，与业务模块数据隔离）
+const pluginStateStorage = useModuleStorage<{ disabled?: string[] }>('plugins');
 
 const { mode: themeMode, setTheme } = useTheme();
 const themeOptions = [
@@ -228,27 +264,26 @@ const themeOptions = [
   { label: '跟随系统', value: 'system' as const },
 ];
 
-/** 核心激活：执行模块切换（不处理返回标记，由上层调用方决定 back 语义） */
+/** 核心激活：执行模块切换（不处理返回标记，由上层调用方决定 back 语义）。
+ * 停旧启新、懒加载、贡献注册、业务钩子均由插件管理器统一管理（生命周期状态机）。 */
 async function activateCore(id: string) {
-  if (!moduleViewLoaders[id]) return;
+  if (!pm.has(id)) return;
   if (id === activeId.value && activeView.value) return;
 
-  // 1) 停用上一个模块（释放资源 / 关闭弹窗）
-  await activeDef.value?.deactivate?.();
+  try {
+    // 插件管理器内部先停用上一插件，再懒加载并激活目标插件
+    const result = await pm.activate(id);
 
-  // 2) 加载模块定义（动态 import，仅激活时才拉取）
-  const mod = (await moduleViewLoaders[id]()) as any;
-  const def: ModuleDefinition = mod.default ?? mod;
+    activeView.value = result.view;
+    activeId.value = id;
+    // ⌘K 命令数据源与视图联动（来自命令贡献注册表）
+    activeCommands.value = result.commands;
 
-  activeDef.value = def;
-  activeView.value = def.view;
-  activeId.value = id;
-
-  // 3) 持久化上次活动模块
-  shellStorage.save({ lastActiveModuleId: id, collapsed: collapsed.value }).catch(() => {});
-
-  // 4) 激活当前模块
-  await def.activate?.();
+    // 持久化上次活动模块
+    shellStorage.save({ lastActiveModuleId: id, collapsed: collapsed.value }).catch(() => {});
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e));
+  }
 }
 
 /** 用户主动导航（侧边栏 / ⌘K / logo / 恢复上次模块）：清除业务流返回标记 */
@@ -344,11 +379,24 @@ onMounted(async () => {
     /* 忽略：版本号获取失败时隐藏 */
   }
 
-  // 恢复上次活动模块与侧边栏状态
-  let initialId = sortedMetas[0]?.id || '';
+  // 先应用持久化插件停用集：停用插件的静态视图贡献移除后侧栏/⌘K 即时反映（幂等；首次 activate 前执行）
+  try {
+    const ps = await pluginStateStorage.load();
+    if (ps?.disabled?.length) await pm.applyDisabled(ps.disabled);
+  } catch {
+    /* 忽略：应用失败时全部插件默认启用 */
+  }
+  refreshMetas();
+
+  // 恢复上次活动模块与侧边栏状态（被停用插件不参与恢复，回退默认模块）
+  let initialId = sortedMetas.value[0]?.id || '';
   try {
     const saved = await shellStorage.load();
-    if (saved?.lastActiveModuleId && moduleViewLoaders[saved.lastActiveModuleId]) {
+    if (
+      saved?.lastActiveModuleId &&
+      pm.has(saved.lastActiveModuleId) &&
+      pm.isEnabled(saved.lastActiveModuleId)
+    ) {
       initialId = saved.lastActiveModuleId;
     }
     if (saved?.collapsed !== undefined) collapsed.value = saved.collapsed;
@@ -356,12 +404,42 @@ onMounted(async () => {
     /* 忽略读取失败，使用默认模块 */
   }
   await activate(initialId);
+
+  // 订阅插件状态变更：
+  //  - 插件停用/启用 → 刷新侧栏/⌘K 数据源并持久化停用集；当前视图插件被停用时回退第一个启用插件
+  //  - 外置插件激活/停用 → 刷新 ⌘K「外置插件命令」区
+  //  - 随后扫描独立插件目录并懒激活 onStartup 外置插件
+  stopStateWatch = pm.onStateChange((id, state, prev) => {
+    refreshPluginCommands();
+    // 停用（state=disabled）或从停用恢复启用（disabled→installed→loaded 序列，prev=disabled 即触发）
+    if (state === 'disabled' || prev === 'disabled') {
+      refreshMetas();
+      // 业务流返回标记指向被停用插件时清空，避免 TitleBar 残留无效返回入口
+      if (backId.value === id) backId.value = '';
+      pluginStateStorage.save({ disabled: pm.getDisabledIds() }).catch(() => {});
+    }
+    if (prev === 'active' && state === 'disabled' && id === activeId.value) {
+      const fallback = sortedMetas.value[0];
+      if (fallback && fallback.id !== id) {
+        activateCore(fallback.id).catch((e) => {
+          toast.error(`插件已停用：${e instanceof Error ? e.message : String(e)}`);
+          activeView.value = null;
+          activeId.value = '';
+        });
+      } else {
+        activeView.value = null;
+        activeId.value = '';
+      }
+    }
+  });
+  void discoverAndStartExternalPlugins();
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   window.removeEventListener('open-settings', onOpenSettings);
   window.removeEventListener('switch-module', onSwitchModule);
+  stopStateWatch?.();
 });
 
 function iconSvg(icon?: string): string {

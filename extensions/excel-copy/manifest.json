@@ -1,0 +1,9 @@
+{
+  "name": "excel-copy",
+  "displayName": "TV模版",
+  "version": "1.0.0",
+  "description": "导入 Excel 数据，按模板生成文本并一键复制，智能跟踪每条记录的使用状态。",
+  "author": "SellerKit",
+  "kind": "view",
+  "activationEvents": ["onStartup"]
+}

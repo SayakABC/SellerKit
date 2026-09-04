@@ -434,4 +434,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       items: sanitizePurchaseItems(payload?.items),
       defaultName: typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
     }),
+  // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
+  pluginsScan: () => ipcRenderer.invoke('plugins-scan'),
+  pluginsReadEntry: (payload: any) =>
+    ipcRenderer.invoke('plugins-read-entry', {
+      id: typeof payload?.id === 'string' ? payload.id.slice(0, 64) : '',
+      entry: typeof payload?.entry === 'string' ? payload.entry.slice(0, 256) : '',
+    }),
+  pluginsUninstall: (payload: any) =>
+    ipcRenderer.invoke('plugins-uninstall', {
+      id: typeof payload?.id === 'string' ? payload.id.slice(0, 64) : '',
+    }),
+  pluginsOpenDir: () => ipcRenderer.invoke('plugins-open-dir'),
 });

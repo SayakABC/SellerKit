@@ -1,0 +1,9 @@
+{
+  "name": "order-insight",
+  "displayName": "订单归类",
+  "version": "1.0.0",
+  "description": "导入订单 Excel → 主图下载 → 指纹查重 → AI 识别 → 归类汇总，支持拿货对账。",
+  "author": "SellerKit",
+  "kind": "view",
+  "activationEvents": ["onStartup"]
+}

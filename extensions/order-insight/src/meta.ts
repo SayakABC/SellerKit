@@ -1,4 +1,4 @@
-// src/modules/order-insight/meta.ts
+// extensions/order-insight/src/meta.ts
 // 「订单归类」模块元信息：id 与目录名一致（kebab-case），name 为用户可见名。
 
 import type { ModuleMeta } from '@/core/types';

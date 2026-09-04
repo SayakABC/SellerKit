@@ -38,13 +38,15 @@ src/
 │   ├── services/               # ipc / storage / theme / toast / clipboard / dialog / excel
 │   ├── network/                # 统一网络请求（request: axios+IPC adapter / token / types）
 │   └── types.ts                # ModuleMeta / ModuleDefinition / ModuleCommand 等
-├── modules/<module-id>/        # 业务模块（可插拔，一个文件夹一个模块）
+├── modules/<module-id>/        # 业务模块（快速迭代用；目前仅 quick-note）
 │   ├── meta.ts                 # 模块元信息（必须）
 │   ├── index.ts                # ModuleDefinition（必须）
 │   ├── store.ts                # Pinia store（setup 语法）
 │   ├── <Xxx>View.vue           # 模块主视图
 │   └── components/             # 模块内组件
 ├── lib/                        # 纯函数工具（无副作用）
+extensions/<id>/                # 随宿主分发视图插件包（Phase 5）：manifest.json + src/ 源码，见 §1.8
+│   └── src/                    # = 原业务模块代码（meta/index/store/view/components…自包含）
 ├── styles/index.css            # 全局样式 + 设计令牌（--wb-*）
 ├── types.ts                    # 业务共享类型 + ElectronAPI 接口
 ├── registry.generated.ts       # ⚠️ 自动生成，禁止手改
@@ -64,6 +66,7 @@ modules.config.ts ──► vite.config.ts ──► src/registry.generated.ts �
 关键约束：
 - **`src/registry.generated.ts` 是 AUTO-GENERATED，严禁手改**；任何修改会在下次 `npm run dev/build` 被覆盖。
 - `vite.config.ts` 用 esbuild 转译求值 `modules.config.ts`，因此 config 必须是**纯字面量结构**（对象/数组/字符串），禁止复杂逻辑。
+- **双根源码解析（Phase 5）**：`vite.config.ts` 按 id 探测 `src/modules/<id>`（优先）或 `extensions/<id>/src`，meta/index 入口统一进 registry；扩展插件包另生成 `pluginPackageInfos`（manifest 元数据）与 `settingsPanelLoaders`（设置面板入口 `settings.ts`）。新增/外挂化请参照 §1.8「随宿主分发视图插件」。
 - 模块视图通过 `moduleViewLoaders` 动态 `import()`，仅激活时才拉取；未启用模块不进入 bundle。
 - 打包范围选择优先级（`vite.config.ts`）：`MODULE_IDS`（逗号分隔自定义清单）> `MODULE_PROFILE`（预设名，如 minimal/standard/pro）> 文件内 `profile` 字段 > `enabledModules` 兜底。未选中的模块代码不进 bundle，侧边栏菜单与 ⌘K 命令均不出现（侧边栏由 `enabledModuleMetas` 渲染）。
 - 交互式打包：`npm run dist:select` / `build:select`（`scripts/select-build.js`，方向键+空格勾选模块，记住上次选择于 `node_modules/.cache`），勾选结果经 `MODULE_IDS` 传给构建。
@@ -124,6 +127,22 @@ modules.config.ts ──► vite.config.ts ──► src/registry.generated.ts �
 - Token：`getToken/setToken`（`token.ts`）；请求拦截器自动附加 `Authorization: Bearer <token>`，401 响应自动清除本地 token。
 - 安全边界（勿随意放宽）：`electron/http-client.ts` 协议白名单（https/http）+ 方法白名单；`preload.ts` 结构白名单消毒；`ipc-handlers.ts` 入参二次校验（URL≤8192、body≤10MB、响应≤10MB、15s 超时）。
 - 使用方式：`const { data } = await http.get<T>('/api/x')`——响应**不自动解包**，保持类型安全；登录后 `setToken(...)` 写入 token。
+
+### 1.8 运行时插件体系（`src/core/plugin/`，Phase 1–4 已落地）
+
+在 §1.3 构建期模块裁剪之上，新增运行时插件内核（详见 `PLUGIN_ARCHITECTURE.md`）：
+
+- **目录分层**：`src/core/plugin/` 内核不依赖业务；`electron/plugins-handlers.ts` 主进程做外置插件目录的第一层防线；业务模块（内建插件）经 `pluginManager` 以 `PluginModule` 身份注册。
+- **链路**：AppShell `createBuiltinPluginManager()` → `discoverExternal()`（扫描 `<userData>/plugins`，渲染层 `externalManifest.ts` 严格 schema 校验）→ `activateStartupPlugins()` 激活 `activationEvents: ['onStartup']` 的外置插件 → 贡献点（视图/命令/设置）注册进贡献注册表 → 侧边栏 / ⌘K 消费。
+- **外置插件形态**：目录 `<userData>/plugins/<kebab-id>/`，`manifest.json`（`name` 必须等于目录名）+ 自包含单文件 ESM 入口（`default` 导出 `{ activate(ctx), deactivate?(ctx) }`）；entry 仅 `./` 相对路径、禁止 `..` 穿越、入口 ≤2MB（主进程 `plugins-handlers.ts` 强制）。
+- **信任分级**：内建 = Level 0（raw host）；**外置 = Level 2（Worker 沙箱）**——插件源码在主线程不复存在，被 `?raw` 注入的 `sandboxRuntime.ts` 于独立 module Worker（Blob）内 `import()` 求值；宿主侧（`sandbox.ts`，仍在主线程）以 `createGatedHostApi` 包权限门逐调用判定。Level 1（主线程受限外置，Phase 3 过渡形态）已移除，`trustLevel: 0|1|2` 字段保留 1 仅为历史兼容。
+- **沙箱桥协议**（宿主 ↔ Worker，MSG 常量双端同源，见 `sandboxRuntime.ts` 头部注释）：宿主→Worker `boot/run-command/event/deactivate/abort`，Worker→宿主 `activated/boot-error/deactivated/command-result/call/log/register-*/unregister-*/subscribe/unsubscribe/publish`；请求以 `payload.rid` 关联、能力调用以 `payload.id` 关联（宿主回 `call-result`）；一次性随机 token 随 boot 建立，后续所有消息必须携带，Worker 内伪造/串台消息被静默丢弃。
+- **运行时自包含约束**：`sandboxRuntime.ts` 以 `?raw` 文本注入 Blob module worker，必须保持纯 JS（无 import/无 TS 语法，仅末尾 `export {}` 空导出标模块、无 Vite alias）；权限判定与审计仍发生在宿主主线程（Worker 不可自证可信）。
+- **生命周期/崩溃**：激活/停用均有超时；Worker 异常（crash/超时）走 `handleSandboxCrash` → 记录 error → 清理贡献 → `deactivateRecord`；activation 失败会回滚已注册贡献并销毁 sandbox。
+- **权限门**（`security.ts`）：manifest `capabilities` 显式声明 → 逐调用判定（能力域 / 动作 / 命名空间 / URL 前缀）→ 未声明即抛 `PluginPermissionError` 并写入审计环（`auditDenied()` 供「设置 → 插件」面板展示）；自身命名空间经 `ctx.storage` 走 raw host 直通。
+- **T8/T9（已落地）**：贡献点统一 `order?: number`（⌘K 消费点升序渲染：`pluginManager.getActiveCommands/getPluginCommands` 按 order 排序；沙箱命令经 `register-command` 透传 order）；事件总线支持尾部 `*` 通配订阅（`meta.eventType` 携带实际事件名，`sandboxRuntime.ts` 内联 pattern 判定本地路由，与 `eventBus.ts` 双端一致——见红线 20）。
+- **外置插件无视图**：按"后台贡献型"处理（命令进 ⌘K 的"外置插件命令"分组），与内建视图切换语义解耦；「设置 → 插件」面板以 `内建 · L0` / `外置 · L2` 徽标区分信任级别。
+- **随宿主分发视图插件（Phase 5，机制 A）**：excel-copy / order-insight 已外挂为 `extensions/<id>/` 视图插件包——`manifest.json`（`kind: view` + displayName/version/description/author）+ `src/` 源码随宿主编译（registry 双根收录），**保留完整 Vue 视图/数据/设置能力**。设置面板贡献化：插件包 `settings.ts`（导出 `settingPanels`）经 registry `settingsPanelLoaders` 注册，SettingsModal 分类导航/内容区按贡献生成（已去硬 import）。运行时按包启停：`pluginManager.setPluginEnabled/applyDisabled`（停用 → 移除静态视图贡献 → 侧栏/⌘K/设置分类消失、`activate` 拒绝；启用 → 恢复静态贡献）；停用集经 `plugins` 命名空间持久化；PluginCenter 内建行提供启停按钮。安装/移除 = 增删 `extensions/<id>/` 目录（构建期收录），与 src/modules 模块同受 `MODULE_IDS`/profile 裁剪。
 
 ---
 
@@ -195,23 +214,31 @@ ipcMain.handle('xxx', async (_e: any, ...args) => {
 13. **禁止业务类型命名遮蔽 TS 内置类型**：曾因 `interface Record` 遮蔽全局 `Record<K,V>` 工具类型（已改名 `RecordItem`），新类型命名前先确认不与内置工具类型冲突。
 14. **禁止修改 .env 变量名**：`VITE_API_BASE_URL` / `VITE_REQUEST_ENGINE` 已被 `request.ts` 与 `env.d.ts` 读取，改名需三处同步。
 15. **禁止改变模块选择优先级或移除 `MODULE_IDS` 支持**：`scripts/select-build.js` 交互选择器依赖 `MODULE_IDS` 驱动 `vite.config.ts` 裁剪；调整优先级需同步选择器、vite.config.ts 与本文档（见 §1.3）。
+16. **禁止插件直连 `window.electronAPI`/裸 IPC**：一律 `ctx.host.*`（权限门）；manifest `capabilities` 未声明即调用会抛 `PluginPermissionError` 并写审计。
+17. **禁止给外置插件放行未声明能力**：`capabilities` 显式声明是权限门的唯一放行依据；新增能力声明需评估（storage 命名空间/动作）并同步示例 manifest。
+18. **禁止破坏外置插件目录安全边界**：目录名 = manifest.name（kebab-case）、entry 仅 `./` 相对且禁 `..`、入口 ≤2MB——任何放宽须同步 `electron/plugins-handlers.ts` 与渲染层 `externalManifest.ts` 两处防线。
+19. **禁止新增主进程插件 handler 不设双防线**：主进程只做形状/路径/大小第一层校验，严格 schema（manifest 能力/entry）校验必须在渲染层 `externalManifest.ts` 完成。
+20. **禁止两端桥协议常量不同步**：`sandboxRuntime.ts`（Worker 端）与 `sandbox.ts`（宿主端）的 MSG 常量与消息载荷（rid/id/token 关联规则）必须一一对应；改动须两处同步并跑通冒烟验证（`npm run plugins:sandbox:smoke`，即 `node scripts/sandbox-smoke.mjs`，boot→command→call→deactivate→token 拒绝全链路）。T9 通配 pattern 判定（`plugin:*` 前缀匹配）同属两端双份逻辑（`eventBus.ts` 宿主实现 / `sandboxRuntime.ts` Worker 纯 JS 内联），改动须两处同步——冒烟已覆盖通配订阅命中实际事件。
+21. **禁止破坏 Worker 运行时自包含性**：`sandboxRuntime.ts` 以 `?raw` 文本注入 Blob module worker，必须保持纯 JS——无 import/TS 语法、仅末尾 `export {}` 空导出标模块、无 Vite alias、不触碰 window/DOM/electronAPI；任何新增依赖必须内联到该文件（见 §1.8）。
+22. **禁止外置插件绕过沙箱**：外置插件执行必须走 `createSandboxedPlugin`（Worker 沙箱），不得回退到主线程 `import()`/`eval` 执行插件源码；宿主侧权限门判定不得移入 Worker。
 
 ---
 
 ## 4. 文件操作边界
 
 ### 4.1 可自由修改
-`src/core/components/`、`src/core/network/`（保持现有模式）、`src/modules/*/`、`src/lib/`、`src/styles/index.css`、`src/core/services/`（保持现有模式）、`modules.config.ts`（登记新模块）、`scripts/`。
+`src/core/components/`、`src/core/network/`（保持现有模式）、`src/modules/*/`、`extensions/<id>/`（随宿主分发视图插件包：manifest.json + `src/` 源码，源码 import 一律走 `@/` 别名或模块内相对路径，禁止 `../..` 相对宿主引用）、`src/lib/`、`src/styles/index.css`、`src/core/services/`（保持现有模式）、`modules.config.ts`（登记新模块）、`scripts/`。
 
 ### 4.2 需先理解 IPC 模式后再改
 `electron/main.ts` / `electron/preload.ts`：新增/修改 IPC 必须同步 `preload.ts` 与 `src/types.ts` 的 `ElectronAPI`。
 `electron/http-client.ts` / `electron/ipc-handlers.ts`：网络白名单/校验逻辑，修改需评估安全边界（见 §1.7）。
+`electron/plugins-handlers.ts`：外置插件目录扫描/入口读取/卸载的**主进程第一层防线**，改动须评估路径穿越/大小上限（见红线 18）。
 
 ### 4.3 严格禁止修改（除非用户明确要求并确认）
-`package.json` 的 `name/main/overrides`、`electron-builder.yml` 的 `appId/mac.asar/产出目录`、`vite.config.ts` 的 plugin/alias/outDir、`tsconfig*.json`、`tailwind.config.js` / `postcss.config.js`、`index.html`、**`src/registry.generated.ts`（自动生成）**。
+`package.json` 的 `name/main/overrides`、`electron-builder.yml` 的 `appId/mac.asar/产出目录`、`vite.config.ts` 的 plugin/alias/outDir、`tsconfig*.json`（注：Phase 5 已授权把 `extensions/**/*.{ts,vue}` 加入 `tsconfig.json` include 以覆盖插件包类型，勿回退）、`tailwind.config.js` / `postcss.config.js`、`index.html`、**`src/registry.generated.ts`（自动生成）**。
 
 ### 4.4 底层公共工具（改动前必须搜全部调用方并逐一更新）
-`src/lib/excelParser.ts`、`src/lib/templateEngine.ts`、`src/lib/fieldProcessor.ts`、`src/types.ts`、`src/env.d.ts`、`electron/preload.ts`、`src/core/services/*`、`src/core/network/*`（request/token/types）、`src/core/types.ts`。
+`src/lib/excelParser.ts`、`src/lib/templateEngine.ts`、`src/lib/fieldProcessor.ts`、`src/types.ts`、`src/env.d.ts`、`electron/preload.ts`、`src/core/services/*`、`src/core/network/*`（request/token/types）、`src/core/types.ts`、`src/core/plugin/*`（内核：pluginManager / security / gatedHost / externalManifest / externalLoader / sdk / types / index）、`electron/plugins-handlers.ts`。
 
 ---
 
@@ -220,6 +247,8 @@ ipcMain.handle('xxx', async (_e: any, ...args) => {
 | 场景 | 必须步骤 |
 |------|----------|
 | 新增业务模块 | 见 §1.3 SOP；meta.id 与目录一致；modules.config.ts 登记 |
+| 新增随宿主分发视图插件 / 大模块外挂化 | 代码放 `extensions/<id>/src/`（meta/index/store/view/components 自包含）+ `manifest.json`（`kind: view`）；设置面板在包内写 `settings.ts` 导出 `settingPanels`（分类/tab + 组件）；在 modules.config `enabledModules`/相关 profile 登记 id 进包；SettingsModal 不新增硬 import（分类/内容注册式，参考 excel-copy / order-insight） |
+| 停用/启用插件 | 「设置 → 插件」内建行按钮，或 `pm.setPluginEnabled(id, enabled)` / 启动时 `pm.applyDisabled(list)`；停用集自动持久化 `plugins` 命名空间；停用后侧栏/⌘K/设置分类消失、视图不可激活 |
 | 新增模块状态 | `store.ts` 中 `defineStore` setup 语法；经 `useModuleStorage('<模块id>')` 持久化；用 `scheduleSave` |
 | 新增 IPC 通道 | main.ts（或 ipc-handlers.ts）注册 handler → preload.ts 暴露 → `ipc.ts` 封装 → `src/types.ts` 声明 → 调用方只依赖服务层；主进程 .ts 记得加 `export {}` |
 | 业务功能需要 HTTP 请求 | 经 `src/core/network/request.ts` 的 `http` 实例调用；Token 用 `setToken/getToken`；新域名/方法需评估 `http-client.ts` 白名单与 §1.7 安全边界 |
@@ -228,6 +257,9 @@ ipcMain.handle('xxx', async (_e: any, ...args) => {
 | 新增 UI 颜色 | 先在 `index.css` 两套主题定义 `--wb-*`，再引用；主色底文字用 `--wb-primary-contrast` |
 | 新增命令面板项 | 模块 `index.ts` 的 `commands` 数组添加 `{ id, title, shortcut?, run }` |
 | 新增持久化字段 | 主进程 defaultStoreData 或模块 loadState 兜底默认值；保持向后兼容读取 |
+| 新增外置插件 | `npm run plugins:create <kebab-id>` 脚手架生成（或手建）`extensions/<kebab-id>/`（manifest.json + index.js 自包含 ESM）；manifest 声明 name/entry/capabilities；`npm run plugins:demo:install`（或脚本复制到 `<userData>/plugins/`）后 AppShell 启动扫描即注册 |
+| 新增外置插件能力调用 | 插件内一律 `ctx.host.<domain>.<action>`；先在 manifest `capabilities` 声明，未声明调用会被权限门拒绝（`PluginPermissionError` + 审计） |
+| 插件审计查看 | 「设置 → 插件」分类（`PluginCenter.vue`，依赖 `manager` prop）；越权拒绝实时反映在"最近被拒绝的调用"区 |
 
 ---
 

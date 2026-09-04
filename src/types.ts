@@ -131,12 +131,40 @@ export interface ElectronAPI {
   purchaseShopAllocationDetail: (payload: { shop: string; from?: string; to?: string }) => Promise<APIResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
   purchaseExportExcel: (payload: { items: PurchaseItem[]; defaultName?: string }) => Promise<APIResult<{ filePath: string }>>;
+  // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
+  /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
+  pluginsScan: () => Promise<APIResult<PluginScanResult>>;
+  /** 读取外置插件入口 JS 源码（主进程做路径穿越防护 + 大小限制） */
+  pluginsReadEntry: (payload: { id: string; entry: string }) => Promise<APIResult<{ code: string }>>;
+  /** 卸载（删除）外置插件目录 */
+  pluginsUninstall: (payload: { id: string }) => Promise<APIResult<void>>;
+  /** 在系统文件管理器中打开插件目录 */
+  pluginsOpenDir: () => Promise<APIResult<string>>;
 }
 
 export interface APIResult<T> {
   success: boolean;
   data?: T;
   error?: string;
+}
+
+/** 主进程扫描到的外置插件目录条目（manifest.json 解析原始内容 + 派生信息） */
+export interface PluginScanItem {
+  /** 目录名（应等于 manifest.name） */
+  id: string;
+  /** 入口文件（manifest.entry ?? './index.js'） */
+  entry: string;
+  /** manifest.json 解析后的原始内容 */
+  manifest: Record<string, unknown>;
+  /** 目录读取/manifest 解析失败时的错误（其余字段可能不完整） */
+  error?: string;
+}
+
+/** plugins-scan 结果：插件根目录 + 条目列表 */
+export interface PluginScanResult {
+  /** 插件根目录（<userData>/plugins） */
+  root: string;
+  plugins: PluginScanItem[];
 }
 
 /** 网络请求载荷（渲染层 → 主进程） */

@@ -1,0 +1,14 @@
+{
+  "name": "__PLUGIN_ID__",
+  "displayName": "我的插件",
+  "version": "0.1.0",
+  "description": "由 npm run plugins:create __PLUGIN_ID__ 生成的脚手架插件",
+  "author": "SellerKit Developer",
+  "engines": { "sellerkit": "^1.0.0" },
+  "activationEvents": ["onStartup"],
+  "entry": "./index.js",
+  "capabilities": [
+    { "id": "storage", "namespaces": ["__PLUGIN_ID__"] },
+    { "id": "ui" }
+  ]
+}

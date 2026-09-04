@@ -18,6 +18,9 @@
     "dist:pro": "MODULE_PROFILE=pro npm run dist",
     "dist:select": "node scripts/select-build.js",
     "build:select": "node scripts/select-build.js --build-only",
+    "plugins:demo:install": "node scripts/plugins-install-demo.js",
+    "plugins:sandbox:smoke": "node scripts/sandbox-smoke.mjs",
+    "plugins:create": "node scripts/plugin-create.js",
     "rebuild": "node scripts/rebuild-native.js",
     "postinstall": "npm run rebuild",
     "preview": "vite preview"

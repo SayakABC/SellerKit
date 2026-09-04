@@ -31,6 +31,7 @@ import type {
   PurchaseSourceRow,
   ShopAllocationRow,
   ShopAllocationDetailRow,
+  PluginScanResult,
 } from '@/types';
 
 export interface ApiResult<T> {
@@ -187,6 +188,11 @@ export interface ElectronApi {
   purchaseShopAllocationDetail(payload: { shop: string; from?: string; to?: string }): Promise<ApiResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
   purchaseExportExcel(payload: { items: PurchaseItem[]; defaultName?: string }): Promise<ApiResult<{ filePath: string }>>;
+  // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
+  pluginsScan(): Promise<ApiResult<PluginScanResult>>;
+  pluginsReadEntry(payload: { id: string; entry: string }): Promise<ApiResult<{ code: string }>>;
+  pluginsUninstall(payload: { id: string }): Promise<ApiResult<void>>;
+  pluginsOpenDir(): Promise<ApiResult<string>>;
 }
 
 export const ipc: ElectronApi = (window as unknown as { electronAPI: ElectronApi }).electronAPI;
@@ -197,4 +203,25 @@ export const isMac: boolean = ipc.platform === 'darwin';
 /** 窗口最小化 / 最大化切换 / 关闭 */
 export function controlWindow(action: 'minimize' | 'maximize' | 'close'): Promise<ApiResult<unknown>> {
   return ipc.controlWindow(action);
+}
+
+// ---- 外置插件（Phase 3）：统一收敛到 core/services/ipc.ts，组件不得直触 window.electronAPI ----
+/** 扫描独立插件目录（<userData>/plugins），返回每个目录的 manifest 原始内容 */
+export function pluginsScan(): Promise<ApiResult<PluginScanResult>> {
+  return ipc.pluginsScan();
+}
+
+/** 读取外置插件入口 JS 源码（用于渲染层动态加载） */
+export function pluginsReadEntry(id: string, entry: string): Promise<ApiResult<{ code: string }>> {
+  return ipc.pluginsReadEntry({ id, entry });
+}
+
+/** 卸载（删除）外置插件目录 */
+export function pluginsUninstall(id: string): Promise<ApiResult<void>> {
+  return ipc.pluginsUninstall({ id });
+}
+
+/** 在系统文件管理器中打开插件目录 */
+export function pluginsOpenDir(): Promise<ApiResult<string>> {
+  return ipc.pluginsOpenDir();
 }

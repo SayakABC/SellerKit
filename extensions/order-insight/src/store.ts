@@ -1,4 +1,4 @@
-// src/modules/order-insight/store.ts
+// extensions/order-insight/src/store.ts
 // 「订单归类」模块状态与处理管线：
 //   导入 Excel → 逐行：URL 指纹查重 → 下载主图（主进程落盘+内容指纹）→ 指纹查重
 //   → 未命中：读图 → AI 识别 → 结果入库 → 订单入库 → 分组统计 → 界面/导出。

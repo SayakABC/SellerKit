@@ -1,0 +1,14 @@
+{
+  "name": "sk-hello",
+  "displayName": "外置示例 · 你好",
+  "version": "0.1.0",
+  "description": "Phase 3 外置插件演示：命令进 ⌘K + 命名空间数据读写 + 权限门放行/拒绝对比",
+  "author": "SellerKit Demo",
+  "engines": { "sellerkit": "^1.0.0" },
+  "activationEvents": ["onStartup"],
+  "entry": "./index.js",
+  "capabilities": [
+    { "id": "storage", "namespaces": ["sk-hello"] },
+    { "id": "clipboard", "actions": ["write"] }
+  ]
+}

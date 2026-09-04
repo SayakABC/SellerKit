@@ -16,6 +16,8 @@ require('./order-handlers');
 require('./backup');
 // 拿货对账模块 IPC（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
 require('./purchase-handlers');
+// 外置插件 IPC（Phase 3：独立插件目录 <userData>/plugins 扫描/入口读取/卸载/打开目录）
+require('./plugins-handlers');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {

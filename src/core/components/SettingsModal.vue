@@ -22,7 +22,7 @@
           <div
             v-for="cat in categories"
             :key="cat.id"
-            @click="activeCategory = cat.id"
+            @click="selectCategory(cat.id)"
             :class="[
               'mx-2 flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm cursor-pointer transition-colors border-l-2',
               activeCategory === cat.id
@@ -128,37 +128,33 @@
             </section>
           </div>
 
-          <!-- 订单归类 -->
-          <div v-else-if="activeCategory === 'order-insight'" class="flex-1 min-h-0 p-4">
-            <div class="h-full rounded-xl border border-[var(--wb-border)] overflow-hidden bg-[var(--wb-surface)]">
-              <EngineSettings :embedded="true" />
-            </div>
-          </div>
-
-          <!-- TV模版 -->
-          <div v-else-if="activeCategory === 'excel'" class="flex-1 flex flex-col min-h-0 p-4">
-            <!-- 二级 Tab：模板配置 / 字段规则 -->
-            <div class="flex items-center gap-1 mb-3 flex-shrink-0">
+          <!-- 插件设置面板（注册式贡献：分类与面板内容来自插件包 settings.ts，随宿主分发视图插件停用即消失） -->
+          <div v-else-if="activePanel" class="flex-1 flex flex-col min-h-0 p-4">
+            <!-- 二级 Tab 条（面板 tabs 长度 >1 时展示） -->
+            <div v-if="activePanel.tabs.length > 1" class="flex items-center gap-1 mb-3 flex-shrink-0">
               <button
-                v-for="tab in excelTabs"
-                :key="tab.value"
-                @click="excelTab = tab.value"
+                v-for="t in activePanel.tabs"
+                :key="t.tabId"
+                @click="activeTabId = t.tabId"
                 :class="[
                   'px-3 py-1.5 text-sm rounded-md transition-colors',
-                  excelTab === tab.value
+                  activeTabId === t.tabId
                     ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)] font-medium'
                     : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)]',
                 ]"
               >
-                {{ tab.label }}
+                {{ t.label }}
               </button>
             </div>
             <!-- 内嵌面板 -->
             <div class="flex-1 min-h-0 rounded-xl border border-[var(--wb-border)] overflow-hidden bg-[var(--wb-surface)]">
-              <TemplateManager v-if="excelTab === 'template'" :embedded="true" />
-              <FieldRuleManager v-else-if="excelTab === 'rules'" :embedded="true" />
-              <ColumnSelector v-else :embedded="true" />
+              <component :is="activeTabComponent" :key="activeTabId" :embedded="true" />
             </div>
+          </div>
+
+          <!-- 插件管理 -->
+          <div v-else-if="activeCategory === 'plugins'" class="flex-1 min-h-0 p-4 flex flex-col">
+            <PluginCenter v-if="manager" :manager="manager" />
           </div>
 
         </div>
@@ -168,45 +164,115 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import type { ModuleMeta } from '../types';
+import type { BuiltinPluginManager } from '../plugin';
 import { toast } from '../services/toast';
 import { ipc } from '../services/ipc';
-import TemplateManager from '@/modules/excel-copy/components/TemplateManager.vue';
-import FieldRuleManager from '@/modules/excel-copy/components/FieldRuleManager.vue';
-import ColumnSelector from '@/modules/excel-copy/components/ColumnSelector.vue';
-import EngineSettings from '@/modules/order-insight/components/EngineSettings.vue';
+import type { SettingPanelDef } from '../plugin/sdk';
+import PluginCenter from './PluginCenter.vue';
 
 const props = defineProps<{
   modules: ModuleMeta[];
+  /** 插件管理器（AppShell 传入）；存在时展示「插件」分类（外置插件管理 + 权限审计） */
+  manager?: BuiltinPluginManager;
   initialCategory?: string;
   initialTab?: string;
 }>();
 defineEmits<{ close: [] }>();
 
-const categories = [
-  { id: 'general', name: '通用', icon: 'box' },
-  { id: 'excel', name: 'TV模版', icon: 'table' },
-  { id: 'order-insight', name: '订单归类', icon: 'sparkles' },
-];
+/** 插件设置面板贡献（异步加载：插件包 settings.ts 入口 → manager 设置面板注册表） */
+const panelCategories = ref<SettingPanelDef[]>([]);
+
+/** 当前面板分类（插件贡献；分类与内容随插件启停即时增减） */
+const activePanel = computed(
+  () => panelCategories.value.find((p) => p.categoryId === activeCategory.value) || null,
+);
+
+/** 分类导航：通用 + 插件面板贡献（按 order 升序）+ 插件管理（仅 manager 存在时） */
+const categories = computed(() => {
+  const pluginCats = panelCategories.value.map((p) => ({
+    id: p.categoryId,
+    name: p.categoryName,
+    icon: p.icon || 'box',
+    order: p.order ?? 100,
+  }));
+  return [
+    { id: 'general', name: '通用', icon: 'box', order: 0 },
+    ...pluginCats,
+    ...(props.manager ? [{ id: 'plugins', name: '插件', icon: 'puzzle', order: 999 }] : []),
+  ].sort((a, b) => a.order - b.order);
+});
+
 const activeCategory = ref(
-  props.initialCategory && categories.some((c) => c.id === props.initialCategory)
+  props.initialCategory && ['general', 'plugins'].includes(props.initialCategory)
     ? props.initialCategory
     : 'general',
 );
 
-const excelTabs = [
-  { label: '模板配置', value: 'template' as const },
-  { label: '字段规则', value: 'rules' as const },
-  { label: '显示列', value: 'columns' as const },
-];
-const excelTab = ref<'template' | 'rules' | 'columns'>(
-  props.initialTab === 'rules' || props.initialTab === 'columns' ? props.initialTab : 'template',
-);
+/** 二级 Tab（面板 tabs 长度 >1 时展示 tab 条）；tabId 为当前面板选中项 */
+const activeTabId = ref('');
+
+/** 当前面板要渲染的组件（未匹配 tabId 时回退面板首个 tab） */
+const activeTabComponent = computed(() => {
+  const panel = activePanel.value;
+  if (!panel) return null;
+  const tab = panel.tabs.find((t) => t.tabId === activeTabId.value) || panel.tabs[0];
+  return tab ? tab.component : null;
+});
+
+function selectCategory(id: string) {
+  activeCategory.value = id;
+  const panel = panelCategories.value.find((p) => p.categoryId === id);
+  if (panel && !panel.tabs.some((t) => t.tabId === activeTabId.value)) {
+    activeTabId.value = panel.tabs[0]?.tabId ?? '';
+  }
+}
 
 const appVersion = ref('');
 
 onMounted(async () => {
+  // 订阅插件启停：停用/启用会增删「设置页分类」（插件包设置面板贡献）；打开状态下即时重建导航
+  const offState =
+    props.manager?.onStateChange((_id, state, prev) => {
+      if (state !== 'disabled' && prev !== 'disabled') return;
+      void (async () => {
+        try {
+          await props.manager?.ensureSettingPanelsLoaded();
+          if (!props.manager) return;
+          panelCategories.value = props.manager.getSettingCategories();
+          // 当前分类对应插件被停用时回退「通用」，避免内容区空白
+          const cur = activeCategory.value;
+          if (
+            cur !== 'general' &&
+            cur !== 'plugins' &&
+            !panelCategories.value.some((p) => p.categoryId === cur)
+          ) {
+            activeCategory.value = 'general';
+          }
+        } catch {
+          /* 忽略：面板加载失败不影响分类导航 */
+        }
+      })();
+    });
+  onUnmounted(() => offState?.());
+  // 懒加载插件设置面板（幂等）：加载完成后分类导航即时补全插件分类
+  if (props.manager) {
+    try {
+      await props.manager.ensureSettingPanelsLoaded();
+      panelCategories.value = props.manager.getSettingCategories();
+    } catch {
+      /* 忽略：插件面板加载失败不影响通用/插件管理分类 */
+    }
+    // 定位 initialCategory/initialTab（open-settings dispatch；general/plugins 已由初值处理）
+    const panel = panelCategories.value.find((p) => p.categoryId === props.initialCategory);
+    if (panel) {
+      activeCategory.value = panel.categoryId;
+      activeTabId.value = panel.tabs.some((t) => t.tabId === props.initialTab)
+        ? (props.initialTab as string)
+        : panel.tabs[0]?.tabId ?? '';
+    }
+  }
   try {
     const res = await ipc.getAppVersion();
     if (res.success && res.data) appVersion.value = res.data;
@@ -297,6 +363,8 @@ function iconSvg(icon?: string): string {
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
     note:
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11l4 4v12H5z"/><path d="M15 4v5h5M9 13h6M9 17h6"/></svg>',
+    puzzle:
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 3h4v2.5a1.5 1.5 0 002.5 1.06L17.5 5.5 19 7l-1.06 1a1.5 1.5 0 001.06 2.5H21v4h-2.5a1.5 1.5 0 00-1.06 2.5L19 18l-1.5 1.5-1-1.06a1.5 1.5 0 00-2.5 1.06V21h-4v-2.5A1.5 1.5 0 007 17.44l-1 1.06L4.5 17l1.06-1A1.5 1.5 0 003.5 13.5H3v-4h.5A1.5 1.5 0 004.5 7L3.44 6 5 4.5l1 1.06A1.5 1.5 0 008.5 4.5V3z"/></svg>',
   };
   return map[icon || ''] || map.box;
 }

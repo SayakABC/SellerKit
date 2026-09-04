@@ -80,6 +80,8 @@ const props = defineProps<{
   modules: ModuleMeta[];
   commands: ModuleCommand[];
   activeModuleId: string;
+  /** Phase 3：已激活外置插件（后台贡献型，非当前视图插件）的命令，独立分区展示 */
+  pluginCommands?: ModuleCommand[];
 }>();
 
 const emit = defineEmits<{
@@ -123,13 +125,30 @@ const commandItems = computed<PaletteItem[]>(() =>
   })),
 );
 
-// 扁平列表（导航用）：先模块，后当前模块命令
-const flatItems = computed<PaletteItem[]>(() => [...moduleItems.value, ...commandItems.value]);
+// Phase 3：外置插件（后台贡献型）命令，独立分区展示（避免与当前模块命令混淆）
+const pluginCommandItems = computed<PaletteItem[]>(() =>
+  (props.pluginCommands ?? []).map((c) => ({
+    key: `plugin:${c.id}`,
+    label: c.title,
+    icon: 'tool',
+    shortcut: c.shortcut,
+    section: '外置插件命令',
+    command: c,
+  })),
+);
+
+// 扁平列表（导航用）：先模块，后当前模块命令，再外置插件命令
+const flatItems = computed<PaletteItem[]>(() => [
+  ...moduleItems.value,
+  ...commandItems.value,
+  ...pluginCommandItems.value,
+]);
 
 // 分组（渲染用）
 const sections = computed(() => [
   { title: '模块', items: moduleItems.value },
   { title: '当前模块命令', items: commandItems.value },
+  { title: '外置插件命令', items: pluginCommandItems.value },
 ]);
 
 const hasResults = computed(() => flatItems.value.length > 0);

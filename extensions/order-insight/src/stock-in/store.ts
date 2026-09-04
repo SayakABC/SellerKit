@@ -1,4 +1,4 @@
-// src/modules/order-insight/stock-in/store.ts
+// extensions/order-insight/src/stock-in/store.ts
 // 「拿货对账」（内嵌于 order-insight 的 stock-in Tab）状态：厂商 / 拿货单 / 付款 / 对账汇总 / 待拿货缺口（实时差量）。
 // 金额统一以"分"整数存储；界面展示用「元」输入，进出经 yuanToCents / centsToYuan 转换。
 

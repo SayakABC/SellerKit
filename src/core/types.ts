@@ -3,6 +3,11 @@
 // 业务模块分为两层文件，保证「侧栏渲染」与「视图加载」解耦：
 // - meta.ts   导出轻量元信息 meta（id/name/icon/order），被用于左侧导航，体积可忽略
 // - index.ts  默认导出 ModuleDefinition（含视图与可选的命令/生命周期），由注册表在模块激活时才动态 import
+//
+// Phase 2：ModuleDefinition/ModuleLifecycle 作为 SDK（definePlugin）的兼容别名保留。
+// 钩子的 ctx 由插件管理器注入（HostApi 等能力面见 plugin/sdk），仅 type import，无运行时依赖。
+
+import type { PluginContext } from './plugin/sdk';
 
 export type ModuleIcon =
   | 'table'
@@ -27,17 +32,19 @@ export interface ModuleCommand {
   id: string;
   /** 命令面板中显示的标题 */
   title: string;
+  /** ⌘K 分组显示顺序（升序，缺省 0；同值按注册序稳定） */
+  order?: number;
   /** 仅展示用的快捷键提示，不绑定全局事件 */
   shortcut?: string;
   run: () => void | Promise<void>;
 }
 
-/** 模块激活 / 停用生命周期钩子（Phase 2 接入） */
+/** 模块激活 / 停用生命周期钩子（Phase 2 接入；ctx 兼容别名，旧无参钩子形态仍可用） */
 export interface ModuleLifecycle {
-  /** 模块被切换到前台时调用（视图挂载后） */
-  activate?: () => void | Promise<void>;
+  /** 模块被切换到前台时调用（视图挂载后）；ctx 由插件管理器注入（SDK 优先，无参旧形态兼容） */
+  activate?: (ctx: PluginContext) => void | Promise<void>;
   /** 模块被切离前台时调用（视图卸载前），用于释放资源、关闭弹窗等 */
-  deactivate?: () => void | Promise<void>;
+  deactivate?: (ctx: PluginContext) => void | Promise<void>;
 }
 
 /** 模块定义：注册表动态 import 后得到的默认导出 */

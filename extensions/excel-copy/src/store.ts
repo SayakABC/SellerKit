@@ -1,12 +1,13 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { RecordItem, TemplateConfig, AppState, ProcessingRule } from '../../types';
-import { renderTemplate, previewTemplate } from '../../lib/templateEngine';
-import { applyFieldProcessor, computeRulesHash } from '../../lib/fieldProcessor';
+import type { RecordItem, TemplateConfig, AppState, ProcessingRule } from '@/types';
+import { renderTemplate, previewTemplate } from '@/lib/templateEngine';
+import { applyFieldProcessor, computeRulesHash } from '@/lib/fieldProcessor';
 import { toast } from '@/core/services/toast';
 import { useModuleStorage } from '@/core/services/storage';
 import { writeClipboard } from '@/core/services/clipboard';
 import { selectExcelFile as dialogSelectExcel, selectTemplateFile } from '@/core/services/dialog';
+import type { HostApi } from '@/core/plugin/sdk';
 import { importExcelFromFile, parseExcelBuffer, type ParseResult } from '@/core/services/excel';
 import { ipc } from '@/core/services/ipc';
 
@@ -39,6 +40,28 @@ const defaultDomainRule: ProcessingRule = {
   order: 1,
   config: { code: `fields["DNS"].split('.').slice(0, 1)[0]` },
 };
+
+// --- Phase 2（SDK 收敛示范）：宿主能力经 ctx.host 注入（见 index.ts activate），
+// 剪贴板写入路径以此为优先；旧通道 writeClipboard 保留为未激活/回退形态（兼容别名） ---
+let clipboardHost: HostApi | null = null;
+
+/** 模块激活时由 index.ts 注入 ctx.host；停用传 null 回退旧通道 */
+export function setClipboardHost(host: HostApi | null): void {
+  clipboardHost = host;
+}
+
+/** 复制文本：ctx.host.clipboard 优先（失败 reject → 捕获返回 false），未注入时回退旧通道 */
+async function clipboardWrite(text: string): Promise<boolean> {
+  if (clipboardHost) {
+    try {
+      await clipboardHost.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return writeClipboard(text);
+}
 
 export const useExcelCopyStore = defineStore('excel-copy', () => {
   // --- State ---
@@ -341,7 +364,7 @@ export const useExcelCopyStore = defineStore('excel-copy', () => {
     }
     const text = renderTemplate(activeTemplate.value.content, record.fields);
     try {
-      const ok = await writeClipboard(text);
+      const ok = await clipboardWrite(text);
       if (!ok) {
         toast('复制到剪贴板失败，请手动复制', 'error');
         return;

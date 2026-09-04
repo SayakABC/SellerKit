@@ -274,7 +274,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { useExcelCopyStore } from '../store';
-import type { ProcessingRule } from '../../../types';
+import type { ProcessingRule } from '@/types';
 import { toast } from '@/core/services/toast';
 
 defineProps<{ embedded?: boolean }>();

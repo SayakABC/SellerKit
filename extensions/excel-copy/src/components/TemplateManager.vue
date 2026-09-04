@@ -162,7 +162,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { useExcelCopyStore } from '../store';
-import type { TemplateConfig } from '../../../types';
+import type { TemplateConfig } from '@/types';
 
 const props = defineProps<{ embedded?: boolean }>();
 const emit = defineEmits<{ (e: 'close'): void }>();

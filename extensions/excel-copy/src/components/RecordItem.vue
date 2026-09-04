@@ -54,7 +54,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useExcelCopyStore } from '../store';
-import type { RecordItem } from '../../../types';
+import type { RecordItem } from '@/types';
 
 const props = defineProps<{ record: RecordItem }>();
 const store = useExcelCopyStore();

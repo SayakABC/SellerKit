@@ -13,6 +13,12 @@ Thumbs.db
 .workbuddy/
 .codebuddy/
 
+# ============ AI 协作文档（不入库） ============
+AGENTS.md
+REFACTOR_PLAN.md
+PLUGIN_ARCHITECTURE.md
+PROJECT_OVERVIEW.md
+
 # ============ 环境变量 ============
 # 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example
 .env

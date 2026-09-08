@@ -102,6 +102,8 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
       ...(isStr(raw.description) ? { description: raw.description.slice(0, 200) } : {}),
       ...(isStr(raw.author) ? { author: raw.author.slice(0, 64) } : {}),
       entry,
+      // 形态标识（§15）：仅放行 'ui'（预构建静态站点/iframe 岛）；未知 kind 忽略保持兼容
+      ...(raw.kind === 'ui' ? { kind: 'ui' } : {}),
       ...(capabilities.length ? { capabilities } : {}),
     },
   };

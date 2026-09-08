@@ -1,0 +1,14 @@
+{
+  "name": "sk-ui-starter",
+  "displayName": "sk-ui-starter（UI 岛）",
+  "version": "0.1.0",
+  "description": "sk-ui-starter：UI 形态包示例（iframe 运行时岛 + window.__sk 桥）",
+  "author": "SellerKit",
+  "engines": { "sellerkit": ">=1.0.0" },
+  "entry": "./dist/index.html",
+  "kind": "ui",
+  "activationEvents": [],
+  "capabilities": [
+    { "id": "storage" }
+  ]
+}

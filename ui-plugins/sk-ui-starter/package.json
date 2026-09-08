@@ -1,0 +1,14 @@
+{
+  "name": "sk-ui-starter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SellerKit UI 形态包（iframe 运行时岛）工程",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^5.1.6"
+  }
+}

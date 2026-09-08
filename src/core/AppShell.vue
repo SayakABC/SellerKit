@@ -149,6 +149,15 @@
       <!-- 工作区：模块内容直接铺满（工作台与工作区一体化） -->
       <main class="flex-1 min-w-0 relative">
         <component :is="activeView" v-if="activeView" class="h-full" />
+        <!-- §15 UI 岛（外置富 UI 插件）：宿主双通道渲染——activeIslandId 非空时替代 activeView -->
+        <UiIslandView
+          v-else-if="activeIslandId"
+          :plugin-id="activeIslandId"
+          :manager="pm"
+          class="h-full"
+          @back="backFromIsland"
+          @ping="islandHostPing"
+        />
         <div
           v-else
           class="absolute inset-0 flex items-center justify-center text-[var(--wb-text-muted)] text-sm"
@@ -179,6 +188,56 @@
       @select-module="activate"
       @run-command="runCommand"
     />
+    <div
+      v-if="updPhase !== 'idle'"
+      class="fixed bottom-20 right-4 z-[55] w-72 rounded-xl border border-[var(--wb-border)] bg-[var(--wb-surface)] shadow-lg p-3.5 text-sm"
+    >
+      <!-- 下载中：进度条 -->
+      <div v-if="updPhase === 'downloading'">
+        <div class="flex items-center justify-between text-[13px]">
+          <span class="font-medium text-[var(--wb-text)]"
+            >正在下载{{ updVersion ? ` v${updVersion}` : '更新' }}</span
+          >
+          <span class="text-[var(--wb-text-muted)] tabular-nums">{{ Math.round(updPercent) }}%</span>
+        </div>
+        <div class="mt-2 h-1.5 rounded-full bg-[var(--wb-surface-2)] overflow-hidden">
+          <div
+            class="h-full rounded-full bg-[var(--wb-primary)] transition-all duration-300"
+            :style="{ width: Math.min(updPercent, 100) + '%' }"
+          ></div>
+        </div>
+      </div>
+
+      <!-- 下载完成：重启安装 -->
+      <div v-else-if="updPhase === 'downloaded'" class="flex items-center justify-between gap-2">
+        <div class="min-w-0">
+          <p class="font-medium text-[var(--wb-text)]">更新已就绪</p>
+          <p class="text-xs text-[var(--wb-text-muted)] mt-0.5">
+            v{{ updVersion || '' }} 下载完成，重启后生效
+          </p>
+        </div>
+        <button
+          class="flex-shrink-0 px-2.5 py-1 rounded-md bg-[var(--wb-primary)] text-[var(--wb-primary-contrast)] text-xs font-medium hover:opacity-90 transition-opacity"
+          @click="restartToInstall"
+        >
+          立即重启
+        </button>
+      </div>
+
+      <!-- 失败：错误信息 + 关闭 -->
+      <div v-else class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <p class="font-medium text-[var(--wb-danger)]">更新失败</p>
+          <p class="text-xs text-[var(--wb-text-muted)] mt-0.5 break-all">{{ updError }}</p>
+        </div>
+        <button
+          class="flex-shrink-0 text-xs text-[var(--wb-text-muted)] hover:text-[var(--wb-text)] px-1"
+          @click="hideUpdBanner"
+        >
+          关闭
+        </button>
+      </div>
+    </div>
     <ToastHost />
   </div>
 </template>
@@ -190,6 +249,7 @@ import TitleBar from './components/TitleBar.vue';
 import ToastHost from './components/ToastHost.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import SettingsModal from './components/SettingsModal.vue';
+import UiIslandView from './components/UiIslandView.vue';
 import { useModuleStorage } from './services/storage';
 import { initTheme, useTheme } from './services/theme';
 import { toast } from './services/toast';
@@ -214,6 +274,8 @@ const paletteOpen = ref(false);
 const menuOpen = ref(false);
 const hoveredAppearance = ref(false);
 const settingsOpen = ref(false);const settingsInitial = ref<{ category?: string; tab?: string }>({});
+// §15 UI 岛（外置富 UI 插件）双通道：activeIslandId 非空 → 渲染 UiIslandView（桥会话生命周期随组件）
+const activeIslandId = ref<string>('');
 
 const activeMeta = computed(() => sortedMetas.value.find((m) => m.id === activeId.value) || null);
 /** 业务流来源模块（switch-module 跨模块跳转时记录），TitleBar 据此显示「返回」入口 */
@@ -226,6 +288,25 @@ const activeCommands = ref<ModuleCommand[]>([]);
 const pluginCommands = ref<ModuleCommand[]>([]);
 // onStateChange 退订函数（onUnmounted 清理）
 let stopStateWatch: (() => void) | null = null;
+// 更新事件订阅退订函数（onUnmounted 清理）
+let stopUpdaterEvents: (() => void) | null = null;
+// 更新进度浮层状态：idle(隐藏) / downloading(进度条) / downloaded(重启安装) / error(失败信息)
+const updPhase = ref<'idle' | 'downloading' | 'downloaded' | 'error'>('idle');
+const updVersion = ref('');
+const updPercent = ref(0);
+const updError = ref('');
+function hideUpdBanner() {
+  updPhase.value = 'idle';
+  updError.value = '';
+}
+async function restartToInstall() {
+  try {
+    const res = await ipc.quitAndInstallUpdate();
+    if (!res.success) toast.error(`重启安装失败：${res.error || '未知错误'}`);
+  } catch (e: unknown) {
+    toast.error(`重启安装失败：${e instanceof Error ? e.message : '未知错误'}`);
+  }
+}
 
 /** 刷新外置插件命令区（外置插件激活/停用/卸载/扫描后调用） */
 function refreshPluginCommands() {
@@ -236,6 +317,8 @@ function refreshPluginCommands() {
 async function discoverAndStartExternalPlugins() {
   try {
     const found = await pm.discoverExternal();
+    // §15：发现 UI 形态包（kind: 'ui'）时其侧栏 meta 需同步刷新
+    if (found.uiCount > 0) refreshMetas();
     for (const e of found.errors) toast.error(`外置插件 ${e.id} 加载失败: ${e.error}`);
     const started = await pm.activateStartupPlugins();
     for (const e of started.errors) toast.error(`外置插件 ${e.id} 启动失败: ${e.error}`);
@@ -269,12 +352,20 @@ const themeOptions = [
 async function activateCore(id: string) {
   if (!pm.has(id)) return;
   if (id === activeId.value && activeView.value) return;
+  if (pm.isUiIsland(id) && id === activeIslandId.value) return;
 
   try {
     // 插件管理器内部先停用上一插件，再懒加载并激活目标插件
     const result = await pm.activate(id);
 
-    activeView.value = result.view;
+    // §15 UI 岛：宿主双通道——activeIslandId 驱动 UiIslandView（pm.activate 对岛返回 view:null）
+    if (pm.isUiIsland(id)) {
+      activeIslandId.value = id;
+      activeView.value = null;
+    } else {
+      activeIslandId.value = '';
+      activeView.value = result.view;
+    }
     activeId.value = id;
     // ⌘K 命令数据源与视图联动（来自命令贡献注册表）
     activeCommands.value = result.commands;
@@ -321,6 +412,22 @@ function toggleMenu() {
   menuOpen.value = !menuOpen.value;
 }
 
+/** §15 UI 岛「宿主→岛事件」演示按钮：经总线 emit，岛内订阅 sk:host-ping 后展示 */
+function islandHostPing() {
+  pm.bus.emit('sk:host-ping', { at: Date.now() });
+}
+
+/** §15 UI 岛「返回」：切回默认视图插件（首个非 UI 岛模块） */
+function backFromIsland() {
+  const fallback = sortedMetas.value.find((m) => !pm.isUiIsland(m.id)) ?? sortedMetas.value[0];
+  if (fallback) void activateCore(fallback.id);
+  else {
+    activeIslandId.value = '';
+    activeView.value = null;
+    activeId.value = '';
+  }
+}
+
 function openSettings(category?: string, tab?: string) {
   menuOpen.value = false;
   settingsInitial.value = { category, tab };
@@ -346,10 +453,40 @@ function onSwitchModule(e: Event) {
   activateFromSwitch(detail.moduleId);
 }
 
-function checkUpdates() {
+// 软件更新：点击入口（真实检测；结果经 updater-event 事件异步送达，见 onMounted 订阅）
+let checkBusy = false;
+let lastCheckedAt = 0;
+async function checkUpdates() {
   menuOpen.value = false;
-  toast.info('正在检查更新…');
-  setTimeout(() => toast.success(`已是最新版本 (v${appVersion.value || '1.0.0'})`), 800);
+  // 下载中/已就绪时不再发起新检查：避免并发触发 + 「后台下载中」反复提示
+  if (updPhase.value === 'downloading') {
+    toast.info('新版本正在下载中，请稍候…');
+    return;
+  }
+  if (updPhase.value === 'downloaded') {
+    toast.info('新版本已下载完成，点击「立即重启」即可安装');
+    return;
+  }
+  // 3s 冷却，避免连点重复触发 autoUpdater.checkForUpdates（并发会报错）
+  if (checkBusy || Date.now() - lastCheckedAt < 3000) return;
+  checkBusy = true;
+  try {
+    const res = await ipc.checkForUpdates();
+    if (!res.success) {
+      toast.error(`检查更新失败：${res.error || '未知错误'}`);
+      return;
+    }
+    if (res.data?.mode === 'dev') {
+      toast.info(`开发模式：不检查更新（当前 v${appVersion.value || '1.0.0'}）`);
+      return;
+    }
+    lastCheckedAt = Date.now();
+    toast.info('正在检查更新…');
+  } catch (e: unknown) {
+    toast.error(`检查更新失败：${e instanceof Error ? e.message : '未知错误'}`);
+  } finally {
+    checkBusy = false;
+  }
 }
 
 function onGlobalKeydown(e: KeyboardEvent) {
@@ -409,8 +546,45 @@ onMounted(async () => {
   //  - 插件停用/启用 → 刷新侧栏/⌘K 数据源并持久化停用集；当前视图插件被停用时回退第一个启用插件
   //  - 外置插件激活/停用 → 刷新 ⌘K「外置插件命令」区
   //  - 随后扫描独立插件目录并懒激活 onStartup 外置插件
+  // 订阅更新事件：检测结果 / 下载完成 → toast 提示（下载完成后由主进程弹「立即重启」原生对话框）
+  stopUpdaterEvents = ipc.onUpdaterEvent((ev) => {
+    switch (ev.type) {
+      case 'update-available':
+        updPhase.value = 'downloading';
+        updVersion.value = ev.version || '';
+        updPercent.value = 0;
+        toast.info(
+          ev.version ? `发现新版本 v${ev.version}，开始下载…` : '发现新版本，开始下载…',
+        );
+        break;
+      case 'download-progress':
+        if (ev.percent !== undefined) {
+          updPhase.value = 'downloading';
+          updPercent.value = ev.percent;
+        }
+        break;
+      case 'update-not-available':
+        toast.success(`已是最新版本 (v${appVersion.value || '1.0.0'})`);
+        break;
+      case 'update-downloaded':
+        updPhase.value = 'downloaded';
+        if (ev.version) updVersion.value = ev.version;
+        toast.info(ev.version ? `新版本 v${ev.version} 已下载完成` : '新版本已下载完成');
+        break;
+      case 'updater-error':
+        updPhase.value = 'error';
+        updError.value = ev.message || '未知错误';
+        toast.error(`检查更新失败：${ev.message || '未知错误'}`);
+        break;
+      default:
+        break; // checking 静默
+    }
+  });
+
   stopStateWatch = pm.onStateChange((id, state, prev) => {
     refreshPluginCommands();
+    // P2：UI 岛轨道事件（注册 loaded/installed、启停 loaded/disabled 由 pm 合成广播）→ 即时刷新侧栏
+    if (pm.isUiIsland(id)) refreshMetas();
     // 停用（state=disabled）或从停用恢复启用（disabled→installed→loaded 序列，prev=disabled 即触发）
     if (state === 'disabled' || prev === 'disabled') {
       refreshMetas();
@@ -418,6 +592,7 @@ onMounted(async () => {
       if (backId.value === id) backId.value = '';
       pluginStateStorage.save({ disabled: pm.getDisabledIds() }).catch(() => {});
     }
+    // 内建插件停用 + UI 岛停用（pm 以 prev=active 合成广播）且正被显示 → 自动回落其他入口
     if (prev === 'active' && state === 'disabled' && id === activeId.value) {
       const fallback = sortedMetas.value[0];
       if (fallback && fallback.id !== id) {
@@ -425,11 +600,19 @@ onMounted(async () => {
           toast.error(`插件已停用：${e instanceof Error ? e.message : String(e)}`);
           activeView.value = null;
           activeId.value = '';
+          activeIslandId.value = '';
         });
       } else {
         activeView.value = null;
         activeId.value = '';
+        // 被停用的正是当前显示的 UI 岛且无其他可用入口 → 一并清岛状态
+        if (id === activeIslandId.value) activeIslandId.value = '';
       }
+    }
+    // P2：插件/UI 岛被卸载（运行时已移除）→ 刷新侧栏；若正显示被卸载的岛则回落其他入口
+    if (!pm.has(id)) {
+      refreshMetas();
+      if (id === activeIslandId.value) backFromIsland();
     }
   });
   void discoverAndStartExternalPlugins();
@@ -440,6 +623,7 @@ onUnmounted(() => {
   window.removeEventListener('open-settings', onOpenSettings);
   window.removeEventListener('switch-module', onSwitchModule);
   stopStateWatch?.();
+  stopUpdaterEvents?.();
 });
 
 function iconSvg(icon?: string): string {

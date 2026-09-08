@@ -32,7 +32,9 @@ import type {
   ShopAllocationRow,
   ShopAllocationDetailRow,
   PluginScanResult,
+  UpdaterEventPayload,
 } from '@/types';
+import type { MarketCatalog, MarketPluginInfo } from '@/core/plugin/types';
 
 export interface ApiResult<T> {
   success: boolean;
@@ -193,6 +195,14 @@ export interface ElectronApi {
   pluginsReadEntry(payload: { id: string; entry: string }): Promise<ApiResult<{ code: string }>>;
   pluginsUninstall(payload: { id: string }): Promise<ApiResult<void>>;
   pluginsOpenDir(): Promise<ApiResult<string>>;
+  // ---- 插件市场（Market：catalog 拉取 + zip 安装）----
+  pluginMarketCatalog(payload: { url: string }): Promise<ApiResult<MarketCatalog>>;
+  pluginMarketInstall(payload: { item: MarketPluginInfo; force?: boolean }): Promise<ApiResult<{ id: string; version: string }>>;
+  // 软件更新（GitHub Releases 自动更新）
+  checkForUpdates(): Promise<ApiResult<{ mode: 'dev' | 'release'; currentVersion: string }>>;
+  quitAndInstallUpdate(): Promise<ApiResult<void>>;
+  /** 订阅更新事件（主进程→渲染层单向）；返回退订函数 */
+  onUpdaterEvent(cb: (event: UpdaterEventPayload) => void): () => void;
 }
 
 export const ipc: ElectronApi = (window as unknown as { electronAPI: ElectronApi }).electronAPI;
@@ -224,4 +234,18 @@ export function pluginsUninstall(id: string): Promise<ApiResult<void>> {
 /** 在系统文件管理器中打开插件目录 */
 export function pluginsOpenDir(): Promise<ApiResult<string>> {
   return ipc.pluginsOpenDir();
+}
+
+// ---- 插件市场（Market）----
+/** 拉取市场 catalog（净化后的合法条目） */
+export function marketCatalogFetch(url: string): Promise<ApiResult<MarketCatalog>> {
+  return ipc.pluginMarketCatalog({ url });
+}
+
+/** 安装/更新市场插件（下载 zip → sha256 → 解压校验 → 落盘 plugins/<id>/） */
+export function marketPluginInstall(
+  item: MarketPluginInfo,
+  force = false,
+): Promise<ApiResult<{ id: string; version: string }>> {
+  return ipc.pluginMarketInstall({ item, force });
 }

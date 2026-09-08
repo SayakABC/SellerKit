@@ -61,6 +61,8 @@ export interface PluginManifest {
   author?: string;
   /** 外置插件入口文件（相对插件目录，默认 ./index.js） */
   entry?: string;
+  /** 外置插件形态：缺省 = L2 Worker 后台插件（单文件 ESM）；'ui' = §15 iframe 运行时岛（预构建静态站点，不经 Worker 求值） */
+  kind?: 'ui';
   /** 能力声明；内建插件（Level 0）恒放行，外置插件（Level 1）缺省 = 全部拒绝 */
   capabilities?: PluginCapability[];
 }
@@ -122,4 +124,31 @@ export interface Contribution<S = unknown> {
   /** 全局唯一 id：<plugin>.<localId>，冲突由注册表拒绝 */
   id: string;
   spec: S;
+}
+
+// ---- 插件市场（Market，静态 catalog + zip 分发，安装落外置插件目录）----
+
+/** 市场 catalog 条目（发布者填写，下载/安装前主进程二次净化校验） */
+export interface MarketPluginInfo {
+  /** 全局唯一 kebab-case id（须与 zip 内 manifest.name 一致，也即安装目录名） */
+  id: string;
+  /** 展示名 */
+  name: string;
+  /** semver 版本（x.y.z） */
+  version: string;
+  description?: string;
+  author?: string;
+  /** zip 下载地址（http/https） */
+  downloadUrl: string;
+  /** 下载包 sha256（64 位 hex），安装时强制校验 */
+  sha256: string;
+  /** 插件主页（可选） */
+  homepage?: string;
+  /** 插件形态（P3 起发布工具写入；缺省/旧 catalog 视为 extension = L2 Worker 后台插件） */
+  kind?: 'extension' | 'ui';
+}
+
+/** 市场 catalog 结构：{ plugins: MarketPluginInfo[] } */
+export interface MarketCatalog {
+  plugins: MarketPluginInfo[];
 }

@@ -76,4 +76,7 @@ export type {
   ActivationResult,
   PluginOverview,
 } from './pluginManager';
+
+// 插件市场（Market）：静态 catalog + zip 分发（安装落外置插件目录）
+export type { MarketPluginInfo, MarketCatalog } from './types';
 export { createBuiltinPluginManager } from './pluginManager';

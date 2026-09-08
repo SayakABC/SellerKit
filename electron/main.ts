@@ -18,6 +18,12 @@ require('./backup');
 require('./purchase-handlers');
 // 外置插件 IPC（Phase 3：独立插件目录 <userData>/plugins 扫描/入口读取/卸载/打开目录）
 require('./plugins-handlers');
+// 插件市场 IPC（Market：拉取 catalog + 下载 zip 安装外置插件，主进程防线）
+require('./plugins-market-handlers');
+// P0 POC：外置富 UI 插件运行时协议 sk-plugin://（模块顶层 registerSchemesAsPrivileged 须在 app ready 前执行）
+const { ensurePocPackageSeeded, initPluginUiProtocol } = require('./plugin-ui-protocol');
+// 自动更新 IPC（GitHub Releases：checkForUpdates / quitAndInstall + updater-event 广播）
+const updater = require('./updater');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {
@@ -161,7 +167,12 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initStore();
+  // P0 POC：种子 demo UI 包 + 注册 sk-plugin:// 请求处理（先于窗口创建，保证 iframe 首次导航即可命中）
+  ensurePocPackageSeeded();
+  initPluginUiProtocol();
   createWindow();
+  // 注入窗口引用：updater.ts 随即注册 autoUpdater 事件（向渲染层广播 updater-event）
+  updater.initUpdater(() => mainWindow);
 });
 
 app.on('window-all-closed', () => {

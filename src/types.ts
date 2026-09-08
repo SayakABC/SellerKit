@@ -1,3 +1,5 @@
+import type { MarketCatalog, MarketPluginInfo } from './core/plugin/types';
+
 export interface ElectronAPI {
   selectExcel: () => Promise<APIResult<ExcelFileResult>>;
   importExcelByPath: (filePath: string) => Promise<APIResult<ExcelFileResult | TemplateFileResult>>;
@@ -140,6 +142,34 @@ export interface ElectronAPI {
   pluginsUninstall: (payload: { id: string }) => Promise<APIResult<void>>;
   /** 在系统文件管理器中打开插件目录 */
   pluginsOpenDir: () => Promise<APIResult<string>>;
+  // ---- 插件市场（Market：catalog 拉取 + zip 安装，主进程净化/校验）----
+  /** 拉取市场 catalog（净化后的合法条目列表） */
+  pluginMarketCatalog: (payload: { url: string }) => Promise<APIResult<MarketCatalog>>;
+  /** 安装/更新市场插件：下载 zip → sha256 → 解压校验 → 落盘 <userData>/plugins/<id>/；force=true 允许覆盖同版本 */
+  pluginMarketInstall: (
+    payload: { item: MarketPluginInfo; force?: boolean },
+  ) => Promise<APIResult<{ id: string; version: string }>>;
+  // ---- 软件更新（GitHub Releases 自动更新）----
+  /** 触发检查更新：{ mode:'dev' }（开发模式不检查）/ { mode:'release' }；结果经 updater-event 事件异步送达 */
+  checkForUpdates: () => Promise<APIResult<{ mode: 'dev' | 'release'; currentVersion: string }>>;
+  /** 立即重启并安装已下载更新 */
+  quitAndInstallUpdate: () => Promise<APIResult<void>>;
+  /** 订阅更新事件（主进程→渲染层单向推送）；返回退订函数 */
+  onUpdaterEvent: (cb: (event: UpdaterEventPayload) => void) => () => void;
+}
+
+/** 更新事件载荷（主进程 updater.ts 经 updater-event 通道广播，最小安全字段） */
+export interface UpdaterEventPayload {
+  type:
+    | 'checking'
+    | 'update-available'
+    | 'update-not-available'
+    | 'download-progress'
+    | 'update-downloaded'
+    | 'updater-error';
+  version?: string;
+  percent?: number;
+  message?: string;
 }
 
 export interface APIResult<T> {

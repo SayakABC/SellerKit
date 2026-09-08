@@ -32,6 +32,7 @@ import { createSandboxedPlugin, type SandboxedPlugin } from './sandbox';
 import { createPermissionGate, type AuditEntry } from './security';
 import type {
   ContributionRegistrar,
+  HostApi,
   PluginContext,
   PluginKeyValueStorage,
   PluginLogger,
@@ -92,8 +93,8 @@ export interface PluginOverview {
   author?: string;
   /** 信任级别：0 = 内建 / 1 = 旧外置（主线程）/ 2 = 外置 Worker 沙箱 */
   trustLevel: 0 | 1 | 2;
-  /** 内建细分（外置插件无此字段）：extension = 随宿主分发插件包（extensions/）；module = 纯宿主模块（src/modules） */
-  kind?: 'extension' | 'module';
+  /** 形态细分：内建 extension/module；外置 UI 岛为 'ui'（外置 L2 Worker 插件不设此字段） */
+  kind?: 'extension' | 'module' | 'ui';
   /** 已声明能力域（外置插件；内建为空 = Level 0 恒放行） */
   capabilities: string[];
 }
@@ -102,7 +103,11 @@ export interface BuiltinPluginManager {
   /** 侧栏/⌘K 模块列表数据源（来自视图贡献注册表，已按 order 排序） */
   sortedMetas: ModuleMeta[];
   has(id: string): boolean;
-  /** 统一激活（仅内建视图插件）：内部处理上一插件的停用（懒加载 + 贡献注册 + 业务钩子 + 状态机） */
+  /** §15：id 是否为 UI 形态包（iframe 运行时岛；宿主双通道渲染，pm.activate 返回 view:null） */
+  isUiIsland(id: string): boolean;
+  /** §15：UI 岛运行时依赖（已过权限门的 gated hostApi + manifest），供宿主视图组件（UiIslandView）挂接桥 */
+  getUiIslandRuntime(id: string): { manifest: PluginManifest; hostApi: HostApi } | undefined;
+  /** 统一激活（仅内建视图插件与 UI 岛）：内部处理上一插件的停用（懒加载 + 贡献注册 + 业务钩子 + 状态机） */
   activate(id: string): Promise<ActivationResult>;
   /** 停用当前插件（activate 切换已自动处理；进程退出/测试清理时按需调用） */
   deactivateCurrent(reason?: string): Promise<void>;
@@ -115,8 +120,14 @@ export interface BuiltinPluginManager {
   bus: EventBus;
   contributions: ContributionRegistry;
   // ---- 外置插件（Phase 3）：目录发现 / 懒激活 / 后台命令 / 卸载 / 审计 ----
-  /** 扫描 <userData>/plugins（IPC），校验 manifest 后登记为外置插件记录（内建 id 冲突将被拒绝） */
-  discoverExternal(): Promise<{ root: string; total: number; errors: Array<{ id: string; error: string }> }>;
+  /** 扫描 <userData>/plugins（IPC），校验 manifest 后登记为外置插件记录与 UI 岛（内建 id 冲突将被拒绝） */
+  discoverExternal(): Promise<{
+    root: string;
+    total: number;
+    errors: Array<{ id: string; error: string }>;
+    /** 发现的 UI 形态包（kind: 'ui'）数量——进独立轨道（uiIslands），不注册为 L2 Worker 插件 */
+    uiCount: number;
+  }>;
   /** 激活单个外置插件（不改变当前视图插件；入口 JS 懒加载并缓存） */
   activateExternal(id: string): Promise<void>;
   /** 激活 activationEvents 含 onStartup 的外置插件（宿主启动后调用） */
@@ -202,6 +213,14 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     record.state = next;
     for (const h of [...stateListeners]) h(record.id, next, prev);
     void bus.emit(PluginEvents.StateChanged, { id: record.id, state: next, prev });
+  }
+
+  /**
+   * 仅广播宿主状态监听（不产生 bus 事件）：UI 岛不在 records 里、无真实状态机，
+   * 注册/启停/卸载时以合成状态通知宿主刷新侧栏/回落/持久化，沙箱插件不可感知。
+   */
+  function notifyHostState(id: string, state: PluginState, prev: PluginState): void {
+    for (const h of [...stateListeners]) h(id, state, prev);
   }
 
   /** 注册内建插件的静态视图贡献（manifest.contributes.views[0]，侧栏/⌘K 模块入口激活前即可见） */
@@ -380,6 +399,20 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
   }
 
   async function activate(id: string): Promise<ActivationResult> {
+    // §15 UI 岛：独立轨道激活——不建 Worker/ctx，停上一视图插件后返回空视图（宿主双通道渲染 UiIslandView）
+    if (uiIslands.has(id)) {
+      if (disabled.has(id)) {
+        throw new Error(`插件 "${id}" 已停用，请到「设置 → 插件」启用后再打开`);
+      }
+      if (currentId && currentId !== id) {
+        const prev = records.get(currentId);
+        if (prev) await deactivateRecord(prev, `switch-to:${id}`);
+        currentId = '';
+        currentView = null;
+      }
+      void bus.emit(PluginEvents.Activated, { id });
+      return { view: null, commands: [] };
+    }
     const record = records.get(id);
     if (!record) throw new Error(`plugin not discovered: ${id}`);
     if (disabled.has(id)) {
@@ -475,6 +508,9 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
 
   /** 登记一个校验通过的外置插件（manifest 来自文件，与内建记录字段对齐） */
   function registerExternal(p: ExternalPluginDescriptor): void {
+    // UI 形态包（kind: ui）不经 L2 Worker 注册：入口为静态站点而非 ESM，Worker import 必失败。
+    // §15 iframe 运行时岛登记为 P1 范围，discoverExternalPlugins 已前置过滤，此处为兜底不变式。
+    if (p.manifest.kind === 'ui') return;
     if (records.has(p.id)) {
       // eslint-disable-next-line no-console
       console.warn(`[plugin] 外置插件 "${p.id}" 与既有插件冲突，已跳过（内建不可被覆盖）`);
@@ -497,17 +533,26 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     setState(record, 'loaded'); // 发现完成（无静态视图贡献；命令在激活时注册）
   }
 
-  /** 扫描 <userData>/plugins 并登记（坏 manifest 不中断；返回错误清单供宿主提示） */
-  async function discoverExternal(): Promise<{ root: string; total: number; errors: Array<{ id: string; error: string }> }> {
+  /** 扫描 <userData>/plugins 并登记（坏 manifest 不中断；返回错误清单供宿主提示；UI 形态包进独立轨道） */
+  async function discoverExternal(): Promise<{
+    root: string;
+    total: number;
+    errors: Array<{ id: string; error: string }>;
+    uiCount: number;
+  }> {
     const res = await discoverExternalPlugins();
     for (const p of res.plugins) registerExternal(p);
-    return { root: res.root, total: res.plugins.length, errors: res.errors };
+    for (const u of res.ui) registerUiIsland(u);
+    return { root: res.root, total: res.plugins.length, uiCount: res.ui.length, errors: res.errors };
   }
 
   /** 激活外置插件（后台贡献型：不改 currentId/currentView；入口 JS 在 Worker 沙箱内求值执行） */
   async function activateExternal(id: string): Promise<void> {
     const record = records.get(id);
     if (!record || record.source !== 'external') throw new Error(`外置插件不存在: ${id}`);
+    if (record.manifest.kind === 'ui') {
+      throw new Error(`插件 "${id}" 为 UI 形态（§15 iframe 运行时岛），不能以 Worker 后台方式激活`);
+    }
     if (record.state === 'active') return;
     ensureLoadable(record);
     setState(record, 'activating');
@@ -579,8 +624,19 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     return result;
   }
 
-  /** 卸载外置插件：停用（若活跃）→ 清贡献 → 删目录（IPC）→ 移除记录 */
+  /** 卸载外置插件：停用（若活跃）→ 清贡献 → 删目录（IPC）→ 移除记录；UI 岛走独立分支（P2） */
   async function uninstallExternal(id: string): Promise<void> {
+    const island = uiIslands.get(id);
+    if (island) {
+      // UI 形态岛：无 Worker/贡献/ctx——移除运行时登记与停用标记 → 删目录（IPC）；合成 inactive
+      // 通知让宿主刷新侧栏，且若该岛正被显示（activeIslandId === id）则回落回其他入口。
+      uiIslands.delete(id);
+      disabled.delete(id);
+      notifyHostState(id, 'inactive', 'active');
+      const r = await ipcUninstallPlugin(id);
+      if (!r.success) throw new Error(r.error ?? '删除插件目录失败（已从运行时移除，可手动清理）');
+      return;
+    }
     const record = records.get(id);
     if (!record || record.source !== 'external') throw new Error(`外置插件不存在: ${id}`);
     if (record.state === 'active') {
@@ -604,7 +660,7 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
 
   /** 全部插件概览（管理面板数据源） */
   function overview(): PluginOverview[] {
-    return [...records.values()]
+    const rows: PluginOverview[] = [...records.values()]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((r) => ({
         id: r.id,
@@ -618,6 +674,22 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
         ...(r.manifest.author ? { author: r.manifest.author } : {}),
         capabilities: (r.manifest.capabilities ?? []).map((c) => c.id),
       }));
+    // P2：UI 岛并入管理面板（kind:'ui' 供 PluginCenter 徽标/启停/卸载；state 为合成 loaded/disabled）
+    for (const [id, island] of uiIslands) {
+      rows.push({
+        id,
+        name: island.manifest.displayName ?? id,
+        version: island.manifest.version,
+        source: 'external',
+        state: disabled.has(id) ? 'disabled' : 'loaded',
+        trustLevel: 2,
+        kind: 'ui',
+        ...(island.manifest.description ? { description: island.manifest.description } : {}),
+        ...(island.manifest.author ? { author: island.manifest.author } : {}),
+        capabilities: (island.manifest.capabilities ?? []).map((c) => c.id),
+      });
+    }
+    return rows.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   /** 权限门最近被拒绝的审计（新的在前） */
@@ -625,17 +697,59 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     return gate.recentDenied();
   }
 
+  // ===================== §15 UI 岛（外置富 UI 插件：iframe 运行时岛）独立轨道 =====================
+  // 设计：UI 形态包（manifest.kind === 'ui'，入口为静态站点）不注册为 L2 Worker 插件，
+  // 也不进 PluginRecord/贡献注册表生命周期（避免与视图插件启停/removeByPlugin 纠缠）——
+  // 单独持有记录 + gated hostApi（同一权限门 → 越权审计与 PluginCenter 共享）。
+  // 视图渲染由宿主双通道完成（AppShell activeIslandId → UiIslandView），桥会话生命周期跟随视图组件。
+  // P2：岛并入管理面板与启停体系——overview() 出 kind:'ui' 行；启停复用统一停用集 disabled
+  // （侧栏/⌘K/激活/管理面板读点均以 disabled.has(id) 判定），生命周期变化经 notifyHostState 广播宿主。
+  interface UiIslandRecord {
+    manifest: PluginManifest;
+    /** 已过权限门的宿主能力面（createGatedHostApi 产物；越权拒绝 + 审计落同一 gate） */
+    hostApi: HostApi;
+  }
+  const uiIslands = new Map<string, UiIslandRecord>();
+
+  /** 登记一个 UI 形态包（discoverExternal 消费 discoverExternalPlugins 的 ui[]）。
+   *  新增时合成 loaded/installed 通知 → 宿主刷新侧栏（市场安装 UI 包后入口即时可见）；
+   *  同 id 版本变更（市场更新落盘）→ 重建 manifest/权限门面并再次广播；同版本幂等跳过。 */
+  function registerUiIsland(p: ExternalPluginDescriptor): void {
+    if (records.has(p.id)) return;
+    if (p.manifest.kind !== 'ui') return;
+    const existing = uiIslands.get(p.id);
+    if (existing && existing.manifest.version === p.manifest.version) return;
+    uiIslands.set(p.id, {
+      manifest: p.manifest,
+      hostApi: createGatedHostApi(createHostApi(), p.manifest, gate, p.id),
+    });
+    notifyHostState(p.id, 'loaded', 'installed');
+  }
+
   // ===================== 随宿主分发视图插件：运行时按包启停 =====================
-  /** 停用插件集合（经 applyDisabled/setPluginEnabled 维护；持久化由宿主 AppShell 负责） */
+  /** 停用插件集合（内建 + UI 岛共用；经 applyDisabled/setPluginEnabled 维护；持久化由宿主 AppShell 负责） */
   const disabled = new Set<string>();
 
   /**
-   * 停用/启用内建插件：
-   * - 停用：active → 完整停用（deactivateRecord 释放动态贡献/ctx）；再移除静态视图贡献并落到 disabled；
-   * - 启用：disabled → installed → loaded（ensureLoadable），再补静态视图贡献（侧栏/⌘K 恢复）。
+   * 停用/启用内建插件与 UI 岛（P2）：
+   * - 内建停用：active → 完整停用（deactivateRecord 释放动态贡献/ctx）；再移除静态视图贡献并落到 disabled；
+   * - 内建启用：disabled → installed → loaded（ensureLoadable），再补静态视图贡献（侧栏/⌘K 恢复）。
+   * - UI 岛：无记录/贡献，直接增删停用集，合成 state 广播驱动宿主刷新侧栏并持久化。
    * 幂等；state 变更经 stateListeners 广播，宿主侧随之刷新侧栏/⌘K/设置分类并持久化。
    */
   async function setPluginEnabled(id: string, enabled: boolean): Promise<void> {
+    if (uiIslands.has(id)) {
+      if (enabled === !disabled.has(id)) return; // 幂等
+      if (enabled) {
+        disabled.delete(id);
+        notifyHostState(id, 'loaded', 'disabled');
+      } else {
+        disabled.add(id);
+        // prev=active：若该岛正被显示（宿主 activeId === id），其回落逻辑据此触发
+        notifyHostState(id, 'disabled', 'active');
+      }
+      return;
+    }
     const record = records.get(id);
     if (!record || record.source !== 'builtin') return;
     if (enabled === !disabled.has(id)) return; // 幂等
@@ -704,11 +818,28 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
   discover();
 
   return {
-    // getter：每次访问从视图贡献注册表重算，停用/启用后可即时取到最新列表
+    // getter：每次访问从视图贡献注册表重算，停用/启用后可即时取到最新列表；UI 岛追加在尾部（order 120）
     get sortedMetas(): ModuleMeta[] {
-      return metasFromContributions();
+      const metas = metasFromContributions();
+      for (const island of uiIslands.values()) {
+        if (disabled.has(island.manifest.name)) continue; // P2：停用的岛不进侧栏/⌘K
+        metas.push({
+          id: island.manifest.name,
+          name: island.manifest.displayName ?? island.manifest.name,
+          icon: 'box',
+          order: 120,
+        });
+      }
+      return metas.sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
     },
-    has: (id: string): boolean => records.has(id),
+    has: (id: string): boolean => records.has(id) || uiIslands.has(id),
+    /** §15：id 是否为 UI 形态包（iframe 运行时岛） */
+    isUiIsland: (id: string): boolean => uiIslands.has(id),
+    /** §15：UI 岛运行时依赖（gated hostApi + manifest），供宿主视图组件挂接桥（UiIslandView） */
+    getUiIslandRuntime: (id: string): { manifest: PluginManifest; hostApi: HostApi } | undefined => {
+      const island = uiIslands.get(id);
+      return island ? { manifest: island.manifest, hostApi: island.hostApi } : undefined;
+    },
     activate,
     deactivateCurrent,
     getState: (id: string): PluginState | undefined => records.get(id)?.state,

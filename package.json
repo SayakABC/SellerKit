@@ -1,6 +1,6 @@
 {
   "name": "seller-kit",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "SellerKit - Template Copy Tool",
   "main": "dist/electron/main.js",
   "scripts": {
@@ -16,11 +16,13 @@
     "dist:minimal": "MODULE_PROFILE=minimal npm run dist",
     "dist:standard": "MODULE_PROFILE=standard npm run dist",
     "dist:pro": "MODULE_PROFILE=pro npm run dist",
+    "release": "bash scripts/release.sh",
     "dist:select": "node scripts/select-build.js",
     "build:select": "node scripts/select-build.js --build-only",
     "plugins:demo:install": "node scripts/plugins-install-demo.js",
     "plugins:sandbox:smoke": "node scripts/sandbox-smoke.mjs",
     "plugins:create": "node scripts/plugin-create.js",
+    "plugins:create:ui": "node scripts/plugin-create.js --ui",
     "rebuild": "node scripts/rebuild-native.js",
     "postinstall": "npm run rebuild",
     "preview": "vite preview"
@@ -29,6 +31,7 @@
     "axios": "^1.19.0",
     "better-sqlite3": "^12.11.1",
     "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.21",

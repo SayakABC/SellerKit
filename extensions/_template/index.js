@@ -37,7 +37,9 @@ export default {
       }),
     );
 
-    // 3) 需要更多能力时：先在 manifest.json capabilities 显式声明（storage 命名空间 / ui / clipboard 等）
+    // 3) 需要更多宿主能力时：先在 manifest.json capabilities 显式声明
+    //    合法能力域仅：storage（跨命名空间）/ http / clipboard / dialog；
+    //    ctx.storage 自身命名空间直通、ui/env 默认放行——均无需且不可声明（写了安装校验会失败）。
   },
   async deactivate(ctx) {
     // 停用钩子：清理命令/订阅等资源

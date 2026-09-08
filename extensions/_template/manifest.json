@@ -7,8 +7,5 @@
   "engines": { "sellerkit": "^1.0.0" },
   "activationEvents": ["onStartup"],
   "entry": "./index.js",
-  "capabilities": [
-    { "id": "storage", "namespaces": ["__PLUGIN_ID__"] },
-    { "id": "ui" }
-  ]
+  "capabilities": []
 }

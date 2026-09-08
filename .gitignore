@@ -34,3 +34,9 @@ src/registry.generated.ts
 debug-name.js
 # 测试导出的 Excel 数据文件
 导出测试.xlsx
+
+# ============ 插件市场本地发布产物 ============
+# publish-plugin.js 输出目录：zip + catalog.json（内含独立 git 仓库，作市场部署用，不入主仓库）
+market-out/
+# 早期 UI 岛 POC 验证产物（无源码、仅 dist），已被 ui-plugins/sk-ui-starter 取代
+scripts/poc-ui-hello/

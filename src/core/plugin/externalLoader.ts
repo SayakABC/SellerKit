@@ -23,8 +23,14 @@ export interface ExternalPluginDescriptor {
 }
 
 export interface ExternalDiscoverResult {
-  /** 校验通过、可被管理器接纳的插件 */
+  /** 校验通过、可被管理器接纳的 L2 Worker 后台插件 */
   plugins: ExternalPluginDescriptor[];
+  /**
+   * UI 形态包（manifest.kind === 'ui'，§15 iframe 运行时岛）：
+   * 不注册为 L2 Worker 插件（其入口是静态站点而非 ESM 单文件，Worker import 会抛语法错误），
+   * 单独列出供未来 P1「视图岛记录」消费；当前阶段宿主不激活、不展示。
+   */
+  ui: ExternalPluginDescriptor[];
   /** 插件根目录（供"打开插件目录"等展示） */
   root: string;
   /** 目录/manifest 层面的失败（不中断其他插件） */
@@ -33,7 +39,7 @@ export interface ExternalDiscoverResult {
 
 /** 扫描并校验插件目录（坏 manifest 只记录 error，不抛错） */
 export async function discoverExternalPlugins(): Promise<ExternalDiscoverResult> {
-  const result: ExternalDiscoverResult = { plugins: [], root: '', errors: [] };
+  const result: ExternalDiscoverResult = { plugins: [], ui: [], root: '', errors: [] };
   const r = await pluginsScan();
   if (!r.success || !r.data) {
     result.errors.push({ id: '*', error: r.error ?? '扫描插件目录失败（IPC 不可用）' });
@@ -55,7 +61,17 @@ export async function discoverExternalPlugins(): Promise<ExternalDiscoverResult>
       result.errors.push({ id: item.id, error: `目录名(${item.id})与 manifest.name(${v.manifest.name})不一致` });
       continue;
     }
-    result.plugins.push({ id: v.manifest.name, entry: v.manifest.entry ?? './index.js', manifest: v.manifest });
+    const desc: ExternalPluginDescriptor = {
+      id: v.manifest.name,
+      entry: v.manifest.entry ?? './index.js',
+      manifest: v.manifest,
+    };
+    // UI 形态包不进 L2 Worker 注册（见 ExternalDiscoverResult.ui 注释）
+    if (v.manifest.kind === 'ui') {
+      result.ui.push(desc);
+      continue;
+    }
+    result.plugins.push(desc);
   }
   return result;
 }

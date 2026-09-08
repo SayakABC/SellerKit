@@ -84,6 +84,22 @@ const sanitizeNetPayload = (payload: any) => {
   };
 };
 
+/** 市场安装条目消毒：结构白名单（主进程还会再净化一次，这里是第一道形状约束） */
+const sanitizeMarketItem = (raw: any) => {
+  if (!isPlainObject(raw)) return {};
+  const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  return {
+    id: s(raw.id, 64),
+    name: s(raw.name, 80),
+    version: s(raw.version, 32),
+    description: s(raw.description, 300),
+    author: s(raw.author, 80),
+    downloadUrl: /^https?:\/\//i.test(s(raw.downloadUrl, 2048)) ? s(raw.downloadUrl, 2048) : '',
+    sha256: /^[0-9a-f]{64}$/i.test(s(raw.sha256, 64)) ? s(raw.sha256, 64) : '',
+    homepage: s(raw.homepage, 2048),
+  };
+};
+
 contextBridge.exposeInMainWorld('electronAPI', {
   selectExcel: () => ipcRenderer.invoke('select-excel'),
   importExcelByPath: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
@@ -446,4 +462,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
       id: typeof payload?.id === 'string' ? payload.id.slice(0, 64) : '',
     }),
   pluginsOpenDir: () => ipcRenderer.invoke('plugins-open-dir'),
+  // ---- 插件市场（Market：catalog 拉取 + zip 安装；主进程二次净化）----
+  pluginMarketCatalog: (payload: any) =>
+    ipcRenderer.invoke('plugins-market-catalog', {
+      url: typeof payload?.url === 'string' && /^https?:\/\//i.test(payload.url)
+        ? payload.url.slice(0, 2048)
+        : '',
+    }),
+  pluginMarketInstall: (payload: any) =>
+    ipcRenderer.invoke('plugins-market-install', {
+      item: sanitizeMarketItem(payload?.item),
+      force: payload?.force === true,
+    }),
+  // ---- 软件更新（GitHub Releases 自动更新）----
+  checkForUpdates: () => ipcRenderer.invoke('updater-check'),
+  quitAndInstallUpdate: () => ipcRenderer.invoke('updater-install'),
+  // 订阅更新事件（主进程→渲染层单向）；返回退订函数
+  onUpdaterEvent: (cb: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => {
+      if (cb) cb(payload);
+    };
+    ipcRenderer.on('updater-event', listener);
+    return () => {
+      ipcRenderer.removeListener('updater-event', listener);
+    };
+  },
 });

@@ -33,6 +33,9 @@ import type {
   ShopAllocationDetailRow,
   PluginScanResult,
   UpdaterEventPayload,
+  AeOrderListItem,
+  AeReceiverStatus,
+  AeSummary,
 } from '@/types';
 import type { MarketCatalog, MarketPluginInfo } from '@/core/plugin/types';
 
@@ -144,6 +147,11 @@ export interface ElectronApi {
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected(input: number[] | { all: true }): Promise<ApiResult<{ updated: number }>>;
+  // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
+  aeDbEnsure(): Promise<ApiResult<unknown>>;
+  aeOrderList(payload?: { offset?: number; limit?: number; search?: string }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>>;
+  aeSummary(): Promise<ApiResult<AeSummary>>;
+  aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>>;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure(): Promise<ApiResult<unknown>>;
   purchaseSupplierList(): Promise<ApiResult<Supplier[]>>;
@@ -248,4 +256,25 @@ export function marketPluginInstall(
   force = false,
 ): Promise<ApiResult<{ id: string; version: string }>> {
   return ipc.pluginMarketInstall({ item, force });
+}
+
+// ---- 速卖通利润追踪（ae-profit / M0）：语义化查询 IPC ----
+/** 幂等建表（视图首次激活时调用） */
+export function aeDbEnsure(): Promise<ApiResult<unknown>> {
+  return ipc.aeDbEnsure();
+}
+
+/** 订单明细列表（分页 + 单号/店铺关键字） */
+export function aeOrderList(payload?: { offset?: number; limit?: number; search?: string }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>> {
+  return ipc.aeOrderList(payload);
+}
+
+/** 汇总（分币种，收入/费用分列） */
+export function aeSummary(): Promise<ApiResult<AeSummary>> {
+  return ipc.aeSummary();
+}
+
+/** 接收端运行状态（端口 / 最近入库 / 错误） */
+export function aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>> {
+  return ipc.aeReceiverStatus();
 }

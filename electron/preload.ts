@@ -324,6 +324,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ? input.filter((n: any) => typeof n === 'number' && Number.isInteger(n) && n > 0).slice(0, 10000)
         : [],
     }),
+  // --- 速卖通利润追踪（M0：入站走 localhost 接收端，本区仅查询类 IPC）---
+  aeDbEnsure: () => ipcRenderer.invoke('ae-db-ensure'),
+  aeOrderList: (payload: any) =>
+    ipcRenderer.invoke('ae-order-list', {
+      offset: typeof payload?.offset === 'number' ? Math.max(Math.round(payload.offset), 0) : 0,
+      limit: typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 1), 2000) : 200,
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : '',
+    }),
+  aeSummary: () => ipcRenderer.invoke('ae-summary'),
+  aeReceiverStatus: () => ipcRenderer.invoke('ae-receiver-status'),
   // --- 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）---
   purchaseDbEnsure: () => ipcRenderer.invoke('purchase-db-ensure'),
   // 厂商

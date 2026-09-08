@@ -22,10 +22,10 @@ export const buildConfig: BuildConfig = {
   profiles: {
     // 最小包：仅核心 Excel 复制
     minimal: ['excel-copy'],
-    // 标准包：核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab，非独立模块）
-    standard: ['excel-copy', 'quick-note', 'order-insight'],
+    // 标准包：核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 利润追踪
+    standard: ['excel-copy', 'quick-note', 'order-insight', 'ae-profit'],
     // 完整包：全部模块
-    pro: ['excel-copy', 'quick-note', 'order-insight'],
+    pro: ['excel-copy', 'quick-note', 'order-insight', 'ae-profit'],
   },
   // 兜底（当 profile 未在 profiles 中匹配时使用）
   enabledModules: ['excel-copy'],

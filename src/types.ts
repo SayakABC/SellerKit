@@ -84,6 +84,11 @@ export interface ElectronAPI {
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected: (input: number[] | { all: true }) => Promise<APIResult<{ updated: number }>>;
+  // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
+  aeDbEnsure: () => Promise<APIResult<void>>;
+  aeOrderList: (payload?: { offset?: number; limit?: number; search?: string }) => Promise<APIResult<{ rows: AeOrderListItem[]; total: number }>>;
+  aeSummary: () => Promise<APIResult<AeSummary>>;
+  aeReceiverStatus: () => Promise<APIResult<AeReceiverStatus>>;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure: () => Promise<APIResult<void>>;
   purchaseSupplierList: () => Promise<APIResult<Supplier[]>>;
@@ -600,6 +605,91 @@ export interface IgnoreRow {
   color: string;
   reason: string;
   createdAt: string;
+}
+
+// ---- 速卖通利润追踪（ae-profit / M0，字段与 electron/ae-db.ts 对应）----
+
+/** SKU 明细行（列表页仅行数，点开详情时按需拉取） */
+export interface AeOrderLineItem {
+  productId: string;
+  skuId: string;
+  title: string;
+  skuProps: string;
+  qty: number;
+  unitPrice: number;
+  goodsAmount: number;
+}
+
+/**
+ * 费用科目 key（宽松白名单：未知科目同样入库，仅前端 label 字典缺失时回退原 key）。
+ * 与 electron/ae-db.ts AeFeeCategory 语义一致；新增科目 = 采集端加 fees 条目，无需改表。
+ */
+export type AeFeeCategory =
+  | 'platform_commission' // 平台佣金
+  | 'logistics_fee' // 物流费-卖家承担
+  | 'payment_channel' // 支付通道费
+  | 'refund' // 退款/纠纷调整（收入扣减类）
+  | (string & {});
+
+/** 订单级费用条目（列表行内联；currency 已回填订单币种） */
+export interface AeFeeItem {
+  category: AeFeeCategory;
+  amount: number;
+  currency: string;
+}
+
+/** 订单明细列表行（不含 raw_json） */
+export interface AeOrderListItem {
+  id: number;
+  orderId: string;
+  shopName: string;
+  site: string;
+  orderTime: string;
+  status: string;
+  currency: string;
+  /** 商品金额（收入侧） */
+  goodsAmount: number;
+  /** 买家付运费（收入侧） */
+  shippingIncome: number;
+  /** 费用科目明细（平台佣金/物流费/退款…；同币种 = 订单币种） */
+  fees: AeFeeItem[];
+  lineCount: number;
+  source: string;
+  updatedAt: string;
+}
+
+export interface AeFeeSummary {
+  category: AeFeeCategory;
+  total: number;
+  orders: number;
+}
+
+export interface AeCurrencyGroup {
+  currency: string;
+  orders: number;
+  goodsAmount: number;
+  shippingIncome: number;
+  fees: AeFeeSummary[];
+}
+
+/**
+ * 汇总（分币种，收入/费用分列；M1 利润引擎基于此扩展）。
+ * 金额保留原币种按组聚合；top 级 total* 为跨币种预览合计（真实口径以 byCurrency 为准）。
+ */
+export interface AeSummary {
+  totalOrders: number;
+  totalGoodsAmount: number;
+  totalShippingIncome: number;
+  byCurrency: AeCurrencyGroup[];
+}
+
+/** 接收端运行状态（ae-receiver.ts） */
+export interface AeReceiverStatus {
+  running: boolean;
+  port: number;
+  startedAt: string;
+  lastIngestAt: string;
+  lastError: string;
 }
 
 declare global {

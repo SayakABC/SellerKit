@@ -24,6 +24,9 @@ require('./plugins-market-handlers');
 const { ensurePocPackageSeeded, initPluginUiProtocol } = require('./plugin-ui-protocol');
 // 自动更新 IPC（GitHub Releases：checkForUpdates / quitAndInstall + updater-event 广播）
 const updater = require('./updater');
+// 速卖通利润追踪：localhost 接收端（应用就绪后自启）+ 语义化查询 IPC（ae-db-ensure / ae-order-list / ae-summary / ae-receiver-status）
+require('./ae-receiver');
+require('./ae-handlers');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {

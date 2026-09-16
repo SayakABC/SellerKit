@@ -1,9 +1,11 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
 
-// 单元测试只覆盖「纯函数层」（src/lib）：无 DOM、无 IPC、无副作用，
-// 因此不需要 vue 插件、不需要 jsdom 环境，跑得又快又稳。
-// 组件/集成层面的验证仍走手工冒烟脚本（scripts/*-smoke.*）与手动流程回归。
+// 单元测试覆盖两类目标：
+//   1. src/lib/ 纯函数层——无 DOM、无 IPC、无副作用；
+//   2. electron/ipc-util.ts 的 IPC 注册契约——用 vi.mock 假 ipcMain，不启动 Electron。
+// 两者都不需要 vue 插件，也不需要 jsdom，故 environment 用 node，跑得又快又稳。
+// 组件 / Pinia store / 主进程业务逻辑 / 插件沙箱仍走手工冒烟（scripts/*-smoke.*）与手动流程回归。
 export default defineConfig({
   resolve: {
     alias: {

@@ -38,7 +38,7 @@
     "mailparser": "^3.9.26",
     "pinia": "^2.1.7",
     "vue": "^3.4.21",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

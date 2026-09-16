@@ -1,3 +1,10 @@
+> ⚠️ **已归档（ARCHIVED）——请勿作为现行依据。**
+> 本文是早期简版用户手册（记录版本 1.0.0），内容已被 `docs/guides/USER_GUIDE.md` 完整覆盖且更新。
+> 已知失效点：`cd iptv` 应为 `cd SellerKit`；版本号 1.0.0 对应 `package.json` 的 1.0.4；"最后更新：2024 年"为笔误；快捷键表 `Ctrl+Z` 重复两行；仅覆盖 arm64。
+> 保留本文仅作历史对照。
+
+---
+
 # SellerKit 用户手册
 
 > 版本 1.0.0 | 跨平台桌面应用 | 适用于 macOS / Windows

@@ -2,7 +2,7 @@ import './style.css';
 
 /**
  * UI 岛入口：页面在宿主 iframe（sk-plugin://<id>/…）内独立 JS realm 运行。
- * 宿主注入桥 runtime：window.__sk（详见 PLUGIN_DEVELOPMENT.md「UI 岛」章节）。
+ * 宿主注入桥 runtime：window.__sk（详见 docs/architecture/PLUGIN_DEVELOPMENT.md「UI 岛」章节）。
  * 能力调用一律走 __sk，不直连 window.electronAPI；权限门按 manifest capabilities 判定。
  */
 

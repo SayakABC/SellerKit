@@ -14,10 +14,16 @@ Thumbs.db
 .codebuddy/
 
 # ============ AI 协作文档（不入库） ============
+# 注：docs/ 下「对外/同类可共享」的文档（PLUGIN_DEVELOPMENT / PROFIT_TRACKER / MAIL_INBOX /
+#     USER_GUIDE / Requirements / manual）正常入库；以下「本地内部文档」不入库（沿用既有策略）。
+#     路径随 docs 目录整理同步更新（2026-09-16）。
+#     如需把审查报告纳入版本管理，删掉 docs/reviews/ 这一行即可。
 AGENTS.md
-REFACTOR_PLAN.md
-PLUGIN_ARCHITECTURE.md
-PROJECT_OVERVIEW.md
+docs/baseline/
+docs/architecture/PLUGIN_ARCHITECTURE.md
+docs/architecture/PROJECT_OVERVIEW.md
+docs/reviews/
+docs/plans/
 
 # ============ 环境变量 ============
 # 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example

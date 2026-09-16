@@ -3,7 +3,7 @@
 面向在 SellerKit 桌面应用中开发、调试并发布到插件市场（GitHub 静态托管）的插件开发者。
 
 - 本文档是**插件作者**向的操作手册（生态文档，可随仓库提交）。
-- 内核实现细节见 `PLUGIN_ARCHITECTURE.md`（本地 AI 内部文档，不提交 GitHub）。
+- 内核实现细节见 `docs/architecture/PLUGIN_ARCHITECTURE.md`（本地 AI 内部文档，不提交 GitHub）。
 - 官方市场仓库：`https://github.com/SayakABC/SellerKitPlugin`（`catalog.json` + `*.zip` 平铺在 `main` 分支根目录）。
 
 ---
@@ -69,7 +69,7 @@ extensions/<kebab-id>/        # 源码目录（脚手架生成）
 }
 ```
 
-> ⚠️ `capabilities` 的合法能力域 id **仅 `storage / http / clipboard / dialog` 四项**；`ui` / `env` 等**不可声明**（写入即安装校验失败，见 §6）。
+> ⚠️ `capabilities` 的合法能力域 id **仅 `storage / http / clipboard / dialog / db / secrets / mail` 七项**；`ui` / `env` 等**不可声明**（写入即安装校验失败，见 §6）。后三项（业务库 / 安全存储 / 邮件）只开放宿主登记好的**白名单操作**，见 §6。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -185,6 +185,9 @@ export default {
 | `clipboard` | `host.clipboard.writeText` | `actions` 省略 = 该域全部放行 |
 | `http` | `host.http.get/post` | `allow`（URL 前缀，支持尾部 `*`）**省略 = 禁止任何请求** |
 | `dialog` | `host.dialog.openFile` | 同上，`actions` 省略 = 全放行 |
+| `db` | `host.db.call(domain, op, payload)` | **`domains` 必填**（业务域白名单，如 `shop-accounts`）+ `actions`（操作名白名单）；**不放行任意 SQL**，只允许宿主 `DB_OPS` 登记的业务操作 |
+| `secrets` | `host.secrets.status()` | 仅暴露"宿主安全存储是否可用"；密文由主进程保管，**读写经 `db` 的宿主业务操作完成**（如 `shop-accounts:reveal`），插件不接触密文与引用 |
+| `mail` | `host.mail.call(op, payload)` | `domains: ["mail"]` + `actions`（操作名白名单）；只读 IMAP 语义，账号凭据由宿主维护，**不经过插件** |
 
 ⚠️ `ui` / `env` 两个面**默认放行、不设门**（透传），且**不在能力域白名单内**——`capabilities` 的合法 id 仅 `storage / http / clipboard / dialog` 四项，把 `ui` / `env` 写进声明会在安装校验时被拒（`capabilities.id 非法`）。
 
@@ -196,6 +199,9 @@ ctx.host.clipboard.writeText(text);                         // 需声明 clipboa
 ctx.host.http.get(url, { timeout, params, headers });       // 需声明 http + allow 前缀
 ctx.host.http.post(url, body, opts);
 ctx.host.dialog.openFile({ kind: 'excel' | 'template' | 'directory' }); // 需声明 dialog
+ctx.host.db.call('shop-accounts', 'list', { search: 'a' });  // 需声明 db + domains + actions
+ctx.host.secrets.status();                                    // 需声明 secrets + domains
+ctx.host.mail.call('messagesList', { keyword: 'invoice' });   // 需声明 mail + domains + actions
 ctx.host.ui.notify({ kind: 'success'|'error'|'info', text });           // 默认放行
 ctx.host.ui.openSettings(category, tab);
 ctx.host.env.isMac / ctx.host.env.platform / ctx.host.env.version;      // 只读，默认放行
@@ -368,6 +374,7 @@ node scripts/publish-plugin.js --dir ui-plugins/<kebab-id> --base <URL前缀> [-
 - `sk.host.ui.notify({ kind, text })`：宿主 toast（`text` 必填；`kind: 'success' | 'error' | 'info'`，非法/缺省按 info）；`sk.log.debug/info/warn/error(...)`：宿主日志（dev 终端带 `[ui-island:<id>]` 前缀）；
 - `sk.bus.emit(type, payload)` / `sk.bus.on(pattern, cb)`：发布 / 通配订阅（`*` 尾部前缀匹配，建议按 `plugin:<id>:*` 前缀约定）；回调 `cb(payload, meta)`，`meta` 为 `{ sourcePlugin, origin }`，**不含 eventType**（实际事件名由命中的订阅 pattern 判定；与 L2 `ctx.bus` 的 `meta.eventType` 不同）；`on` 返回退订函数；
 - `sk.host.*` 其余能力面：`clipboard.writeText` / `http.get/post`（须 `allow` 前缀）/ `dialog.openFile` / `ui.openSettings` ——未声明对应能力 → 桥拒绝（`PluginPermissionError` + 审计环，设置 → 插件可查）；
+- `sk.host.db.call(domain, op, payload)` / `sk.host.mail.call(op, payload)` / `sk.host.secrets.status()`：业务库 / 邮件 / 安全存储三域（须在 `capabilities` 声明 `db`/`mail`/`secrets` 与 `domains`）；岛内一律 `payload` 对象传参，**参数形状与宿主 IPC 一致**（如 `mail` 的 `{ messageId, attachmentId }`）；
 - ⚠️ **不存在** `sk.ui` 顶层成员、`sk.storage.get/set`、`clipboard.readText`（桥面只有 `writeText`）——旧模板/demo 用法请勿照抄；
 - 桥握手 token 校验失败的消息会被静默丢弃；页面 **禁止直连 `window.electronAPI`/裸 IPC**。
 

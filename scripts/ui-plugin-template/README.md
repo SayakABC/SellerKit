@@ -38,7 +38,7 @@ node scripts/plugin-create.js --ui __PLUGIN_ID__ --install
 # 或手动：cp manifest.json + dist/ → <userData>/plugins/__PLUGIN_ID__/
 ```
 
-## 桥面速查（完整见 PLUGIN_DEVELOPMENT.md）
+## 桥面速查（完整见 docs/architecture/PLUGIN_DEVELOPMENT.md）
 
 - `window.__sk.onReady(fn)`：握手完成后回调（**无参**；元信息经 `sk.manifest` / `sk.env` 读取；`sk.ready` 是 Promise，不可当函数调用）。
 - `sk.storage.load(key)` / `save(key, value)` / `clear()`：自身命名空间 key 级存储（需先声明 `storage`）。

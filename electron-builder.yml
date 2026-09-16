@@ -1,6 +1,8 @@
 appId: com.sellerkit.app
 productName: SellerKit
-buildVersion: 1.0.0
+# 版本元数据单一来源：不设 buildVersion，产物 CFBundleVersion / version 一律继承 package.json。
+# 曾设 buildVersion: 1.0.0 而 package.json 已到 1.0.4，导致产物元数据与实际版本分歧，
+# 并让 electron-updater 的版本比对失去唯一可信来源。
 directories:
   output: release
 files:

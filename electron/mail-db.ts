@@ -785,7 +785,10 @@ export function upsertMailMessages(rows: MailMessageUpsertRow[]): void {
 function collectMessageIds(rows: MailMessageUpsertRow[]): number[] {
   const grouped = new Map<string, { accountId: number; folder: string; uids: number[] }>();
   for (const r of rows) {
-    const key = `${r.accountId} ${r.folder}`;
+    // 复合键用 \x00 作分隔符：accountId 是数字、folder 来自 IMAP，都不可能含 NUL，
+    // 故不会与 "1"+"23" 这类拼接产生歧义。\x00 必须写成**转义**——裸控制字节会让整个
+    // 文件被 file(1)/grep(1) 判定为二进制（BSD grep 静默跳过），语义完全一致。（R2-8）
+    const key = `${r.accountId}\x00${r.folder}`;
     const g = grouped.get(key) || { accountId: r.accountId, folder: r.folder, uids: [] };
     if (!g.uids.includes(r.uid)) g.uids.push(r.uid);
     grouped.set(key, g);
@@ -858,13 +861,14 @@ export function replaceMailAttachments(
     const insert = stmt(`INSERT INTO sk_mail_attachments (message_id, filename, mime, size) VALUES (?, ?, ?, ?)`);
     const remove = stmt(`DELETE FROM sk_mail_attachments WHERE id = ?`);
     const pool = new Map<string, number[]>();
+    // 复合键同 collectMessageIds：filename / mime 都可能含空格或 '-'，故用 \x00 分隔（转义写法，见上）
     for (const e of existing) {
-      const key = `${e.filename} ${e.mime} ${e.size}`;
+      const key = `${e.filename}\x00${e.mime}\x00${e.size}`;
       pool.set(key, [...(pool.get(key) || []), e.id]);
     }
     const kept = new Set<number>();
     for (const it of incoming) {
-      const key = `${it.filename} ${it.mime} ${it.size}`;
+      const key = `${it.filename}\x00${it.mime}\x00${it.size}`;
       const bucket = pool.get(key);
       if (bucket && bucket.length) {
         kept.add(Number(bucket.shift()));

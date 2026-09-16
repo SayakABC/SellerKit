@@ -27,7 +27,7 @@
 
 export {};
 
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron';
+import { dialog, shell, BrowserWindow } from 'electron';
 import { promises as fsPromises } from 'fs';
 import {
   ensureMailSchema,
@@ -63,6 +63,7 @@ import {
   ensureMailAttachmentPath,
   getMailCacheDir,
 } from './mail-cache';
+import { handle } from './ipc-util';
 
 const MAX_LEN = {
   email: 200,
@@ -77,17 +78,6 @@ const MAX_LEN = {
 const PREVIEW_MIME_PREFIX = 'image/';
 /** 预览附件大小上限：超出不转 data URL，避免大 base64 撑爆渲染进程 */
 const PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
-
-function handle<T>(channel: string, fn: (payload: any) => T | Promise<T>): void {
-  ipcMain.handle(channel, async (_e: any, payload: any) => {
-    try {
-      const data = await fn(payload);
-      return { success: true, data };
-    } catch (err: any) {
-      return { success: false, error: err?.message || '未知错误' };
-    }
-  });
-}
 
 /** 正整数收敛（非法值回落到 fallback） */
 function toInt(value: unknown, fallback: number): number {

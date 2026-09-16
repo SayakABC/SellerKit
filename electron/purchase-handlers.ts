@@ -5,25 +5,11 @@
 
 export {};
 
-const { ipcMain } = require('electron');
 const purchaseDb = require('./purchase-db');
+const { register } = require('./ipc-util');
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
-}
-
-/** 注册语义化 handler：统一 try/catch 与错误返回结构 */
-function register(
-  channel: string,
-  handler: (payload: any) => Promise<{ success: boolean; data?: any; error?: string }> | { success: boolean; data?: any; error?: string },
-) {
-  ipcMain.handle(channel, async (_e: any, payload: any) => {
-    try {
-      return await handler(payload);
-    } catch (err: any) {
-      return { success: false, error: err.message || 'Unknown error' };
-    }
-  });
 }
 
 const str = (v: unknown, max = 500) => String(v ?? '').slice(0, max);

@@ -8,6 +8,7 @@
 //   ✅ extensions/**         随宿主分发的视图插件包（同样是宿主 bundle 的一部分）
 //   ✅ electron/**           主进程（CommonJS + TS）
 //   ✅ scripts/**            构建 / 发布 / 校验脚本
+//   ✅ tests/**              单元测试（vitest）
 //   ✅ *.config.*            根级构建配置
 //   ❌ ui-plugins/**         独立子包（各自 package.json / node_modules / tailwind 配置，
 //                           在各自目录内独立构建与发布，不入宿主 bundle，故不并入本 lint 图）
@@ -232,6 +233,27 @@ export default tseslint.config(
       ],
       '@typescript-eslint/no-require-imports': 'off',
       '@typescript-eslint/ban-ts-comment': 'warn',
+    },
+  },
+
+  // 单元测试（tests/）：node 环境，跑在 vitest 里
+  //  - 必须显式降级 any：tests/ 不落在下面任何带降级规则的 files 匹配里，
+  //    会继承 typescript-eslint recommended 的 error 级 no-explicit-any，
+  //    与 src/extensions「any 一律 warn」的存量策略自相矛盾（R2-6 实测踩到）。
+  //  - mock/替身代码里 any 本就是常态（vi.mock 工厂、假 ipcMain 回调），
+  //    与业务代码同等对待即可。
+  {
+    files: ['tests/**/*.ts'],
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': [
+        'warn',
+        { args: 'none', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
     },
   },
 

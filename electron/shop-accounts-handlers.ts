@@ -13,7 +13,6 @@
 
 export {};
 
-import { ipcMain } from 'electron';
 import {
   ensureShopAccountSchema,
   listShopAccounts,
@@ -31,6 +30,7 @@ import {
   type ShopAccountUpsertInput,
   type ShopAccountBatchFieldPatch,
 } from './shop-accounts-db';
+import { handle } from './ipc-util';
 
 const MAX_LEN = {
   email: 200,
@@ -48,17 +48,6 @@ const MAX_LEN = {
 
 /** 平台数组上限（与 db 层 MAX_PLATFORM_COUNT 保持一致） */
 const MAX_PLATFORM_COUNT = 20;
-
-function handle<T>(channel: string, fn: (payload: any) => T): void {
-  ipcMain.handle(channel, (_e: any, payload: any) => {
-    try {
-      const data = fn(payload);
-      return { success: true, data };
-    } catch (err: any) {
-      return { success: false, error: err?.message || '未知错误' };
-    }
-  });
-}
 
 /** 截断字符串到指定长度（非字符串一律视为空串） */
 function str(value: unknown, max: number): string {

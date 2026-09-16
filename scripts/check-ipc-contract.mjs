@@ -274,6 +274,7 @@ function collectTypes() {
 
 function collectMain() {
   const files = readdirSync(ELECTRON_DIR).filter((f) => f.endsWith('.ts'));
+  const wrappers = collectWrapperNames(files);
   const channels = [];
   const broadcasts = [];
   const perFile = [];
@@ -289,17 +290,12 @@ function collectMain() {
       if (lit) found.add(lit.value);
     }
 
-    // 包装式注册：先找出"函数体里含 ipcMain.handle/on"的本地函数名，再收集其调用点
-    const wrappers = new Set();
-    for (const m of masked.matchAll(
-      /(?:function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^=]*)?=>)/g,
-    )) {
-      const name = m[1] || m[2];
-      const body = masked.slice(m.index, m.index + 1500);
-      if (/ipcMain\s*\.\s*(?:handle|handleOnce|on)\s*\(/.test(body)) wrappers.add(name);
-    }
+    // 包装式注册：调用点可能在**别的文件**（封装被抽到共享模块后即是常态），
+    // 故包装名取自跨文件收集的 wrappers，而非本文件内的局部函数名。
+    // 负向后行排除成员调用：`protocol.handle('sk-plugin', ...)` 不是 IPC 通道，
+    // 而 `handle` 如今是共享包装名，用 `\b` 只能挡住词字符、挡不住 `.`（实测会误报）。
     for (const name of wrappers) {
-      const callRe = new RegExp(`\\b${name}\\s*(?:<[^>]*>)?\\s*\\(`, 'g');
+      const callRe = new RegExp(`(?<![\\w$.])${name}\\s*(?:<[^>]*>)?\\s*\\(`, 'g');
       for (const m of masked.matchAll(callRe)) {
         const lit = readStringAt(source, m.index + m[0].length);
         if (lit) found.add(lit.value);
@@ -318,6 +314,46 @@ function collectMain() {
     }
   }
   return { channels: [...new Set(channels)], broadcasts, perFile };
+}
+
+/**
+ * 跨文件收集「包装式注册」的函数名：函数体里出现 `ipcMain.handle/on` 的名字。
+ *
+ * 为什么必须跨文件：注册封装一旦被抽成共享模块（如 `electron/ipc-util.ts` 导出
+ * `register` / `handle`，再由 5 个 handler 文件 import），定义处与调用处就分居两个
+ * 文件。若只在单文件内找局部函数名，抽取后所有经包装注册的通道都会被误判成
+ * "主进程未注册"——R2-6 抽取 ipc-util 时即实测踩到本脚本的这个耦合。
+ *
+ * 别名一并解析：`const { register: reg } = require('./ipc-util')` 这类重命名导入，
+ * 会把 `reg` 也加进集合。别名匹配必须跑在**原文**上——掩码串里字面量内容已被抹空，
+ * 模块路径匹配不到。
+ */
+function collectWrapperNames(files) {
+  const sources = new Map();
+  for (const file of files) sources.set(file, readFileSync(join(ELECTRON_DIR, file), 'utf8'));
+
+  const wrappers = new Set();
+  for (const source of sources.values()) {
+    const masked = maskNonCode(source);
+    // 函数声明（含泛型）/ 箭头函数赋值
+    for (const m of masked.matchAll(
+      /(?:function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^=]*)?=>)/g,
+    )) {
+      const name = m[1] || m[2];
+      const body = masked.slice(m.index, m.index + 1500);
+      if (/ipcMain\s*\.\s*(?:handle|handleOnce|on)\s*\(/.test(body)) wrappers.add(name);
+    }
+  }
+
+  // 别名一轮：命中即足够（现实中不存在别名的别名链）
+  for (const source of sources.values()) {
+    for (const m of source.matchAll(
+      /([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)\s*\}?\s*(?:=[^;]*?\brequire\s*\(|from\s+)['"]\.{1,2}\//g,
+    )) {
+      if (wrappers.has(m[1])) wrappers.add(m[2]);
+    }
+  }
+  return wrappers;
 }
 
 // ---------------------------------------------------------------------------

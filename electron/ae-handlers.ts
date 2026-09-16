@@ -12,7 +12,6 @@
 
 export {};
 
-import { ipcMain } from 'electron';
 import {
   ensureAeSchema,
   listOrders,
@@ -24,17 +23,7 @@ import {
 } from './ae-db';
 import { getProfitOverview } from './ae-engine';
 import { getAeReceiverStatus } from './ae-receiver';
-
-function handle<T>(channel: string, fn: (payload: any) => T): void {
-  ipcMain.handle(channel, (_e: any, payload: any) => {
-    try {
-      const data = fn(payload);
-      return { success: true, data };
-    } catch (err: any) {
-      return { success: false, error: err.message || '未知错误' };
-    }
-  });
-}
+import { handle } from './ipc-util';
 
 handle('ae-db-ensure', () => {
   ensureAeSchema();

@@ -11,6 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
 const orderDb = require('./order-db');
+const { register } = require('./ipc-util');
 
 /** 主图缓存目录：userData/order-images/ */
 const IMAGE_DIR = () => path.join(app.getPath('userData'), 'order-images');
@@ -94,20 +95,6 @@ const IMG_EXT_BY_FORMAT: Record<'jpeg' | 'png' | 'webp', string> = {
   png: '.png',
   webp: '.webp',
 };
-
-/** 注册语义化 handler：统一 try/catch 与错误返回结构 */
-function register(
-  channel: string,
-  handler: (payload: any) => Promise<{ success: boolean; data?: any; error?: string }> | { success: boolean; data?: any; error?: string },
-) {
-  ipcMain.handle(channel, async (_e: any, payload: any) => {
-    try {
-      return await handler(payload);
-    } catch (err: any) {
-      return { success: false, error: err.message || 'Unknown error' };
-    }
-  });
-}
 
 // 幂等建表（模块首次使用时调用）
 register('order-db-ensure', async () => {

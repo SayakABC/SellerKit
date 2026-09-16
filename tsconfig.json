@@ -26,7 +26,8 @@
     "src/**/*.vue",
     "extensions/**/*.ts",
     "extensions/**/*.d.ts",
-    "extensions/**/*.vue"
+    "extensions/**/*.vue",
+    "tests/**/*.ts"
   ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

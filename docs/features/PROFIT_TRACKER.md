@@ -37,7 +37,7 @@
 >
 > **D1'（现行）**：宿主新增 `db` 能力域（`ctx.host.db.call(domain, op, payload)`，白名单 op、禁止任意 SQL），
 > UI 岛可经该域读 ae_* 数据 → ae-profit 迁移为**市场分发的 UI 岛**（`ui-plugins/ae-profit/`，`kind: "ui"`），
-> 已从 `modules.config.ts` 的 standard/pro 预设移除内建包。
+> 已从 `modules.config.json` 的 standard/pro 预设移除内建包。
 > 约束：内建视图插件与 UI 岛同名时内建优先（`pluginManager.registerUiIsland` 遇同名记录跳过），
 > 因此 ae-profit **不得**再进入任何默认打包预设，否则市场安装版不生效。
 
@@ -117,7 +117,7 @@
 
 > ⚠️ **文档与代码漂移提示（2026-09-16 审查发现）**
 > 1. 上表「展示端」行原写 `extensions/ae-profit/`，与 §10 决策 D1' 冲突；D1' 已生效，正确落位是 `ui-plugins/ae-profit/`。
-> 2. **磁盘现状与决策不一致**：`extensions/ae-profit/`（约 1.5k 行，`kind: view`）仍然存在，而 `modules.config.ts` 已将其移出 standard/pro 预设，且明确注明"必须保持其不进入默认包，否则内建记录会占用同名 id，导致市场安装的 UI 岛无法注册"。该目录目前是**迁移残留**，建议确认后删除（本次审查未改动）。
+> 2. **磁盘现状与决策不一致**：`extensions/ae-profit/`（约 1.5k 行，`kind: view`）仍然存在，而 `modules.config.json` 已将其移出 standard/pro 预设，且明确注明"必须保持其不进入默认包，否则内建记录会占用同名 id，导致市场安装的 UI 岛无法注册"。该目录目前是**迁移残留**，建议确认后删除（本次审查未改动）。
 > 3. §5 列出的 `ae_ops_costs`、`ae_sync_log` 两张表在 `electron/ae-db.ts` 中**尚未实现**（实际已建：`ae_orders` / `ae_order_lines` / `ae_fees` / `ae_cost_map` / `ae_rates`），它们属 §8 的 M2 范围。
 
 ## 8. 里程碑（每步明确"验证什么"）

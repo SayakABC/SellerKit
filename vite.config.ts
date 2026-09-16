@@ -2,7 +2,6 @@ import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { resolve } from 'path';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
-import { transformSync } from 'esbuild';
 import { resolveModuleKind, entryPath as sharedEntryPath } from './scripts/lib/module-roots.cjs';
 
 const root = process.cwd();
@@ -16,12 +15,16 @@ function resolveModuleRoot(id: string): 'modules' | 'extensions' | null {
   return resolveModuleKind(root, id);
 }
 
-// 稳健读取 modules.config.ts：用 esbuild 转译后求值，避免手搓正则漏匹配嵌套结构
-const cfgSrc = readFileSync(resolve(root, 'modules.config.ts'), 'utf-8');
-const cfgJs = transformSync(cfgSrc, { loader: 'ts', format: 'cjs' }).code;
-const sandbox: any = { module: { exports: {} }, exports: {} };
-new Function('module', 'exports', cfgJs)(sandbox.module, sandbox.module.exports);
-const buildConfig: any = sandbox.module.exports.buildConfig || {};
+// 读取 modules.config.json：纯字面量 JSON，直接解析即可。
+// 历史上该文件是 modules.config.ts，需用 esbuild 的 transformSync 转译后求值；
+// 而 esbuild 只是 vite 的传递依赖、并未在 package.json 声明——Vite 8 改用 Rolldown/Oxc
+// 后该依赖会消失，构建配置随之失效。改为 JSON 后既消除隐式依赖，也天然强制
+// AGENTS.md §1.3 要求的「纯字面量、禁止复杂逻辑」。
+const buildConfig: {
+  profile?: string;
+  profiles?: Record<string, string[]>;
+  enabledModules?: string[];
+} = JSON.parse(readFileSync(resolve(root, 'modules.config.json'), 'utf-8'));
 
 // 解析本次构建要启用的模块（优先级从高到低）：
 //   1) MODULE_IDS 环境变量（逗号分隔模块 id，交互式/自定义打包用，如 MODULE_IDS=excel-copy,quick-note）

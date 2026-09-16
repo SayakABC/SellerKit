@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "业务模块启用清单 —— 单一事实源（规则见 AGENTS.md §1.3 与 §5 SOP）。",
+    "本文件按设计为「纯字面量」：只能是对象/数组/字符串，不含任何逻辑；",
+    "构建期由 vite.config.ts 直接 JSON.parse 求值，不需要任何转译步骤。",
+    "",
+    "字段说明：",
+    "  profile        默认构建预设；构建时可用 MODULE_PROFILE 环境变量覆盖",
+    "  profiles       预设名 → 模块 ID 列表 的映射；决定「打哪些模块进包」",
+    "  enabledModules 兜底列表，当 profile 不在 profiles 中命中时使用",
+    "",
+    "预设含义：",
+    "  minimal   仅核心 Excel 复制",
+    "  standard  核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 店铺账号管家",
+    "  pro       完整包（当前与 standard 相同）",
+    "",
+    "新增业务模块：",
+    "  1) 在 src/modules/<id>/（内建）或 extensions/<id>/src/（视图插件包）下实现 meta.ts + index.ts",
+    "  2) 在对应 profile 的数组中加入 '<id>'",
+    "",
+    "禁止：把 UI 岛（ui-plugins/<id>）的 id 登记进 profiles —— 内建记录会占用同名 id，",
+    "      导致从市场安装的 UI 岛无法注册（AGENTS.md 红线 23）。",
+    "",
+    "切换打包范围：",
+    "  MODULE_PROFILE=minimal npm run build            预设",
+    "  MODULE_IDS=excel-copy,quick-note npm run build  自定义清单（优先级最高）",
+    "  npm run dist:select                             交互式勾选（scripts/select-build.js）"
+  ],
+
+  "profile": "standard",
+
+  "profiles": {
+    "minimal": ["excel-copy"],
+    "standard": ["excel-copy", "quick-note", "order-insight", "shop-accounts"],
+    "pro": ["excel-copy", "quick-note", "order-insight", "shop-accounts"]
+  },
+
+  "enabledModules": ["excel-copy"]
+}

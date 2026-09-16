@@ -71,8 +71,9 @@ SellerKit/
 ├── extensions/<id>/             # 随宿主分发的视图插件包（manifest.json + src/）
 ├── ui-plugins/<id>/             # 市场分发的 UI 岛（kind: ui，静态产物）
 ├── scripts/                     # 构建 / 打包 / 脚手架 / 冒烟脚本
+│   └── lib/module-roots.cjs     # 模块根探测规则（vite.config.ts 与 select-build.js 共用，单一事实源）
 ├── docs/                        # 项目文档（入口见 docs/README.md）
-├── modules.config.ts            # 模块启用清单（单一事实源）
+├── modules.config.json          # 模块启用清单（单一事实源，纯 JSON 无转译）
 ├── AGENTS.md                    # 架构基线 + 编码红线（AI 编码必读）
 └── electron-builder.yml         # 打包配置
 ```
@@ -99,7 +100,7 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 
 | | 构建期模块裁剪 | 运行时插件体系 |
 |---|---|---|
-| 载体 | `modules.config.ts` → `vite.config.ts` → `src/registry.generated.ts` | `src/core/plugin/` |
+| 载体 | `modules.config.json` → `vite.config.ts` → `src/registry.generated.ts` | `src/core/plugin/` |
 | 单元 | 内建模块 / 视图插件包 | 内建插件（L0）/ 外置插件（L2 Worker 沙箱）/ UI 岛 |
 | 隔离 | 未选中的模块不进 bundle | 外置插件源码在主线程不存在，跑在独立 module Worker |
 | 权限 | — | manifest `capabilities` 显式声明 + `gatedHost` 逐调用判定 + 审计环 |

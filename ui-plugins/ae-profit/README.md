@@ -44,6 +44,6 @@ node scripts/publish-plugin.js --dir ui-plugins/ae-profit --build \
 
 产物写入 `market-out/`（`ae-profit-1.0.0.zip` + `catalog.json`），提交推送后即上架。
 
-> 注意：`ae-profit` 已从宿主 `modules.config.ts` 的默认打包预设中移除。
+> 注意：`ae-profit` 已从宿主 `modules.config.json` 的默认打包预设中移除。
 > 内建视图插件与 UI 岛同名时内建优先（`pluginManager.registerUiIsland` 遇同名记录直接跳过），
 > 因此**不要**把它加回 `standard` / `pro`，否则市场安装的版本不会生效。

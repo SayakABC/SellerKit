@@ -115,8 +115,8 @@
           class="absolute right-2 top-2 z-10 rounded-md px-2 py-1 text-xs transition-colors"
           :class="
             confirmDeleteId === s.id
-              ? 'bg-[var(--wb-danger)] text-white font-medium'
-              : 'bg-black/55 text-white hover:bg-[var(--wb-danger)]'
+              ? 'bg-[var(--wb-danger)] text-[var(--wb-primary-contrast)] font-medium'
+              : 'bg-black/55 text-white hover:bg-[var(--wb-danger)] hover:text-[var(--wb-primary-contrast)]'
           "
           :title="confirmDeleteId === s.id ? '再次点击确认删除' : '删除该款编码（订单保留，图片解除归属）'"
           @click.stop="requestDelete(s)"

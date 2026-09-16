@@ -12,7 +12,7 @@
           >
             {{ order.styleCode }}
           </span>
-          <span v-else class="shrink-0 px-1.5 py-0.5 rounded bg-[var(--wb-warning)] text-white text-xs font-medium">
+          <span v-else class="shrink-0 px-1.5 py-0.5 rounded bg-[var(--wb-warning)] text-[var(--wb-primary-contrast)] text-xs font-medium">
             未归类
           </span>
           <span class="ml-auto shrink-0 text-xs text-[var(--wb-text-muted)]">

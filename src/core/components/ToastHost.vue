@@ -7,9 +7,9 @@
         :class="[
           'px-4 py-2.5 rounded-lg shadow-lg text-sm max-w-xs',
           t.type === 'success'
-            ? 'bg-[var(--wb-success)] text-white'
+            ? 'bg-[var(--wb-success)] text-[var(--wb-primary-contrast)]'
             : t.type === 'error'
-              ? 'bg-[var(--wb-danger)] text-white'
+              ? 'bg-[var(--wb-danger)] text-[var(--wb-primary-contrast)]'
               : 'bg-[var(--wb-text)] text-[var(--wb-surface)]',
         ]"
       >

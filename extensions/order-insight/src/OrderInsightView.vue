@@ -21,7 +21,7 @@
           {{ t.label }}
           <span
             v-if="t.badgeKey && stats[t.badgeKey] > 0"
-            class="min-w-[18px] h-[18px] px-1 rounded-full text-[11px] leading-[18px] text-center bg-[var(--wb-warning)] text-white"
+            class="min-w-[18px] h-[18px] px-1 rounded-full text-[11px] leading-[18px] text-center bg-[var(--wb-warning)] text-[var(--wb-primary-contrast)]"
           >
             {{ stats[t.badgeKey] }}
           </span>

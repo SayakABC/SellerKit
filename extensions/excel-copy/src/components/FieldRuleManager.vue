@@ -24,7 +24,7 @@
         <div class="flex items-center gap-2">
           <button
             @click="store.reprocessRules()"
-            class="px-3 py-1.5 text-sm bg-[var(--wb-success)] text-white rounded-md hover:opacity-90 transition-colors"
+            class="px-3 py-1.5 text-sm bg-[var(--wb-success)] text-[var(--wb-primary-contrast)] rounded-md hover:opacity-90 transition-colors"
           >
             立即应用
           </button>

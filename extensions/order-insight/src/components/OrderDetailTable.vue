@@ -109,7 +109,7 @@
                 class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors whitespace-nowrap"
                 :class="
                   confirmDeleteId === o.id
-                    ? 'bg-[var(--wb-danger)] text-white font-medium'
+                    ? 'bg-[var(--wb-danger)] text-[var(--wb-primary-contrast)] font-medium'
                     : 'text-[var(--wb-danger)] hover:bg-[var(--wb-danger-soft)]'
                 "
                 :title="confirmDeleteId === o.id ? '再次点击确认删除' : '删除该订单'"

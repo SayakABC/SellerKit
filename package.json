@@ -29,6 +29,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "verify": "node scripts/check-ipc-contract.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

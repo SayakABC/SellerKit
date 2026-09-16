@@ -108,7 +108,7 @@
                 :key="c.id"
                 class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 bg-[var(--wb-primary-soft)] text-[var(--wb-primary)] text-xs"
               >
-                <i class="h-2 w-2 rounded-full ring-1 ring-[var(--wb-primary)]" :style="{ background: swatch(c.color) }"></i>
+                <i class="h-2 w-2 rounded-full ring-1 ring-[var(--wb-primary)]" :style="{ background: swatchOf(c.color) }"></i>
                 {{ c.color }}
               </span>
               <span v-if="s.colors.length > 5" class="px-1 text-xs text-[var(--wb-text-muted)]">
@@ -158,6 +158,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { StyleRecord } from '@/types';
+import { swatchOf } from '../lib/colorSwatch';
 import { useOrderInsightStore } from '../store';
 import OrderThumb from './OrderThumb.vue';
 
@@ -190,33 +191,6 @@ const filtered = computed(() => {
       .some((v) => String(v).toLowerCase().includes(q)),
   );
 });
-
-/** 款色色块（常见颜色名 → 色值，未知返回中性灰） */
-const COLOR_SWATCH: Record<string, string> = {
-  黑色: '#3a3a3a',
-  白色: '#f5f5f5',
-  红色: '#d64545',
-  蓝色: '#3b6fd4',
-  绿色: '#3d9a5c',
-  黄色: '#e8c23d',
-  橙色: '#e8853d',
-  紫色: '#8b5ec9',
-  粉色: '#e89ab6',
-  灰色: '#9a9a9a',
-  棕色: '#8a6a4f',
-  米色: '#d9c9a8',
-  卡其: '#c3b091',
-  藏青: '#2f3b5e',
-  军绿: '#5b6b46',
-  酒红: '#7d2f3a',
-};
-function swatch(color: string): string {
-  const c = (color || '').toLowerCase();
-  for (const [name, value] of Object.entries(COLOR_SWATCH)) {
-    if (c.includes(name)) return value;
-  }
-  return '#b9bdc7';
-}
 
 function toggle(id: number) {
   activeId.value = activeId.value === id ? null : id;

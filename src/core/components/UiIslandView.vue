@@ -163,7 +163,8 @@ onBeforeUnmount(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #9a9a96;
+  /* 未连接态：跟随主题的次要文字色（原先裸 hex，深色主题下偏亮） */
+  background: var(--wb-text-muted, #8e8e93);
 }
 .ui-island-dot.connected {
   background: var(--wb-success, #34c759);

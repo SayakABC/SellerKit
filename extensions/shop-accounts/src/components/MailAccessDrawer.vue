@@ -302,7 +302,7 @@ function close(): void {
   border-left: 1px solid var(--wb-border);
   display: flex;
   flex-direction: column;
-  box-shadow: -18px 0 48px rgb(0 0 0 / 18%);
+  box-shadow: -18px 0 48px var(--wb-shadow);
 }
 
 .editor-head {

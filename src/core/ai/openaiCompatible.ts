@@ -124,6 +124,7 @@ function getTestImageDataUrl(): string {
   c.height = 64;
   const ctx = c.getContext('2d');
   if (!ctx) throw new Error('无法创建画布生成测试图片');
+  // 非 UI 颜色：这是发给视觉模型的探针像素，不是界面配色，故刻意用固定色值
   ctx.fillStyle = '#e05a3a';
   ctx.fillRect(0, 0, 64, 64);
   cachedTestImage = c.toDataURL('image/png');

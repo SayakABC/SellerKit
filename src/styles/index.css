@@ -28,6 +28,7 @@
   --wb-accent-soft: #eef1f4;   /* 强调浅底 */
   --wb-hover: #e8ebf0;         /* 悬浮底 */
   --wb-overlay: rgba(23, 26, 33, 0.4); /* 弹层遮罩 */
+  --wb-shadow: rgba(23, 26, 33, 0.18); /* 抽屉 / 浮层投影色（用主题墨色而非纯黑，避免发灰） */
   --wb-radius: 12px;
 
   /* Tailwind 默认灰阶 / white 的主题化映射（RGB 三元组，供 tailwind.config 引用） */
@@ -66,6 +67,7 @@
   --wb-accent-soft: rgba(166, 175, 187, 0.14);
   --wb-hover: #272c36;
   --wb-overlay: rgba(0, 0, 0, 0.6); /* 弹层遮罩（深色下更重） */
+  --wb-shadow: rgba(0, 0, 0, 0.58); /* 抽屉 / 浮层投影色（深色下须更重才有层次） */
   --wb-radius: 12px;
 
   /* 深色下的 Tailwind 灰阶 / white 映射 */

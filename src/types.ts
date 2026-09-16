@@ -8,6 +8,10 @@ export interface ElectronAPI {
   writeClipboard: (text: string) => Promise<APIResult<void>>;
   loadState: () => Promise<APIResult<AppState>>;
   saveState: (data: Partial<AppState>) => Promise<APIResult<void>>;
+  /** 模块命名空间持久化（§1.4）：读取 `modules.<moduleId>` 下的数据，无数据返回 null */
+  getModuleState: (moduleId: string) => Promise<APIResult<unknown>>;
+  /** 模块命名空间持久化（§1.4）：写入 `modules.<moduleId>`，模块之间互不污染 */
+  setModuleState: (moduleId: string, data: unknown) => Promise<APIResult<void>>;
   checkFileExists: (filePath: string) => Promise<APIResult<boolean>>;
   readFile: (filePath: string) => Promise<APIResult<ExcelFileResult | TemplateFileResult>>;
   getDefaultTemplatePath: () => Promise<APIResult<string>>;
@@ -18,6 +22,10 @@ export interface ElectronAPI {
   backupExport: (targetDir: string) => Promise<APIResult<BackupSummary>>;
   backupImport: (backupDir: string) => Promise<APIResult<void>>;
   openDataDir: () => Promise<APIResult<string>>;
+  /** 运行平台标识（`process.platform`，非 IPC 通道）；标题栏样式与平台判定用 */
+  platform: string;
+  /** 自定义标题栏窗口控制：最小化 / 最大化切换 / 关闭 */
+  controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<APIResult<void>>;
   netRequest: (payload: NetRequestPayload) => Promise<APIResult<NetRequestResult>>;
   // 订单归类模块（SQLite 指纹库 / 订单 / 主图）
   orderDbEnsure: () => Promise<APIResult<void>>;

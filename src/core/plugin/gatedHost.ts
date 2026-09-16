@@ -84,6 +84,24 @@ export function createGatedHostApi(
         return raw.dialog.openFile(opts);
       },
     },
+    db: {
+      call<T = unknown>(domain: string, op: string, payload?: unknown): Promise<T> {
+        guard(gate, manifest, pluginId, { capability: 'db', action: op, domain });
+        return raw.db.call<T>(domain, op, payload);
+      },
+    },
+    secrets: {
+      status(): Promise<{ secureStorage: boolean }> {
+        guard(gate, manifest, pluginId, { capability: 'secrets', action: 'status' });
+        return raw.secrets.status();
+      },
+    },
+    mail: {
+      call<T = unknown>(op: string, payload?: unknown): Promise<T> {
+        guard(gate, manifest, pluginId, { capability: 'mail', action: op, domain: 'mail' });
+        return raw.mail.call<T>(op, payload);
+      },
+    },
     // ui / env：轻量只读，默认放行
     ui: raw.ui,
     env: raw.env,

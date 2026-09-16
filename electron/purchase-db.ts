@@ -899,6 +899,51 @@ export function shopAllocationDetail(shop: string, from?: string, to?: string): 
     .sort((a, b) => a.bizDate.localeCompare(b.bizDate) || a.purchaseId - b.purchaseId);
 }
 
+// ---- 成本快照（M1 利润追踪 D3：只读导出，供 ae-profit 导入 ae_cost_map，不向渲染层透传本模块） ----
+
+/** 快照项：款编码 → 加权均价（分/件，按已提交拿货单明细数量加权） */
+export interface CostSnapshotItem {
+  styleCode: string;
+  styleName: string;
+  /** 参与统计的拿货件数 */
+  sampleCount: number;
+  /** 加权单价（分） = Σ(qty×price_cents) / Σqty，取整 */
+  weightedPriceCents: number;
+  /** 该款最近一次拿货日期（yyyy-mm-dd，无则空串） */
+  lastBizDate: string;
+}
+
+/**
+ * 成本快照（D3 单向快照）：从全部「已提交」拿货单明细按款编码聚合，
+ * 输出款编码 → 加权均价（分）。成本衔接只允许这个只读出口（ae-profit 侧导入），
+ * 不暴露本模块任何写能力；口径 = 历史拿货加权均价（M1 简化，不计颜色/尺码差异）。
+ */
+export function costSnapshot(): CostSnapshotItem[] {
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT pi.style_code, pi.style_name, SUM(pi.qty) AS qty, SUM(pi.amount_cents) AS amount_cents,
+            MAX(po.biz_date) AS last_biz_date
+     FROM purchase_items pi
+     JOIN purchase_orders po ON pi.purchase_id = po.id
+     WHERE po.status = 'submitted' AND pi.qty > 0 AND pi.amount_cents > 0
+     GROUP BY pi.style_code
+     ORDER BY pi.style_code`,
+  );
+  return rows
+    .map((r) => {
+      const qty = Number(r.qty ?? 0);
+      const amount = Number(r.amount_cents ?? 0);
+      if (qty <= 0) return null;
+      return {
+        styleCode: String(r.style_code ?? ''),
+        styleName: String(r.style_name ?? ''),
+        sampleCount: qty,
+        weightedPriceCents: Math.round(amount / qty),
+        lastBizDate: String(r.last_biz_date ?? ''),
+      };
+    })
+    .filter((x): x is CostSnapshotItem => x !== null);
+}
+
 // ---- 单价记忆（同款衣服自动填价：优先当前厂商，未命中或未选厂商时按款色全局取最近一次） ----
 
 export function priceHistory(supplierId: number, styleCode: string, color: string): number {

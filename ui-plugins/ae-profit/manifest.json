@@ -1,0 +1,31 @@
+{
+  "name": "ae-profit",
+  "displayName": "利润追踪（UI 岛）",
+  "version": "1.0.1",
+  "description": "速卖通订单利润追踪：订单明细、利润引擎（趋势/分类/爆品）、成本衔接（拿货对账快照导入）与汇率维护。数据经宿主 db 能力域读写，不外发。",
+  "author": "SellerKit",
+  "engines": { "sellerkit": ">=1.0.0" },
+  "entry": "./dist/index.html",
+  "kind": "ui",
+  "activationEvents": [],
+  "capabilities": [
+    { "id": "storage", "namespaces": ["ae-profit"] },
+    { "id": "clipboard", "actions": ["write", "writeText"] },
+    {
+      "id": "db",
+      "domains": ["ae", "purchase"],
+      "actions": [
+        "ensure",
+        "receiverStatus",
+        "orderList",
+        "summary",
+        "profitStats",
+        "costMapList",
+        "costMapImport",
+        "rateList",
+        "rateUpsert",
+        "costSnapshot"
+      ]
+    }
+  ]
+}

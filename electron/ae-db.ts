@@ -10,7 +10,7 @@
 //                   科目化后「加科目 = 插行」，零 ALTER；v1 顶层费用字段（platformFee 等）自动映射为科目行；
 //   - ae_order_lines SKU 行（明细键不稳定，随订单 upsert 整批替换）。
 //
-// 协议字段与 schema 权威定义：PROFIT_TRACKER.md §5/§6；金额语义见 §4（收入侧/费用侧分列，不预摊）。
+// 协议字段与 schema 权威定义：docs/features/PROFIT_TRACKER.md §5/§6；金额语义见 §4（收入侧/费用侧分列，不预摊）。
 // schema 兼容：ae-order/v1（旧帧，顶层 platformFee/logisticsFee/refundAmount → fees 科目）与
 //              ae-order/v2（结构化 fees 数组，见 AeIngestFee）。
 
@@ -39,8 +39,11 @@ export interface AeIngestFee {
 export interface AeIngestLine {
   productId?: string;
   skuId?: string;
+  /** 商品标题（可含款号等描述） */
   title?: string;
   skuProps?: string;
+  /** M1 成本衔接键：扩展详情采集的「商家编码/货号」（= 采购款编码时即可命中成本表） */
+  styleCode?: string;
   qty?: number;
   unitPrice?: number;
   goodsAmount?: number;
@@ -173,19 +176,58 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_ae_order_lines_ae_order_id ON ae_order_lines(ae_order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_ae_fees_ae_order_id ON ae_fees(ae_order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_ae_fees_category ON ae_fees(category)`,
+  // ---- M1：成本衔接（D3 快照）与汇率（成本 CNY 计价需外币→CNY） ----
+  `CREATE TABLE IF NOT EXISTS ae_cost_map (
+    style_code TEXT PRIMARY KEY,
+    style_name TEXT NOT NULL DEFAULT '',
+    unit_price_cents INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    last_biz_date TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'purchase',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS ae_rates (
+    from_currency TEXT PRIMARY KEY,
+    rate_to_cny REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`,
 ];
 
-/** 幂等初始化：建表 + 索引（应用启动 / 首次使用自动调用；含旧库无 ALTER 增量，新表由 CREATE IF NOT EXISTS 补齐） */
+/** 幂等初始化：建表 + 索引 + 存量库增量列 + 默认汇率种子（应用启动 / 首次使用自动调用） */
 export function ensureAeSchema(): void {
   initDb();
   dbMigrate(SCHEMA);
+  migrateOrderLinesStyleCode();
+  seedDefaultRates();
+}
+
+/**
+ * 旧库增量：ae_order_lines 补 style_code 列（M1 成本衔接键；旧库无此列 → ALTER ADD COLUMN）。
+ * SQLite 无 IF NOT EXISTS for ADD COLUMN，故 PRAGMA 探测后执行，幂等安全。
+ */
+function migrateOrderLinesStyleCode(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(ae_order_lines)`);
+  if (cols.some((c) => c.name === 'style_code')) return;
+  dbRun(`ALTER TABLE ae_order_lines ADD COLUMN style_code TEXT NOT NULL DEFAULT ''`);
+}
+
+/**
+ * 常用结算币种默认参考汇率（1 外币 = X CNY）。
+ * CNY 为利润统计基准币：恒 1:1（引擎对 CNY 订单免查表），此处仅用于界面可见/种子占位；
+ * 其余默认值仅供引擎起步参考，用户可在「成本与汇率」页手动修正。
+ */
+const DEFAULT_RATES: Record<string, number> = { CNY: 1, USD: 7.2, EUR: 7.8, GBP: 9.2, RUB: 0.085 };
+function seedDefaultRates(): void {
+  for (const [ccy, rate] of Object.entries(DEFAULT_RATES)) {
+    dbRun(`INSERT OR IGNORE INTO ae_rates (from_currency, rate_to_cny) VALUES (?, ?)`, [ccy, rate]);
+  }
 }
 
 // ---- 字段规整与校验 ----
 
 const MAX_STR = {
   orderId: 40, shopName: 200, site: 20, orderTime: 40, status: 60, currency: 8,
-  productId: 64, skuId: 64, title: 300, skuProps: 300,
+  productId: 64, skuId: 64, title: 300, skuProps: 300, styleCode: 64,
   category: 60, source: 20,
 };
 const MAX_MONEY = 1e9;
@@ -285,6 +327,7 @@ export function sanitizeIngestOrder(input: unknown): { order: AeIngestOrder | nu
         skuId: clipStr(r.skuId, MAX_STR.skuId),
         title: clipStr(r.title, MAX_STR.title),
         skuProps: clipStr(r.skuProps, MAX_STR.skuProps),
+        styleCode: clipStr(r.styleCode, MAX_STR.styleCode),
         qty,
         unitPrice,
         goodsAmount: lineGoods,
@@ -348,8 +391,8 @@ export function upsertOrderBatch(orders: AeIngestOrder[]): AeUpsertResult {
 function replaceLines(orderDbId: number, lines: AeIngestLine[]): void {
   for (const l of lines) {
     dbRun(
-      `INSERT INTO ae_order_lines (ae_order_id, product_id, sku_id, title, sku_props, qty, unit_price, goods_amount) VALUES (?,?,?,?,?,?,?,?)`,
-      [orderDbId, l.productId ?? '', l.skuId ?? '', l.title ?? '', l.skuProps ?? '', l.qty ?? 1, l.unitPrice ?? 0, l.goodsAmount ?? 0],
+      `INSERT INTO ae_order_lines (ae_order_id, product_id, sku_id, title, sku_props, style_code, qty, unit_price, goods_amount) VALUES (?,?,?,?,?,?,?,?,?)`,
+      [orderDbId, l.productId ?? '', l.skuId ?? '', l.title ?? '', l.skuProps ?? '', l.styleCode ?? '', l.qty ?? 1, l.unitPrice ?? 0, l.goodsAmount ?? 0],
     );
   }
 }
@@ -474,4 +517,83 @@ export function getAeSummary(): AeSummary {
     totalShippingIncome: byCurrency.reduce((s, g) => s + g.shippingIncome, 0),
     byCurrency,
   };
+}
+
+// ---- M1：成本衔接（ae_cost_map 快照）与汇率（ae_rates） ----
+
+/** 成本表行（供渲染层成本管理面板展示） */
+export interface AeCostMapItem {
+  styleCode: string;
+  styleName: string;
+  /** 单价（分/CNY 元） */
+  unitPriceCents: number;
+  sampleCount: number;
+  lastBizDate: string;
+  source: string;
+  updatedAt: string;
+}
+
+/** 汇率行（渲染层类型同构，勿拆字段） */
+export interface AeRateItem {
+  fromCurrency: string;
+  /** 1 fromCurrency = rateToCny CNY */
+  rateToCny: number;
+  updatedAt: string;
+}
+
+/** 全量替换成本快照（D3 单向导入：purchase-cost-snapshot → 本表），事务内先清后插。 */
+export function costMapReplace(items: { styleCode: string; styleName: string; unitPriceCents: number; sampleCount: number; lastBizDate: string }[]): { replaced: number } {
+  dbTransaction(() => {
+    dbRun(`DELETE FROM ae_cost_map`);
+    for (const it of items) {
+      dbRun(
+        `INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents, sample_count, last_biz_date, source) VALUES (?,?,?,?,?, 'purchase')`,
+        [clipStr(it.styleCode, MAX_STR.styleCode), clipStr(it.styleName, 200), Math.max(0, Math.round(it.unitPriceCents)), Math.max(0, Math.round(it.sampleCount)), clipStr(it.lastBizDate, 40)],
+      );
+    }
+  });
+  return { replaced: items.length };
+}
+
+/** 成本表全量（前端展示 / 成本覆盖率提示用） */
+export function costMapList(): AeCostMapItem[] {
+  return dbQuery<Record<string, unknown>>(`SELECT style_code, style_name, unit_price_cents, sample_count, last_biz_date, source, updated_at FROM ae_cost_map ORDER BY style_code`).map((r) => ({
+    styleCode: String(r.style_code ?? ''),
+    styleName: String(r.style_name ?? ''),
+    unitPriceCents: num(r.unit_price_cents),
+    sampleCount: num(r.sample_count),
+    lastBizDate: String(r.last_biz_date ?? ''),
+    source: String(r.source ?? 'purchase'),
+    updatedAt: String(r.updated_at ?? ''),
+  }));
+}
+
+/** 汇率全量 */
+export function rateList(): AeRateItem[] {
+  return dbQuery<Record<string, unknown>>(`SELECT from_currency, rate_to_cny, updated_at FROM ae_rates ORDER BY from_currency`).map((r) => ({
+    fromCurrency: String(r.from_currency ?? ''),
+    rateToCny: num(r.rate_to_cny),
+    updatedAt: String(r.updated_at ?? ''),
+  }));
+}
+
+/** 汇率 upsert（利润引擎换算入口，UI 可修正默认参考值） */
+export function rateUpsert(fromCurrency: string, rateToCny: number): void {
+  const ccy = clipStr(fromCurrency, MAX_STR.currency).toUpperCase();
+  const rate = Number.isFinite(rateToCny) && rateToCny > 0 ? rateToCny : 0;
+  if (!ccy || rate <= 0) return;
+  dbRun(
+    `INSERT INTO ae_rates (from_currency, rate_to_cny, updated_at) VALUES (?,?,datetime('now','localtime'))
+     ON CONFLICT(from_currency) DO UPDATE SET rate_to_cny=excluded.rate_to_cny, updated_at=excluded.updated_at`,
+    [ccy, rate],
+  );
+}
+
+/** 汇率 map（引擎一次性读入：currency → rateToCny） */
+export function rateMap(): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const r of dbQuery<Record<string, unknown>>(`SELECT from_currency, rate_to_cny FROM ae_rates`)) {
+    m.set(String(r.from_currency ?? ''), num(r.rate_to_cny));
+  }
+  return m;
 }

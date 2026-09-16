@@ -36,6 +36,32 @@ import type {
   AeOrderListItem,
   AeReceiverStatus,
   AeSummary,
+  AeProfitOverview,
+  AeCostMapImportItem,
+  AeCostMapItem,
+  AeRateItem,
+  PurchaseCostSnapshotItem,
+  ShopAccountItem,
+  ShopAccountDetail,
+  ShopAccountUpsertInput,
+  ShopAccountSecretKey,
+  ShopAccountStatus,
+  ShopAccountSummary,
+  ShopAccountBatchUpdateInput,
+  ShopAccountBatchUpdateResult,
+  MailAccountItem,
+  MailAccountUpsertInput,
+  MailMessageItem,
+  MailMessageDetail,
+  MailMessageListFilter,
+  MailConnectionTestResult,
+  MailStats,
+  MailProviderPresetView,
+  MailSyncEvent,
+  MailAttachmentPreview,
+  MailRemoteFolder,
+  MailCacheStatus,
+  MailFtsStatus,
 } from '@/types';
 import type { MarketCatalog, MarketPluginInfo } from '@/core/plugin/types';
 
@@ -152,6 +178,13 @@ export interface ElectronApi {
   aeOrderList(payload?: { offset?: number; limit?: number; search?: string }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>>;
   aeSummary(): Promise<ApiResult<AeSummary>>;
   aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>>;
+  // M1：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
+  aeProfitStats(payload?: { granularity?: 'day' | 'month'; rangeDays?: number }): Promise<ApiResult<AeProfitOverview>>;
+  aeCostMapImport(payload: { items: AeCostMapImportItem[] }): Promise<ApiResult<{ replaced: number }>>;
+  aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>>;
+  aeRateList(): Promise<ApiResult<AeRateItem[]>>;
+  aeRateUpsert(payload: { fromCurrency: string; rateToCny: number }): Promise<ApiResult<{ ok: boolean }>>;
+  purchaseCostSnapshot(): Promise<ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>>;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure(): Promise<ApiResult<unknown>>;
   purchaseSupplierList(): Promise<ApiResult<Supplier[]>>;
@@ -198,6 +231,76 @@ export interface ElectronApi {
   purchaseShopAllocationDetail(payload: { shop: string; from?: string; to?: string }): Promise<ApiResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
   purchaseExportExcel(payload: { items: PurchaseItem[]; defaultName?: string }): Promise<ApiResult<{ filePath: string }>>;
+  // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
+  shopAccountDbEnsure(): Promise<ApiResult<unknown>>;
+  shopAccountList(payload?: { search?: string; status?: string; platform?: string }): Promise<ApiResult<ShopAccountItem[]>>;
+  shopAccountGet(payload: { id: number }): Promise<ApiResult<ShopAccountDetail | null>>;
+  shopAccountSummary(): Promise<ApiResult<ShopAccountSummary>>;
+  shopAccountSecurity(): Promise<ApiResult<{ secureStorage: boolean }>>;
+  shopAccountUpsert(payload: ShopAccountUpsertInput): Promise<ApiResult<{ id: number; secureStorage: boolean }>>;
+  shopAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  shopAccountReveal(payload: { id: number; field: ShopAccountSecretKey }): Promise<ApiResult<{ value: string }>>;
+  shopAccountBatchUpdate(payload: ShopAccountBatchUpdateInput): Promise<ApiResult<ShopAccountBatchUpdateResult>>;
+  // ---- 集中邮件收件箱（IMAP 只读同步；授权码只进不出）----
+  mailDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+  mailAccountList(): Promise<ApiResult<MailAccountItem[]>>;
+  mailAccountUpsert(payload: MailAccountUpsertInput): Promise<ApiResult<{ id: number }>>;
+  mailAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  mailAccountTest(payload: {
+    email: string;
+    authPassword: string;
+    providerId?: string;
+    host?: string;
+    port?: number;
+    secure?: boolean;
+  }): Promise<ApiResult<MailConnectionTestResult>>;
+  mailSyncNow(payload?: { accountId?: number }): Promise<ApiResult<{ queued: number[] }>>;
+  mailSyncCancel(payload: { accountId: number }): Promise<ApiResult<{ cancelled: boolean }>>;
+  mailSyncState(): Promise<ApiResult<{ active: number[]; queued: number[] }>>;
+  mailMessagesList(payload?: MailMessageListFilter): Promise<ApiResult<{ items: MailMessageItem[]; total: number }>>;
+  mailMessageGet(payload: { id: number }): Promise<ApiResult<MailMessageDetail | null>>;
+  /** 本地已读标记（IMAP 只读；ids 为空 + accountId/all 时按账号批量） */
+  mailMessageRead(payload: {
+    ids?: number[];
+    accountId?: number;
+    all?: boolean;
+    read?: boolean;
+  }): Promise<ApiResult<{ changed: number; unread: number }>>;
+  /** 按需补拉正文（M2-1：超大邮件只缓存了预览，点开时现拉原文） */
+  mailBodyFetch(payload: { accountId?: number; messageId: number }): Promise<ApiResult<MailMessageDetail | null>>;
+  /** 附件另存（M2-2：弹系统保存对话框后落盘；用户取消时 canceled=true） */
+  mailAttachmentSave(payload: {
+    messageId: number;
+    attachmentId: number;
+  }): Promise<ApiResult<{ canceled: boolean; path: string; size: number }>>;
+  /** 附件预览（M3-1：命中本地缓存不触网；图片返回 data URL） */
+  mailAttachmentPreview(payload: {
+    messageId: number;
+    attachmentId: number;
+  }): Promise<ApiResult<MailAttachmentPreview>>;
+  /** 附件用系统默认应用打开（M3-1） */
+  mailAttachmentOpen(payload: {
+    messageId: number;
+    attachmentId: number;
+  }): Promise<ApiResult<{ path: string }>>;
+  /** 拉取服务端文件夹列表（M3-3） */
+  mailFoldersList(payload: { accountId: number }): Promise<ApiResult<MailRemoteFolder[]>>;
+  /** 附件本地缓存占用（M3-1） */
+  mailCacheStatus(): Promise<ApiResult<MailCacheStatus>>;
+  /** 清空附件本地缓存 */
+  mailCacheClear(): Promise<ApiResult<{ removed: number }>>;
+  /** 打开附件缓存目录 */
+  mailCacheOpen(): Promise<ApiResult<{ opened: boolean }>>;
+  /** FTS5 全文索引状态（M3-2） */
+  mailFtsStatus(): Promise<ApiResult<MailFtsStatus>>;
+  /** 重建全文索引（M3-2） */
+  mailFtsRebuild(): Promise<ApiResult<{ total: number; indexed: number }>>;
+  mailPurge(payload?: { accountId?: number; days?: number }): Promise<ApiResult<{ deleted: number }>>;
+  mailStats(): Promise<ApiResult<MailStats>>;
+  /** 邮箱服务商预设（授权码获取指引 / 默认连接参数，不含凭据） */
+  mailProviderList(): Promise<ApiResult<MailProviderPresetView[]>>;
+  /** 订阅邮件同步事件（主进程→渲染层单向）；返回退订函数 */
+  onMailSyncEvent(cb: (event: MailSyncEvent) => void): () => void;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   pluginsScan(): Promise<ApiResult<PluginScanResult>>;
   pluginsReadEntry(payload: { id: string; entry: string }): Promise<ApiResult<{ code: string }>>;
@@ -277,4 +380,271 @@ export function aeSummary(): Promise<ApiResult<AeSummary>> {
 /** 接收端运行状态（端口 / 最近入库 / 错误） */
 export function aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>> {
   return ipc.aeReceiverStatus();
+}
+
+// ---- M1：利润引擎 / 成本衔接 / 汇率（语义化查询） ----
+/** 利润总览（CNY 基准分层利润 + 趋势 + TOP + 费用构成 + 成本覆盖率） */
+export function aeProfitStats(payload?: { granularity?: 'day' | 'month'; rangeDays?: number }): Promise<ApiResult<AeProfitOverview>> {
+  return ipc.aeProfitStats(payload);
+}
+
+/** 成本快照全量替换（items 来自 purchaseCostSnapshot 只读导出） */
+export function aeCostMapImport(items: AeCostMapImportItem[]): Promise<ApiResult<{ replaced: number }>> {
+  return ipc.aeCostMapImport({ items });
+}
+
+/** 成本表全量（成本管理面板） */
+export function aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>> {
+  return ipc.aeCostMapList();
+}
+
+/** 汇率全量 */
+export function aeRateList(): Promise<ApiResult<AeRateItem[]>> {
+  return ipc.aeRateList();
+}
+
+/** 汇率 upsert（1 fromCurrency = rateToCny CNY） */
+export function aeRateUpsert(fromCurrency: string, rateToCny: number): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.aeRateUpsert({ fromCurrency, rateToCny });
+}
+
+/** 拿货对账只读成本快照导出（D3 单向通道，供本模块导入 ae_cost_map） */
+export function purchaseCostSnapshot(): Promise<ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>> {
+  return ipc.purchaseCostSnapshot();
+}
+
+// ---- 店铺账号管家（shop-accounts 视图插件）----
+/** 幂等建表（视图首次激活时调用） */
+export function shopAccountDbEnsure(): Promise<ApiResult<unknown>> {
+  return ipc.shopAccountDbEnsure();
+}
+
+/** 店铺套列表（关键字/状态/平台过滤，永不含明文密码） */
+export function shopAccountList(payload?: {
+  search?: string;
+  status?: ShopAccountStatus | '';
+  platform?: string;
+}): Promise<ApiResult<ShopAccountItem[]>> {
+  return ipc.shopAccountList(payload);
+}
+
+/** 单套详情（含解密敏感字段，仅编辑时使用） */
+export function shopAccountGet(id: number): Promise<ApiResult<ShopAccountDetail | null>> {
+  return ipc.shopAccountGet({ id });
+}
+
+/** 汇总（总数 / 按状态计数 / 平台选项去重计数） */
+export function shopAccountSummary(): Promise<ApiResult<ShopAccountSummary>> {
+  return ipc.shopAccountSummary();
+}
+
+/** 当前系统安全存储可用性（false 时密码为降级存储，需在 UI 提示） */
+export function shopAccountSecurity(): Promise<ApiResult<{ secureStorage: boolean }>> {
+  return ipc.shopAccountSecurity();
+}
+
+/** 新增/更新店铺套（secrets：缺省=保持、空串=清空、非空=覆盖） */
+export function shopAccountUpsert(
+  payload: ShopAccountUpsertInput,
+): Promise<ApiResult<{ id: number; secureStorage: boolean }>> {
+  return ipc.shopAccountUpsert(payload);
+}
+
+/** 删除店铺套（含其密文） */
+export function shopAccountDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.shopAccountDelete({ id });
+}
+
+/** 按需解密单个敏感字段（复制/查看用） */
+export function shopAccountReveal(
+  id: number,
+  field: ShopAccountSecretKey,
+): Promise<ApiResult<{ value: string }>> {
+  return ipc.shopAccountReveal({ id, field });
+}
+
+/** 批量修改店铺套（非敏感字段，含整批事务） */
+export function shopAccountBatchUpdate(
+  payload: ShopAccountBatchUpdateInput,
+): Promise<ApiResult<ShopAccountBatchUpdateResult>> {
+  return ipc.shopAccountBatchUpdate(payload);
+}
+
+// ---------------------------------------------------------------------------
+// 集中邮件收件箱（IMAP 只读同步）
+// ---------------------------------------------------------------------------
+
+/** 幂等建表（收件箱视图首次激活时调用） */
+export function mailDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.mailDbEnsure();
+}
+
+/** 已接入邮箱列表（含同步状态；不含任何凭据） */
+export function mailAccountList(): Promise<ApiResult<MailAccountItem[]>> {
+  return ipc.mailAccountList();
+}
+
+/** 接入/更新邮箱；授权码经主进程加密落库，写入后永不回读 */
+export function mailAccountUpsert(
+  payload: MailAccountUpsertInput,
+): Promise<ApiResult<{ id: number }>> {
+  return ipc.mailAccountUpsert(payload);
+}
+
+/** 取消接入（连带删除该账号已缓存的邮件） */
+export function mailAccountDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.mailAccountDelete({ id });
+}
+
+/** 连接测试：只读打开 INBOX 后即登出，不落库任何数据 */
+export function mailAccountTest(payload: {
+  email: string;
+  authPassword: string;
+  providerId?: string;
+  host?: string;
+  port?: number;
+  secure?: boolean;
+}): Promise<ApiResult<MailConnectionTestResult>> {
+  return ipc.mailAccountTest(payload);
+}
+
+/** 触发同步（省略 accountId = 同步全部启用中的账号） */
+export function mailSyncNow(accountId?: number): Promise<ApiResult<{ queued: number[] }>> {
+  return ipc.mailSyncNow(accountId ? { accountId } : {});
+}
+
+/** 取消同步（下一个批次边界生效） */
+export function mailSyncCancel(accountId: number): Promise<ApiResult<{ cancelled: boolean }>> {
+  return ipc.mailSyncCancel({ accountId });
+}
+
+/** 当前同步队列状态 */
+export function mailSyncState(): Promise<ApiResult<{ active: number[]; queued: number[] }>> {
+  return ipc.mailSyncState();
+}
+
+/** 邮件列表（纯本地查询，不触网） */
+export function mailMessagesList(
+  payload?: MailMessageListFilter,
+): Promise<ApiResult<{ items: MailMessageItem[]; total: number }>> {
+  return ipc.mailMessagesList(payload || {});
+}
+
+/** 邮件详情（含正文与附件元信息） */
+export function mailMessageGet(id: number): Promise<ApiResult<MailMessageDetail | null>> {
+  return ipc.mailMessageGet({ id });
+}
+
+/**
+ * 本地已读标记
+ * IMAP 只读不改服务端 flag，本地 read_at 是已读态的唯一可靠来源；返回变更数与最新未读总数，
+ * 便于调用方直接刷新角标而不必重查列表。
+ * @param payload { ids } 精确标记；或 { accountId } / { all: true } 按范围批量
+ * @param read true=标记已读（默认）；false=恢复未读（服务端已读的不可恢复）
+ */
+export function mailMessageRead(payload: {
+  ids?: number[];
+  accountId?: number;
+  all?: boolean;
+  read?: boolean;
+}): Promise<ApiResult<{ changed: number; unread: number }>> {
+  return ipc.mailMessageRead(payload);
+}
+
+/**
+ * 按需补拉正文（M2-1）
+ * 同步时为超大邮件只缓存了预览，点开详情时按 UID 现拉原文解析入库。
+ * @param messageId 本地邮件 id
+ * @param accountId 邮箱账号 id（省略时取邮件自身归属）
+ * @returns 最新详情（含正文与附件清单）
+ */
+export function mailBodyFetch(
+  messageId: number,
+  accountId?: number,
+): Promise<ApiResult<MailMessageDetail | null>> {
+  return ipc.mailBodyFetch({ messageId, accountId });
+}
+
+/**
+ * 附件另存（M2-2）
+ * 库里只存元信息，落盘前重拉原文解析；弹出系统保存对话框（默认文件名=附件名）。
+ * @returns 用户取消时 data.canceled 为 true（非错误）
+ */
+export function mailAttachmentSave(
+  messageId: number,
+  attachmentId: number,
+): Promise<ApiResult<{ canceled: boolean; path: string; size: number }>> {
+  return ipc.mailAttachmentSave({ messageId, attachmentId });
+}
+
+/**
+ * 附件预览（M3-1）
+ * 命中本地缓存时直接读盘（不触网）；图片返回 data URL 供内联预览，其余类型建议走 mailAttachmentOpen。
+ */
+export function mailAttachmentPreview(
+  messageId: number,
+  attachmentId: number,
+): Promise<ApiResult<MailAttachmentPreview>> {
+  return ipc.mailAttachmentPreview({ messageId, attachmentId });
+}
+
+/** 附件用系统默认应用打开（M3-1）：未缓存时先落盘到缓存目录再调用 shell.openPath */
+export function mailAttachmentOpen(
+  messageId: number,
+  attachmentId: number,
+): Promise<ApiResult<{ path: string }>> {
+  return ipc.mailAttachmentOpen({ messageId, attachmentId });
+}
+
+/** 拉取服务端文件夹列表（M3-3：设置页勾选同步目录；会建立一次只读连接） */
+export function mailFoldersList(accountId: number): Promise<ApiResult<MailRemoteFolder[]>> {
+  return ipc.mailFoldersList({ accountId });
+}
+
+/** 附件本地缓存占用（M3-1） */
+export function mailCacheStatus(): Promise<ApiResult<MailCacheStatus>> {
+  return ipc.mailCacheStatus();
+}
+
+/** 清空附件本地缓存（M3-1） */
+export function mailCacheClear(): Promise<ApiResult<{ removed: number }>> {
+  return ipc.mailCacheClear();
+}
+
+/** 在系统文件管理器中打开附件缓存目录 */
+export function mailCacheOpen(): Promise<ApiResult<{ opened: boolean }>> {
+  return ipc.mailCacheOpen();
+}
+
+/** FTS5 全文索引状态（M3-2） */
+export function mailFtsStatus(): Promise<ApiResult<MailFtsStatus>> {
+  return ipc.mailFtsStatus();
+}
+
+/** 重建全文索引（M3-2） */
+export function mailFtsRebuild(): Promise<ApiResult<{ total: number; indexed: number }>> {
+  return ipc.mailFtsRebuild();
+}
+
+/** 手动清理同步窗口外的过期邮件 */
+export function mailPurge(payload?: {
+  accountId?: number;
+  days?: number;
+}): Promise<ApiResult<{ deleted: number }>> {
+  return ipc.mailPurge(payload || {});
+}
+
+/** 收件箱汇总（账号数 / 邮件数 / 未读数 / 最近同步时间） */
+export function mailStats(): Promise<ApiResult<MailStats>> {
+  return ipc.mailStats();
+}
+
+/** 邮箱服务商预设（授权码获取指引 / 默认连接参数，不含凭据） */
+export function mailProviderList(): Promise<ApiResult<MailProviderPresetView[]>> {
+  return ipc.mailProviderList();
+}
+
+/** 订阅邮件同步事件（主进程→渲染层单向广播）；返回退订函数 */
+export function onMailSyncEvent(cb: (event: MailSyncEvent) => void): () => void {
+  return ipc.onMailSyncEvent(cb);
 }

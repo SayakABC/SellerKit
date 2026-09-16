@@ -1,5 +1,5 @@
 // electron/ae-receiver.ts
-// 「速卖通利润追踪」localhost 接收端（M0 POC 通道，正式通道为 Chrome Native Messaging，见 PROFIT_TRACKER.md D2）。
+// 「速卖通利润追踪」localhost 接收端（M0 POC 通道，正式通道为 Chrome Native Messaging，见 docs/features/PROFIT_TRACKER.md D2）。
 //
 // 安全设计（对本机其他进程开放 HTTP 的最小暴露面）：
 //   - 仅监听 127.0.0.1 loopback，不绑定 0.0.0.0；

@@ -9,7 +9,7 @@
 //   host → iframe: boot{token,plugin,env,theme} / call-result{id,ok,value|error} /
 //                  event{eventType,payload,meta} / theme{vars} / abort{reason}
 // token：boot 携带的一次性随机串；其后所有 iframe → host 消息必须携带；伪造/串台消息宿主侧丢弃。
-// 暴露（UI 岛开发者面，P1 定稿）：window.__sk = { ready, onReady, env, manifest, host(六域直通), storage(key 级), bus, log }
+// 暴露（UI 岛开发者面，P1 定稿）：window.__sk = { ready, onReady, env, manifest, host(六域 + db/secrets/mail), storage(key 级), bus, log }
 
 (function () {
   'use strict';
@@ -205,6 +205,24 @@
         },
         notify: function (o) {
           return call('ui', 'notify', [o]);
+        },
+      },
+      // 业务库（白名单 domain+op；宿主登记表外一律拒绝，不放行任意 SQL）
+      db: {
+        call: function (domain, op, payload) {
+          return call('db', 'call', [domain, op, payload === undefined ? null : payload]);
+        },
+      },
+      // 安全存储：密文由主进程保管，岛内只能查询宿主安全存储可用性
+      secrets: {
+        status: function () {
+          return call('secrets', 'status', []);
+        },
+      },
+      // 邮件（白名单 op；只读 IMAP 语义，凭据不经过岛）
+      mail: {
+        call: function (op, payload) {
+          return call('mail', 'call', [op, payload === undefined ? null : payload]);
         },
       },
     },

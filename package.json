@@ -16,6 +16,7 @@
     "dist:minimal": "MODULE_PROFILE=minimal npm run dist",
     "dist:standard": "MODULE_PROFILE=standard npm run dist",
     "dist:pro": "MODULE_PROFILE=pro npm run dist",
+    "mail:smoke": "tsc -p tsconfig.electron.json && electron scripts/mail-engine-smoke.cjs",
     "release": "bash scripts/release.sh",
     "dist:select": "node scripts/select-build.js",
     "build:select": "node scripts/select-build.js --build-only",
@@ -33,6 +34,8 @@
     "electron-store": "^8.1.0",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",
+    "imapflow": "^2.0.2",
+    "mailparser": "^3.9.26",
     "pinia": "^2.1.7",
     "vue": "^3.4.21",
     "xlsx": "^0.18.5"

@@ -1,0 +1,61 @@
+{
+  "name": "shop-accounts",
+  "displayName": "店铺账号管家（UI 岛）",
+  "version": "1.0.0",
+  "description": "店铺套账号集中管理 + 集中邮件收件箱（IMAP 只读）。数据经宿主 db 能力域读写，凭据只进不出。",
+  "author": "SellerKit",
+  "engines": { "sellerkit": ">=1.0.0" },
+  "entry": "./dist/index.html",
+  "kind": "ui",
+  "activationEvents": [],
+  "capabilities": [
+    { "id": "storage", "namespaces": ["shop-accounts"] },
+    { "id": "clipboard", "actions": ["writeText"] },
+    {
+      "id": "db",
+      "domains": ["shop-accounts"],
+      "actions": [
+        "ensure",
+        "list",
+        "get",
+        "summary",
+        "security",
+        "upsert",
+        "delete",
+        "reveal",
+        "batchUpdate"
+      ]
+    },
+    { "id": "secrets", "domains": ["shop-accounts"], "actions": ["status"] },
+    {
+      "id": "mail",
+      "domains": ["mail"],
+      "actions": [
+        "ensure",
+        "stats",
+        "accountList",
+        "accountUpsert",
+        "accountDelete",
+        "accountTest",
+        "syncNow",
+        "syncCancel",
+        "syncState",
+        "messagesList",
+        "messageGet",
+        "messageRead",
+        "bodyFetch",
+        "attachmentSave",
+        "attachmentPreview",
+        "attachmentOpen",
+        "foldersList",
+        "cacheStatus",
+        "cacheClear",
+        "cacheOpen",
+        "ftsStatus",
+        "ftsRebuild",
+        "purge",
+        "providers"
+      ]
+    }
+  ]
+}

@@ -236,11 +236,40 @@ body {
 @layer components {
   input[type='text'],
   input[type='search'],
+  input[type='date'],
+  input[type='datetime-local'],
+  input[type='month'],
+  input[type='time'],
   input:not([type]),
   textarea,
   select {
     background-color: var(--wb-surface-2);
     color: var(--wb-text);
+  }
+  /* 原生日期/时间控件：分段文字（年/月/日）与日历图标跟随主题 */
+  input[type='date'],
+  input[type='datetime-local'],
+  input[type='month'],
+  input[type='time'] {
+    /* 未显式声明时 UA 按系统偏好渲染，深色应用主题下会出现浅色面板 + 深色图标 */
+    color-scheme: light;
+  }
+  [data-theme='dark'] input[type='date'],
+  [data-theme='dark'] input[type='datetime-local'],
+  [data-theme='dark'] input[type='month'],
+  [data-theme='dark'] input[type='time'] {
+    color-scheme: dark;
+  }
+  input[type='date']::-webkit-calendar-picker-indicator,
+  input[type='datetime-local']::-webkit-calendar-picker-indicator,
+  input[type='month']::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.75;
+  }
+  input[type='date']::-webkit-calendar-picker-indicator:hover,
+  input[type='datetime-local']::-webkit-calendar-picker-indicator:hover,
+  input[type='month']::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
   }
   input::placeholder,
   textarea::placeholder {

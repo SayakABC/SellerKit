@@ -30,7 +30,7 @@ export type PluginSource = 'builtin' | 'external';
  * 外置插件必须在此声明要使用的能力；未声明的调用会被门拒绝并写入审计日志。
  * 说明：ui/env 为轻量/只读能力，默认放行，不设门。
  */
-export type CapabilityId = 'storage' | 'http' | 'clipboard' | 'dialog';
+export type CapabilityId = 'storage' | 'http' | 'clipboard' | 'dialog' | 'db' | 'secrets' | 'mail';
 
 /** 单个能力声明（manifest.capabilities 元素） */
 export interface PluginCapability {
@@ -42,6 +42,8 @@ export interface PluginCapability {
   namespaces?: string[];
   /** http 允许的 URL 前缀白名单；省略 = 禁止任何请求；支持尾部 * 通配（如 https://api.example.com/*） */
   allow?: string[];
+  /** db/secrets/mail 的业务域白名单（如 'shop-accounts'）；省略 = 禁止任何业务域调用 */
+  domains?: string[];
 }
 
 /** 插件声明式元信息（manifest v1 子集；Phase 1 由内建模块 meta 生成） */

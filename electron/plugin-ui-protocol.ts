@@ -1,5 +1,5 @@
 // electron/plugin-ui-protocol.ts
-// 外置富 UI 插件运行时协议（PLUGIN_ARCHITECTURE.md §15：P0 验证技术路线 → P1 落地桥 + 权限门复用）
+// 外置富 UI 插件运行时协议（docs/architecture/PLUGIN_ARCHITECTURE.md §15：P0 验证技术路线 → P1 落地桥 + 权限门复用）
 // 职责：
 //  1. 注册特权 scheme `sk-plugin://`（standard/secure/CORS/stream），只读映射 <userData>/plugins/<id>/；
 //  2. 请求校验：host = 插件 id（kebab-case），路径解码后逐段拒绝 `..`/反斜杠/空字节，realpath 二次防逃逸；

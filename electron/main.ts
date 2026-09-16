@@ -27,6 +27,11 @@ const updater = require('./updater');
 // 速卖通利润追踪：localhost 接收端（应用就绪后自启）+ 语义化查询 IPC（ae-db-ensure / ae-order-list / ae-summary / ae-receiver-status）
 require('./ae-receiver');
 require('./ae-handlers');
+// 店铺账号管家 IPC（账号元数据 CRUD + safeStorage 加密的密码字段）
+require('./shop-accounts-handlers');
+// 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
+const mailEngine = require('./mail-engine');
+require('./mail-handlers');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {
@@ -176,6 +181,8 @@ app.whenReady().then(async () => {
   createWindow();
   // 注入窗口引用：updater.ts 随即注册 autoUpdater 事件（向渲染层广播 updater-event）
   updater.initUpdater(() => mainWindow);
+  // 邮件同步进度广播（mail-sync-event）同样需要窗口引用
+  mailEngine.setMailEventWindow(() => mainWindow);
 });
 
 app.on('window-all-closed', () => {

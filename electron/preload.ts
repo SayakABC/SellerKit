@@ -84,6 +84,111 @@ const sanitizeNetPayload = (payload: any) => {
   };
 };
 
+/** 店铺套入参消毒：结构白名单 + 长度约束（主进程再做一次业务口径校验） */
+const sanitizeShopAccountInput = (payload: any) => {
+  const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  // 敏感字段白名单：店铺密码 / 邮箱密码 / 支付宝支付密码 / 紫鸟密码 / ERP密码 / IMAP 授权码
+  const allowedSecretKeys = [
+    'shopPwd',
+    'emailPwd',
+    'alipayPwd',
+    'ziniaoPwd',
+    'erpPwd',
+    'mailAuthPwd',
+  ];
+  const secrets: Record<string, string> = {};
+  if (isPlainObject(payload?.secrets)) {
+    for (const [k, v] of Object.entries(payload.secrets)) {
+      if (!allowedSecretKeys.includes(k) || typeof v !== 'string') continue;
+      secrets[k] = v.slice(0, 500);
+    }
+  }
+  // undefined = 保持原值；数组（含空数组）= 覆盖（空数组即清空关联平台）
+  const platforms = Array.isArray(payload?.platforms)
+    ? payload.platforms
+        .slice(0, 20)
+        .map((v: unknown) => s(v, 60))
+        .filter((v: string) => !!v)
+    : undefined;
+  return {
+    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    email: s(payload?.email, 200),
+    phone: s(payload?.phone, 40),
+    company: s(payload?.company, 120),
+    alipay: s(payload?.alipay, 200),
+    ziniaoAccount: s(payload?.ziniaoAccount, 120),
+    erpAccount: s(payload?.erpAccount, 120),
+    ...(platforms === undefined ? {} : { platforms }),
+    // 开店时间：仅字符串才透传（缺省 = 主进程/db 层保持原值），格式由 db 层归一化
+    ...(typeof payload?.openedAt === 'string' ? { openedAt: s(payload.openedAt, 10) } : {}),
+    status: s(payload?.status, 20),
+    tags: s(payload?.tags, 200),
+    note: s(payload?.note, 2000),
+    secrets,
+  };
+};
+
+/**
+ * 批量修改入参消毒：结构白名单（仅非敏感字段）+ 数量/长度约束。
+ * - ids：正整数数组，去重，上限 5000（与主进程 handler 口径一致）
+ * - patch：status / phone / alipay / ziniaoAccount / erpAccount / company / tags / note
+ *   / platforms，未声明字段一律剔除
+ */
+const sanitizeShopAccountBatchInput = (payload: any) => {
+  const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const ids = Array.isArray(payload?.ids)
+    ? Array.from(
+        new Set(
+          payload.ids.filter(
+            (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0,
+          ),
+        ),
+      ).slice(0, 5000)
+    : [];
+  const patchRaw = isPlainObject(payload?.patch) ? payload.patch : {};
+  const patch: Record<string, unknown> = {};
+  if (typeof patchRaw.status === 'string') {
+    patch.status = s(patchRaw.status, 20);
+  }
+  // 单值账号字段：仅覆盖（长度与 shop-account-upsert 的 MAX_LEN 口径保持一致）
+  if (typeof patchRaw.phone === 'string') {
+    patch.phone = s(patchRaw.phone, 40);
+  }
+  if (typeof patchRaw.alipay === 'string') {
+    patch.alipay = s(patchRaw.alipay, 200);
+  }
+  if (typeof patchRaw.ziniaoAccount === 'string') {
+    patch.ziniaoAccount = s(patchRaw.ziniaoAccount, 120);
+  }
+  if (typeof patchRaw.erpAccount === 'string') {
+    patch.erpAccount = s(patchRaw.erpAccount, 120);
+  }
+  if (isPlainObject(patchRaw.company) && (patchRaw.company.mode === 'set' || patchRaw.company.mode === 'append')) {
+    patch.company = { mode: patchRaw.company.mode, value: s(patchRaw.company.value, 120) };
+  }
+  if (isPlainObject(patchRaw.tags) && (patchRaw.tags.mode === 'set' || patchRaw.tags.mode === 'append')) {
+    patch.tags = { mode: patchRaw.tags.mode, value: s(patchRaw.tags.value, 200) };
+  }
+  if (isPlainObject(patchRaw.note) && (patchRaw.note.mode === 'set' || patchRaw.note.mode === 'append')) {
+    patch.note = { mode: patchRaw.note.mode, value: s(patchRaw.note.value, 2000) };
+  }
+  if (
+    isPlainObject(patchRaw.platforms) &&
+    (patchRaw.platforms.mode === 'set' ||
+      patchRaw.platforms.mode === 'append' ||
+      patchRaw.platforms.mode === 'remove')
+  ) {
+    const values = Array.isArray(patchRaw.platforms.values)
+      ? patchRaw.platforms.values
+          .slice(0, 20)
+          .map((v: unknown) => s(v, 60))
+          .filter((v: string) => !!v)
+      : [];
+    patch.platforms = { mode: patchRaw.platforms.mode, values };
+  }
+  return { ids, patch };
+};
+
 /** 市场安装条目消毒：结构白名单（主进程还会再净化一次，这里是第一道形状约束） */
 const sanitizeMarketItem = (raw: any) => {
   if (!isPlainObject(raw)) return {};
@@ -334,6 +439,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }),
   aeSummary: () => ipcRenderer.invoke('ae-summary'),
   aeReceiverStatus: () => ipcRenderer.invoke('ae-receiver-status'),
+  aeProfitStats: (payload: any) =>
+    ipcRenderer.invoke('ae-profit-stats', {
+      granularity: payload?.granularity === 'day' ? 'day' : 'month',
+      rangeDays: typeof payload?.rangeDays === 'number' ? Math.min(Math.max(Math.round(payload.rangeDays), 1), 3650) : 90,
+    }),
+  aeCostMapImport: (payload: any) =>
+    ipcRenderer.invoke('ae-cost-map-import', {
+      items: Array.isArray(payload?.items) ? payload.items.slice(0, 20000) : [],
+    }),
+  aeCostMapList: () => ipcRenderer.invoke('ae-cost-map-list'),
+  aeRateList: () => ipcRenderer.invoke('ae-rate-list'),
+  aeRateUpsert: (payload: any) =>
+    ipcRenderer.invoke('ae-rate-upsert', {
+      fromCurrency: String(payload?.fromCurrency ?? '').slice(0, 8).toUpperCase(),
+      rateToCny: Number(payload?.rateToCny),
+    }),
+  purchaseCostSnapshot: () => ipcRenderer.invoke('purchase-cost-snapshot'),
   // --- 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）---
   purchaseDbEnsure: () => ipcRenderer.invoke('purchase-db-ensure'),
   // 厂商
@@ -460,6 +582,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
       items: sanitizePurchaseItems(payload?.items),
       defaultName: typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
     }),
+  // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位的店群账号维护；密码经主进程 safeStorage 加密落库，渲染层不存明文）----
+  shopAccountDbEnsure: () => ipcRenderer.invoke('shop-account-db-ensure'),
+  shopAccountList: (payload: any) =>
+    ipcRenderer.invoke('shop-account-list', {
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+      platform: typeof payload?.platform === 'string' ? payload.platform.slice(0, 60) : '',
+    }),
+  shopAccountGet: (payload: any) =>
+    ipcRenderer.invoke('shop-account-get', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  shopAccountSummary: () => ipcRenderer.invoke('shop-account-summary'),
+  shopAccountSecurity: () => ipcRenderer.invoke('shop-account-security'),
+  shopAccountUpsert: (payload: any) =>
+    ipcRenderer.invoke('shop-account-upsert', sanitizeShopAccountInput(payload)),
+  shopAccountDelete: (payload: any) =>
+    ipcRenderer.invoke('shop-account-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  shopAccountReveal: (payload: any) =>
+    ipcRenderer.invoke('shop-account-reveal', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+      field: typeof payload?.field === 'string' ? payload.field.slice(0, 20) : '',
+    }),
+  shopAccountBatchUpdate: (payload: any) =>
+    ipcRenderer.invoke('shop-account-batch-update', sanitizeShopAccountBatchInput(payload)),
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   pluginsScan: () => ipcRenderer.invoke('plugins-scan'),
   pluginsReadEntry: (payload: any) =>
@@ -495,6 +644,134 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('updater-event', listener);
     return () => {
       ipcRenderer.removeListener('updater-event', listener);
+    };
+  },
+  // ---- 集中邮件收件箱（IMAP 只读同步；授权码只进不出）----
+  mailDbEnsure: () => ipcRenderer.invoke('mail-db-ensure'),
+  mailAccountList: () => ipcRenderer.invoke('mail-account-list'),
+  mailAccountUpsert: (payload: any) =>
+    ipcRenderer.invoke('mail-account-upsert', {
+      shopSetId: Number(payload?.shopSetId) || 0,
+      email: typeof payload?.email === 'string' ? payload.email.slice(0, 200) : '',
+      providerId: typeof payload?.providerId === 'string' ? payload.providerId.slice(0, 40) : '',
+      imapHost: typeof payload?.imapHost === 'string' ? payload.imapHost.slice(0, 200) : '',
+      imapPort: Number(payload?.imapPort) || 993,
+      imapSecure: payload?.imapSecure !== false,
+      folder: typeof payload?.folder === 'string' ? payload.folder.slice(0, 200) : 'INBOX',
+      // 多文件夹（M3-3）：空数组 = 保持「单文件夹 folder」语义
+      folders: Array.isArray(payload?.folders)
+        ? payload.folders
+            .map((f: any) => String(f || '').trim().slice(0, 200))
+            .filter(Boolean)
+            .slice(0, 30)
+        : [],
+      syncEnabled: payload?.syncEnabled !== false,
+      syncDays: Math.min(365, Math.max(1, Number(payload?.syncDays) || 30)),
+      maxBodyBytes: Math.min(
+        2 * 1024 * 1024,
+        Math.max(8 * 1024, Number(payload?.maxBodyBytes) || 204800),
+      ),
+      // 授权码：仅当显式传入时才带上（省略 = 保持原值）
+      secrets:
+        typeof payload?.secrets?.mailAuthPwd === 'string'
+          ? { mailAuthPwd: payload.secrets.mailAuthPwd.slice(0, 500) }
+          : {},
+    }),
+  mailAccountDelete: (payload: any) =>
+    ipcRenderer.invoke('mail-account-delete', { id: Number(payload?.id) || 0 }),
+  mailAccountTest: (payload: any) =>
+    ipcRenderer.invoke('mail-account-test', {
+      email: typeof payload?.email === 'string' ? payload.email.slice(0, 200) : '',
+      authPassword: typeof payload?.authPassword === 'string' ? payload.authPassword.slice(0, 500) : '',
+      providerId: typeof payload?.providerId === 'string' ? payload.providerId.slice(0, 40) : '',
+      host: typeof payload?.host === 'string' ? payload.host.slice(0, 200) : '',
+      port: Number(payload?.port) || 993,
+      secure: payload?.secure !== false,
+    }),
+  mailSyncNow: (payload?: any) =>
+    ipcRenderer.invoke('mail-sync-now', { accountId: Number(payload?.accountId) || 0 }),
+  mailSyncCancel: (payload: any) =>
+    ipcRenderer.invoke('mail-sync-cancel', { accountId: Number(payload?.accountId) || 0 }),
+  mailSyncState: () => ipcRenderer.invoke('mail-sync-state'),
+  mailMessagesList: (payload?: any) =>
+    ipcRenderer.invoke('mail-messages-list', {
+      accountIds: Array.isArray(payload?.accountIds)
+        ? payload.accountIds.map((n: any) => Number(n) || 0).filter((n: number) => n > 0).slice(0, 200)
+        : [],
+      keyword: typeof payload?.keyword === 'string' ? payload.keyword.slice(0, 100) : '',
+      unreadOnly: payload?.unreadOnly === true,
+      since: typeof payload?.since === 'string' ? payload.since.slice(0, 40) : '',
+      // 多文件夹筛选（M3-3）
+      folders: Array.isArray(payload?.folders)
+        ? payload.folders
+            .map((f: any) => String(f || '').trim().slice(0, 200))
+            .filter(Boolean)
+            .slice(0, 30)
+        : [],
+      limit: Math.min(200, Math.max(1, Number(payload?.limit) || 50)),
+      offset: Math.max(0, Number(payload?.offset) || 0),
+    }),
+  mailMessageGet: (payload: any) =>
+    ipcRenderer.invoke('mail-message-get', { id: Number(payload?.id) || 0 }),
+  // 本地已读标记（IMAP 只读，有效已读 = 服务端 seen || 本地 read_at）
+  mailMessageRead: (payload: any) =>
+    ipcRenderer.invoke('mail-message-read', {
+      ids: Array.isArray(payload?.ids)
+        ? payload.ids.map((n: any) => Number(n) || 0).filter((n: number) => n > 0)
+        : [],
+      accountId: Number(payload?.accountId) || 0,
+      all: payload?.all === true,
+      read: payload?.read !== false,
+    }),
+  // 按需补拉正文（M2-1）
+  mailBodyFetch: (payload: any) =>
+    ipcRenderer.invoke('mail-body-fetch', {
+      accountId: Number(payload?.accountId) || 0,
+      messageId: Number(payload?.messageId) || 0,
+    }),
+  // 附件另存（M2-2 / M3-1 走本地缓存）
+  mailAttachmentSave: (payload: any) =>
+    ipcRenderer.invoke('mail-attachment-save', {
+      messageId: Number(payload?.messageId) || 0,
+      attachmentId: Number(payload?.attachmentId) || 0,
+    }),
+  // 附件预览（M3-1）：图片返回 data URL
+  mailAttachmentPreview: (payload: any) =>
+    ipcRenderer.invoke('mail-attachment-preview', {
+      messageId: Number(payload?.messageId) || 0,
+      attachmentId: Number(payload?.attachmentId) || 0,
+    }),
+  // 附件用系统应用打开（M3-1）
+  mailAttachmentOpen: (payload: any) =>
+    ipcRenderer.invoke('mail-attachment-open', {
+      messageId: Number(payload?.messageId) || 0,
+      attachmentId: Number(payload?.attachmentId) || 0,
+    }),
+  // 服务端文件夹列表（M3-3）
+  mailFoldersList: (payload: any) =>
+    ipcRenderer.invoke('mail-folders-list', { accountId: Number(payload?.accountId) || 0 }),
+  // 附件本地缓存（M3-1）
+  mailCacheStatus: () => ipcRenderer.invoke('mail-cache-status'),
+  mailCacheClear: () => ipcRenderer.invoke('mail-cache-clear'),
+  mailCacheOpen: () => ipcRenderer.invoke('mail-cache-open'),
+  // FTS5 全文检索（M3-2）
+  mailFtsStatus: () => ipcRenderer.invoke('mail-fts-status'),
+  mailFtsRebuild: () => ipcRenderer.invoke('mail-fts-rebuild'),
+  mailPurge: (payload?: any) =>
+    ipcRenderer.invoke('mail-purge', {
+      accountId: Number(payload?.accountId) || 0,
+      days: Math.min(365, Math.max(1, Number(payload?.days) || 30)),
+    }),
+  mailStats: () => ipcRenderer.invoke('mail-stats'),
+  mailProviderList: () => ipcRenderer.invoke('mail-provider-list'),
+  // 订阅邮件同步事件（主进程→渲染层单向）；返回退订函数
+  onMailSyncEvent: (cb: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => {
+      if (cb) cb(payload);
+    };
+    ipcRenderer.on('mail-sync-event', listener);
+    return () => {
+      ipcRenderer.removeListener('mail-sync-event', listener);
     };
   },
 });

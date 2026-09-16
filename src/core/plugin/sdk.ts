@@ -82,6 +82,27 @@ export interface HostApi {
     platform: string;
     version: string;
   };
+  /**
+   * 业务库访问（白名单 domain + op，走主进程 IPC）。
+   * 不放行任意 SQL，只允许宿主登记好的业务操作（如 shop-accounts:list/upsert）。
+   */
+  db: {
+    call<T = unknown>(domain: string, op: string, payload?: unknown): Promise<T>;
+  };
+  /**
+   * 安全存储（主进程加密保管，密文不出主进程）。
+   * 插件只可查询可用性；具体读写一律经 db 的宿主业务操作完成（如 shop-accounts:reveal）。
+   */
+  secrets: {
+    status(): Promise<{ secureStorage: boolean }>;
+  };
+  /**
+   * 邮件能力（白名单 op，只读 IMAP 语义：列表/详情/按需补拉/附件/缓存/全文检索）。
+   * 账号接入与同步状态经宿主维护，插件不接触凭据。
+   */
+  mail: {
+    call<T = unknown>(op: string, payload?: unknown): Promise<T>;
+  };
 }
 
 /** 动态贡献注册便捷层：自动拼接 <plugin>.<localId> 全局 id，返回注销函数 */

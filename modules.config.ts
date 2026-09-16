@@ -22,10 +22,12 @@ export const buildConfig: BuildConfig = {
   profiles: {
     // 最小包：仅核心 Excel 复制
     minimal: ['excel-copy'],
-    // 标准包：核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 利润追踪
-    standard: ['excel-copy', 'quick-note', 'order-insight', 'ae-profit'],
+    // 标准包：核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 店铺账号管家
+    // 注：利润追踪（ae-profit）已迁移为市场 UI 岛（ui-plugins/ae-profit），不再随宿主分发；
+    //     必须保持其不进入默认包，否则内建记录会占用同名 id，导致市场安装的 UI 岛无法注册。
+    standard: ['excel-copy', 'quick-note', 'order-insight', 'shop-accounts'],
     // 完整包：全部模块
-    pro: ['excel-copy', 'quick-note', 'order-insight', 'ae-profit'],
+    pro: ['excel-copy', 'quick-note', 'order-insight', 'shop-accounts'],
   },
   // 兜底（当 profile 未在 profiles 中匹配时使用）
   enabledModules: ['excel-copy'],

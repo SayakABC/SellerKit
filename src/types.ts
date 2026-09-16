@@ -89,6 +89,13 @@ export interface ElectronAPI {
   aeOrderList: (payload?: { offset?: number; limit?: number; search?: string }) => Promise<APIResult<{ rows: AeOrderListItem[]; total: number }>>;
   aeSummary: () => Promise<APIResult<AeSummary>>;
   aeReceiverStatus: () => Promise<APIResult<AeReceiverStatus>>;
+  // M1 利润追踪扩展：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
+  aeProfitStats: (payload?: { granularity?: 'day' | 'month'; rangeDays?: number }) => Promise<APIResult<AeProfitOverview>>;
+  aeCostMapImport: (payload: { items: AeCostMapImportItem[] }) => Promise<APIResult<{ replaced: number }>>;
+  aeCostMapList: () => Promise<APIResult<AeCostMapItem[]>>;
+  aeRateList: () => Promise<APIResult<AeRateItem[]>>;
+  aeRateUpsert: (payload: { fromCurrency: string; rateToCny: number }) => Promise<APIResult<{ ok: boolean }>>;
+  purchaseCostSnapshot: () => Promise<APIResult<{ items: PurchaseCostSnapshotItem[]; count: number }>>;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure: () => Promise<APIResult<void>>;
   purchaseSupplierList: () => Promise<APIResult<Supplier[]>>;
@@ -138,6 +145,42 @@ export interface ElectronAPI {
   purchaseShopAllocationDetail: (payload: { shop: string; from?: string; to?: string }) => Promise<APIResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
   purchaseExportExcel: (payload: { items: PurchaseItem[]; defaultName?: string }) => Promise<APIResult<{ filePath: string }>>;
+  // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
+  /** 幂等建表（视图首次激活时调用） */
+  shopAccountDbEnsure: () => Promise<APIResult<void>>;
+  /** 店铺套列表（关键字/状态/平台过滤；永不返回明文密码，仅 secretKeys 标记哪些敏感字段已配置） */
+  shopAccountList: (payload?: {
+    search?: string;
+    status?: ShopAccountStatus | '';
+    platform?: string;
+  }) => Promise<APIResult<ShopAccountItem[]>>;
+  /** 单套详情（含解密后的敏感字段，仅编辑时使用） */
+  shopAccountGet: (payload: { id: number }) => Promise<APIResult<ShopAccountDetail | null>>;
+  /** 汇总（总数 / 按状态计数 / 平台选项去重计数） */
+  shopAccountSummary: () => Promise<APIResult<ShopAccountSummary>>;
+  /** 当前系统安全存储是否可用（不可用时前端提示密码降级存储风险） */
+  shopAccountSecurity: () => Promise<APIResult<{ secureStorage: boolean }>>;
+  /** 新增/更新店铺套（secrets 缺省=保持、空串=清空、非空=覆盖；密码在主进程加密后落库） */
+  shopAccountUpsert: (
+    payload: ShopAccountUpsertInput,
+  ) => Promise<APIResult<{ id: number; secureStorage: boolean }>>;
+  shopAccountDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /** 按需解密单个敏感字段（复制/查看，避免整条详情往返） */
+  shopAccountReveal: (payload: {
+    id: number;
+    field: ShopAccountSecretKey;
+  }) => Promise<APIResult<{ value: string }>>;
+  /**
+   * 批量修改店铺套（仅作用于非敏感字段；敏感密码字段在批量操作中不被允许）
+   * - ids：待改店铺 id 列表（自动去重，仅保留正整数）
+   * - patch：单字段修改指令；未声明的字段 = 不改
+   *   - status：覆盖
+   *   - company / tags / note：{ mode: 'set' | 'append', value }
+   *   - platforms：{ mode: 'set' | 'append' | 'remove', values: string[] }
+   */
+  shopAccountBatchUpdate: (
+    payload: ShopAccountBatchUpdateInput,
+  ) => Promise<APIResult<ShopAccountBatchUpdateResult>>;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
   pluginsScan: () => Promise<APIResult<PluginScanResult>>;
@@ -161,6 +204,83 @@ export interface ElectronAPI {
   quitAndInstallUpdate: () => Promise<APIResult<void>>;
   /** 订阅更新事件（主进程→渲染层单向推送）；返回退订函数 */
   onUpdaterEvent: (cb: (event: UpdaterEventPayload) => void) => () => void;
+  // ---- 集中邮件收件箱（IMAP 只读同步）----
+  /** 幂等建表（视图首次激活时调用） */
+  mailDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
+  /** 已接入邮箱列表（含同步状态；不含任何凭据） */
+  mailAccountList: () => Promise<APIResult<MailAccountItem[]>>;
+  /** 接入/更新邮箱（授权码只进不出） */
+  mailAccountUpsert: (payload: MailAccountUpsertInput) => Promise<APIResult<{ id: number }>>;
+  /** 取消接入（连带删除已缓存邮件） */
+  mailAccountDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /** 连接测试：只读打开 INBOX 后即登出，不落库 */
+  mailAccountTest: (payload: {
+    email: string;
+    authPassword: string;
+    providerId?: string;
+    host?: string;
+    port?: number;
+    secure?: boolean;
+  }) => Promise<APIResult<MailConnectionTestResult>>;
+  /** 触发同步（省略 accountId = 全部启用账号） */
+  mailSyncNow: (payload?: { accountId?: number }) => Promise<APIResult<{ queued: number[] }>>;
+  /** 取消同步（下一批次边界生效） */
+  mailSyncCancel: (payload: { accountId: number }) => Promise<APIResult<{ cancelled: boolean }>>;
+  /** 当前同步队列状态 */
+  mailSyncState: () => Promise<APIResult<{ active: number[]; queued: number[] }>>;
+  /** 邮件列表（纯本地查询，不触网） */
+  mailMessagesList: (
+    payload?: MailMessageListFilter,
+  ) => Promise<APIResult<{ items: MailMessageItem[]; total: number }>>;
+  /** 邮件详情（含正文与附件元信息） */
+  mailMessageGet: (payload: { id: number }) => Promise<APIResult<MailMessageDetail | null>>;
+  /** 本地已读标记（ids 为空 + accountId/all 时按账号批量） */
+  mailMessageRead: (payload: {
+    ids?: number[];
+    accountId?: number;
+    all?: boolean;
+    read?: boolean;
+  }) => Promise<APIResult<{ changed: number; unread: number }>>;
+  /** 按需补拉正文（M2-1：超大邮件只缓存了预览，点开时现拉原文） */
+  mailBodyFetch: (payload: {
+    accountId?: number;
+    messageId: number;
+  }) => Promise<APIResult<MailMessageDetail | null>>;
+  /** 附件另存（M2-2：弹系统保存对话框后落盘；用户取消时 canceled=true） */
+  mailAttachmentSave: (payload: {
+    messageId: number;
+    attachmentId: number;
+  }) => Promise<APIResult<{ canceled: boolean; path: string; size: number }>>;
+  /** 附件预览（M3-1：命中本地缓存不触网；图片返回 data URL） */
+  mailAttachmentPreview: (payload: {
+    messageId: number;
+    attachmentId: number;
+  }) => Promise<APIResult<MailAttachmentPreview>>;
+  /** 附件用系统默认应用打开（M3-1） */
+  mailAttachmentOpen: (payload: {
+    messageId: number;
+    attachmentId: number;
+  }) => Promise<APIResult<{ path: string }>>;
+  /** 拉取服务端文件夹列表（M3-3：设置页勾选同步目录） */
+  mailFoldersList: (payload: { accountId: number }) => Promise<APIResult<MailRemoteFolder[]>>;
+  /** 附件本地缓存占用（M3-1） */
+  mailCacheStatus: () => Promise<APIResult<MailCacheStatus>>;
+  /** 清空附件本地缓存 */
+  mailCacheClear: () => Promise<APIResult<{ removed: number }>>;
+  /** 打开附件缓存目录 */
+  mailCacheOpen: () => Promise<APIResult<{ opened: boolean }>>;
+  /** FTS5 全文索引状态（M3-2） */
+  mailFtsStatus: () => Promise<APIResult<MailFtsStatus>>;
+  /** 重建全文索引（M3-2） */
+  mailFtsRebuild: () => Promise<APIResult<{ total: number; indexed: number }>>;
+  /** 手动清理窗口外的过期邮件 */
+  mailPurge: (payload?: { accountId?: number; days?: number }) => Promise<APIResult<{ deleted: number }>>;
+  /** 收件箱汇总 */
+  mailStats: () => Promise<APIResult<MailStats>>;
+  /** 支持的邮箱服务商预设（只读展示，含授权码获取指引） */
+  mailProviderList: () => Promise<APIResult<MailProviderPresetView[]>>;
+  /** 订阅同步事件（主进程→渲染层单向推送）；返回退订函数 */
+  onMailSyncEvent: (cb: (event: MailSyncEvent) => void) => () => void;
 }
 
 /** 更新事件载荷（主进程 updater.ts 经 updater-event 通道广播，最小安全字段） */
@@ -546,6 +666,329 @@ export interface ShopAllocationDetailRow {
   amountCents: number;
 }
 
+// ---- 店铺账号管家（shop-accounts 视图插件）----
+//
+// 业务模型：一行 = 一套店铺（店群中的一个邮箱主体），邮箱为业务主标识。
+// 一套店铺 = 邮箱 + 店铺密码 / 邮箱密码 / 关联手机号 / 关联企业名称
+//          / 关联支付宝 + 支付密码 / 紫鸟账号 + 紫鸟密码 / ERP账号 + ERP密码
+//          / 关联平台（可多选，既支持单平台，也支持一个邮箱跨平台复用）/ 状态 / 标签 / 备注
+
+/** 店铺状态：在用 / 停用 / 封店 / 已注销 */
+export type ShopAccountStatus = 'active' | 'paused' | 'banned' | 'closed';
+
+/**
+ * 敏感字段键（统一经主进程 safeStorage 加密落库；列表接口永不返回明文）
+ * mailAuthPwd = IMAP 授权码（集中邮件收件箱专用，与 emailPwd 登录密码是两套凭据）
+ */
+export type ShopAccountSecretKey =
+  | 'shopPwd'
+  | 'emailPwd'
+  | 'alipayPwd'
+  | 'ziniaoPwd'
+  | 'erpPwd'
+  | 'mailAuthPwd';
+
+/**
+ * 账号编辑器里直接维护的敏感字段（不含 mailAuthPwd）。
+ * IMAP 授权码由「收件箱接入」流程单独维护（mailAccountUpsert），不进入店铺套的密码组，
+ * 避免在同一处混用两套语义不同的邮箱凭据。
+ */
+export type ShopAccountSecretField = Exclude<ShopAccountSecretKey, 'mailAuthPwd'>;
+
+/** 店铺套列表行（可检索元数据 + 已配置的敏感字段标记，不含任何明文密码） */
+export interface ShopAccountItem {
+  id: number;
+  /** 店铺邮箱（业务主标识，唯一） */
+  email: string;
+  /** 关联手机号 */
+  phone: string;
+  /** 关联企业名称 */
+  company: string;
+  /** 关联支付宝（运费扣款） */
+  alipay: string;
+  /** 关联紫鸟账号 */
+  ziniaoAccount: string;
+  /** ERP 账号 */
+  erpAccount: string;
+  /** 关联平台（单平台 = 长度 1；跨平台复用 = 多项） */
+  platforms: string[];
+  /** 开店时间（YYYY-MM-DD；空串 = 未填写） */
+  openedAt: string;
+  status: ShopAccountStatus;
+  tags: string;
+  note: string;
+  /** 已配置值的敏感字段（仅供 UI 展示「已保存」徽标，不含任何明文） */
+  secretKeys: ShopAccountSecretKey[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 店铺套详情（含解密后的敏感字段，仅编辑时获取） */
+export interface ShopAccountDetail extends ShopAccountItem {
+  secrets: Partial<Record<ShopAccountSecretKey, string>>;
+}
+
+/**
+ * 店铺套写入入参
+ * - secrets：字段缺省 = 保持原值；空串 = 清空；非空 = 覆盖
+ * - platforms：undefined = 保持原值；数组（含空数组）= 覆盖
+ */
+export interface ShopAccountUpsertInput {
+  id?: number;
+  email?: string;
+  phone?: string;
+  company?: string;
+  alipay?: string;
+  ziniaoAccount?: string;
+  erpAccount?: string;
+  platforms?: string[];
+  /** 开店时间（YYYY-MM-DD）；字符串（含空串）= 覆盖，缺省 = 保持原值 */
+  openedAt?: string;
+  status?: ShopAccountStatus;
+  tags?: string;
+  note?: string;
+  secrets?: Partial<Record<ShopAccountSecretKey, string>>;
+}
+
+/** 平台选项（去重 + 该平台店铺套数） */
+export interface ShopAccountPlatformCount {
+  platform: string;
+  count: number;
+}
+
+// ---------------------------------------------------------------------------
+// 集中邮件收件箱（IMAP 只读；挂在「店铺账号管家」内）
+// ---------------------------------------------------------------------------
+
+/** 邮件账号状态：空闲 / 同步中 / 出错 / 已暂停 */
+export type MailAccountStatus = 'idle' | 'syncing' | 'error' | 'paused';
+
+/** 邮件账号（连接配置 + 同步状态；**不含任何凭据**——授权码只进不出） */
+export interface MailAccountItem {
+  id: number;
+  shopSetId: number;
+  email: string;
+  providerId: string;
+  imapHost: string;
+  imapPort: number;
+  imapSecure: boolean;
+  folder: string;
+  /** 需同步的文件夹列表（M3-3；为空表示仅同步 folder） */
+  folders: string[];
+  syncEnabled: boolean;
+  /** 同步/保留窗口（天），超出即清理 */
+  syncDays: number;
+  /** 单封正文缓存上限（字节），超限只留元数据 */
+  maxBodyBytes: number;
+  status: MailAccountStatus;
+  lastError: string;
+  lastSyncedAt: string;
+  uidValidity: number;
+  lastUid: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 邮件列表行（本地缓存；列表查询纯本地，不触网） */
+export interface MailMessageItem {
+  id: number;
+  accountId: number;
+  accountEmail: string;
+  folder: string;
+  uid: number;
+  subject: string;
+  fromName: string;
+  fromAddr: string;
+  toJson: string;
+  ccJson: string;
+  receivedAt: string;
+  size: number;
+  seen: boolean;
+  flagged: boolean;
+  hasAttachment: boolean;
+  bodyCached: boolean;
+  preview: string;
+  createdAt: string;
+  /** 本地已读标记时间（空串 = 未在本地读过） */
+  readAt: string;
+  /** 有效已读态：服务端 seen 或本地已读过（IMAP 只读，本地已读是唯一可靠来源） */
+  read: boolean;
+}
+
+/** 附件元信息（不缓存二进制，按需下载时再拉） */
+export interface MailAttachmentItem {
+  id: number;
+  messageId: number;
+  filename: string;
+  mime: string;
+  size: number;
+}
+
+/** 附件预览结果（M3-1：图片内联，其余类型走系统应用打开） */
+export interface MailAttachmentPreview {
+  filename: string;
+  mime: string;
+  size: number;
+  /** 本地缓存路径（空串表示未入缓存） */
+  path: string;
+  /** 能否内联预览（图片且未超体积上限） */
+  previewable: boolean;
+  /** 预览用的 data URL（不可预览时为空串） */
+  dataUrl: string;
+}
+
+/** 服务端文件夹条目（M3-3） */
+export interface MailRemoteFolder {
+  path: string;
+  specialUse: string;
+  delimiter: string;
+}
+
+/** 附件本地缓存状态（M3-1） */
+export interface MailCacheStatus {
+  dir: string;
+  files: number;
+  bytes: number;
+  maxBytes: number;
+}
+
+/** FTS5 全文索引状态（M3-2；available=false 时自动降级为 LIKE 检索） */
+export interface MailFtsStatus {
+  available: boolean;
+  total: number;
+  indexed: number;
+}
+
+/** 邮件详情（含正文与附件元信息） */
+export interface MailMessageDetail extends MailMessageItem {
+  textBody: string;
+  htmlBody: string;
+  /** 正文是否因超长被截断 */
+  truncated: boolean;
+  attachments: MailAttachmentItem[];
+}
+
+/** 连接测试结果（只读打开 INBOX 后即登出，不落库） */
+export interface MailConnectionTestResult {
+  ok: boolean;
+  capabilities: string[];
+  /** 是否支持 IDLE 长连接（163/126 实测不支持） */
+  idle: boolean;
+  folders: { path: string; specialUse: string }[];
+  inboxExists: boolean;
+  messageCount: number;
+  error: string;
+}
+
+/** 账号接入入参（secrets.mailAuthPwd 省略 = 保持原值，空串 = 清除） */
+export interface MailAccountUpsertInput {
+  shopSetId: number;
+  email?: string;
+  providerId?: string;
+  imapHost?: string;
+  imapPort?: number;
+  imapSecure?: boolean;
+  folder?: string;
+  /** 需同步的文件夹列表（M3-3；空数组 = 保持单文件夹 folder） */
+  folders?: string[];
+  syncEnabled?: boolean;
+  syncDays?: number;
+  maxBodyBytes?: number;
+  secrets?: { mailAuthPwd?: string };
+}
+
+/** 邮件列表筛选（纯本地查询） */
+export interface MailMessageListFilter {
+  accountIds?: number[];
+  keyword?: string;
+  unreadOnly?: boolean;
+  /** ISO 时间下界（含） */
+  since?: string;
+  /** 多文件夹筛选（M3-3；为空表示不限文件夹） */
+  folders?: string[];
+  limit?: number;
+  offset?: number;
+}
+
+/** 收件箱汇总 */
+export interface MailStats {
+  accounts: number;
+  messages: number;
+  unread: number;
+  lastSyncedAt: string;
+  /** 本地已收邮件的文件夹分布（M3-3） */
+  folders: { path: string; count: number }[];
+}
+
+/** 邮箱服务商预设（主进程精简下发，仅 UI 需要的字段） */
+export interface MailProviderPresetView {
+  id: string;
+  label: string;
+  domains: string[];
+  host: string;
+  port: number;
+  secure: boolean;
+  authHint: string;
+  helpUrl: string;
+  idle: boolean;
+  defaultSyncDays: number;
+}
+
+/** 同步事件（主进程 → 渲染层单向广播） */
+export interface MailSyncEvent {
+  type: 'status' | 'progress' | 'done' | 'error';
+  accountId: number;
+  email: string;
+  status?: string;
+  processed?: number;
+  total?: number;
+  message?: string;
+}
+
+/** 店铺套汇总（总量 / 按状态计数 / 平台选项），供统计条与筛选下拉使用 */
+export interface ShopAccountSummary {
+  total: number;
+  byStatus: Partial<Record<ShopAccountStatus, number>>;
+  platforms: ShopAccountPlatformCount[];
+}
+
+/**
+ * 单字段批量修改指令
+ * - 字符串字段（company / tags / note）：mode=set 覆盖、append 追加（去重 / 拼接）
+ * - 单值账号字段（phone / alipay / ziniaoAccount / erpAccount）：仅覆盖语义
+ *   （均为唯一标识，同一字段内追加多个值无业务意义，故不提供 append）
+ * - 状态（status）：仅覆盖语义；未传 = 不改
+ * - 平台（platforms）：set=覆盖、append=并入、remove=从已有中移除（set 差集）
+ * - 未出现在 patch 中的字段一律不动
+ *
+ * 不在批量操作范围内的字段：
+ * - email（业务主标识，批量改成同一值会直接撞唯一约束）
+ * - secrets（shopPwd / emailPwd / alipayPwd / ziniaoPwd / erpPwd）——一次性覆写 N 套凭证
+ *   无法逐条确认、不可回滚，风险不可控（见 AGENTS.md 红线 3）
+ */
+export interface ShopAccountBatchFieldPatch {
+  status?: ShopAccountStatus;
+  company?: { mode: 'set' | 'append'; value: string };
+  phone?: string;
+  alipay?: string;
+  ziniaoAccount?: string;
+  erpAccount?: string;
+  tags?: { mode: 'set' | 'append'; value: string };
+  note?: { mode: 'set' | 'append'; value: string };
+  platforms?: { mode: 'set' | 'append' | 'remove'; values: string[] };
+}
+
+/** 批量修改入参：ids 为目标店铺 id 数组；patch 全字段可选（未设置=不改） */
+export interface ShopAccountBatchUpdateInput {
+  ids: number[];
+  patch: ShopAccountBatchFieldPatch;
+}
+
+/** 批量修改返回：实际被更新（按 patch 修改了至少一个字段）的店铺套条数 */
+export interface ShopAccountBatchUpdateResult {
+  updated: number;
+}
+
 /** 拿货单 */
 export interface PurchaseOrder {
   id: number;
@@ -690,6 +1133,107 @@ export interface AeReceiverStatus {
   startedAt: string;
   lastIngestAt: string;
   lastError: string;
+}
+
+// ---- 速卖通利润追踪 M1：利润引擎 / 成本衔接 / 汇率（与 electron/ae-engine.ts、ae-db.ts 同构）----
+
+/** 拿货成本快照项（purchase-cost-snapshot 只读导出） */
+export interface PurchaseCostSnapshotItem {
+  styleCode: string;
+  styleName: string;
+  sampleCount: number;
+  /** 加权均价（分） */
+  weightedPriceCents: number;
+  lastBizDate: string;
+}
+
+/** ae_cost_map 导入项（渲染层构造后交 ae-cost-map-import 全量替换） */
+export interface AeCostMapImportItem {
+  styleCode: string;
+  styleName: string;
+  unitPriceCents: number;
+  sampleCount: number;
+  lastBizDate: string;
+}
+
+/** ae_cost_map 行（成本管理面板） */
+export interface AeCostMapItem extends AeCostMapImportItem {
+  source: string;
+  updatedAt: string;
+}
+
+/** 汇率行（1 fromCurrency = rateToCny CNY） */
+export interface AeRateItem {
+  fromCurrency: string;
+  rateToCny: number;
+  updatedAt: string;
+}
+
+/** 利润引擎分层合计（CNY 基准） */
+export interface AeProfitTotals {
+  orders: number;
+  /** 净收入 CNY（已扣退款） */
+  incomeCny: number;
+  /** 商品成本 CNY（命中成本表的行） */
+  costCny: number;
+  /** 订单级费用 CNY（不含退款科目） */
+  feeCny: number;
+  /** 毛利 CNY = 净收入 − 成本 */
+  grossProfitCny: number;
+  /** 运营利润 CNY = 毛利 − 费用 */
+  operatingProfitCny: number;
+  /** 缺汇率跳过的订单数 */
+  missingRateOrders: number;
+}
+
+export interface AeTrendPoint {
+  bucket: string;
+  orders: number;
+  incomeCny: number;
+  costCny: number;
+  grossProfitCny: number;
+}
+
+export interface AeTopOrder {
+  orderId: string;
+  orderTime: string;
+  status: string;
+  currency: string;
+  incomeCny: number;
+  costCny: number;
+  grossProfitCny: number;
+}
+
+export interface AeTopStyle {
+  styleCode: string;
+  styleName: string;
+  qty: number;
+  incomeCny: number;
+  costCny: number;
+  grossProfitCny: number;
+}
+
+export interface AeFeeBreakdownItem {
+  category: string;
+  totalCny: number;
+  orders: number;
+}
+
+export interface AeProfitOverview {
+  baseCurrency: 'CNY';
+  totals: AeProfitTotals;
+  trend: AeTrendPoint[];
+  topOrders: AeTopOrder[];
+  topStyles: AeTopStyle[];
+  feeBreakdown: AeFeeBreakdownItem[];
+  coverage: {
+    orderCount: number;
+    lineCount: number;
+    /** 有 style_code 的行 */
+    codeLines: number;
+    /** 命中成本表的行 */
+    matchedLines: number;
+  };
 }
 
 declare global {

@@ -36,6 +36,13 @@ register('purchase-db-ensure', async () => {
   return { success: true };
 });
 
+// 只读成本快照导出（D3：供 ae-profit 利润追踪导入 ae_cost_map；仅成本数据，无写能力）
+register('purchase-cost-snapshot', async () => {
+  purchaseDb.ensurePurchaseSchema();
+  const items = purchaseDb.costSnapshot();
+  return { success: true, data: { items, count: items.length } };
+});
+
 // ---- 厂商 ----
 register('purchase-supplier-list', async () => {
   purchaseDb.ensurePurchaseSchema();

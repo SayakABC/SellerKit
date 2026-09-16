@@ -15,7 +15,15 @@ export type ManifestValidationResult =
   | { ok: true; manifest: PluginManifest }
   | { ok: false; error: string };
 
-const CAPABILITIES: readonly CapabilityId[] = ['storage', 'http', 'clipboard', 'dialog'];
+const CAPABILITIES: readonly CapabilityId[] = [
+  'storage',
+  'http',
+  'clipboard',
+  'dialog',
+  'db',
+  'secrets',
+  'mail',
+];
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
@@ -80,10 +88,13 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
       if (namespacesErr) return { ok: false, error: namespacesErr };
       const allowErr = checkStrArray(c.allow, 256, 16, `capabilities.${id}.allow`);
       if (allowErr) return { ok: false, error: allowErr };
+      const domainsErr = checkStrArray(c.domains, 64, 16, `capabilities.${id}.domains`);
+      if (domainsErr) return { ok: false, error: domainsErr };
       const cap: PluginCapability = { id };
       if (Array.isArray(c.actions) && c.actions.length) cap.actions = c.actions as string[];
       if (Array.isArray(c.namespaces) && c.namespaces.length) cap.namespaces = c.namespaces as string[];
       if (Array.isArray(c.allow) && c.allow.length) cap.allow = c.allow as string[];
+      if (Array.isArray(c.domains) && c.domains.length) cap.domains = c.domains as string[];
       capabilities.push(cap);
     }
   }

@@ -363,6 +363,8 @@ function iconSvg(icon?: string): string {
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
     note:
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11l4 4v12H5z"/><path d="M15 4v5h5M9 13h6M9 17h6"/></svg>',
+    key:
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
     puzzle:
       '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 3h4v2.5a1.5 1.5 0 002.5 1.06L17.5 5.5 19 7l-1.06 1a1.5 1.5 0 001.06 2.5H21v4h-2.5a1.5 1.5 0 00-1.06 2.5L19 18l-1.5 1.5-1-1.06a1.5 1.5 0 00-2.5 1.06V21h-4v-2.5A1.5 1.5 0 007 17.44l-1 1.06L4.5 17l1.06-1A1.5 1.5 0 003.5 13.5H3v-4h.5A1.5 1.5 0 004.5 7L3.44 6 5 4.5l1 1.06A1.5 1.5 0 008.5 4.5V3z"/></svg>',
   };

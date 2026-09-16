@@ -22,7 +22,7 @@
 
 <script setup lang="ts">
 // src/core/components/UiIslandView.vue
-// UI 岛宿主视图（PLUGIN_ARCHITECTURE.md §15 P1）：外置富 UI 插件（manifest.kind === 'ui'）的运行时视图容器。
+// UI 岛宿主视图（docs/architecture/PLUGIN_ARCHITECTURE.md §15 P1）：外置富 UI 插件（manifest.kind === 'ui'）的运行时视图容器。
 // 职责：
 //  1. 以 sk-plugin://<id>/<entry> 加载插件静态站点（iframe 跨源沙箱）；
 //  2. 挂接宿主桥（uiBridgeHost.attachUiIslandBridge）——token 握手、能力调用过 gated hostApi（权限门+审计）、

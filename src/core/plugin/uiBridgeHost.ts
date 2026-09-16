@@ -1,5 +1,5 @@
 // src/core/plugin/uiBridgeHost.ts
-// UI 岛桥（宿主端主线程）—— PLUGIN_ARCHITECTURE.md §15 P1：外置富 UI 插件（iframe 运行时岛）与宿主之间的 postMessage 会话。
+// UI 岛桥（宿主端主线程）—— docs/architecture/PLUGIN_ARCHITECTURE.md §15 P1：外置富 UI 插件（iframe 运行时岛）与宿主之间的 postMessage 会话。
 // 职责：
 //  1. 与 iframe 端运行时（electron/plugin-ui-runtime.js，由主进程协议注入 UI 包 HTML）完成 token 握手；
 //  2. 转发 iframe 的能力调用到「已过权限门的 gated HostApi」（createGatedHostApi 产物）——越权在宿主侧拒绝并写入审计环；
@@ -31,14 +31,49 @@ export const UI_MSG = {
   abort: 'abort',
 } as const;
 
+/**
+ * 宿主设计令牌清单（与 src/styles/index.css 的 :root / [data-theme='dark'] 对应）。
+ * 用途：部分引擎的 getComputedStyle 索引枚举不返回自定义属性，仅靠 cs[i] 会拿不到令牌；
+ * 显式清单用 getPropertyValue 逐个读取，保证 UI 岛一定能拿到主题色。新增令牌需同步此处与 index.css。
+ */
+const WB_THEME_TOKENS = [
+  '--wb-bg',
+  '--wb-surface',
+  '--wb-surface-2',
+  '--wb-border',
+  '--wb-text',
+  '--wb-text-muted',
+  '--wb-primary',
+  '--wb-primary-hover',
+  '--wb-primary-soft',
+  '--wb-primary-contrast',
+  '--wb-success',
+  '--wb-success-soft',
+  '--wb-warning',
+  '--wb-warning-soft',
+  '--wb-danger',
+  '--wb-danger-soft',
+  '--wb-accent',
+  '--wb-accent-soft',
+  '--wb-hover',
+  '--wb-overlay',
+  '--wb-radius',
+] as const;
+
 /** 采集当前生效的宿主设计令牌（--wb-* 前缀），用于注入 iframe（宿主 data-theme 切换后重采） */
 export function collectWbThemeVars(): Record<string, string> {
   const vars: Record<string, string> = {};
   try {
     const cs = getComputedStyle(document.documentElement);
+    // 1) 显式清单：确定性读取（引擎无关）
+    for (const name of WB_THEME_TOKENS) {
+      const value = cs.getPropertyValue(name).trim();
+      if (value) vars[name] = value;
+    }
+    // 2) 索引枚举：补齐清单外的自定义属性（引擎支持时生效）
     for (let i = 0; i < cs.length; i += 1) {
       const name = cs[i];
-      if (name.startsWith('--wb-')) {
+      if (name.startsWith('--wb-') && !vars[name]) {
         const value = cs.getPropertyValue(name).trim();
         if (value) vars[name] = value;
       }
@@ -80,7 +115,32 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 const isStr = (v: unknown): v is string => typeof v === 'string';
 
 /** 桥能力面白名单（对齐 host.ts/sdk.ts 的 HostApi；iframe 消息不可信，逐调用校验参数后再执行） */
+// 业务域 / 操作名的长度与字符约束（宿主登记表有限，超长一律拒绝，避免畸形参数进 IPC）
+const isShortName = (v: unknown): v is string => isStr(v) && v.length > 0 && v.length <= 64;
+
 const CALLS: Record<string, Record<string, CallSpec>> = {
+  db: {
+    call: {
+      // 只放行登记表内业务操作（不放行任意 SQL），domain/op 必为字符串
+      arity: 3,
+      run: (h, a) =>
+        isShortName(a[0]) && isShortName(a[1])
+          ? h.db.call(a[0], a[1], a[2])
+          : Promise.reject(new Error('db.call: domain/op 必须为非空字符串（≤64）')),
+    },
+  },
+  secrets: {
+    status: { arity: 0, run: (h) => h.secrets.status() },
+  },
+  mail: {
+    call: {
+      arity: 2,
+      run: (h, a) =>
+        isShortName(a[0])
+          ? h.mail.call(a[0], a[1])
+          : Promise.reject(new Error('mail.call: op 必须为非空字符串（≤64）')),
+    },
+  },
   storage: {
     load: {
       arity: 1,

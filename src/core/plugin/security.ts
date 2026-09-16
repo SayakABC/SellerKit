@@ -18,6 +18,8 @@ export interface PermissionRequest {
   namespace?: string;
   /** http 请求 URL */
   url?: string;
+  /** db/secrets/mail 的业务域（如 'shop-accounts'） */
+  domain?: string;
 }
 
 /** 判定结果 */
@@ -46,6 +48,9 @@ const CAPABILITY_LABEL: Record<CapabilityId, string> = {
   http: 'http',
   clipboard: 'clipboard',
   dialog: 'dialog',
+  db: 'db',
+  secrets: 'secrets',
+  mail: 'mail',
 };
 
 /** URL 前缀匹配：支持尾部 * 通配（https://api.x.com/*），否则按字符串前缀匹配 */
@@ -102,6 +107,18 @@ export function decidePermission(
     }
     if (req.url && !cap.allow.some((p) => matchUrlPattern(p, req.url ?? ''))) {
       return { ok: false, reason: `URL 越权: ${req.url} 未命中声明前缀 [${cap.allow.join(', ')}]` };
+    }
+    return { ok: true };
+  }
+  if (req.capability === 'db' || req.capability === 'secrets' || req.capability === 'mail') {
+    // 业务域必须显式声明（domains 缺省 = 不放行任何业务域），避免拿到能力就横扫宿主业务库
+    if (req.domain) {
+      if (!cap.domains || !cap.domains.includes(req.domain)) {
+        return {
+          ok: false,
+          reason: `业务域越权: ${req.capability}.${req.domain} 不在声明白名单 [${(cap.domains ?? []).join(', ')}]`,
+        };
+      }
     }
     return { ok: true };
   }

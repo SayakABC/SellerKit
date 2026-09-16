@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// extensions/ae-profit/src/components/CostRatesPanel.vue
+// ui-plugins/ae-profit/src/components/CostRatesPanel.vue
 // M1 数据基础维护：① 成本衔接（拿货对账快照 → ae_cost_map 全量替换 + 成本表浏览）
 // ② 汇率维护（ae_rates upsert）。金额单位：成本表单价分 → 元展示。
 

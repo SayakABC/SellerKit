@@ -23,8 +23,9 @@ export const buildConfig: BuildConfig = {
     // 最小包：仅核心 Excel 复制
     minimal: ['excel-copy'],
     // 标准包：核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 店铺账号管家
-    // 注：利润追踪（ae-profit）已迁移为市场 UI 岛（ui-plugins/ae-profit），不再随宿主分发；
-    //     必须保持其不进入默认包，否则内建记录会占用同名 id，导致市场安装的 UI 岛无法注册。
+    // 注：利润追踪（ae-profit）已改为市场 UI 岛分发；其原内建源 extensions/ae-profit/src
+    //     已于 2026-09-16 删除（功能等价性已逐文件核对）。此处不再列出该 id —— 若误加入，
+    //     内建记录会占用同名 id，导致市场安装的 UI 岛无法注册。
     standard: ['excel-copy', 'quick-note', 'order-insight', 'shop-accounts'],
     // 完整包：全部模块
     pro: ['excel-copy', 'quick-note', 'order-insight', 'shop-accounts'],

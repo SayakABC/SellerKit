@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// extensions/ae-profit/src/AeProfitView.vue
+// ui-plugins/ae-profit/src/AeProfitView.vue
 // 「利润追踪」主视图（M1）：Tab 外壳 = 利润统计(M1 统计页 v1) / 订单明细(M0) / 成本与汇率(M1 数据基础)。
 // 接收端状态常驻头部；刷新按钮驱动 refreshKey 让各面板重载；统计面板可请求跳转到成本/汇率子页。
 

@@ -1,4 +1,4 @@
-// extensions/ae-profit/src/format.ts
+// ui-plugins/ae-profit/src/format.ts
 // 「利润追踪」共享展示工具：时间/金额/百分比格式化 + 费用科目 label 字典。
 // 纯展示函数，无副作用；金额不带单位，单位由列头/卡片语境标明（订单行=原币种，引擎聚合=CNY）。
 

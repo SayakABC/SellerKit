@@ -1,9 +1,0 @@
-{
-  "name": "ae-profit",
-  "displayName": "利润追踪",
-  "version": "0.2.0",
-  "description": "速卖通利润追踪（M1）：利润统计 v1（日月趋势/TOP/费用构成/成本覆盖率，CNY 分层）+ 订单明细 + 成本衔接（拿货对账快照导入成本表）+ 汇率维护。数据经 localhost 接收端入库。",
-  "author": "SellerKit",
-  "kind": "view",
-  "activationEvents": ["onStartup"]
-}

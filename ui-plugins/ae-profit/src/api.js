@@ -1,6 +1,7 @@
 // src/api.js — 岛侧宿主服务适配层。
 // 作用：把受控桥（window.__sk.host.*）包装成与内建插件同名的服务函数，
-//      使 extensions/ae-profit 的 Vue 源码可零改动复用（vite alias 将 @/core/services/* 指向本文件）。
+//      使本岛的 Vue 源码沿用内建插件的写法（vite alias 将 @/core/services/* 指向本文件）。
+// 来源：源码原为内建视图插件包 extensions/ae-profit/src，已于 2026-09-16 迁入本岛并删除原目录。
 // 纪律：一律走桥，不直连 window.electronAPI / 裸 IPC（AGENTS 红线 16）；
 //      能力需在 manifest.json 的 capabilities 中显式声明，否则权限门拒绝并写入审计。
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// extensions/ae-profit/src/components/ProfitStatsPanel.vue
+// ui-plugins/ae-profit/src/components/ProfitStatsPanel.vue
 // M1 统计页 v1：全周期利润 KPI + 日月趋势（范围/粒度可切）+ TOP（款编码/订单）+ 费用构成 + 成本覆盖率。
 // 数据源：aeProfitStats（主进程利润引擎，CNY 基准，见 electron/ae-engine.ts）。
 // 口径提示：合计/TOP 为全周期口径；范围（rangeDays）与粒度仅作用于下方趋势窗口。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// extensions/ae-profit/src/components/OrderListPanel.vue
+// ui-plugins/ae-profit/src/components/OrderListPanel.vue
 // 订单明细（M0 迁移）：分币种收支汇总 + 订单明细列表（搜索/分页）。
 // 依赖主进程 ae_orders / ae_order_lines / ae_order_fees 只读查询 IPC。
 

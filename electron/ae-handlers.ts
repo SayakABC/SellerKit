@@ -25,7 +25,7 @@ import { getProfitOverview } from './ae-engine';
 import { getAeReceiverStatus } from './ae-receiver';
 import { handle } from './ipc-util';
 
-handle('ae-db-ensure', () => {
+handle('ae-db-ensure', (): null => {
   ensureAeSchema();
   return null;
 });

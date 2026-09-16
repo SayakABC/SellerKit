@@ -5,7 +5,7 @@
 // 标记为 ES 模块，避免顶层声明进入全局作用域与其他主进程文件冲突
 export {};
 
-const { net } = require('electron');
+const { net } = require('electron') as typeof import('electron');
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);

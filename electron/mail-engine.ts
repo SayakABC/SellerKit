@@ -557,7 +557,7 @@ async function syncMailFolder(
           let htmlBody = '';
           let attachments: { filename: string; mime: string; size: number }[] = [];
           try {
-            const parsed = await simpleParser(msg.source, { skipHtmlToText: true } as any);
+            const parsed = await simpleParser(msg.source, { skipHtmlToText: true });
             textBody = String(parsed.text || '');
             htmlBody = String(parsed.html || '').slice(0, BODY_HTML_MAX);
             attachments = (parsed.attachments || []).map((a: any) => ({
@@ -691,7 +691,7 @@ export async function fetchMailBody(
     const source = await fetchSourceByUid(client, message.uid, maxBytes);
     if (!source) throw new Error('未取到邮件原文（可能已在服务端被删除）');
 
-    const parsed = await simpleParser(source, { skipHtmlToText: true } as any);
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
     const textBody = String(parsed.text || '');
     const htmlBody = String(parsed.html || '').slice(0, BODY_HTML_MAX);
     const attachments = toAttachmentMeta(parsed);
@@ -750,7 +750,7 @@ export async function fetchMailAttachmentData(
     const source = await fetchSourceByUid(client, message.uid, maxBytes);
     if (!source) throw new Error('未取到邮件原文（可能已在服务端被删除）');
 
-    const parsed = await simpleParser(source, { skipHtmlToText: true } as any);
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
     const list: any[] = parsed.attachments || [];
     let hit = list[ordinal];
     if (hit && String(hit.filename || '') !== target.filename) {

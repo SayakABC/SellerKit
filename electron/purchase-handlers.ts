@@ -6,7 +6,7 @@
 export {};
 
 const purchaseDb = require('./purchase-db');
-const { register } = require('./ipc-util');
+const { register } = require('./ipc-util') as typeof import('./ipc-util');
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);

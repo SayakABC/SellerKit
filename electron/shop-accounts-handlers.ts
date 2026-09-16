@@ -59,7 +59,7 @@ function toId(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
 }
 
-handle('shop-account-db-ensure', () => {
+handle('shop-account-db-ensure', (): null => {
   ensureShopAccountSchema();
   return null;
 });

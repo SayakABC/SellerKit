@@ -118,7 +118,7 @@ ipcMain.handle('plugins-uninstall', async (_event: any, payload: any) => {
     const rel = path.relative(pluginsRoot(), dir);
     if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('插件目录越界，已拒绝删除');
     fs.rmSync(dir, { recursive: true, force: true });
-    return { success: true, data: undefined };
+    return { success: true, data: undefined as any };
   } catch (err: any) {
     return { success: false, error: err instanceof Error ? err.message : '卸载插件失败' };
   }

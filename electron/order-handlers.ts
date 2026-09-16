@@ -11,7 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
 const orderDb = require('./order-db');
-const { register } = require('./ipc-util');
+const { register } = require('./ipc-util') as typeof import('./ipc-util');
 
 /** 主图缓存目录：userData/order-images/ */
 const IMAGE_DIR = () => path.join(app.getPath('userData'), 'order-images');
@@ -416,7 +416,7 @@ register('order-style-import', async (payload) => {
       extraFingerprints: Array.isArray(s.extraFingerprints)
         ? s.extraFingerprints
             .filter((f: unknown): f is string => typeof f === 'string')
-            .map((f) => f.slice(0, 512))
+            .map((f: string) => f.slice(0, 512))
             .slice(0, 20)
         : [],
     }));

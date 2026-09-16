@@ -20,7 +20,7 @@ const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
-const yauzl = require('yauzl');
+const yauzl = require('yauzl') as typeof import('yauzl');
 
 /** 插件根目录（与 plugins-handlers.ts 同源：<userData>/plugins） */
 function pluginsRoot(): string {

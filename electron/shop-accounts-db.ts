@@ -87,6 +87,8 @@ export interface ShopAccountUpsertInput {
   ziniaoPwd?: string;
   erpAccount?: string;
   erpPwd?: string;
+  /** IMAP 授权码：账号编辑器 UI 不出现（见 src/types.ts ShopAccountSecretField），但收件箱接入流程经本通道写入 */
+  mailAuthPwd?: string;
   platforms?: string[];
   /** 开店时间（YYYY-MM-DD；空串 = 清除，undefined = 保持原值） */
   openedAt?: string;

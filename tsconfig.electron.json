@@ -5,6 +5,7 @@
     "outDir": "dist/electron",
     "rootDir": "electron",
     "strict": false,
+    "noImplicitAny": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,

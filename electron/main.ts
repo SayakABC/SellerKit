@@ -100,7 +100,7 @@ async function initStore() {
   const defaultStoreData = {
     lastExcelPath: '',
     lastTemplatePath: '',
-    records: [],
+    records: [] as unknown[],
     templateConfigs: [
       {
         id: 'default',
@@ -124,7 +124,7 @@ async function initStore() {
         },
       },
     ],
-    visibleColumns: [],
+    visibleColumns: [] as string[],
   };
 
   try {

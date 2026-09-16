@@ -503,7 +503,7 @@ export function getAeSummary(): AeSummary {
     orders: num(r.c),
     goodsAmount: num(r.ga),
     shippingIncome: num(r.si),
-    fees: [],
+    fees: [] as AeFeeSummary[],
   }));
   const groupByCcy = new Map<string, AeCurrencyGroup>(byCurrency.map((g) => [g.currency, g]));
   for (const f of feeRows) {

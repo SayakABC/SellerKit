@@ -795,7 +795,7 @@ export const useOrderInsightStore = defineStore(MODULE_ID, () => {
       return { ok: false };
     }
     let styleCode = r.data?.styleCode ?? '';
-    let styleColorCode = r.data?.styleColorCode ?? '';
+    const styleColorCode = r.data?.styleColorCode ?? '';
     // 手动归并：把订单图片挂到用户指定的款编码，并把指纹记入该款式（未来自动识别命中同一款）
     if (raw.targetStyleId) {
       const target = styles.value.find((s) => s.id === raw.targetStyleId);

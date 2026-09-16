@@ -142,7 +142,7 @@ function parseDate(v: string): Date | null {
   const d = new Date(t);
   if (!isNaN(d.getTime())) return d;
   // 兼容 "2024年8月24日 10:30" / "2024/8/24" 等非标准格式
-  const m = t.match(/(\d{4})[年/.\-](\d{1,2})(?:[月/.\-](\d{1,2}))?/);
+  const m = t.match(/(\d{4})[年/.-](\d{1,2})(?:[月/.-](\d{1,2}))?/);
   if (m) {
     const d2 = new Date(Number(m[1]), Number(m[2]) - 1, m[3] ? Number(m[3]) : 1);
     if (!isNaN(d2.getTime())) return d2;

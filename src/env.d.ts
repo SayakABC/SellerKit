@@ -2,6 +2,9 @@
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue';
+  // `{}` 表示"该 shim 不约束 props/slots 形状"，是 Vue 官方 SFC 兜底声明写法；
+  // vue-tsc 走真实 .vue 解析，不会命中此处（本文件仅为工具兜底）。
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   const component: DefineComponent<{}, {}, any>;
   export default component;
 }

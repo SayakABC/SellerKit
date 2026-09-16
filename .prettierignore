@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules/
+dist/
+release/
+.vite/
+market-out/
+
+# 自动生成（vite.config.ts 每次 dev/build 重写）
+src/registry.generated.ts
+
+# 独立子包：各自工具链与格式化偏好，不纳入主仓库统一格式化
+ui-plugins/
+
+# 本地文档 / 本地文件
+.workbuddy/
+.codebuddy/
+docs/plans/
+docs/reviews/
+docs/baseline/
+*.xlsx
+*.log

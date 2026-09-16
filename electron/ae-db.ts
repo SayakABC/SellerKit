@@ -311,7 +311,7 @@ export function sanitizeIngestOrder(input: unknown): { order: AeIngestOrder | nu
   }
 
   // SKU 行：非法行跳过；条目内未知字段宽容保留
-  let lines: AeIngestLine[] = [];
+  const lines: AeIngestLine[] = [];
   if (o.lines !== undefined && o.lines !== null) {
     if (!Array.isArray(o.lines) || o.lines.length > MAX_LINES) return { order: null, error: 'lines 必须是 ≤100 的数组' };
     for (const raw of o.lines as unknown[]) {

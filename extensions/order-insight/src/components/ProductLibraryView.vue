@@ -75,6 +75,12 @@
           <!-- 封面图：IO 懒加载缩略图（fill 撑满 h-36），不再全量预取 -->
           <div class="relative h-36 bg-[var(--wb-surface-2)]">
             <OrderThumb :path="s.coverPath" fill placeholder="暂无图片" />
+            <!--
+              封面图上的角标：黑底白字是"图片上叠加"的绝对对比方案，与主题无关
+              （深色主题下 --wb-primary-contrast 反而是浅色），故有意不使用 --wb-* 令牌。
+              这是 AGENTS.md §1.6 令牌纪律的唯一例外形态，在此显式豁免。
+            -->
+            <!-- eslint-disable vue/no-restricted-class -->
             <span
               class="absolute left-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 text-xs font-medium text-white"
             >
@@ -86,6 +92,7 @@
             >
               {{ s.orderCount }} 单
             </span>
+            <!-- eslint-enable vue/no-restricted-class -->
           </div>
           <div class="p-3">
             <div class="flex items-baseline gap-2">

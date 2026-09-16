@@ -240,7 +240,7 @@ function processMath(
     const trimmedKey = key.trim();
     const val = fields[trimmedKey];
     if (val === undefined || val === null) throw new Error(`字段缺失: ${trimmedKey}`);
-    const num = parseFloat(val.replace(/[^0-9.\-]/g, ''));
+    const num = parseFloat(val.replace(/[^0-9.-]/g, ''));
     if (isNaN(num)) throw new Error(`字段 "${trimmedKey}" 的值 "${val}" 无法转换为数字`);
     return num.toString();
   });

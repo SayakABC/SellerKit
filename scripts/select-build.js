@@ -18,31 +18,18 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { enumerateModules } = require('./lib/module-roots.cjs');
 
 const root = path.resolve(__dirname, '..');
-const modulesDir = path.join(root, 'src', 'modules');
 const cacheFile = path.join(root, 'node_modules', '.cache', 'sellerkit-selection.json');
 
 const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm');
 
-// ---------- 1. 扫描可用模块（目录名即模块 id，meta.ts 提供展示名） ----------
+// ---------- 1. 扫描可用模块（双根：src/modules 内建 + extensions 视图插件包） ----------
+// 判定规则与 vite.config.ts 完全一致，统一由 scripts/lib/module-roots.cjs 提供，
+// 避免「选择器扫到的模块」与「构建期实际可打包的模块」不一致而静默产出残缺安装包。
 function scanModules() {
-  const ids = fs
-    .readdirSync(modulesDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name)
-    .sort();
-  return ids.map((id) => {
-    let name = id;
-    try {
-      const src = fs.readFileSync(path.join(modulesDir, id, 'meta.ts'), 'utf-8');
-      const m = src.match(/name:\s*['"]([^'"]+)['"]/);
-      if (m) name = m[1];
-    } catch {
-      /* 无 meta.ts 时用 id 兜底 */
-    }
-    return { id, name };
-  });
+  return enumerateModules(root);
 }
 
 // ---------- 2. 读取/写入上次选择 ----------
@@ -84,7 +71,7 @@ function promptSelect(items, initial) {
         const mark = selected.has(i) ? '\x1b[32m◉\x1b[0m' : '\x1b[2m◯\x1b[0m';
         const arrow = i === cursor ? '\x1b[36m❯\x1b[0m' : ' ';
         const title = i === cursor ? `\x1b[36;1m${it.name}\x1b[0m` : it.name;
-        out += `\x1b[2K ${arrow} ${mark} ${title}  \x1b[2m(${it.id})\x1b[0m\n`;
+        out += `\x1b[2K ${arrow} ${mark} ${title}  \x1b[2m(${it.id}${it.label ? ` · ${it.label}` : ''})\x1b[0m\n`;
       });
       out += `\x1b[2K  \x1b[2m已选 ${selected.size}/${items.length} 个模块\x1b[0m`;
       process.stdout.write(out);
@@ -170,15 +157,19 @@ async function main() {
   const listOnly = args.includes('--list');
   const platform = args.find((a) => a.startsWith('--platform='))?.split('=')[1];
 
-  const modules = scanModules();
+  const { modules, skipped } = scanModules();
   if (modules.length === 0) {
-    console.error('未发现任何模块（src/modules 为空）。');
+    console.error('未发现任何可打包模块（src/modules 与 extensions 下均无 meta.ts 入口）。');
     process.exit(1);
   }
 
   if (listOnly) {
     console.log('可打包模块:');
-    modules.forEach((m) => console.log(`  ${m.id}  (${m.name})`));
+    modules.forEach((m) => console.log(`  ${m.id}  (${m.name})  [${m.label}]`));
+    if (skipped.length) {
+      const names = skipped.map((s) => s.id).join(', ');
+      console.error(`\x1b[2m忽略 ${skipped.length} 个目录（无 meta.ts 入口，不参与打包裁剪）: ${names}\x1b[0m`);
+    }
     return;
   }
 

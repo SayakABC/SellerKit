@@ -405,7 +405,15 @@ async function doInstall(p: MarketPluginInfo) {
         : `插件 ${p.id} v${p.version} 已安装，可在「已安装插件」中激活`,
     );
   } catch (e) {
-    toast.error(`安装失败：${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    // 同版本重复安装：主进程会拒绝（目录已是该版本），此处按「已是最新」处理而非报错
+    if (msg.includes('无需重复安装')) {
+      await props.manager.discoverExternal();
+      refresh();
+      toast.info(`插件 ${p.id} v${p.version} 已是最新版`);
+      return;
+    }
+    toast.error(`安装失败：${msg}`);
   } finally {
     installingId.value = '';
   }

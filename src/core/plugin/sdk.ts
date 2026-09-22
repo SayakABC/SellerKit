@@ -184,6 +184,23 @@ export interface SettingPanelDef {
   tabs: SettingTabDef[];
 }
 
+/**
+ * UI 岛设置分类贡献（manifest.settings → 宿主设置中心分类）。
+ * 与 SettingPanelDef 的差别：内容不是宿主组件，而是岛产物里的一个 HTML 入口（iframe 岛承载）。
+ */
+export interface UiIslandSettingPanelDef {
+  /** 分类 id，固定为 `<pluginId>:settings`（open-settings dispatch 的 category 同值） */
+  categoryId: string;
+  categoryName: string;
+  icon?: string;
+  /** 分类排序（越小越靠前） */
+  order?: number;
+  /** 贡献该设置的 UI 岛 id */
+  pluginId: string;
+  /** 设置页入口（岛目录相对路径，如 ./dist/settings.html） */
+  entry: string;
+}
+
 /** 插件包设置入口模块（registry 的 settingsPanelLoaders 指向该模块，default 导出本结构） */
 export interface PluginSettingsModule {
   settingPanels: SettingPanelDef[];

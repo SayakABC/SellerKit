@@ -189,6 +189,28 @@ export interface ElectronAPI {
   shopAccountBatchUpdate: (
     payload: ShopAccountBatchUpdateInput,
   ) => Promise<APIResult<ShopAccountBatchUpdateResult>>;
+  // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法；无密码类凭据）----
+  /** 幂等建表（企业管理 Tab 首次激活时调用） */
+  companyDbEnsure: () => Promise<APIResult<void>>;
+  /** 企业列表（关键字/状态过滤；含已维护的合规类型，不含明细） */
+  companyList: (payload?: {
+    search?: string;
+    status?: CompanyStatus | '';
+  }) => Promise<APIResult<CompanyItem[]>>;
+  /** 企业详情（含欧代 / 土代 / 德国包装法明细） */
+  companyGet: (payload: { id: number }) => Promise<APIResult<CompanyDetail | null>>;
+  /** 汇总（总数 / 按状态 / 各合规类型覆盖企业数 / 30 天内到期条数） */
+  companySummary: () => Promise<APIResult<CompanySummary>>;
+  /** 新增/更新企业 */
+  companyUpsert: (payload: CompanyUpsertInput) => Promise<APIResult<{ id: number }>>;
+  /** 删除企业（级联删除其合规资料） */
+  companyDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /** 新增/更新合规资料（type 由主进程白名单校验） */
+  companyProfileUpsert: (
+    payload: CompanyProfileUpsertInput,
+  ) => Promise<APIResult<{ id: number }>>;
+  /** 删除合规资料 */
+  companyProfileDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
   pluginsScan: () => Promise<APIResult<PluginScanResult>>;
@@ -712,6 +734,8 @@ export interface ShopAccountItem {
   phone: string;
   /** 关联企业名称 */
   company: string;
+  /** 关联企业 id（企业管理 sk_companies 主键；0 = 未关联） */
+  companyId: number;
   /** 关联支付宝（运费扣款） */
   alipay: string;
   /** 关联紫鸟账号 */
@@ -762,6 +786,123 @@ export interface ShopAccountUpsertInput {
 export interface ShopAccountPlatformCount {
   platform: string;
   count: number;
+}
+
+// ---------------------------------------------------------------------------
+// 企业管理（挂在「店铺账号管家」内：企业基本信息 + 欧代/土代/德国包装法）
+// ---------------------------------------------------------------------------
+
+/** 企业状态：启用 / 停用 */
+export type CompanyStatus = 'active' | 'inactive';
+
+/**
+ * 企业下的合规资料类型
+ * - eu_rep       欧代：欧盟授权代表（EC Rep / EU Responsible Person）
+ * - tr_rep       土代：土耳其授权代表（Turkish Representative）
+ * - de_packaging 德国包装法：LUCID 注册 + 双元系统（回收商）合同
+ */
+export type ComplianceType = 'eu_rep' | 'tr_rep' | 'de_packaging';
+
+/** 合规资料状态：有效 / 办理中 / 已过期 */
+export type ComplianceStatus = 'valid' | 'pending' | 'expired';
+
+/** 合规资料条目（欧代 / 土代 / 德国包装法；类型专属字段在 extra 中） */
+export interface CompanyProfileItem {
+  id: number;
+  companyId: number;
+  type: ComplianceType;
+  /** 主体名称（欧代公司 / 土代公司 / 双元系统回收商） */
+  name: string;
+  /** 编号（协议号 / 注册号 / LUCID 号） */
+  regNo: string;
+  contactName: string;
+  contactPhone: string;
+  contactEmail: string;
+  address: string;
+  /** 生效日期（YYYY-MM-DD） */
+  effectiveAt: string;
+  /** 到期日期（YYYY-MM-DD；空 = 长期有效） */
+  expireAt: string;
+  status: ComplianceStatus;
+  note: string;
+  /** 类型专属扩展字段（德国包装法：合同号 / 申报年度 / 申报重量等） */
+  extra: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 企业列表行（含已维护的合规资料类型，供列表徽标展示） */
+export interface CompanyItem {
+  id: number;
+  name: string;
+  /** 统一社会信用代码 / 境外注册号 */
+  unifiedCode: string;
+  country: string;
+  address: string;
+  legalPerson: string;
+  contactName: string;
+  contactPhone: string;
+  contactEmail: string;
+  /** VAT 税号 */
+  vatNo: string;
+  /** EORI 号 */
+  eoriNo: string;
+  status: CompanyStatus;
+  note: string;
+  /** 已维护的合规资料类型 */
+  profileTypes: ComplianceType[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 企业详情（含合规资料明细） */
+export interface CompanyDetail extends CompanyItem {
+  profiles: CompanyProfileItem[];
+}
+
+/** 企业汇总（列表顶部 chips：总数 / 状态 / 各合规类型覆盖数 / 到期预警） */
+export interface CompanySummary {
+  total: number;
+  byStatus: Partial<Record<CompanyStatus, number>>;
+  byType: Partial<Record<ComplianceType, number>>;
+  /** 30 天内到期（含已过期）的合规资料条数 */
+  expiringSoon: number;
+}
+
+/** 企业写入入参（字段缺省 = 保持原值；空串 = 清空） */
+export interface CompanyUpsertInput {
+  id?: number;
+  name?: string;
+  unifiedCode?: string;
+  country?: string;
+  address?: string;
+  legalPerson?: string;
+  contactName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  vatNo?: string;
+  eoriNo?: string;
+  status?: CompanyStatus;
+  note?: string;
+}
+
+/** 合规资料写入入参（type 与 companyId 必填） */
+export interface CompanyProfileUpsertInput {
+  id?: number;
+  companyId?: number;
+  type?: ComplianceType;
+  name?: string;
+  regNo?: string;
+  contactName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  address?: string;
+  effectiveAt?: string;
+  expireAt?: string;
+  status?: ComplianceStatus;
+  note?: string;
+  /** 类型专属扩展字段（整体覆盖） */
+  extra?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -976,7 +1117,12 @@ export interface ShopAccountSummary {
  */
 export interface ShopAccountBatchFieldPatch {
   status?: ShopAccountStatus;
-  company?: { mode: 'set' | 'append'; value: string };
+  /**
+   * 关联企业 id（引用企业管理列表，仅「覆盖」语义——企业是引用关系，无追加概念）：
+   * 0 = 取消关联（同时清空企业名称列）；> 0 = 覆盖为该企业（企业名称列同步取企业库中的名称）。
+   * 2026-09-18：原 `company?: { mode, value }` 文本 patch 由下拉选择取代，已移除。
+   */
+  companyId?: number;
   phone?: string;
   alipay?: string;
   ziniaoAccount?: string;

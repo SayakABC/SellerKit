@@ -9,6 +9,7 @@ import type {
   CapabilityId,
   PluginCapability,
   PluginManifest,
+  UiIslandSettingsContrib,
 } from './types';
 
 export type ManifestValidationResult =
@@ -26,6 +27,21 @@ const CAPABILITIES: readonly CapabilityId[] = [
 ];
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+/**
+ * 单条 capability.actions 的条数上限。
+ *
+ * 由来（2026-09-21 真实故障）：原值 32 是按「粗略防护」拍的，未与实际业务域规模对齐。
+ * 宿主 DB_OPS 里 `order-insight` 域自身就有 37 个 op、`purchase` 域 24 个，
+ * 而 order-insight 插件跨两个域声明 58 个动作 → 安装期直接被判定为非法 manifest、
+ * 整个插件加载失败（报「capabilities.db.actions 条数超限（≤32）」），且该报错不指向业务真实原因。
+ *
+ * 上层语义：actions 是「插件自报的动作白名单」，真正的越权判定在宿主权限门
+ * （security.ts decidePermission）+ DB_OPS 登记表，本上限只用于抵御病态/超大 manifest。
+ * 故取 128（约 2× 当前最大业务域规模的余量），新增业务域时无需再动这个常量。
+ * 若未来单域 op 数逼近该值，应改为从宿主登记表推导上限，而不是继续手调。
+ */
+const MAX_ACTIONS = 128;
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const isPlainObj = (v: unknown): v is Record<string, unknown> =>
@@ -82,7 +98,7 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
         return { ok: false, error: `capabilities.id 非法（允许: ${CAPABILITIES.join('/')}）` };
       }
       const id = c.id as CapabilityId;
-      const actionsErr = checkStrArray(c.actions, 64, 32, `capabilities.${id}.actions`);
+      const actionsErr = checkStrArray(c.actions, 64, MAX_ACTIONS, `capabilities.${id}.actions`);
       if (actionsErr) return { ok: false, error: actionsErr };
       const namespacesErr = checkStrArray(c.namespaces, 128, 32, `capabilities.${id}.namespaces`);
       if (namespacesErr) return { ok: false, error: namespacesErr };
@@ -96,6 +112,24 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
       if (Array.isArray(c.allow) && c.allow.length) cap.allow = c.allow as string[];
       if (Array.isArray(c.domains) && c.domains.length) cap.domains = c.domains as string[];
       capabilities.push(cap);
+    }
+  }
+
+  // UI 岛设置面板贡献（manifest.settings，§15）：仅 kind==='ui' 时生效；entry 与主入口同规则校验
+  let settingsContrib: UiIslandSettingsContrib | undefined;
+  if (raw.kind === 'ui' && isPlainObj(raw.settings)) {
+    const s = raw.settings as Record<string, unknown>;
+    const sEntry = isStr(s.entry) ? s.entry.trim() : '';
+    if (sEntry) {
+      if (!sEntry.startsWith('./') || sEntry.includes('..')) {
+        return { ok: false, error: `manifest.settings.entry 非法（须为 ./ 开头的相对路径）: ${sEntry}` };
+      }
+      settingsContrib = {
+        entry: sEntry,
+        ...(isStr(s.displayName) ? { displayName: s.displayName.slice(0, 32) } : {}),
+        ...(isStr(s.icon) ? { icon: s.icon.slice(0, 24) } : {}),
+        ...(Number.isFinite(Number(s.order)) ? { order: Number(s.order) } : {}),
+      };
     }
   }
 
@@ -116,6 +150,7 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
       // 形态标识（§15）：仅放行 'ui'（预构建静态站点/iframe 岛）；未知 kind 忽略保持兼容
       ...(raw.kind === 'ui' ? { kind: 'ui' } : {}),
       ...(capabilities.length ? { capabilities } : {}),
+      ...(settingsContrib ? { settings: settingsContrib } : {}),
     },
   };
 }

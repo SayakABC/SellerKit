@@ -35,6 +35,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { BuiltinPluginManager } from '@/core/plugin/pluginManager';
 import { attachUiIslandBridge, type UiIslandBridge } from '@/core/plugin/uiBridgeHost';
 import { toast } from '@/core/services/toast';
+import { onMailSyncEvent } from '@/core/services/ipc';
 
 const props = defineProps<{
   pluginId: string;
@@ -51,6 +52,8 @@ const connState = ref<'idle' | 'connected'>('idle');
 const bridge = ref<UiIslandBridge | null>(null);
 let themeObserver: MutationObserver | null = null;
 let offIslandEvents: (() => void) | null = null;
+/** 主进程邮件同步事件 → 插件总线转发（岛内 mailStore 以此驱动同步进度；订阅者为空时无副作用） */
+let offMailSync: (() => void) | null = null;
 
 const runtime = computed(() => props.manager.getUiIslandRuntime(props.pluginId));
 const manifest = computed(() => runtime.value?.manifest);
@@ -93,9 +96,12 @@ function reload(): void {
   connState.value = 'idle';
   bridge.value?.dispose();
   bridge.value = null;
-  const win = frame.value?.contentWindow;
-  if (win) win.location.reload();
-  else if (frame.value) frame.value.src = frame.value.src;
+  // 跨域 iframe 无法访问 location（SecurityError），用 src 重置触发重新加载
+  if (frame.value) {
+    const currentSrc = frame.value.src;
+    frame.value.src = '';
+    frame.value.src = currentSrc;
+  }
   attach();
 }
 
@@ -109,6 +115,10 @@ onMounted(() => {
     const type = (meta as { eventType?: string } | undefined)?.eventType ?? `${props.pluginId}:*`;
     toast.info(`[${props.pluginId}] 发布事件 ${type}`);
   });
+  // 岛无独立 IPC 通道：把主进程的邮件同步事件转发到插件总线，供岛内按需订阅（事件名 mail-sync-event）
+  offMailSync = onMailSyncEvent((payload) => {
+    void props.manager.bus.emit('mail-sync-event', payload);
+  });
 });
 
 onBeforeUnmount(() => {
@@ -116,6 +126,8 @@ onBeforeUnmount(() => {
   themeObserver = null;
   offIslandEvents?.();
   offIslandEvents = null;
+  offMailSync?.();
+  offMailSync = null;
   bridge.value?.dispose();
   bridge.value = null;
 });

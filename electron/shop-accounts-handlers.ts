@@ -106,6 +106,10 @@ handle('shop-account-upsert', (payload: any) => {
   if (typeof p.openedAt === 'string') {
     input.openedAt = str(p.openedAt, MAX_LEN.openedAt);
   }
+  // 关联企业：undefined = 保持原值；数字（含 0 = 取消关联）由 db 层归一化并校验存在性
+  if (typeof p.companyId === 'number' && Number.isFinite(p.companyId)) {
+    input.companyId = p.companyId;
+  }
   // 平台：undefined = 保持原值；数组（含空数组）= 覆盖（空数组即清空）
   if (Array.isArray(p.platforms)) {
     input.platforms = p.platforms
@@ -173,9 +177,9 @@ handle('shop-account-batch-update', (payload: any) => {
   if (typeof raw.erpAccount === 'string') {
     patch.erpAccount = str(raw.erpAccount, MAX_LEN.erpAccount);
   }
-  if (raw.company && typeof raw.company === 'object') {
-    const mode = raw.company.mode === 'append' ? 'append' : 'set';
-    patch.company = { mode, value: str(raw.company.value, MAX_LEN.company) };
+  // 关联企业：下拉选择（0 = 取消关联；> 0 = 覆盖），合法性由 db 层再校验（企业不存在则该字段不生效）
+  if (typeof raw.companyId === 'number' && Number.isInteger(raw.companyId) && raw.companyId >= 0) {
+    patch.companyId = Math.min(Math.max(Math.floor(raw.companyId), 0), 2147483647);
   }
   if (raw.tags && typeof raw.tags === 'object') {
     const mode = raw.tags.mode === 'append' ? 'append' : 'set';

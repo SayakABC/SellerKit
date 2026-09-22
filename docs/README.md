@@ -16,13 +16,13 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | [`baseline/REFACTOR_PLAN.md`](baseline/REFACTOR_PLAN.md) | Phase 0–3 单体 → 模块化重构计划 | 架构/开发者 | 🗄️ 已完成归档 | 2026-08-21 |
 | [`architecture/PLUGIN_ARCHITECTURE.md`](architecture/PLUGIN_ARCHITECTURE.md) | 插件化方向性架构：Phase 1–5、Worker 沙箱、权限门、UI 岛方案 | 架构/开发者 | ✅ 活跃（方向性，规则以 AGENTS.md 为准） | 2026-09-08 |
 | [`architecture/PLUGIN_DEVELOPMENT.md`](architecture/PLUGIN_DEVELOPMENT.md) | 外置插件与 UI 岛开发、调试、发布操作手册 | 插件作者 | ✅ 活跃 | 2026-09-15 |
-| [`architecture/PROJECT_OVERVIEW.md`](architecture/PROJECT_OVERVIEW.md) | 单体时期的项目分析报告 | 历史追溯 | ⚠️ **已过期**（被 `baseline/PROJECT_BASELINE.md` 取代） | 2026-06-03 |
 | [`features/MAIL_INBOX.md`](features/MAIL_INBOX.md) | 集中收件箱 M1–M3 设计与落地（IMAP / FTS / 附件缓存） | 开发者 | ✅ 活跃 | 2026-09-15 |
 | [`features/PROFIT_TRACKER.md`](features/PROFIT_TRACKER.md) | 速卖通利润追踪三端方案与落地路线（**跨端协议唯一权威来源**） | 架构/开发者 | ✅ 活跃（含 2026-09-16 漂移提示） | 2026-09-15 |
 | [`guides/USER_GUIDE.md`](guides/USER_GUIDE.md) | 用户使用指南（安装 / 界面 / 导入 / 复制 / 模板 / 字段规则 / 打包） | 最终用户 | 🟡 活跃但覆盖面偏旧（未含收件箱 / 店铺账号 / 自动更新） | 2026-06-20 |
 | [`requirements/Requirements.md`](requirements/Requirements.md) | 最初立项需求规格 | 历史追溯 | 🗄️ 历史档案（功能已全部实现） | 2026-06-02 |
 | [`reviews/CODE_REVIEW_REPORT.md`](reviews/CODE_REVIEW_REPORT.md) | 代码与文档审查报告（31 项发现、风险分级、取证命令） | 开发者 | ✅ 活跃 | 2026-09-16 |
 | [`plans/REMEDIATION_PLAN.md`](plans/REMEDIATION_PLAN.md) | **整改计划**：26 个任务分 4 个阶段，含验收标准 / 风险回滚 / 进度跟踪表 | 开发者 | ✅ 活跃（待执行） | 2026-09-16 |
+| [`plans/PLUGIN_TRIAGE_PLAN.md`](plans/PLUGIN_TRIAGE_PLAN.md) | **内置插件盘点与处置**：3 个内置插件 + 2 个脚手架 + 4 个 UI 岛的逐项判定、`order-insight` ID 冲突取证、外置化步骤与验收 | 架构/开发者 | ✅ 活跃（待评审，未执行） | 2026-09-21 |
 | [`archive/manual.md`](archive/manual.md) | 早期简版用户手册 | 历史追溯 | 🗄️ 已归档（被 `guides/USER_GUIDE.md` 取代） | 2026-06-03 |
 
 状态图例：✅ 活跃 · 🟡 活跃但有已知缺口 · ⚠️ 已过期 · 🗄️ 已归档（仅历史对照）
@@ -38,6 +38,7 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | **要写插件** | `architecture/PLUGIN_DEVELOPMENT.md` → `architecture/PLUGIN_ARCHITECTURE.md`（§1.8 机制）→ `AGENTS.md` 红线 16–23 |
 | **要排查性能 / 找风险** | `reviews/CODE_REVIEW_REPORT.md` → `baseline/PROJECT_BASELINE.md` |
 | **要执行整改** | `plans/REMEDIATION_PLAN.md`（先读 §1 原则与 §2 依赖关系，再按 Phase 顺序做） |
+| **要清理内置插件 / 外置化** | `plans/PLUGIN_TRIAGE_PLAN.md` → `AGENTS.md` §1.8/§1.9 + 红线 23 → `baseline/PROJECT_BASELINE.md` §4 |
 | **终端用户** | `guides/USER_GUIDE.md` |
 
 ---
@@ -54,12 +55,17 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 
 ## 版本管理策略
 
-`.gitignore` 中有意将**本地内部文档**排除在版本库外（保留上游 fork 的干净度）：
+**全部文档入库**（R4-5 / D-07，2026-09-16 决策变更）。
 
-- **不入库**：`AGENTS.md`、`docs/baseline/`、`docs/architecture/PLUGIN_ARCHITECTURE.md`、`docs/architecture/PROJECT_OVERVIEW.md`、`docs/reviews/`、`docs/plans/`
-- **入库**：`docs/features/`、`docs/guides/`、`docs/requirements/`、`docs/archive/`、`docs/architecture/PLUGIN_DEVELOPMENT.md`、本文件
+原策略只让「对外可共享」的文档入库，暴露了两个实际问题：
 
-如需把审查报告、整改计划或基线快照纳入版本管理，删除 `.gitignore` 中对应的 `docs/reviews/` / `docs/plans/` / `docs/baseline/` 行即可。
+1. `AGENTS.md` 是编码助手的**强制约定入口**，不入库等于"换机器/协作即失效"；
+2. `PLUGIN_DEVELOPMENT.md`（入库）大量引用 `PLUGIN_ARCHITECTURE.md` / `AGENTS.md`（不入库），
+   克隆仓库者必然看到**指向不存在文件的悬空引用**。
+
+现策略：`AGENTS.md` 与 `docs/**` **全部入库**，可追溯性优先于仓库整洁度。
+仍不入库的只有 `.workbuddy/` / `.codebuddy/`（AI 工具本地数据，非项目文档）。
+入库前已扫描密钥 / 内网 IP / 凭据，无命中。
 
 > ⚠️ **该策略有一处副作用**（已记为发现项 `D-07`，整改任务 `R4-5`）：`PLUGIN_DEVELOPMENT.md` 入库但引用了不入库的 `PLUGIN_ARCHITECTURE.md`，因此克隆仓库者会看到悬空引用。策略定案前请知悉。
 
@@ -75,8 +81,7 @@ docs/
 │   └── REFACTOR_PLAN.md           # 重构计划（已归档）
 ├── architecture/                  # 架构
 │   ├── PLUGIN_ARCHITECTURE.md     # 插件化方向性架构
-│   ├── PLUGIN_DEVELOPMENT.md      # 插件开发手册
-│   └── PROJECT_OVERVIEW.md        # 单体时期分析（已过期）
+│   └── PLUGIN_DEVELOPMENT.md      # 插件开发手册
 ├── features/                      # 业务方案
 │   ├── MAIL_INBOX.md
 │   └── PROFIT_TRACKER.md
@@ -87,7 +92,8 @@ docs/
 ├── reviews/                       # 审查报告
 │   └── CODE_REVIEW_REPORT.md
 ├── plans/                         # 整改计划
-│   └── REMEDIATION_PLAN.md
+│   ├── REMEDIATION_PLAN.md
+│   └── PLUGIN_TRIAGE_PLAN.md
 └── archive/                       # 归档
     └── manual.md
 ```

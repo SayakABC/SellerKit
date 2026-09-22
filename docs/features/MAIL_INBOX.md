@@ -1,7 +1,7 @@
 # 集中邮件收件箱（Mail Inbox）— M1 / M2 / M3 已落地
 
 > 更新：2026-09-15
-> 代码入口：`electron/mail-*.ts`（主进程）、`extensions/shop-accounts/`（渲染层插件包）
+> 代码入口：`electron/mail-*.ts`（主进程）、`ui-plugins/shop-accounts/dist/`（渲染层 UI 岛；内建版 `extensions/shop-accounts` 已于 2026-09-16 移除）
 > 相关文档：`AGENTS.md`（架构基线）、`docs/features/PROFIT_TRACKER.md`（ae 利润模块）
 
 ---
@@ -31,9 +31,8 @@
 | 主进程 | `electron/mail-cache.ts` | 附件本地磁盘缓存（`<userData>/mail-cache`，LRU 淘汰 + GC，M3-1） |
 | 主进程 | `electron/mail-engine.ts` | IMAP 只读同步引擎：连接测试 / 增量同步 / 并发限流 / 进度广播 |
 | 主进程 | `electron/mail-handlers.ts` | IPC 通道定义（`mail-*`）与入参消毒 |
-| 渲染层 | `extensions/shop-accounts/src/mailStore.ts` | Pinia store（列表/详情/同步状态机/事件订阅） |
-| 渲染层 | `extensions/shop-accounts/src/components/MailInboxView.vue` | 收件箱主视图 |
-| 渲染层 | `extensions/shop-accounts/src/components/MailAccessDrawer.vue` | 邮箱接入抽屉（含授权码指引、连接测试） |
+| 渲染层 | `ui-plugins/shop-accounts/src/components/MailInboxView.vue` / `MailAccessDrawer.vue` / `src/mailStore.ts` | 收件箱视图 + 邮箱接入（岛内闭环：填授权码 → 测试连接 → 保存并同步）与收件箱 store（同步状态机 / 未读统计） |
+| 渲染层 | `ui-plugins/shop-accounts/src/api.js` / `bridge.js` | 邮件 API 层与 `__sk` 桥封装（经 mail 能力域） |
 
 ### 2.2 数据模型（`sk_mail_*`）
 

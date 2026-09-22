@@ -294,14 +294,20 @@
 
   window.__sk = api;
 
-  // ---- 握手：DOM 就绪后向宿主报告；宿主回 boot 前重试（宿主监听器注册晚于 iframe 首帧） ----
-  var retries = 0;
-  var MAX_RETRIES = 6;
+  // ---- 握手：DOM 就绪后向宿主报告；宿主回 boot 前**持续**重试 ----
+  //
+  // 纪律（2026-09-21 修正）：必须一直重试到 token 落地，不能设「放弃阈值」。
+  // 原先写作最多 6 次、退避 250*retries，累计约 3.75s 后永久停止——宿主侧 message 监听器
+  // 若晚于该窗口注册（冷启动、宿主窗口刚恢复、iframe 被后台挂起后恢复、宿主 HMR 重挂），
+  // hello 就再也送不出去，岛将永久停在「未握手」：拿不到 --wb-* 令牌（浅色回退 → 与宿主主题不一致）、
+  // 所有 call 都挂在 ready 上（界面永久「加载中」），且没有任何自愈路径。
+  // 代价仅为每 ≤2s 一条极小的 postMessage；iframe 已 detached 时 parentPost 自身会静默丢弃。
+  var helloDelay = 250;
   function hello() {
-    if (token !== null) return; // 已 boot
+    if (token !== null) return; // 已 boot，停止重试
     parentPost({ __sk: 1, type: TYPE.hello });
-    retries += 1;
-    if (retries < MAX_RETRIES) setTimeout(hello, 250 * retries);
+    helloDelay = Math.min(Math.round(helloDelay * 1.6), 2000); // 指数退避封顶 2s
+    setTimeout(hello, helloDelay);
   }
   function start() {
     if (document.readyState === 'loading') {

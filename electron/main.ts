@@ -29,6 +29,8 @@ require('./ae-receiver');
 require('./ae-handlers');
 // 店铺账号管家 IPC（账号元数据 CRUD + safeStorage 加密的密码字段）
 require('./shop-accounts-handlers');
+// 企业管理 IPC（企业基本信息 CRUD + 欧代/土代/德国包装法等合规资料）
+require('./company-handlers');
 // 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
 const mailEngine = require('./mail-engine');
 require('./mail-handlers');

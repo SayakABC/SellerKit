@@ -182,7 +182,7 @@ export default {
 | 能力 id | 对应 `ctx.host.*` | 声明规则 |
 |---------|-------------------|----------|
 | `storage` | `host.storage` 跨命名空间读写 | 自身命名空间 `modules.<pluginId>` 声明后恒放行、无需列入 `namespaces`；访问**其他**命名空间须列入 `namespaces`（L2 的 `ctx.storage` 走 raw host 直通，连声明都不需要） |
-| `clipboard` | `host.clipboard.writeText` | `actions` 省略 = 该域全部放行 |
+| `clipboard` | `host.clipboard.writeText` | `actions` 省略 = 该域全部放行。**若声明 `actions`，动作名必须写 `write`（不是 `writeText`）** —— 权限门按 `clipboard.write` 判定（见 `gatedHost.ts`），写成 `writeText` 会报「动作越权：clipboard.write 不在声明白名单」；稳妥写法 `["write", "writeText"]` |
 | `http` | `host.http.get/post` | `allow`（URL 前缀，支持尾部 `*`）**省略 = 禁止任何请求** |
 | `dialog` | `host.dialog.openFile` | 同上，`actions` 省略 = 全放行 |
 | `db` | `host.db.call(domain, op, payload)` | **`domains` 必填**（业务域白名单，如 `shop-accounts`）+ `actions`（操作名白名单）；**不放行任意 SQL**，只允许宿主 `DB_OPS` 登记的业务操作 |

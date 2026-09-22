@@ -36,7 +36,7 @@ export const UI_MSG = {
  * 用途：部分引擎的 getComputedStyle 索引枚举不返回自定义属性，仅靠 cs[i] 会拿不到令牌；
  * 显式清单用 getPropertyValue 逐个读取，保证 UI 岛一定能拿到主题色。新增令牌需同步此处与 index.css。
  */
-const WB_THEME_TOKENS = [
+export const WB_THEME_TOKENS = [
   '--wb-bg',
   '--wb-surface',
   '--wb-surface-2',
@@ -57,6 +57,7 @@ const WB_THEME_TOKENS = [
   '--wb-accent-soft',
   '--wb-hover',
   '--wb-overlay',
+  '--wb-shadow',
   '--wb-radius',
 ] as const;
 
@@ -362,10 +363,23 @@ export function attachUiIslandBridge(iframe: HTMLIFrameElement, opts: UiIslandBr
 
   window.addEventListener('message', onMessage);
 
+  /**
+   * iframe 文档加载完成时补发 boot —— 只作安全网，用于「hello 早于宿主监听器注册而丢失」的情形。
+   * 仅在尚未握手（token === null）时补发：已握手时不重复发，避免 token 轮转把在途调用判为串台而丢弃。
+   * 常态握手仍由 iframe 侧的 hello（持续重试）驱动。
+   */
+  function onFrameLoad(): void {
+    if (!alive) return;
+    if (token !== null) return;
+    issueBoot();
+  }
+  iframe.addEventListener('load', onFrameLoad);
+
   return {
     dispose(): void {
       if (!alive) return;
       alive = false;
+      iframe.removeEventListener('load', onFrameLoad);
       window.removeEventListener('message', onMessage);
       unsubBySubId.forEach((off) => off());
       unsubBySubId.clear();

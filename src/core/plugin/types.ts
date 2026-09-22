@@ -67,6 +67,24 @@ export interface PluginManifest {
   kind?: 'ui';
   /** 能力声明；内建插件（Level 0）恒放行，外置插件（Level 1）缺省 = 全部拒绝 */
   capabilities?: PluginCapability[];
+  /**
+   * UI 岛设置面板贡献（仅 kind === 'ui' 有意义）：
+   * 声明后宿主设置中心自动出现该岛的分类（id = `<pluginId>:settings`），内容区以同源 iframe 岛承载，
+   * 复用 __sk 受控桥（同一 capability 白名单，无额外权限）。缺省不贡献。
+   */
+  settings?: UiIslandSettingsContrib;
+}
+
+/** UI 岛设置面板贡献声明（manifest.settings） */
+export interface UiIslandSettingsContrib {
+  /** 设置页入口：岛目录相对路径（须以 ./ 开头，形如 ./dist/settings.html） */
+  entry: string;
+  /** 设置中心左侧分类名（缺省取 manifest.displayName || name） */
+  displayName?: string;
+  /** 分类图标（SettingsModal 图标白名单 key；缺省 box） */
+  icon?: string;
+  /** 分类排序（越小越靠前；general=0、插件贡献默认 100、插件管理=999） */
+  order?: number;
 }
 
 /** 贡献点类型（宿主定义的扩展槽位） */

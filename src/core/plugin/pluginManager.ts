@@ -33,7 +33,7 @@ import { createEnabledOps } from './managerEnabled';
 import { createSettingsOps } from './managerSettings';
 import { createOverviewOps, type PluginOverview } from './managerOverview';
 import type { AuditEntry } from './security';
-import type { HostApi, SettingPanelDef } from './sdk';
+import type { HostApi, SettingPanelDef, UiIslandSettingPanelDef } from './sdk';
 
 export type { ActivationResult } from './managerActivate';
 export type { PluginOverview } from './managerOverview';
@@ -95,6 +95,8 @@ export interface BuiltinPluginManager {
   ensureSettingPanelsLoaded(): Promise<void>;
   /** 设置页分类（过滤已停用插件；按 order 升序） */
   getSettingCategories(): SettingPanelDef[];
+  /** UI 岛设置分类（manifest.settings 贡献；已安装且启用的岛，按 order 升序） */
+  getIslandSettingCategories(): UiIslandSettingPanelDef[];
 }
 
 export function createBuiltinPluginManager(): BuiltinPluginManager {
@@ -112,7 +114,8 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     getPluginCommands,
   } = createActivateOps(ctx);
   const { setPluginEnabled, applyDisabled } = createEnabledOps(ctx);
-  const { ensureSettingPanelsLoaded, getSettingCategories } = createSettingsOps(ctx);
+  const { ensureSettingPanelsLoaded, getSettingCategories, getIslandSettingCategories } =
+    createSettingsOps(ctx);
   const { overview } = createOverviewOps(ctx);
 
   /** 侧栏/模块列表数据源：由视图贡献注册表派生（注册表为单一事实源） */
@@ -182,6 +185,7 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
     applyDisabled,
     ensureSettingPanelsLoaded,
     getSettingCategories,
+    getIslandSettingCategories,
     container: ctx.container,
     bus: ctx.bus,
     contributions: ctx.contributions,

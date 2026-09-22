@@ -121,6 +121,10 @@ const sanitizeShopAccountInput = (payload: any) => {
     ...(platforms === undefined ? {} : { platforms }),
     // 开店时间：仅字符串才透传（缺省 = 主进程/db 层保持原值），格式由 db 层归一化
     ...(typeof payload?.openedAt === 'string' ? { openedAt: s(payload.openedAt, 10) } : {}),
+    // 关联企业 id：仅数字才透传（缺省 = 保持原值；0 = 取消关联），存在性由 db 层校验
+    ...(typeof payload?.companyId === 'number' && Number.isFinite(payload.companyId)
+      ? { companyId: payload.companyId }
+      : {}),
     status: s(payload?.status, 20),
     tags: s(payload?.tags, 200),
     note: s(payload?.note, 2000),
@@ -131,7 +135,7 @@ const sanitizeShopAccountInput = (payload: any) => {
 /**
  * 批量修改入参消毒：结构白名单（仅非敏感字段）+ 数量/长度约束。
  * - ids：正整数数组，去重，上限 5000（与主进程 handler 口径一致）
- * - patch：status / phone / alipay / ziniaoAccount / erpAccount / company / tags / note
+ * - patch：status / phone / alipay / ziniaoAccount / erpAccount / companyId / tags / note
  *   / platforms，未声明字段一律剔除
  */
 const sanitizeShopAccountBatchInput = (payload: any) => {
@@ -163,8 +167,9 @@ const sanitizeShopAccountBatchInput = (payload: any) => {
   if (typeof patchRaw.erpAccount === 'string') {
     patch.erpAccount = s(patchRaw.erpAccount, 120);
   }
-  if (isPlainObject(patchRaw.company) && (patchRaw.company.mode === 'set' || patchRaw.company.mode === 'append')) {
-    patch.company = { mode: patchRaw.company.mode, value: s(patchRaw.company.value, 120) };
+  // 关联企业：下拉选择（仅覆盖语义）。0 = 取消关联；> 0 = 该企业 id（非整数/负数一律丢弃）
+  if (typeof patchRaw.companyId === 'number' && Number.isInteger(patchRaw.companyId) && patchRaw.companyId >= 0) {
+    patch.companyId = Math.min(patchRaw.companyId, 2147483647);
   }
   if (isPlainObject(patchRaw.tags) && (patchRaw.tags.mode === 'set' || patchRaw.tags.mode === 'append')) {
     patch.tags = { mode: patchRaw.tags.mode, value: s(patchRaw.tags.value, 200) };
@@ -187,6 +192,68 @@ const sanitizeShopAccountBatchInput = (payload: any) => {
     patch.platforms = { mode: patchRaw.platforms.mode, values };
   }
   return { ids, patch };
+};
+
+/**
+ * 企业入参消毒：结构白名单 + 长度约束（主进程再做一次业务口径校验）。
+ * 字段缺省（非字符串）= 主进程保持原值；字符串（含空串）= 覆盖/清空。
+ */
+const sanitizeCompanyInput = (payload: any) => {
+  const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  return {
+    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    name: s(payload?.name, 200),
+    unifiedCode: s(payload?.unifiedCode, 60),
+    country: s(payload?.country, 40),
+    address: s(payload?.address, 300),
+    legalPerson: s(payload?.legalPerson, 60),
+    contactName: s(payload?.contactName, 60),
+    contactPhone: s(payload?.contactPhone, 40),
+    contactEmail: s(payload?.contactEmail, 200),
+    vatNo: s(payload?.vatNo, 60),
+    eoriNo: s(payload?.eoriNo, 60),
+    status: s(payload?.status, 20),
+    note: s(payload?.note, 2000),
+  };
+};
+
+/**
+ * 合规资料（欧代/土代/德国包装法）入参消毒：结构白名单 + 长度约束。
+ * extra 为类型专属扩展字段（如德国包装法的合同号/申报年度/申报重量），
+ * 这里只做浅层键名与值长度约束，语义校验在主进程按 type 处理。
+ */
+const sanitizeCompanyProfileInput = (payload: any) => {
+  const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  let extra: Record<string, string> | undefined;
+  if (isPlainObject(payload?.extra)) {
+    const out: Record<string, string> = {};
+    let count = 0;
+    for (const [k, v] of Object.entries(payload.extra)) {
+      if (typeof k !== 'string' || k.length > 64 || count >= 30) continue;
+      count += 1;
+      out[k] = s(v, 200);
+    }
+    extra = out;
+  }
+  return {
+    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    companyId:
+      typeof payload?.companyId === 'number' && Number.isInteger(payload.companyId) && payload.companyId > 0
+        ? payload.companyId
+        : 0,
+    type: s(payload?.type, 20),
+    name: s(payload?.name, 200),
+    regNo: s(payload?.regNo, 60),
+    contactName: s(payload?.contactName, 60),
+    contactPhone: s(payload?.contactPhone, 40),
+    contactEmail: s(payload?.contactEmail, 200),
+    address: s(payload?.address, 300),
+    ...(typeof payload?.effectiveAt === 'string' ? { effectiveAt: s(payload.effectiveAt, 10) } : {}),
+    ...(typeof payload?.expireAt === 'string' ? { expireAt: s(payload.expireAt, 10) } : {}),
+    status: s(payload?.status, 20),
+    note: s(payload?.note, 2000),
+    ...(extra === undefined ? {} : { extra }),
+  };
 };
 
 /** 市场安装条目消毒：结构白名单（主进程还会再净化一次，这里是第一道形状约束） */
@@ -609,6 +676,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }),
   shopAccountBatchUpdate: (payload: any) =>
     ipcRenderer.invoke('shop-account-batch-update', sanitizeShopAccountBatchInput(payload)),
+  // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法合规资料；无密码类凭据，不进加密列）----
+  companyDbEnsure: () => ipcRenderer.invoke('company-db-ensure'),
+  companyList: (payload: any) =>
+    ipcRenderer.invoke('company-list', {
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+    }),
+  companyGet: (payload: any) =>
+    ipcRenderer.invoke('company-get', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  companySummary: () => ipcRenderer.invoke('company-summary'),
+  companyUpsert: (payload: any) =>
+    ipcRenderer.invoke('company-upsert', sanitizeCompanyInput(payload)),
+  companyDelete: (payload: any) =>
+    ipcRenderer.invoke('company-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  companyProfileUpsert: (payload: any) =>
+    ipcRenderer.invoke('company-profile-upsert', sanitizeCompanyProfileInput(payload)),
+  companyProfileDelete: (payload: any) =>
+    ipcRenderer.invoke('company-profile-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   pluginsScan: () => ipcRenderer.invoke('plugins-scan'),
   pluginsReadEntry: (payload: any) =>

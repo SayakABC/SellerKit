@@ -5,6 +5,15 @@ release/
 .vite/
 *.log
 
+# ---- 例外：无构建步骤的岛，dist/ 即手写源码 ----
+# excel-copy / order-insight 没有 package.json 与 vite.config，源码直接写在 dist/ 下
+# （manifest.entry = ./dist/index.html）。若不放开例外，`git add -A` 只会收录
+# manifest.json + README.md，仓库里会存下一个 entry 指向不存在文件的坏岛。
+# 新增此类岛时要同法补一行；有 src/ + 构建脚本的岛（ae-profit / shop-accounts /
+# sk-ui-starter）保持忽略，它们提交的是 src/。
+!ui-plugins/excel-copy/dist/
+!ui-plugins/order-insight/dist/
+
 # ============ 系统文件 ============
 .DS_Store
 Thumbs.db
@@ -13,17 +22,14 @@ Thumbs.db
 .workbuddy/
 .codebuddy/
 
-# ============ AI 协作文档（不入库） ============
-# 注：docs/ 下「对外/同类可共享」的文档（PLUGIN_DEVELOPMENT / PROFIT_TRACKER / MAIL_INBOX /
-#     USER_GUIDE / Requirements / manual）正常入库；以下「本地内部文档」不入库（沿用既有策略）。
-#     路径随 docs 目录整理同步更新（2026-09-16）。
-#     如需把审查报告纳入版本管理，删掉 docs/reviews/ 这一行即可。
-AGENTS.md
-docs/baseline/
-docs/architecture/PLUGIN_ARCHITECTURE.md
-docs/architecture/PROJECT_OVERVIEW.md
-docs/reviews/
-docs/plans/
+# ============ AI 协作文档：**已改为入库**（R4-5 / D-07，2026-09-16 决策） ============
+# 原策略只让「对外可共享」的文档入库，导致两类实际问题：
+#   1. AGENTS.md 是编码助手的强制约定入口，不入库等于"换机器/协作即失效"；
+#   2. PLUGIN_DEVELOPMENT.md（入库）大量引用 PLUGIN_ARCHITECTURE.md / AGENTS.md（不入库），
+#      克隆仓库者必然看到指向不存在文件的悬空引用。
+# 现策略：**全部文档入库**，理由是可追溯性优先于仓库整洁度。
+#   仍保持不入库的仅：.workbuddy/ / .codebuddy/（AI 工具本地数据，非项目文档）。
+# 入库前已扫描密钥/内网 IP/凭据：无命中。
 
 # ============ 环境变量 ============
 # 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example

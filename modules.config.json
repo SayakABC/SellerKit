@@ -9,10 +9,18 @@
     "  profiles       预设名 → 模块 ID 列表 的映射；决定「打哪些模块进包」",
     "  enabledModules 兜底列表，当 profile 不在 profiles 中命中时使用",
     "",
-    "预设含义：",
-    "  minimal   仅核心 Excel 复制",
-    "  standard  核心 + 便签 + 订单归类（拿货对账已并入 order-insight 同页 Tab）+ 店铺账号管家",
+    "预设含义（2026-09-22 起全部业务功能已下记为市场分发的 UI 岛）：",
+    "  minimal   纯外壳：不含任何内建业务模块（空数组是**有意**的，见 vite.config.ts 的 ?? 说明）",
+    "  standard  外壳 + 便签（默认）",
     "  pro       完整包（当前与 standard 相同）",
+    "",
+    "已下记的模块（均转为 ui-plugins/<id>，从插件中心安装）：",
+    "  店铺账号管家  → ui-plugins/shop-accounts",
+    "  订单归类      → ui-plugins/order-insight",
+    "  TV模版        → ui-plugins/excel-copy",
+    "下记 ≠ 删除：宿主侧业务库与 db 能力域原样保留（electron/order-db.ts、purchase-db.ts、",
+    "excel-copy 域等），供岛照常调用，数据零迁移；extensions/<id>/ 源码留作算法参考，不再进构建。",
+    "下记的原因见 AGENTS 红线 23：内建记录会占用同名 id，导致从市场安装的同名岛无法注册。",
     "",
     "新增业务模块：",
     "  1) 在 src/modules/<id>/（内建）或 extensions/<id>/src/（视图插件包）下实现 meta.ts + index.ts",
@@ -23,17 +31,17 @@
     "",
     "切换打包范围：",
     "  MODULE_PROFILE=minimal npm run build            预设",
-    "  MODULE_IDS=excel-copy,quick-note npm run build  自定义清单（优先级最高）",
+    "  MODULE_IDS=quick-note npm run build             自定义清单（优先级最高）",
     "  npm run dist:select                             交互式勾选（scripts/select-build.js）"
   ],
 
   "profile": "standard",
 
   "profiles": {
-    "minimal": ["excel-copy"],
-    "standard": ["excel-copy", "quick-note", "order-insight", "shop-accounts"],
-    "pro": ["excel-copy", "quick-note", "order-insight", "shop-accounts"]
+    "minimal": [],
+    "standard": ["quick-note"],
+    "pro": ["quick-note"]
   },
 
-  "enabledModules": ["excel-copy"]
+  "enabledModules": ["quick-note"]
 }

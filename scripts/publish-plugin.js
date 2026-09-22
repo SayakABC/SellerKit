@@ -142,6 +142,42 @@ if (!fs.existsSync(entryPath)) {
   }
 }
 
+// ---- UI 岛设置入口校验（manifest.settings.entry，2026-09-18）：宿主设置中心以 iframe 岛加载该页 ----
+// UI 形态包只打包 entry 所在子树，故设置入口必须与该子树同根，否则打出来的 zip 缺文件。
+if (isUi && manifest.settings && typeof manifest.settings === 'object') {
+  const settingsEntry = typeof manifest.settings.entry === 'string' ? manifest.settings.entry : '';
+  if (!settingsEntry) {
+    console.error('[publish-plugin] manifest.settings 存在但缺少 entry');
+    process.exit(1);
+  }
+  if (!settingsEntry.startsWith('./') || settingsEntry.includes('..')) {
+    console.error(`[publish-plugin] manifest.settings.entry 非法（须 ./ 相对且不含 ..）: ${settingsEntry}`);
+    process.exit(1);
+  }
+  if (!settingsEntry.toLowerCase().endsWith('.html')) {
+    console.error(`[publish-plugin] manifest.settings.entry 须指向 HTML 入口（如 ./dist/settings.html）: ${settingsEntry}`);
+    process.exit(1);
+  }
+  const settingsPath = path.resolve(pluginDir, settingsEntry);
+  if (!fs.existsSync(settingsPath)) {
+    console.error(
+      `[publish-plugin] manifest.settings.entry 指向的文件不存在: ${settingsPath}\n` +
+        '（设置入口须与 manifest.entry 同属打包子树，通常在 ./dist/ 下）',
+    );
+    process.exit(1);
+  }
+  const settingsTop = settingsEntry.replace(/^\.\//, '').split('/')[0];
+  const entryTop = entry.replace(/^\.\//, '').split('/')[0];
+  if (settingsTop !== entryTop) {
+    console.error(
+      `[publish-plugin] manifest.settings.entry 与 manifest.entry 不在同一子树 ` +
+        `(${settingsTop} vs ${entryTop})，zip 只打包 entry 子树会导致设置页缺失`,
+    );
+    process.exit(1);
+  }
+  console.log(`[publish-plugin] 设置入口校验通过: ${settingsEntry}`);
+}
+
 // ---- 遍历目录收集文件（无递归依赖，兼容旧 Node）----
 function collectFiles(dir, out = [], prefix = '') {
   for (const name of fs.readdirSync(dir)) {

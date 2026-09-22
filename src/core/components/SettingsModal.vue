@@ -152,6 +152,18 @@
             </div>
           </div>
 
+          <!-- UI 岛设置面板（manifest.settings 贡献；内容为岛产物页，iframe 岛承载） -->
+          <div v-else-if="activeIslandPanel" class="flex-1 min-h-0 p-4 flex flex-col">
+            <div class="flex-1 min-h-0 rounded-xl border border-[var(--wb-border)] overflow-hidden">
+              <IslandSettingsPanel
+                :key="activeIslandPanel.categoryId"
+                :plugin-id="activeIslandPanel.pluginId"
+                :entry="activeIslandPanel.entry"
+                :manager="manager!"
+              />
+            </div>
+          </div>
+
           <!-- 插件管理 -->
           <div v-else-if="activeCategory === 'plugins'" class="flex-1 min-h-0 p-4 flex flex-col">
             <PluginCenter v-if="manager" :manager="manager" />
@@ -169,8 +181,9 @@ import type { ModuleMeta } from '../types';
 import type { BuiltinPluginManager } from '../plugin';
 import { toast } from '../services/toast';
 import { ipc } from '../services/ipc';
-import type { SettingPanelDef } from '../plugin/sdk';
+import type { SettingPanelDef, UiIslandSettingPanelDef } from '../plugin/sdk';
 import PluginCenter from './PluginCenter.vue';
+import IslandSettingsPanel from './IslandSettingsPanel.vue';
 
 const props = defineProps<{
   modules: ModuleMeta[];
@@ -183,10 +196,17 @@ defineEmits<{ close: [] }>();
 
 /** 插件设置面板贡献（异步加载：插件包 settings.ts 入口 → manager 设置面板注册表） */
 const panelCategories = ref<SettingPanelDef[]>([]);
+/** UI 岛设置分类贡献（manifest.settings；随岛安装/卸载/启停即时增减） */
+const islandPanels = ref<UiIslandSettingPanelDef[]>([]);
 
 /** 当前面板分类（插件贡献；分类与内容随插件启停即时增减） */
 const activePanel = computed(
   () => panelCategories.value.find((p) => p.categoryId === activeCategory.value) || null,
+);
+
+/** 当前选中的岛设置分类（内容以 iframe 岛承载） */
+const activeIslandPanel = computed(
+  () => islandPanels.value.find((p) => p.categoryId === activeCategory.value) || null,
 );
 
 /** 分类导航：通用 + 插件面板贡献（按 order 升序）+ 插件管理（仅 manager 存在时） */
@@ -197,9 +217,16 @@ const categories = computed(() => {
     icon: p.icon || 'box',
     order: p.order ?? 100,
   }));
+  const islandCats = islandPanels.value.map((p) => ({
+    id: p.categoryId,
+    name: p.categoryName,
+    icon: p.icon || 'box',
+    order: p.order ?? 100,
+  }));
   return [
     { id: 'general', name: '通用', icon: 'box', order: 0 },
     ...pluginCats,
+    ...islandCats,
     ...(props.manager ? [{ id: 'plugins', name: '插件', icon: 'puzzle', order: 999 }] : []),
   ].sort((a, b) => a.order - b.order);
 });
@@ -241,12 +268,14 @@ onMounted(async () => {
           await props.manager?.ensureSettingPanelsLoaded();
           if (!props.manager) return;
           panelCategories.value = props.manager.getSettingCategories();
+          islandPanels.value = props.manager.getIslandSettingCategories();
           // 当前分类对应插件被停用时回退「通用」，避免内容区空白
           const cur = activeCategory.value;
           if (
             cur !== 'general' &&
             cur !== 'plugins' &&
-            !panelCategories.value.some((p) => p.categoryId === cur)
+            !panelCategories.value.some((p) => p.categoryId === cur) &&
+            !islandPanels.value.some((p) => p.categoryId === cur)
           ) {
             activeCategory.value = 'general';
           }
@@ -261,6 +290,7 @@ onMounted(async () => {
     try {
       await props.manager.ensureSettingPanelsLoaded();
       panelCategories.value = props.manager.getSettingCategories();
+      islandPanels.value = props.manager.getIslandSettingCategories();
     } catch {
       /* 忽略：插件面板加载失败不影响通用/插件管理分类 */
     }
@@ -271,6 +301,10 @@ onMounted(async () => {
       activeTabId.value = panel.tabs.some((t) => t.tabId === props.initialTab)
         ? (props.initialTab as string)
         : panel.tabs[0]?.tabId ?? '';
+    } else {
+      // 岛设置分类（<pluginId>:settings）同样支持定位，内容由 iframe 岛自行渲染
+      const island = islandPanels.value.find((p) => p.categoryId === props.initialCategory);
+      if (island) activeCategory.value = island.categoryId;
     }
   }
   try {

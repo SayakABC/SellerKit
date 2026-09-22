@@ -37,8 +37,151 @@ async function unwrap<T>(p: Promise<{ success: boolean; data?: T; error?: string
   return r.data as T;
 }
 
+// ---- 「TV 模版」业务域的入参消毒 ----
+// iframe 消息不可信（红线 3）：插件可以往 db.call 里塞任意形状的载荷，
+// 而 excel-copy 的 op 会把载荷喂给 xlsx 解析与规则引擎，故一律先做结构 + 规模约束。
+const EC_MAX_RULES = 64;
+const EC_MAX_RECORDS = 50000;
+const EC_MAX_HEADERS = 256;
+const EC_MAX_FIELDS = 256;
+const EC_MAX_STR = 20000;
+const EC_RULE_TYPES = new Set(['dateOffset', 'template', 'math', 'jsExpression']);
+
+const ecStr = (v: unknown, max = EC_MAX_STR): string => (typeof v === 'string' ? v.slice(0, max) : '');
+
+/** 规则消毒：丢弃形状非法的条目（宁缺勿滥，绝不把未校验对象透给规则引擎） */
+interface EcSanitizedRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  targetField: string;
+  type: string;
+  order: number;
+  config: Record<string, string>;
+}
+
+/** 记录消毒：仅保留 id/used/order + 字符串字段表 */
+interface EcSanitizedRecord {
+  id: number;
+  used: boolean;
+  order: number;
+  fields: Record<string, string>;
+}
+
+function sanitizeRules(raw: unknown): EcSanitizedRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EcSanitizedRule[] = [];
+  for (const r of raw.slice(0, EC_MAX_RULES)) {
+    if (!r || typeof r !== 'object') continue;
+    const type = ecStr((r as { type?: unknown }).type, 32);
+    if (!EC_RULE_TYPES.has(type)) continue;
+    const cfgIn = (r as { config?: unknown }).config;
+    const cfg: Record<string, string> = {};
+    if (cfgIn && typeof cfgIn === 'object' && !Array.isArray(cfgIn)) {
+      for (const k of ['sourceField', 'packageField', 'outputFormat', 'template', 'expression', 'code']) {
+        const v = (cfgIn as Record<string, unknown>)[k];
+        if (typeof v === 'string') cfg[k] = v.slice(0, EC_MAX_STR);
+      }
+    }
+    out.push({
+      id: ecStr((r as { id?: unknown }).id, 128) || `rule_${out.length + 1}`,
+      name: ecStr((r as { name?: unknown }).name, 200),
+      enabled: (r as { enabled?: unknown }).enabled !== false,
+      targetField: ecStr((r as { targetField?: unknown }).targetField, 200),
+      type,
+      order: Number.isFinite(Number((r as { order?: unknown }).order))
+        ? Math.trunc(Number((r as { order?: unknown }).order))
+        : out.length + 1,
+      config: cfg,
+    });
+  }
+  return out;
+}
+
+/** 记录消毒：仅保留 id/used/order + 字符串字段表 */
+function sanitizeRecords(raw: unknown): EcSanitizedRecord[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EcSanitizedRecord[] = [];
+  for (const r of raw.slice(0, EC_MAX_RECORDS)) {
+    if (!r || typeof r !== 'object') continue;
+    const fieldsIn = (r as { fields?: unknown }).fields;
+    const fields: Record<string, string> = {};
+    if (fieldsIn && typeof fieldsIn === 'object' && !Array.isArray(fieldsIn)) {
+      const entries = Object.entries(fieldsIn as Record<string, unknown>).slice(0, EC_MAX_FIELDS);
+      for (const [k, v] of entries) {
+        if (typeof v === 'string') fields[String(k).slice(0, EC_MAX_HEADERS)] = v.slice(0, EC_MAX_STR);
+      }
+    }
+    const rid = (r as { id?: unknown }).id;
+    const rorder = (r as { order?: unknown }).order;
+    out.push({
+      id: Number.isFinite(Number(rid)) ? Math.trunc(Number(rid)) : out.length + 1,
+      used: (r as { used?: unknown }).used === true,
+      order: Number.isFinite(Number(rorder)) ? Math.trunc(Number(rorder)) : out.length + 1,
+      fields,
+    });
+  }
+  return out;
+}
+
 /** 业务库白名单：domain → op → 宿主 IPC 调用（禁止放行任意 SQL） */
 const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>> = {
+  // 「TV 模版」业务域：Excel 解析与字段规则求值。
+  //
+  // 为什么这两件事必须在宿主做（与 order-insight:parseExcel 同策略）：
+  //  ① 岛运行在 iframe 里，文档 CSP 是 `script-src 'self'`（electron/plugin-ui-protocol.ts），
+  //     **没有 'unsafe-eval'** —— 岛内既不能用 new Function 也不能用 eval，
+  //     而规则引擎的 jsExpression 类型（用户可在设置页写代码）必须求值 JS 表达式；
+  //  ② 岛是手写 ESM、无构建步骤，不该为读 Excel 打包一份 xlsx 依赖。
+  // 复用宿主既有实现（@/core/services/excel、@/lib/fieldProcessor）→ 与内建版行为零漂移。
+  'excel-copy': {
+    // 按路径读取并解析（对话框选用、以及启动时重载上次文件）
+    parseExcel: async (p) => {
+      const r = await ipc.importExcelByPath(String(p?.filePath ?? ''));
+      if (!r.success || !r.data) throw new Error(r.error || '读取 Excel 失败');
+      const { parseExcelBuffer } = await import('@/core/services/excel');
+      const parsed = parseExcelBuffer(r.data.data);
+      return { headers: parsed.headers, records: parsed.records ?? [] };
+    },
+    // 按字节解析（拖拽导入用：iframe 拿不到真实磁盘路径，只能把 ArrayBuffer 传过来）
+    parseExcelBuffer: async (p) => {
+      const buf = p?.data;
+      if (!(buf instanceof ArrayBuffer)) throw new Error('parseExcelBuffer: data 必须是 ArrayBuffer');
+      const { parseExcelBuffer } = await import('@/core/services/excel');
+      const parsed = parseExcelBuffer(buf);
+      return { headers: parsed.headers, records: parsed.records ?? [] };
+    },
+    // 执行字段规则（衍生列），返回新记录 + 新列名 + 错误 + 规则哈希（岛侧用它判断规则是否变更）
+    applyRules: async (p) => {
+      const { applyFieldProcessor, computeRulesHash } = await import('@/lib/fieldProcessor');
+      const rules = sanitizeRules(p?.rules);
+      const records = sanitizeRecords(p?.records);
+      const headers = (Array.isArray(p?.headers) ? p.headers : [])
+        .slice(0, EC_MAX_HEADERS)
+        .map((h: unknown) => ecStr(h, 200))
+        .filter(Boolean);
+      const result = applyFieldProcessor(records as never, headers, rules as never);
+      return {
+        records: result.records,
+        newHeaders: result.newHeaders,
+        errors: result.errors,
+        rulesHash: computeRulesHash(rules as never),
+      };
+    },
+    // 读取模板文本文件（「导入模板文件」得到 content，无需岛侧再走一次 dialog）
+    readTextFile: async (p) => unwrap(ipc.readFile(String(p?.filePath ?? ''))),
+    // 读取宿主内置模板（把 template.txt 的当前内容同步进来）
+    readDefaultTemplate: async () => {
+      const filePath = await unwrap(ipc.getDefaultTemplatePath());
+      if (!filePath) throw new Error('未找到内置模板路径');
+      const f = await unwrap(ipc.readFile(filePath));
+      return { filePath, content: f?.content ?? '' };
+    },
+    checkFileExists: async (p) => unwrap(ipc.checkFileExists(String(p?.filePath ?? ''))),
+    saveTemplateFile: (p) =>
+      unwrap(ipc.saveTemplate(String(p?.filePath ?? ''), String(p?.content ?? ''))),
+  },
+
   'shop-accounts': {
     ensure: () => unwrap(ipc.shopAccountDbEnsure()),
     list: (p) => unwrap(ipc.shopAccountList(p && typeof p === 'object' ? p : undefined)),
@@ -49,6 +192,16 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
     delete: (p) => unwrap(ipc.shopAccountDelete({ id: Number(p?.id) || 0 })),
     reveal: (p) => unwrap(ipc.shopAccountReveal({ id: Number(p?.id) || 0, field: p?.field })),
     batchUpdate: (p) => unwrap(ipc.shopAccountBatchUpdate(p)),
+    // 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法合规资料）
+    companyEnsure: () => unwrap(ipc.companyDbEnsure()),
+    companyList: (p) => unwrap(ipc.companyList(p && typeof p === 'object' ? p : undefined)),
+    companyGet: (p) => unwrap(ipc.companyGet({ id: Number(p?.id) || 0 })),
+    companySummary: () => unwrap(ipc.companySummary()),
+    companyUpsert: (p) => unwrap(ipc.companyUpsert(p)),
+    companyDelete: (p) => unwrap(ipc.companyDelete({ id: Number(p?.id) || 0 })),
+    companyProfileUpsert: (p) => unwrap(ipc.companyProfileUpsert(p)),
+    companyProfileDelete: (p) =>
+      unwrap(ipc.companyProfileDelete({ id: Number(p?.id) || 0 })),
   },
 
   // 「订单归类」业务域：视觉指纹与订单明细持久化（语义化操作，禁止任意 SQL）

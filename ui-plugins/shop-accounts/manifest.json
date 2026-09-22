@@ -1,19 +1,34 @@
 {
   "name": "shop-accounts",
   "displayName": "店铺账号管家（UI 岛）",
-  "version": "1.0.0",
-  "description": "店铺套账号集中管理 + 集中邮件收件箱（IMAP 只读）。数据经宿主 db 能力域读写，凭据只进不出。",
+  "version": "1.4.3",
+  "description": "店铺套账号集中管理（表格/卡片/分组三视图、一键复制模板、批量修改、关联企业下拉——新增/编辑与批量修改均改为选择企业）+ 企业管理（欧代/土代/德国包装法）+ 集中邮件收件箱（IMAP 只读）；设置页已迁入宿主设置中心（manifest.settings 贡献）。1.4.3 修复握手/主题：boot 前不再渲染主视图、color-scheme 正确跟随深浅主题、抽屉投影令牌补齐。数据经宿主 db/mail 能力域读写，凭据只进不出。",
   "author": "SellerKit",
-  "engines": { "sellerkit": ">=1.0.0" },
+  "engines": {
+    "sellerkit": ">=1.0.0"
+  },
   "entry": "./dist/index.html",
   "kind": "ui",
   "activationEvents": [],
   "capabilities": [
-    { "id": "storage", "namespaces": ["shop-accounts"] },
-    { "id": "clipboard", "actions": ["writeText"] },
+    {
+      "id": "storage",
+      "namespaces": [
+        "shop-accounts"
+      ]
+    },
+    {
+      "id": "clipboard",
+      "actions": [
+        "write",
+        "writeText"
+      ]
+    },
     {
       "id": "db",
-      "domains": ["shop-accounts"],
+      "domains": [
+        "shop-accounts"
+      ],
       "actions": [
         "ensure",
         "list",
@@ -23,13 +38,31 @@
         "upsert",
         "delete",
         "reveal",
-        "batchUpdate"
+        "batchUpdate",
+        "companyEnsure",
+        "companyList",
+        "companyGet",
+        "companySummary",
+        "companyUpsert",
+        "companyDelete",
+        "companyProfileUpsert",
+        "companyProfileDelete"
       ]
     },
-    { "id": "secrets", "domains": ["shop-accounts"], "actions": ["status"] },
+    {
+      "id": "secrets",
+      "domains": [
+        "shop-accounts"
+      ],
+      "actions": [
+        "status"
+      ]
+    },
     {
       "id": "mail",
-      "domains": ["mail"],
+      "domains": [
+        "mail"
+      ],
       "actions": [
         "ensure",
         "stats",
@@ -57,5 +90,11 @@
         "providers"
       ]
     }
-  ]
+  ],
+  "settings": {
+    "entry": "./dist/settings.html",
+    "displayName": "账号管家",
+    "icon": "key",
+    "order": 50
+  }
 }

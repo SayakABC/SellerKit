@@ -44,7 +44,7 @@ npm run dist:select  # 交互式勾选模块 → 构建 → 出安装包
 SellerKit/
 ├── electron/                    # 主进程（CommonJS / require）
 │   ├── main.ts                  # 入口：窗口、生命周期、electron-store
-│   ├── preload.ts               # contextBridge → window.electronAPI（130 个 invoke 通道）
+│   ├── preload.ts               # contextBridge → window.electronAPI（133 个 invoke 通道，由 npm run verify 校验）
 │   ├── ipc-handlers.ts          # 通用 IPC + 网络请求转发
 │   ├── http-client.ts           # Electron net 请求客户端（协议/方法白名单）
 │   ├── *-db.ts                  # SQLite 数据访问层（mail / order / purchase / ae / shop-accounts）
@@ -110,7 +110,7 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 - **禁止硬编码色值**，一律用 `var(--wb-*)`；新颜色先在 `src/styles/index.css` 两套主题各定义令牌。
 - 主色背景上的文字必须用 `--wb-primary-contrast`（不可写死 `text-white`）。
 
-> 完整规则（含 22 条红线）见 [`AGENTS.md`](AGENTS.md)；当前状态快照见 [`docs/baseline/PROJECT_BASELINE.md`](docs/baseline/PROJECT_BASELINE.md)。
+> 完整规则（含 23 条红线）见 [`AGENTS.md`](AGENTS.md)；当前状态快照见 [`docs/baseline/PROJECT_BASELINE.md`](docs/baseline/PROJECT_BASELINE.md)。
 
 ---
 
@@ -135,21 +135,38 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 | [`docs/architecture/PLUGIN_DEVELOPMENT.md`](docs/architecture/PLUGIN_DEVELOPMENT.md) | 外置插件与 UI 岛开发、调试、发布 |
 | [`docs/reviews/CODE_REVIEW_REPORT.md`](docs/reviews/CODE_REVIEW_REPORT.md) | 代码与文档审查报告（含风险分级与整改建议） |
 | [`docs/guides/USER_GUIDE.md`](docs/guides/USER_GUIDE.md) | 用户使用指南 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 + **发布流程与发布前检查清单** |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南（环境 / 分支 / 提交规范 / 门禁 / PR 清单） |
 
 ---
 
 ## 质量现状（2026-09-16）
 
-项目**没有自动化测试、没有 ESLint/Prettier**，回归依赖 `vue-tsc --noEmit` 类型检查 + 手工冒烟脚本：
+六项门禁全部为**本地手动执行**（**项目仍无 CI**，这是当前最大的流程缺口）：
 
 ```bash
-npx vue-tsc --noEmit                          # 渲染进程类型检查
-npx tsc -p tsconfig.electron.json --noEmit    # 主进程类型检查
-npm run plugins:sandbox:smoke                 # 插件沙箱全链路冒烟
-npm run mail:smoke                            # 邮件引擎冒烟
+npm run lint                                  # ESLint（门禁标准：error 数 = 0）
+npm run verify                                # IPC 契约校验（preload 键 ↔ types 声明 ↔ 主进程通道）
+npm test                                      # vitest 单元测试（src/lib 纯函数层 / IPC 注册契约 / 色卡字典）
+npx vue-tsc --noEmit                          # 渲染进程 + tests 类型检查
+npx tsc -p tsconfig.electron.json --noEmit    # 主进程类型检查（strict:false + noImplicitAny:true）
+npm run build                                 # 生产构建
 ```
 
-已知风险（依赖侧）：`xlsx@0.18.5` 存在未修复 CVE（npm 上无补丁版本）、Electron 33 与 Vite 5 均已 EOL。详见审查报告。
+手工冒烟（需环境）：
+
+```bash
+npm run plugins:sandbox:smoke                 # 插件沙箱全链路：boot → command → call → deactivate → token 拒绝
+npm run mail:smoke                            # 邮件引擎冒烟（需真实 IMAP 凭据 MAIL_USER / MAIL_PASS）
+```
+
+**重要**：`npm test` 全绿 ≠ 整体已验证。单元测试只覆盖 `src/lib/` 纯函数层、`electron/ipc-util.ts`
+注册契约与款色色卡；**组件 / Pinia store / 主进程业务逻辑 / 插件沙箱均无自动化覆盖**，
+这些改动仍须手动回归（启动 / 导入 / 预览 / 复制 / 设置 / 主题 / 插件启停 / ⌘K / 邮件同步）。
+
+历史风险已处置：`xlsx` 已换源至 SheetJS 官方 CDN 版本（消除 CVE-2023-30533 / CVE-2024-22363）；
+Electron 33 → 44.4.1、Vite 5.4 → 8.3 均已升级（详见 [`CHANGELOG.md`](CHANGELOG.md)）。
+详见 [`docs/reviews/CODE_REVIEW_REPORT.md`](docs/reviews/CODE_REVIEW_REPORT.md)。
 
 ---
 

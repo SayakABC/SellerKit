@@ -49,6 +49,12 @@ import type {
   ShopAccountSummary,
   ShopAccountBatchUpdateInput,
   ShopAccountBatchUpdateResult,
+  CompanyStatus,
+  CompanyItem,
+  CompanyDetail,
+  CompanySummary,
+  CompanyUpsertInput,
+  CompanyProfileUpsertInput,
   MailAccountItem,
   MailAccountUpsertInput,
   MailMessageItem,
@@ -241,6 +247,15 @@ export interface ElectronApi {
   shopAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
   shopAccountReveal(payload: { id: number; field: ShopAccountSecretKey }): Promise<ApiResult<{ value: string }>>;
   shopAccountBatchUpdate(payload: ShopAccountBatchUpdateInput): Promise<ApiResult<ShopAccountBatchUpdateResult>>;
+  // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法）----
+  companyDbEnsure(): Promise<ApiResult<unknown>>;
+  companyList(payload?: { search?: string; status?: string }): Promise<ApiResult<CompanyItem[]>>;
+  companyGet(payload: { id: number }): Promise<ApiResult<CompanyDetail | null>>;
+  companySummary(): Promise<ApiResult<CompanySummary>>;
+  companyUpsert(payload: CompanyUpsertInput): Promise<ApiResult<{ id: number }>>;
+  companyDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  companyProfileUpsert(payload: CompanyProfileUpsertInput): Promise<ApiResult<{ id: number }>>;
+  companyProfileDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
   // ---- 集中邮件收件箱（IMAP 只读同步；授权码只进不出）----
   mailDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
   mailAccountList(): Promise<ApiResult<MailAccountItem[]>>;
@@ -468,6 +483,55 @@ export function shopAccountBatchUpdate(
   payload: ShopAccountBatchUpdateInput,
 ): Promise<ApiResult<ShopAccountBatchUpdateResult>> {
   return ipc.shopAccountBatchUpdate(payload);
+}
+
+// ---------------------------------------------------------------------------
+// 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法）
+// ---------------------------------------------------------------------------
+
+/** 幂等建表（企业管理视图首次激活时调用） */
+export function companyDbEnsure(): Promise<ApiResult<unknown>> {
+  return ipc.companyDbEnsure();
+}
+
+/** 企业列表（关键字/状态过滤；含已维护合规类型，不含明细） */
+export function companyList(payload?: {
+  search?: string;
+  status?: CompanyStatus | '';
+}): Promise<ApiResult<CompanyItem[]>> {
+  return ipc.companyList(payload);
+}
+
+/** 企业详情（含欧代 / 土代 / 德国包装法明细） */
+export function companyGet(id: number): Promise<ApiResult<CompanyDetail | null>> {
+  return ipc.companyGet({ id });
+}
+
+/** 汇总（企业总数 / 状态分布 / 各合规类型覆盖数 / 30 天内到期条数） */
+export function companySummary(): Promise<ApiResult<CompanySummary>> {
+  return ipc.companySummary();
+}
+
+/** 新增/更新企业 */
+export function companyUpsert(payload: CompanyUpsertInput): Promise<ApiResult<{ id: number }>> {
+  return ipc.companyUpsert(payload);
+}
+
+/** 删除企业（级联删除其合规资料） */
+export function companyDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.companyDelete({ id });
+}
+
+/** 新增/更新合规资料（type 白名单：eu_rep / tr_rep / de_packaging） */
+export function companyProfileUpsert(
+  payload: CompanyProfileUpsertInput,
+): Promise<ApiResult<{ id: number }>> {
+  return ipc.companyProfileUpsert(payload);
+}
+
+/** 删除合规资料 */
+export function companyProfileDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.companyProfileDelete({ id });
 }
 
 // ---------------------------------------------------------------------------

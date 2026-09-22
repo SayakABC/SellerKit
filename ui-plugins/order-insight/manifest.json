@@ -1,8 +1,8 @@
 {
   "name": "order-insight",
   "displayName": "订单归类（UI 岛）",
-  "version": "1.0.0",
-  "description": "表格多数量订单图片识别归类：导入含主图的订单表 → 视觉模型识别款式/颜色/logo → 款色同款归并 → 透视/订单明细/数据纠正/产品库/拿货对账。数据经宿主 db 能力域读写，AI 密钥只入不出。",
+  "version": "1.2.0",
+  "description": "表格多数量订单图片识别归类：导入含主图的订单表 → 视觉模型识别款式/颜色/logo → 款色同款归并 → 透视/订单明细/数据纠正/产品库/拿货对账。1.1.0 起为本功能唯一实现（内建视图包已从宿主预设下记，id 不再被占用）；配置与旧内建版共用 modules.order-insight，列映射 / 分组维度 / 引擎设置自动继承。1.2.0 补齐内建版剩余的拿货对账能力：拿货单查看/编辑（含「取最近价」单价记忆）、待拿货缺口「取消忽略」、对账新增店铺分摊视图与时间窗筛选，数据纠正页新增款编码手工指派并修复 reclassify 漏传指纹的静默空操作。数据经宿主 db 能力域读写，AI 密钥只入不出。",
   "author": "SellerKit",
   "engines": { "sellerkit": ">=1.0.0" },
   "entry": "./dist/index.html",
@@ -10,7 +10,7 @@
   "activationEvents": [],
   "capabilities": [
     { "id": "storage", "namespaces": ["order-insight"] },
-    { "id": "clipboard", "actions": ["writeText"] },
+    { "id": "clipboard", "actions": ["write", "writeText"] },
     { "id": "dialog", "actions": ["openFile"] },
     {
       "id": "db",

@@ -27,10 +27,14 @@ const buildConfig: {
 } = JSON.parse(readFileSync(resolve(root, 'modules.config.json'), 'utf-8'));
 
 // 解析本次构建要启用的模块（优先级从高到低）：
-//   1) MODULE_IDS 环境变量（逗号分隔模块 id，交互式/自定义打包用，如 MODULE_IDS=excel-copy,quick-note）
+//   1) MODULE_IDS 环境变量（逗号分隔模块 id，交互式/自定义打包用，如 MODULE_IDS=quick-note）
 //   2) MODULE_PROFILE 环境变量命中的预设（构建时灵活覆盖）
 //   3) 文件中的 profile 字段命中的预设
 //   4) enabledModules 兜底
+//
+// 注意用 `??` 而不是 `||`：`||` 会把「预设存在但为空数组」和「预设不存在」混为一谈，
+// 于是 minimal: [] 会静默回落到 enabledModules —— 一个"纯外壳"预设根本表达不出来，
+// 而且日志里还会显示成它自己的名字，排查时极易误判。
 const profileName = process.env.MODULE_PROFILE || buildConfig.profile || 'standard';
 const rawIds = (process.env.MODULE_IDS || '')
   .split(',')
@@ -38,9 +42,7 @@ const rawIds = (process.env.MODULE_IDS || '')
   .filter(Boolean);
 const enabled: string[] = rawIds.length
   ? rawIds
-  : (buildConfig.profiles && buildConfig.profiles[profileName]) ||
-    buildConfig.enabledModules ||
-    [];
+  : buildConfig.profiles?.[profileName] ?? buildConfig.enabledModules ?? [];
 
 console.log(`[vite] build profile="${profileName}" modules=[${enabled.join(', ')}]`);
 
@@ -113,7 +115,8 @@ ${pkgLines.length ? pkgLines.join('\n') : '  // (none)'}
 
 // 设置面板入口（插件包 src/settings.ts；无设置面板的插件无条目）
 export const settingsPanelLoaders: Record<string, () => Promise<any>> = {
-${settingsLoaderLines ? settingsLoaderLines : '  // (none)'}};
+${settingsLoaderLines ? settingsLoaderLines : '  // (none)'}
+};
 `;
 
 writeFileSync(resolve(root, 'src/registry.generated.ts'), generated);

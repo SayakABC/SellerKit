@@ -89,6 +89,8 @@ export interface ShopAccountUpsertInput {
   erpPwd?: string;
   /** IMAP 授权码：账号编辑器 UI 不出现（见 src/types.ts ShopAccountSecretField），但收件箱接入流程经本通道写入 */
   mailAuthPwd?: string;
+  /** 关联企业 id（企业管理 sk_companies 主键；0 = 未关联，undefined = 保持原值） */
+  companyId?: number;
   platforms?: string[];
   /** 开店时间（YYYY-MM-DD；空串 = 清除，undefined = 保持原值） */
   openedAt?: string;
@@ -105,7 +107,8 @@ export interface ShopAccountUpsertInput {
  */
 export interface ShopAccountBatchFieldPatch {
   status?: ShopAccountStatus;
-  company?: { mode: 'set' | 'append'; value: string };
+  /** 关联企业 id：0 = 取消关联（连带清空企业名称列）；> 0 = 覆盖（名称按企业库同步） */
+  companyId?: number;
   phone?: string;
   alipay?: string;
   ziniaoAccount?: string;
@@ -121,6 +124,8 @@ export interface ShopAccountItem {
   email: string;
   phone: string;
   company: string;
+  /** 关联企业 id（sk_companies 主键；0 = 未关联） */
+  companyId: number;
   alipay: string;
   ziniaoAccount: string;
   erpAccount: string;
@@ -166,6 +171,7 @@ interface ShopAccountRow {
   email: string;
   phone: string;
   company: string;
+  company_id: number;
   alipay: string;
   ziniao_account: string;
   erp_account: string;
@@ -206,6 +212,7 @@ export function ensureShopAccountSchema(): void {
   ]);
   // 建表语句是 IF NOT EXISTS，历史库不会自动补列 → 需单独探测后 ALTER
   ensureOpenedAtColumn();
+  ensureCompanyIdColumn();
   migrateLegacyAccounts();
 }
 
@@ -217,6 +224,17 @@ function ensureOpenedAtColumn(): void {
   const columns = dbQuery<{ name: string }>(`PRAGMA table_info(sk_shop_sets)`);
   if (columns.some((column) => column.name === 'opened_at')) return;
   dbRun(`ALTER TABLE sk_shop_sets ADD COLUMN opened_at TEXT NOT NULL DEFAULT ''`);
+}
+
+/**
+ * 增量迁移：为历史库补上「关联企业 id」列（company_id，0 = 未关联）。
+ * 关联的是企业管理（sk_companies）的主键，店铺套侧不做外键约束：
+ * 企业删除后店铺套保留 company_id 仅供回显，名称列（company）仍以手动填写为准。
+ */
+function ensureCompanyIdColumn(): void {
+  const columns = dbQuery<{ name: string }>(`PRAGMA table_info(sk_shop_sets)`);
+  if (columns.some((column) => column.name === 'company_id')) return;
+  dbRun(`ALTER TABLE sk_shop_sets ADD COLUMN company_id INTEGER NOT NULL DEFAULT 0`);
 }
 
 /**
@@ -422,10 +440,17 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): number {
   const openedAt =
     input.openedAt === undefined ? String(existing?.opened_at ?? '') : normalizeOpenedAt(input.openedAt);
 
+  // 关联企业：undefined = 保持原值；0 = 取消关联；>0 = 关联该企业
+  const companyId =
+    input.companyId === undefined
+      ? coerceCompanyId(existing?.company_id ?? 0)
+      : coerceCompanyId(input.companyId);
+
   const values = [
     email,
     String(input.phone ?? existing?.phone ?? '').trim(),
     String(input.company ?? existing?.company ?? '').trim(),
+    companyId,
     String(input.alipay ?? existing?.alipay ?? '').trim(),
     String(input.ziniaoAccount ?? existing?.ziniao_account ?? '').trim(),
     String(input.erpAccount ?? existing?.erp_account ?? '').trim(),
@@ -441,7 +466,7 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): number {
   if (id > 0) {
     dbRun(
       `UPDATE sk_shop_sets SET
-         email = ?, phone = ?, company = ?, alipay = ?, ziniao_account = ?, erp_account = ?,
+         email = ?, phone = ?, company = ?, company_id = ?, alipay = ?, ziniao_account = ?, erp_account = ?,
          opened_at = ?, platforms = ?, status = ?, tags = ?, note = ?, secret_enc = ?, secret_keys = ?,
          updated_at = ?
        WHERE id = ?`,
@@ -451,9 +476,9 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): number {
   }
   const result = dbRun(
     `INSERT INTO sk_shop_sets
-       (email, phone, company, alipay, ziniao_account, erp_account, opened_at, platforms, status,
-        tags, note, secret_enc, secret_keys, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (email, phone, company, company_id, alipay, ziniao_account, erp_account, opened_at, platforms,
+        status, tags, note, secret_enc, secret_keys, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [...values, now, now],
   );
   return result.lastInsertRowid;
@@ -504,7 +529,7 @@ export function batchUpdateShopAccounts(
   // 提前判空：patch 所有字段都没声明 → 一条都不动
   const hasAny =
     patch.status !== undefined ||
-    patch.company !== undefined ||
+    patch.companyId !== undefined ||
     patch.tags !== undefined ||
     patch.note !== undefined ||
     patch.platforms !== undefined ||
@@ -540,20 +565,23 @@ export function batchUpdateShopAccounts(
         }
       }
 
-      // company：set / append（空格拼接）
-      if (isPlainObject(patch.company)) {
-        const mode = patch.company.mode === 'append' ? 'append' : 'set';
-        const v = typeof patch.company.value === 'string'
-          ? patch.company.value.replace(/\s+/g, ' ').trim()
-          : '';
-        if (mode === 'append') {
-          const prev = typeof existing.company === 'string' ? existing.company : '';
-          const next = prev ? `${prev} ${v}`.replace(/\s+/g, ' ').trim() : v;
-          sets.push('company = ?');
-          params.push(next);
+      // 关联企业：下拉选择（引用企业管理列表，仅覆盖）
+      //  0 → 取消关联（连带清空企业名称列）；> 0 → 覆盖为该企业，名称取企业库当前值；
+      //  企业已删除（查不到）→ 该字段不生效，避免写入悬空 id 后回显成「已删除的企业」
+      if (typeof patch.companyId === 'number') {
+        const id = coerceCompanyId(patch.companyId);
+        if (id === 0) {
+          sets.push('company_id = ?', 'company = ?');
+          params.push(0, '');
         } else {
-          sets.push('company = ?');
-          params.push(v);
+          const company = dbGet<{ id: number; name: string }>(
+            `SELECT id, name FROM sk_companies WHERE id = ?`,
+            [id],
+          );
+          if (company) {
+            sets.push('company_id = ?', 'company = ?');
+            params.push(id, String(company.name || '').trim());
+          }
         }
       }
 
@@ -639,6 +667,7 @@ function toItem(row: ShopAccountRow): ShopAccountItem {
     email: row.email,
     phone: row.phone,
     company: row.company,
+    companyId: coerceCompanyId(row.company_id),
     alipay: row.alipay,
     ziniaoAccount: row.ziniao_account,
     erpAccount: row.erp_account,
@@ -656,6 +685,12 @@ function toItem(row: ShopAccountRow): ShopAccountItem {
 function coerceStatus(value: unknown): ShopAccountStatus {
   const v = String(value || '').trim();
   return (SHOP_ACCOUNT_STATUSES as string[]).includes(v) ? (v as ShopAccountStatus) : 'active';
+}
+
+/** 关联企业 id 归一化：非负整数（非法值 / 负数一律按「未关联」处理） */
+function coerceCompanyId(value: unknown): number {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function normalizePlatforms(input: unknown): string[] {

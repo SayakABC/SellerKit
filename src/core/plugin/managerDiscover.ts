@@ -107,7 +107,16 @@ export function createDiscoverOps(ctx: ManagerContext): {
    *  新增时合成 loaded/installed 通知 → 宿主刷新侧栏（市场安装 UI 包后入口即时可见）；
    *  同 id 版本变更（市场更新落盘）→ 重建 manifest/权限门面并再次广播；同版本幂等跳过。 */
   function registerUiIsland(p: ExternalPluginDescriptor): void {
-    if (ctx.records.has(p.id)) return;
+    if (ctx.records.has(p.id)) {
+      // 内建记录占用同名 id → UI 岛注册不进 uiIslands，表现为「装上了但没入口、市场按钮不变」。
+      // 常见成因：把 UI 岛 id 登记进了 modules.config.json 的 profiles（AGENTS.md 红线 23）。
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[plugin] UI 岛 "${p.id}" 与内建插件同名，已跳过注册（内建不可被覆盖）。` +
+          `请从 modules.config.json 的 profiles 中移除该 id 后重启宿主。`,
+      );
+      return;
+    }
     if (p.manifest.kind !== 'ui') return;
     const existing = ctx.uiIslands.get(p.id);
     if (existing && existing.manifest.version === p.manifest.version) return;

@@ -1,0 +1,141 @@
+/* ============================================================
+   店铺账号管家 UI 岛 · 全局样式基线
+   职责：
+    1. 提供 --wb-* 设计令牌的本地回退值（宿主 boot 时会把真实令牌以内联样式写到 <html>，
+       内联优先级高于本文件的 :root，因此这里是"兜底"而非"覆盖"）；
+    2. 补齐宿主 src/styles/index.css 的 @layer components 全局控件主题化
+       （输入框 / 下拉 / 日期控件 / .wb-input / 滚动条），
+       使复用自内建插件的组件（AccountEditor 等）在岛内观感与宿主一致。
+   约定（对齐 UI 岛模板 sk-ui-starter）：岛内消费 --wb-* 一律带回退值，
+   避免主题令牌尚未注入（首帧）或注入失败时整页配色/边框失效。
+   ============================================================ */
+:root {
+  color-scheme: light;
+
+  --wb-bg: #f6f7f9;
+  --wb-surface: #ffffff;
+  --wb-surface-2: #fbfcfd;
+  --wb-border: #e8eaed;
+  --wb-text: #1f2328;
+  --wb-text-muted: #8a909a;
+  --wb-primary: #2b2f36;
+  --wb-primary-hover: #171a1f;
+  --wb-primary-soft: #eff1f4;
+  --wb-primary-contrast: #ffffff;
+  --wb-success: #16a34a;
+  --wb-success-soft: #e9f7ee;
+  --wb-warning: #b45309;
+  --wb-warning-soft: #fdf1e3;
+  --wb-danger: #dc2626;
+  --wb-danger-soft: #fdecec;
+  --wb-accent: #5a6472;
+  --wb-accent-soft: #eef1f4;
+  --wb-hover: #e8ebf0;
+  --wb-overlay: rgba(23, 26, 33, 0.4);
+  /* 抽屉/浮层投影色。宿主 index.css 有此项，但一度未列入桥的注入清单，
+     缺失时 box-shadow 的 var() 解析失败、整条声明被丢弃（抽屉会完全没有投影）。
+     这里给出与宿主浅色主题一致的兜底值。 */
+  --wb-shadow: rgba(23, 26, 33, 0.18);
+  --wb-radius: 12px;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Helvetica Neue', Arial,
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+#app {
+  height: 100%;
+}
+
+@layer components {
+  /* 输入控件统一主题化（与宿主 @layer components 等价） */
+  input[type='text'],
+  input[type='search'],
+  input[type='password'],
+  input[type='email'],
+  input[type='date'],
+  input[type='datetime-local'],
+  input[type='month'],
+  input[type='time'],
+  input[type='number'],
+  input:not([type]),
+  textarea,
+  select {
+    background-color: var(--wb-surface-2);
+    color: var(--wb-text);
+  }
+
+  /* 跟随宿主主题：color-scheme 由 src/theme.js 按 --wb-bg 亮度回写到 <html>，
+     此处必须 inherit，写死 light 会让深色主题下的日期面板/滚动条发白 */
+  input[type='date'],
+  input[type='datetime-local'],
+  input[type='month'],
+  input[type='time'] {
+    color-scheme: inherit;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--wb-text-muted);
+  }
+
+  select option {
+    background-color: var(--wb-surface);
+    color: var(--wb-text);
+  }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: var(--wb-primary);
+  }
+
+  /* 通用输入控件（与宿主 .wb-input 同义） */
+  .wb-input {
+    width: 100%;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    border: 1px solid var(--wb-border);
+    border-radius: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .wb-input:focus {
+    outline: none;
+    border-color: var(--wb-primary);
+    box-shadow: 0 0 0 1px var(--wb-primary);
+  }
+}
+
+/* 滚动条（与宿主观感一致） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--wb-border);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wb-text-muted);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -61,11 +61,18 @@ export const moduleViewLoaders = Record<string, ...> = { 'excel-copy': () => imp
 > **勘误（2026-09-22，修复时实测发现）**：本节初稿还写了「并顺带把 492 KB 的 `xlsx` 打回包」。
 > 修复过程中对比构建产物后确认**该归因不成立**：`xlsx`（492 KB）在**默认预设下同样在包里**
 > （`modules=[quick-note]`、registry 无 excel-copy 时依然产出 `xlsx-*.js`），因为宿主必须为
-> 岛的 `db[excel-copy]` 域提供 Excel 解析（CSP 禁 `unsafe-eval`，解析只能留在宿主），
-> 于是 `host.ts → core/services/excel → lib/excelParser → xlsx` 成为**常驻依赖**。
+> 岛的 `db[excel-copy]` 域提供 Excel 解析（CSP 禁 `unsafe-eval`，解析只能留在宿主）。
 > 勾选 excel-copy 的影响只是"该模块自身进 registry 并占 id"，与 xlsx 体积无关。
-> 另记一条**低优先级优化**（L-05）：该 chunk 目前是入口的静态依赖（启动即加载），
-> 若改成在 `db[excel-copy]` 的 op 内动态 `import()`，可让不使用该域的启动路径省下这份解析开销。
+>
+> **勘误之勘误（2026-09-22 二次实测，L-05 关闭）**：上一段末句称该 chunk 是"入口的静态依赖
+> （启动即加载）"——**这一句同样不成立**。实测（重新 `npm run build` 后核对产物）：
+> `dist/renderer/index.html` 只加载入口 `index-*.js`（242 KB）与 CSS，**没有任何 modulepreload**；
+> 入口 chunk 对 xlsx 的引用形态是 `await mf(() => import('./xlsx-*.js'))`，即**动态导入**。
+> 宿主侧本就是 `await import('@/core/services/excel')`（`host.ts` 三处），
+> 故 xlsx 只在岛真的调用 `db['excel-copy'].parseExcel*` 时才被拉取，**首屏不加载**。
+> 结论：**L-05「改懒加载」无需执行，已关闭**；现状即最优。
+> 判据（供后续同类判断复用）：**产物里存在某 chunk ≠ 它会被首屏加载**——
+> 必须看 `index.html` 的 `modulepreload` 与入口 chunk 对该 chunk 的引用形态（静态 `from` 还是 `import()`）。
 
 **后果链**：注册表收录 `excel-copy` → `managerDiscover.discover()` 先占 id →
 `registerUiIsland()` 见 `records.has(id)` **静默 return** → 从市场装的 excel-copy 岛**永远没有侧栏入口**
@@ -520,7 +527,7 @@ import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '../extensions/order-insi
 | 2 | **是否把 `excel-copy` / `order-insight` 的设置收编进宿主「设置」模态**（M-04） | 涉及产品判断：收编后统一入口，但会打断"改模板 → 立刻看预览"的联动循环 |
 | 3 | **`sanitize*` 超限：保持静默截断，还是改为拒绝并报错**（M-02 的后半段） | 影响 >50000 行 Excel 的行为语义（见 §5.2 第 2 条）。若改为拒绝，需同时决定 `parseExcel` 是否也设上限。<br>🗂 **已有候选实现但未采纳、未提交**：`docs/reviews/sanitize-limit-proposal-2026-09-22.patch`（`git apply` 即可预览）——把超限分两类：**配置类**（规则条数 / 表头列数 / 单条字段数 / 文件 64MB）**拒绝并报错**，**数据类**（记录行数 / 单元格长度）**仍截断但回传 `truncation` 元信息**。采纳前需补岛侧消费（`excel-copy` 岛目前不读 `truncation`，也没处理新增的报错分支），否则错误会以未捕获异常的形式冒到岛里 |
 | 4 | **是否升版并发布** | `package.json` 仍为 `1.0.4`；本轮只落了一个检查点 tag。是否作为 `v1.1.0` 正式发布由项目方决定 |
-| 5 | **`xlsx` chunk 是否改懒加载**（L-05，低优先） | 现为入口静态依赖（启动即加载 492 KB chunk）；改动态 `import()` 可省启动开销，但要动宿主 `db[excel-copy]` 的 op 实现 |
+| 5 | ~~**`xlsx` chunk 是否改懒加载**（L-05）~~ **已关闭（2026-09-22）** | 二次实测推翻前提：`index.html` 无 modulepreload、入口对 xlsx 是 `import()` 动态导入，宿主侧三处调用本就是 `await import('@/core/services/excel')` → **它已经是懒加载，首屏不加载 492 KB**。原"入口静态依赖"的说法与"L-05 优化建议"一并作废，详见 §5 勘误之勘误 |
 
 ---
 
@@ -537,9 +544,13 @@ npm run build            # ← 复原（默认预设，注册表只剩 quick-not
 MODULE_IDS=excel-copy npx vite build 2>&1 | grep '⛔'
 grep -c 'excel-copy' src/registry.generated.ts    # -> 0
 
-# 勘误核对：xlsx 是常驻依赖，与是否勾选 excel-copy 无关
+# 勘误核对：xlsx 是否存在与是否勾选 excel-copy 无关（但"存在" ≠ "首屏加载"）
 npm run build 2>&1 | grep xlsx                    # -> dist/renderer/assets/xlsx-*.js 492.36 kB
 grep -rn "from 'xlsx'" src/                       # -> src/lib/excelParser.ts（经 core/services/excel 被 host.ts 引用）
+
+# 判断是否"启动即加载"——必须看这两个，而不是只看 chunk 体积
+grep -c modulepreload dist/renderer/index.html    # -> 0（无预加载，xlsx 不在首屏链路）
+grep -o 'import(`\./xlsx-[^`]*`)' dist/renderer/assets/index-*.js   # -> 动态 import()，非静态 from
 
 # H-04：`dist/` 通配吞掉岛源码（修复前）
 git check-ignore -v ui-plugins/excel-copy/dist/main.js      # -> .gitignore:3:dist/

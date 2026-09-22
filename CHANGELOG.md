@@ -13,6 +13,11 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-22
+
+> 首个**真实发布节点**（文首说明：1.0.x 的四个 tag 全部错位指向 `9ccb73d`，不代表发布）。
+> 主题是「业务模块全部下记为市场 UI 岛 + 宿主安全收敛 + 工程化整改」，`package.json` 由 `1.0.4` 推进至此版本。
+
 ### Changed · 依赖大版本升级（工程化整改 R3）
 
 - **Vite 5.4 → 8.3**：构建管线由 Rollup + esbuild 换为 **Rolldown + Oxc**。
@@ -37,7 +42,7 @@
 - 文档回写：`README.md` 核心能力表按「4 个市场 UI 岛 + 1 个内建模块」的新形态改写；
   `PROJECT_BASELINE.md` §2 目录职责 / §3 规模表 / §4 岛清单按 T4 增量修正；
   `AGENTS.md` §1.9、`PLUGIN_ARCHITECTURE.md`、`PLUGIN_DEVELOPMENT.md`、`docs/README.md`、`REMEDIATION_PLAN.md`（R2-7）
-  的旧路径与滞后表述同步。未升版本号（仍 `1.0.4`，是否发 `v1.1.0` 待定）。
+  的旧路径与滞后表述同步。（版本号随本次 `[1.1.0]` 发布一并推进，见文首段落。）
 
 ### Added
 
@@ -63,6 +68,10 @@
 - `docs/baseline/`（项目基线快照 + 重构计划）、`docs/reviews/`（代码审查报告）、
   `docs/plans/`（分阶段整改计划）三类文档建立并纳入版本管理。
 - `CONTRIBUTING.md`、`CHANGELOG.md`。
+- **`LICENSE`（专有声明，非开源）**：上游 `SayakABC/SellerKit` 实测无 license 文件（GitHub API
+  `license: null`），本仓库据此把它明确为 **All rights reserved**——禁止复制 / 修改 / 分发 /
+  反向工程 / 商用，并单列「第三方组件依其各自许可证」条款（`xlsx` 为 Apache-2.0 等），
+  避免把不属于本项目的代码也纳入专有声明。`package.json` 同步置 `"license": "UNLICENSED"`。
 
 ### Changed · 业务模块全部下记为市场 UI 岛
 
@@ -144,6 +153,24 @@
 - **款色色卡迁出留档目录**：从 `extensions/order-insight/src/lib/` 迁至 `src/lib/colorSwatch.ts`。
   它是纯函数字典（§1.2 目录语义归 `src/lib/`），而 `tests/colorSwatch.spec.ts` 直接从留档目录 import，
   使"删留档目录"会连带打挂测试与 `vue-tsc`（且报错不提示原因）。迁移后留档目录才真的不进任何门禁链路。
+
+### Changed · 决策收口（宿主复查报告 §6 五项遗留，2026-09-22 结案）
+
+- **ADR-001：`excel-copy` / `order-insight` 的设置不收编进宿主「设置」模态**。收编会打断这两个插件
+  「改模板 / 改规则 → 立刻看预览」的核心回路（用户需 打开设置 → 改 → 关闭 → 切回岛 四步）。
+  判据定为「改完设置是否需要立刻看数据变化」：需要 → 留在岛内；不需要 → 收编（如 `shop-accounts`）。
+  全文见 `docs/decisions/ADR-001-island-settings-stay-in-island.md`；`AGENTS.md` §1.5 的偏差标注已改为指向该 ADR。
+- **`db[excel-copy]` 超限语义由「一律静默截断」改为分层**：规则条数（64）/ 表头列数（256）/
+  单条字段数（256）/ Excel 文件体积（新增 64MB 上限）属**配置类**——超限即**拒绝并报错**，
+  不再让用户拿到"看起来正常但结果不对"的数据；记录行数（50000）与单元格字符串长度（20000）
+  属**数据类**——大文件是真实场景，仍截断但**回传截断元信息**
+  （`truncation.droppedRecords` / `truncation.truncatedStrings`），由岛侧决定是否提示"已处理前 N 行"。
+  新增字段向后兼容，不读它的岛行为不变。
+- **勘误（报告第 3 处）：`xlsx` 并非入口静态依赖**。原报告据「产物里有 492KB `xlsx-*.js` chunk」
+  推断它启动即加载；实测 `dist/renderer/index.html` **无 modulepreload**，入口 chunk 对 xlsx 是
+  `import()` 动态导入，只在岛调用 `db['excel-copy'].parseExcel*` 时才拉取。故 §6 第 5 项
+  「改懒加载」**不成立、已关闭**；宿主侧 3 处调用本就是 `await import('@/core/services/excel')`。
+  判据：**产物里存在某 chunk ≠ 它会被首屏加载**，要看 `index.html` 的 preload 与引用形态。
 
 ### Changed · 重构
 

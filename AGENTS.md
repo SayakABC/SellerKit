@@ -133,7 +133,8 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 
   - 岛设置页由岛工程**独立入口**产出（Vite 多入口：`index.html` 主视图 + `settings.html` 设置页），`entry` 须与 `manifest.entry` 同子树（发布脚本 `scripts/publish-plugin.js` 强校验）。
   - 岛内不再重复实现设置页：宿主是唯一入口；岛侧只需一个「设置」按钮，调用既有桥能力 `sk.host.ui.openSettings('<pluginId>:settings')`（`ui` 属轻量能力，gatedHost 默认放行，**不得写入 capabilities**）——宿主内部 dispatch `open-settings`，AppShell 打开 SettingsModal 并定位分类。
-    ⚠ **已知偏差（待收敛）**：`excel-copy` / `order-insight` 的设置自带在**岛内视图**（未声明 `manifest.settings`），理由是它们与工作台联动密切（改模板即时看预览）。代价是不进「设置」模态的分类导航，与本节"宿主是唯一入口"不一致；是否收编进宿主见 `docs/reviews/HOST_REVIEW_2026-09-22.md`。
+    ✅ **已决策的例外（勿擅自"修正"）**：`excel-copy` / `order-insight` 的设置留在**岛内视图**（不声明 `manifest.settings`，故不进本节分类导航）。这不是疏漏——收编会打断它们「改模板/规则 → 立刻看预览」的核心回路。完整论证与重新评估条件见 **`docs/decisions/ADR-001-island-settings-stay-in-island.md`**。改这两个插件的设置入口前**必须先读该 ADR**。
+    - 判据（供新插件对号入座）：**改完设置是否需要立刻看数据变化**——需要 → 留在岛内（同 excel-copy）；不需要（如低频账号管理）→ 收编进宿主（同 `shop-accounts`）。
   - 岛被停用/卸载时分类即时消失（`managerSettings.getIslandSettingCategories()` 读 `ctx.uiIslands` + `ctx.disabled`）。
 
 ### 1.6 主题设计令牌（--wb-* CSS 变量）

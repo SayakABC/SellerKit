@@ -518,7 +518,7 @@ import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '../extensions/order-insi
 |---|---|---|
 | 1 | **`LICENSE` 协议类型** | `REMEDIATION_PLAN.md` R4-6 已注明「源项目为 fork，许可证类型不宜代拟」。本轮**未创建** `LICENSE`（报告初稿把它误列为"未完成"，已勘误） |
 | 2 | **是否把 `excel-copy` / `order-insight` 的设置收编进宿主「设置」模态**（M-04） | 涉及产品判断：收编后统一入口，但会打断"改模板 → 立刻看预览"的联动循环 |
-| 3 | **`sanitize*` 超限：保持静默截断，还是改为拒绝并报错**（M-02 的后半段） | 影响 >50000 行 Excel 的行为语义（见 §5.2 第 2 条）。若改为拒绝，需同时决定 `parseExcel` 是否也设上限 |
+| 3 | **`sanitize*` 超限：保持静默截断，还是改为拒绝并报错**（M-02 的后半段） | 影响 >50000 行 Excel 的行为语义（见 §5.2 第 2 条）。若改为拒绝，需同时决定 `parseExcel` 是否也设上限。<br>🗂 **已有候选实现但未采纳、未提交**：`docs/reviews/sanitize-limit-proposal-2026-09-22.patch`（`git apply` 即可预览）——把超限分两类：**配置类**（规则条数 / 表头列数 / 单条字段数 / 文件 64MB）**拒绝并报错**，**数据类**（记录行数 / 单元格长度）**仍截断但回传 `truncation` 元信息**。采纳前需补岛侧消费（`excel-copy` 岛目前不读 `truncation`，也没处理新增的报错分支），否则错误会以未捕获异常的形式冒到岛里 |
 | 4 | **是否升版并发布** | `package.json` 仍为 `1.0.4`；本轮只落了一个检查点 tag。是否作为 `v1.1.0` 正式发布由项目方决定 |
 | 5 | **`xlsx` chunk 是否改懒加载**（L-05，低优先） | 现为入口静态依赖（启动即加载 492 KB chunk）；改动态 `import()` 可省启动开销，但要动宿主 `db[excel-copy]` 的 op 实现 |
 

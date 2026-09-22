@@ -12,7 +12,7 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | 文档 | 主旨 | 读者 | 状态 | 最后更新 |
 |---|---|---|---|---|
 | [`../AGENTS.md`](../AGENTS.md) | **架构基线 + 编码红线**（三层边界 / 模块化 / 插件体系 / 命名 / 异常 / 红线 1–23） | 开发者、AI 助手 | ✅ 活跃（唯一规则源） | 2026-09-16 |
-| [`baseline/PROJECT_BASELINE.md`](baseline/PROJECT_BASELINE.md) | **项目基线快照**：结构、规模、模块/插件注册表、IPC 契约、持久化、依赖、质量门禁现状 | 开发者、新人 | ✅ 活跃（随版本刷新） | 2026-09-16 |
+| [`baseline/PROJECT_BASELINE.md`](baseline/PROJECT_BASELINE.md) | **项目基线快照**：结构、规模、模块/插件注册表、IPC 契约、持久化、依赖、质量门禁现状 | 开发者、新人 | ✅ 活跃（随版本刷新） | 2026-09-22 |
 | [`baseline/REFACTOR_PLAN.md`](baseline/REFACTOR_PLAN.md) | Phase 0–3 单体 → 模块化重构计划 | 架构/开发者 | 🗄️ 已完成归档 | 2026-08-21 |
 | [`architecture/PLUGIN_ARCHITECTURE.md`](architecture/PLUGIN_ARCHITECTURE.md) | 插件化方向性架构：Phase 1–5、Worker 沙箱、权限门、UI 岛方案 | 架构/开发者 | ✅ 活跃（方向性，规则以 AGENTS.md 为准） | 2026-09-08 |
 | [`architecture/PLUGIN_DEVELOPMENT.md`](architecture/PLUGIN_DEVELOPMENT.md) | 外置插件与 UI 岛开发、调试、发布操作手册 | 插件作者 | ✅ 活跃 | 2026-09-15 |
@@ -22,7 +22,7 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | [`requirements/Requirements.md`](requirements/Requirements.md) | 最初立项需求规格 | 历史追溯 | 🗄️ 历史档案（功能已全部实现） | 2026-06-02 |
 | [`reviews/CODE_REVIEW_REPORT.md`](reviews/CODE_REVIEW_REPORT.md) | 代码与文档审查报告（31 项发现、风险分级、取证命令） | 开发者 | ✅ 活跃 | 2026-09-16 |
 | [`plans/REMEDIATION_PLAN.md`](plans/REMEDIATION_PLAN.md) | **整改计划**：26 个任务分 4 个阶段，含验收标准 / 风险回滚 / 进度跟踪表 | 开发者 | ✅ 活跃（待执行） | 2026-09-16 |
-| [`plans/PLUGIN_TRIAGE_PLAN.md`](plans/PLUGIN_TRIAGE_PLAN.md) | **内置插件盘点与处置**：3 个内置插件 + 2 个脚手架 + 4 个 UI 岛的逐项判定、`order-insight` ID 冲突取证、外置化步骤与验收 | 架构/开发者 | ✅ 活跃（待评审，未执行） | 2026-09-21 |
+| [`plans/PLUGIN_TRIAGE_PLAN.md`](plans/PLUGIN_TRIAGE_PLAN.md) | **内置插件盘点与处置**：3 个内置插件 + 2 个脚手架 + 5 个 UI 岛的逐项判定、`order-insight` ID 冲突取证、外置化步骤与验收 | 架构/开发者 | ✅ 活跃（**T1/T3/T4/T5 已完成**，T2 决定保留内建；§7 仍有 2 项待拍板） | 2026-09-22 |
 | [`archive/manual.md`](archive/manual.md) | 早期简版用户手册 | 历史追溯 | 🗄️ 已归档（被 `guides/USER_GUIDE.md` 取代） | 2026-06-03 |
 
 状态图例：✅ 活跃 · 🟡 活跃但有已知缺口 · ⚠️ 已过期 · 🗄️ 已归档（仅历史对照）

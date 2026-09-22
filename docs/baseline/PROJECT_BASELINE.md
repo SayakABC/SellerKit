@@ -47,9 +47,10 @@
 | `src/core/` | 平台核心（外壳 / 服务 / 网络 / 插件内核 / AI / 布局） | 渲染进程 | 禁止业务逻辑 |
 | `src/modules/<id>/` | 内建业务模块（当前仅 `quick-note`） | 构建期收录 | 须在 `modules.config.json` 登记 |
 | `src/lib/` | 纯函数工具层（无副作用） | 共用 | 改动前搜全部调用方 |
-| `extensions/<id>/` | **随宿主分发的视图插件包**（`kind: view`，含 `src/meta.ts`） | 构建期随包编译 | 自包含，import 走 `@/` 或包内相对 |
+| `extensions/<id>/` | **随宿主分发的视图插件包**（`kind: view`，含 `src/meta.ts`）；**当前无分发实例**——`excel-copy` / `order-insight` 均已下记，目录里只剩**留档源码**（不进构建） | 构建期随包编译 | 自包含，import 走 `@/` 或包内相对 |
 | `ui-plugins/<id>/` | **市场分发 UI 岛**（`kind: ui`，iframe + `window.__sk` 桥） | 独立构建产物，不入主 bundle | 经 host 能力域访问数据 |
 | `scripts/` | 构建 / 打包 / 脚手架 / 冒烟脚本 | Node | — |
+| `scripts/templates/` | **插件脚手架**：`l2-plugin`（L2 后台插件模板）/ `l2-demo`（L2 演示插件，2026-09-22 由 `extensions/_template` / `extensions/sk-hello` 归位而来）；UI 岛模板在 `scripts/ui-plugin-template/` | Node | 移动须同步改 `scripts/plugin-create.js` 的 `TEMPLATE_BG` 与 `scripts/plugins-install-demo.js` 的 `SOURCE`（二者硬编码指向） |
 | `docs/` | 项目文档 | — | 见 `docs/README.md` |
 | `dist/` `release/` `market-out/` | 构建与发布产物 | 生成物 | 不入库 |
 
@@ -61,7 +62,7 @@
 2. **外置插件脚手架/示例**（`manifest.entry = ./index.js`、无 `kind`、无 `src/`）：`_template` / `sk-hello` —— 由 `npm run plugins:create` 生成，产出物应安装到 `<userData>/plugins/`。
 3. **下记后留档的源码**（有 `src/meta.ts` 但**不在任何预设里**）：`extensions/order-insight/`、`extensions/excel-copy/` —— 保留作算法与 UI 参考，**不进构建**（由 `tests/pluginTriage.spec.ts` 守住"预设 ∩ 岛 id = ∅"）。
 
-第 2 类放在 `extensions/` 下**不会被 registry 收录**（无 `src/meta.ts`），但目录位置容易与第 1 类混淆。第 3 类是本项目"下记"动作的常规残留形态：**下记 ≠ 删除**，可逆。另有 `extensions/ae-profit/`（`kind: view`）是迁移到 `ui-plugins/ae-profit/` 后的**残留**，已移出构建预设。详见审查报告 P1-5。
+第 2 类**已不在 `extensions/` 下**（迁出后 `extensions/` 只剩第 3 类留档源码 + `plugins:create` 的临时产物），目录语义冲突随之收敛。第 3 类是本项目"下记"动作的常规残留形态：**下记 ≠ 删除**，可逆。另有 `extensions/ae-profit/`（`kind: view`）是迁移到 `ui-plugins/ae-profit/` 后的**残留**，已移出构建预设。详见审查报告 P1-5。
 
 ---
 
@@ -73,10 +74,16 @@
 |---|---:|---:|
 | `src/` | 55 | 10,254 |
 | `electron/` | 26 | 11,283 |
-| `extensions/` | 60 | 16,579 |
+| `extensions/` | 56 | 16,465 |
 | `ui-plugins/` | 41 | 5,908 |
-| `scripts/` | 17 | 1,719 |
+| `scripts/` | 21 | 1,833 |
 | **合计** | **199** | **45,743** |
+
+> 2026-09-22（T4 脚手架归位）按**增量**修正：脚手架 4 文件 / 114 行由 `extensions/` 移入 `scripts/`
+> （`extensions/` 60 → 56 文件、16,579 → 16,465 行；`scripts/` 17 → 21 文件、1,719 → 1,833 行），合计不变。
+> ⚠️ 本表是**快照**，与实测已有较大偏差（按同口径实测：`extensions/` 32 文件 / 7,243 行、`src/` 64 文件 / 11,304 行），
+> 差额主要来自 `shop-accounts` / `ae-profit` 等包迁出 `extensions/`。**全表重扫列为后续项**，本轮不做。
+> 另：`extensions/ae-profit`（1,532 行）这一行的**目录早已不存在**（R1-5 迁出后删除），仅为历史快照残留。
 
 ### 各扩展包规模
 
@@ -85,13 +92,13 @@
 | `extensions/order-insight` | 5,422 | view（**已下记，留档**） |
 | `extensions/excel-copy` | 1,840 | view（**已下记，留档**） |
 | `extensions/ae-profit` | 1,532 | view（**迁移残留**） |
-| `extensions/sk-hello` | 65 | 外置示例 |
-| `extensions/_template` | 49 | 脚手架 |
 | `ui-plugins/excel-copy` | 2,167 | ui（**dist 即源码，无构建步骤**） |
 | `ui-plugins/order-insight` | 2,272 | ui |
 | `ui-plugins/ae-profit` | 1,685 | ui |
 | `ui-plugins/shop-accounts` | 1,261 | ui |
-| `ui-plugins/sk-ui-starter` | 141 | ui |
+| `ui-plugins/sk-ui-starter` | 141 | ui（**样例岛，非脚手架**） |
+| `scripts/templates/l2-demo` | 65 | 脚手架·L2 示例（原 `extensions/sk-hello`，2026-09-22 归位） |
+| `scripts/templates/l2-plugin` | 49 | 脚手架·L2 模板（原 `extensions/_template`） |
 
 > 手写岛（`excel-copy` / `order-insight`）的行数口径 = `dist/*.js` 合计（`dist/` 即源码，无构建步骤）；
 > 工程化岛（`shop-accounts` / `ae-profit`）的口径 = `src/`（`dist/` 是构建产物，排除）。
@@ -156,7 +163,7 @@
 | `excel-copy` | 1.0.0 | `storage`(excel-copy) · `clipboard` · `dialog` · `db`(excel-copy) —— **TV模版唯一实现**（2026-09-22 内建下记后）。原生 ESM 手写岛：`dist/` 即源码，**无构建步骤**、零 npm 依赖。2 个页签：复制工作台（筛选/搜索/拖拽导入/键盘/撤销）与设置（模板配置 · 字段规则 · 显示列）。**Excel 解析与规则求值都在宿主**（岛所在 iframe 的 CSP 为 `script-src 'self'`，无 `unsafe-eval`，`jsExpression` 规则根本无法在岛内求值；岛也不打包 xlsx）。与内建版共用 `modules.excel-copy` → 模板 / 字段规则 / 显示列 / 记录使用状态**自动继承**。设置页由宿主设置中心迁到**岛内第二个页签**（原 `extensions/excel-copy/src/settings.ts` 的 `excel` 分类随下记一起消失） | — |
 | `order-insight` | 1.2.0 | `storage` · `clipboard` · `dialog` · `db`(order-insight · purchase) —— **订单归类唯一实现**（2026-09-21 内建下记后）。原生 ESM 手写岛：`dist/` 即源码，**无构建步骤**（改完直接发布）。1.1.0：修 `ready()` 握手时序（原写法把 boot Promise 当恒真值，从不等待）、新增命名空间级 `store`、补齐列映射与分组维度的**配置继承**（与内建版共用 `modules.order-insight` 同名键，老用户配置无缝继承、写回不丢其它字段）、设置页新增「列映射」面板。1.2.0：**与内建能力对齐收尾** —— 拿货单查看/编辑（`orderGet`/`orderUpdate`）、单价记忆回填（`priceHistory`）、缺口「取消忽略」（`ignoreRemove`）、对账新增店铺分摊视图（`shopAllocation`/`shopAllocationDetail`）与时间窗筛选、数据纠正新增款编码手工指派（`styleAssign`）；并修掉 4 处**静默失效**（见 §11.12） | — |
 | `shop-accounts` | 1.4.3 | `storage` · `clipboard` · `db`(shop-accounts) · `secrets` · `mail` — **店铺账号管家唯一实现**（账号库 / 企业管理 / 收件箱）。1.2.0 起为 Vite+Vue3+Pinia 工程（`ui-plugins/shop-accounts/src` 由下记的内建版源码整体迁入），`dist/` 为构建产物；1.2.2 起企业管理三弹窗改为与 AccountEditor 同款右侧抽屉；1.3.x 修复复制提示（岛内 Toast）、关联企业下拉与 companyId 落库/回显；1.4.2 批量修改的关联企业由「文本+覆盖/追加」改为**选择企业下拉**（`patch.companyId: number`，0=解绑、-1=未选，写入时按 `sk_companies` 同步企业名）；1.4.3 修复握手与主题（boot 前不渲染主视图、`color-scheme` 正确跟随深浅主题、补齐 `--wb-shadow`） | ✅ `manifest.settings`（1.4.0 起，设置页迁入宿主设置中心；1.4.1 修复设置页布局坍缩，分类 `shop-accounts:settings`） |
-| `sk-ui-starter` | 0.1.0 | `storage` | — |
+| `sk-ui-starter` | 0.1.0 | `storage` | — （**样例岛**：与 `scripts/ui-plugin-template` 内容重复，供参照非脚手架；是否从市场下架待拍板，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §7） |
 
 ---
 
@@ -211,11 +218,18 @@
 | 命名空间 | 内容 |
 |---|---|
 | `app-shell` | `lastActiveModuleId`、`collapsed` |
-| `excel-copy` | 记录列表 / 模板配置 / 字段规则 / 显示列 |
-| `order-insight` | 订单归类状态 |
-| `shop-accounts` | 店铺账号 UI 状态 |
+| `excel-copy` | 记录列表 / 模板配置 / 字段规则 / 显示列（`ui-plugins/excel-copy` 岛声明） |
+| `order-insight` | 订单归类状态（`ui-plugins/order-insight` 岛声明） |
+| `shop-accounts` | 店铺账号 UI 状态（`ui-plugins/shop-accounts` 岛声明） |
+| `ae-profit` | 利润追踪 UI 状态（`ui-plugins/ae-profit` 岛声明） |
+| `sk-ui-starter` | 样例岛自带命名空间（manifest `capabilities` 只写 `"storage"`、**未声明 `namespaces`** → 按 `security.ts` 规则默认仅放行插件自身命名空间） |
 | `plugins` | 插件停用集 |
 
+> 外置插件 / UI 岛能写哪些命名空间由 manifest 的 `capabilities[storage].namespaces` 决定：声明了就必须命中，
+> 未声明则默认只放行插件自身命名空间（`src/core/plugin/security.ts`）。因此**新增一个用 storage 的岛 = 新增一个命名空间**，
+> 本节清单应随岛的 manifest 同步刷新。内建侧落 electron-store 的是 `app-shell`（外壳状态 + 插件停用集）与 `quick-note`（便签列表）。
+> 下记**不迁移**命名空间：内建与同名岛共用 `modules.<id>`，这正是"配置自动继承"的实现方式（见 §4）。
+>
 > ⚠️ `AGENTS.md` §1.4 仍只列 `app-shell` / `excel-copy` 两个命名空间（已滞后，本次快照已补全，详见审查报告 P2-3）。
 > 旧扁平 key（`records` / `templateConfigs`）仅由主进程做一次性迁移探测，**禁止新增**。
 

@@ -10,11 +10,15 @@
 
 | 模块 | 形态 | 说明 |
 |---|---|---|
-| `excel-copy` | 视图插件包（`extensions/`） | 导入 Excel → 按模板生成文本 → 一键复制，智能跟踪记录使用状态 |
-| `order-insight` | 视图插件包（`extensions/`） | 订单导入 → 主图下载 → 指纹查重 → AI 识别 → 归类汇总，含拿货对账 |
-| `shop-accounts` | 视图插件包（`extensions/`） | 店群「店铺套」集中管理，密码经系统安全存储（Keychain/DPAPI）加密落库 |
-| `quick-note` | 内建模块（`src/modules/`） | 轻量便签 |
-| `ae-profit` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 速卖通利润追踪展示端，经 host `db` 能力域读写 |
+| `excel-copy` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**，1.0.0） | 导入 Excel → 按模板生成文本 → 一键复制，智能跟踪记录使用状态 |
+| `order-insight` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**，1.2.0） | 订单导入 → 主图下载 → 指纹查重 → AI 识别 → 归类汇总，含拿货对账 |
+| `shop-accounts` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**，1.4.3） | 店群「店铺套」集中管理，密码经系统安全存储（Keychain/DPAPI）加密落库 |
+| `ae-profit` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**，1.0.1） | 速卖通利润追踪展示端，经 host `db` 能力域读写 |
+| `quick-note` | 内建模块（`src/modules/`） | 轻量便签（当前唯一的随宿主分发实例，兼作「新增模块 = 建目录 + 登记」的活样例） |
+
+> 形态说明（判定规则见 `AGENTS.md` §1.9）：**市场 UI 岛**独立构建、打成 zip 走插件市场分发，运行时由宿主 iframe 加载，只经 `window.__sk` 桥调用宿主能力；
+> `excel-copy` / `order-insight` / `shop-accounts` 已**下记**——它们的 id 已从 `modules.config.json` 的构建预设里移除，`extensions/<id>/` 下只剩**源码留档**（不进构建），宿主侧数据层（SQLite / IPC / `db` 能力域）保留给岛调用。
+> 因此上表 4 个岛均**不随安装包分发**，需从插件市场安装。
 
 支撑能力：集中收件箱（IMAP 多账号同步 / FTS 全文检索 / 附件缓存）、店铺账号管家、订单队列、AI 识别（OpenAI 兼容接口）、自动更新（electron-updater）。
 
@@ -68,9 +72,10 @@ SellerKit/
 │   ├── styles/index.css         # 全局样式 + 设计令牌（--wb-*，浅/深两套）
 │   ├── types.ts                 # 业务共享类型 + ElectronAPI 接口
 │   └── registry.generated.ts    # ⚠️ 自动生成，禁止手改
-├── extensions/<id>/             # 随宿主分发的视图插件包（manifest.json + src/）
+├── extensions/<id>/             # 随宿主分发的视图插件包（manifest.json + src/）；当前仅 excel-copy / order-insight **源码留档**（均已下记为市场岛）
 ├── ui-plugins/<id>/             # 市场分发的 UI 岛（kind: ui，静态产物）
 ├── scripts/                     # 构建 / 打包 / 脚手架 / 冒烟脚本
+│   ├── templates/               # 插件脚手架：l2-plugin（L2 模板）/ l2-demo（L2 演示）；UI 岛模板见 ui-plugin-template/
 │   └── lib/module-roots.cjs     # 模块根探测规则（vite.config.ts 与 select-build.js 共用，单一事实源）
 ├── docs/                        # 项目文档（入口见 docs/README.md）
 ├── modules.config.json          # 模块启用清单（单一事实源，纯 JSON 无转译）

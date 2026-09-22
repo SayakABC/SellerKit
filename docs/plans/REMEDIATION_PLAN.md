@@ -494,7 +494,7 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3
 - [x] `R2-4` IPC 契约自动校验（C-02 防护 / D-10）（`305669c`）
 - [x] `R2-5` vitest 覆盖 `src/lib/`（C-07）（`62a760d`。**部分完成**：131 用例覆盖 `src/lib/` 全部 7 个模块；**无 CI**、组件/store/主进程/沙箱仍未覆盖，详见 `CODE_REVIEW_REPORT.md` §2.7）
 - [x] `R2-6` 抽 `electron/ipc-util.ts`（C-12）（`f82ef04`。**附带修掉校验脚本自身的按文件耦合**：包装名改为跨文件解析，否则抽成共享模块后 26 个通道会被误判为未注册）
-- [x] `R2-7` `extensions/` 语义分离（C-05）（**用户确认采用方案 B 并延后方案 A**，2026-09-16：判定规则已固化在 `AGENTS.md` §1.9 + 红线 23；`extensions/_template`、`extensions/sk-hello` 暂不搬迁）
+- [x] `R2-7` `extensions/` 语义分离（C-05）（**用户确认采用方案 B 并延后方案 A**，2026-09-16：判定规则已固化在 `AGENTS.md` §1.9 + 红线 23；`extensions/_template`、`extensions/sk-hello` 暂不搬迁 —— **后于 2026-09-22 由 `PLUGIN_TRIAGE_PLAN` T4 完成搬迁**：`extensions/_template` → `scripts/templates/l2-plugin`、`extensions/sk-hello` → `scripts/templates/l2-demo`，两个构建脚本已同步重指向并实跑验证）
 - [x] `R2-8` 消除源码内嵌裸控制字节（C-21，R2-3 新发现）（`b18166e`。7 个裸字节改为转义；`file` 不再判为 binary，等价性用「旧版/新版表达式同输入比对」证明）
 
 ### Phase 3 · 依赖与结构升级

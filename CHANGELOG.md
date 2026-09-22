@@ -24,6 +24,21 @@
   原生模块重建链路修复：新增显式依赖 `@electron/rebuild@^4.2.0`，并以 scoped `overrides`
   将其依赖的 `node-abi` 收窄到 `^4.35.0`（旧版无法识别 ABI 149）。
 
+### Changed · 插件脚手架归位 + 文档回写（`PLUGIN_TRIAGE_PLAN` T4 / T5）
+
+- **脚手架不再寄居 `extensions/`**：`extensions/_template` → `scripts/templates/l2-plugin`（L2 模板）、
+  `extensions/sk-hello` → `scripts/templates/l2-demo`（L2 演示），`git mv` 保留文件历史。
+  二者都是构建脚本的**活依赖**，已同步重指向 `scripts/plugin-create.js` 的 `TEMPLATE_BG` 与
+  `scripts/plugins-install-demo.js` 的 `SOURCE`，并实跑 `plugins:create` / `plugins:demo:install` 验证不坏。
+  归位后「`extensions/` 下的目录 = 随宿主分发的视图插件包」这条直觉重新成立（当前只剩
+  `excel-copy` / `order-insight` 两份下记留档源码）。
+- **`ui-plugins/sk-ui-starter` 明确为样例岛**（与 `scripts/ui-plugin-template` 内容重复）：README 顶部标注
+  "样例岛，供参照非脚手架"；是否从市场下架待项目方拍板（未删除，避免不可逆操作）。
+- 文档回写：`README.md` 核心能力表按「4 个市场 UI 岛 + 1 个内建模块」的新形态改写；
+  `PROJECT_BASELINE.md` §2 目录职责 / §3 规模表 / §4 岛清单按 T4 增量修正；
+  `AGENTS.md` §1.9、`PLUGIN_ARCHITECTURE.md`、`PLUGIN_DEVELOPMENT.md`、`docs/README.md`、`REMEDIATION_PLAN.md`（R2-7）
+  的旧路径与滞后表述同步。未升版本号（仍 `1.0.4`，是否发 `v1.1.0` 待定）。
+
 ### Added
 
 - **UI 岛设置贡献（宿主设置中心承载外置插件设置）**：岛 manifest 新增 `settings: { entry, displayName?, icon?, order? }`，

@@ -23,7 +23,12 @@
 | 2026-09-22 | 守卫泛化 + 新增 excel-copy 断言 | 由 19 例增至 **27 例**：op 守卫改为「按 api.js 解析 helper→域」逐域校验（自动覆盖全部 5 个岛）；新增「宿主该域每个 op 必须被岛真实调用」「岛内不得出现 `eval`/`new Function`」「必须走宿主 `applyRules`」「不得引 xlsx」「命名空间必须是 `excel-copy`」「模板保存必须连 name 落库」 |
 | 2026-09-22 | 发布 | `market-out/excel-copy-1.0.0.zip`（34.3 KB，sha256 `4d743159…`），catalog 已更新（6 个插件） |
 | 2026-09-22 | 顺带修掉 2 个连带缺陷 | ① `vite.config.ts` 生成 `settingsPanelLoaders` 时空列表把闭合括号一起注释掉 → **只要构建不含 extensions 视图包就编译失败**（下记 excel-copy 后必然触发）；② `profiles` 取值用 `\|\|` 使"空预设"无法表达（会静默回落到 `enabledModules`），改为 `??` |
-| — | T2 / T4 / T5 | `quick-note` 用户已决定**先保留**（不变）；脚手架归位与文档回写见 §5 T4 / T5 |
+| 2026-09-22 | **T4 完成**：两处脚手架归位 | `extensions/_template` → `scripts/templates/l2-plugin`、`extensions/sk-hello` → `scripts/templates/l2-demo`（`git mv`，历史连续）；`scripts/plugin-create.js:22` 的 `TEMPLATE_BG` 与 `scripts/plugins-install-demo.js:15` 的 `SOURCE` 已重指向；两脚本用法注释同步 |
+| 2026-09-22 | T4 验证（实跑） | `npm run plugins:create test-x` → `extensions/test-x/` 生成 manifest（`name: "test-x"`）+ index.js（占位符已替换），产物已删除；`SK_USER_DATA=/tmp/sk-demo-check npm run plugins:demo:install` → `/tmp/sk-demo-check/plugins/sk-hello/` 复制 2 文件成功，临时目录已清理 |
+| 2026-09-22 | T4 连带同步 | `scripts/lib/module-roots.cjs`（注释）、`scripts/publish-plugin.js`（用法注释）、`AGENTS.md` §1.9 警示段、`docs/architecture/PLUGIN_ARCHITECTURE.md`（§8.1 / T6 / Phase 3 表）、`docs/architecture/PLUGIN_DEVELOPMENT.md`（§3 模板示例、§8.3 批量发布脚本）的旧路径一并改到新址 |
+| 2026-09-22 | `sk-ui-starter` 非破坏性处置 | 未删除（不可逆且未拍板）：`ui-plugins/sk-ui-starter/README.md` 顶部加声明——**样例岛，供参照非脚手架**，脚手架是 `scripts/ui-plugin-template`；「是否下架」写入 §7 待决策 |
+| 2026-09-22 | **T5 完成**：文档回写 | `README.md` 核心能力表、`PROJECT_BASELINE.md` §2/§3/§4/§6、`AGENTS.md` §1.8/§1.9、`docs/README.md` 索引、`CHANGELOG.md` 条目（未升版本号） |
+| — | T2 | `quick-note` 用户已决定**先保留**（不变） |
 
 **下记 ≠ 删除。** 宿主侧 `electron/order-db.ts` 与 db 能力域 `order-insight` / `purchase` 原样保留（岛照常调用）；
 `extensions/order-insight/` 源码暂留作算法参考，仅是不再进构建。
@@ -69,7 +74,7 @@
 - **1 个是 demo**：`quick-note` 源码 124 行，`meta.ts` 自述"最小业务模块示例"。
 - **1 个用户已主动停用**：`excel-copy` 记录在 `plugins.disabled`，且配置为空壳（0 条记录）。
 
-另有**两个放错位置的脚手架**（`sk-hello` / `_template`）和**一个与脚手架模板重复的市场样例**（`sk-ui-starter`）。
+曾有**两个放错位置的脚手架**（`sk-hello` / `_template`，已归位到 `scripts/templates/`）和**一个与脚手架模板重复的市场样例**（`sk-ui-starter`，待拍板）。
 
 ### 处置矩阵
 
@@ -78,9 +83,9 @@
 | `order-insight` | `extensions/order-insight` | 扩展包·L0 | **ID 冲突，功能已被岛覆盖** | **下记内建 → 让已装的 UI 岛生效** | **P0** |
 | `quick-note` | `src/modules/quick-note` | 内建·L0 | 自述 demo，无真实数据 | 删除，或转为 UI 岛示例 | P1 |
 | `excel-copy` | `extensions/excel-copy` | 扩展包·L0 | 已停用、数据空壳 | **下记内建 + 转 UI 岛（已完成，见 §0/§7）** | P1 |
-| `sk-hello` | `extensions/sk-hello` | 脚手架·示例 | 放置错误（不被构建收录） | 移到 `scripts/` | P2 |
-| `_template` | `extensions/_template` | 脚手架·模板 | 放置错误，**但被构建脚本硬编码依赖** | 移到 `scripts/templates/` + 重指向 | P2 |
-| `sk-ui-starter` | `ui-plugins/sk-ui-starter` | 市场 UI 岛 | 与 `scripts/ui-plugin-template` 内容重复 | 下架或明确为"样例岛" | P2 |
+| `sk-hello` | ~~`extensions/sk-hello`~~ → `scripts/templates/l2-demo` | 脚手架·示例 | 放置错误（不被构建收录） | ✅ **已归位**（T4，2026-09-22） | P2 |
+| `_template` | ~~`extensions/_template`~~ → `scripts/templates/l2-plugin` | 脚手架·模板 | 放置错误，**但被构建脚本硬编码依赖** | ✅ **已归位 + 脚本重指向**（T4） | P2 |
+| `sk-ui-starter` | `ui-plugins/sk-ui-starter` | 市场 UI 岛 | 与 `scripts/ui-plugin-template` 内容重复 | 🟡 部分处置：README 已标注"样例岛"；**是否下架待拍板**（§7） | P2 |
 
 ---
 
@@ -111,12 +116,12 @@
 
 > `order-insight` 的 `store.ts`（1,426 行）与 `stock-in/store.ts`（828 行）长期占据"仓库最大文件"榜前列。
 
-### B. `extensions/` 下的脚手架（不被构建收录）
+### B. 脚手架（不被构建收录；已迁出 `extensions/` → `scripts/templates/`）
 
 | id | 文件 | 规模 | 真实身份 | 谁在用它 |
 |---|---|---|---|---|
-| `sk-hello` | `index.js` + `manifest.json` | 66 行 | Phase 3 外置（L2）插件示例 | `scripts/plugins-install-demo.js` 硬编码复制它到 `<userData>/plugins/` |
-| `_template` | `index.js` + `manifest.json` | 50 行 | `npm run plugins:create` 的 **L2 模板**（`__PLUGIN_ID__` 占位） | `scripts/plugin-create.js` 的 `TEMPLATE_BG` 硬编码指向 |
+| `l2-demo`（原 `extensions/sk-hello`） | `index.js` + `manifest.json` | 66 行 | Phase 3 外置（L2）插件示例 | `scripts/plugins-install-demo.js` 的 `SOURCE` 硬编码复制它到 `<userData>/plugins/sk-hello` |
+| `l2-plugin`（原 `extensions/_template`） | `index.js` + `manifest.json` | 50 行 | `npm run plugins:create` 的 **L2 模板**（`__PLUGIN_ID__` 占位） | `scripts/plugin-create.js` 的 `TEMPLATE_BG` 硬编码指向 |
 
 ### C. 市场 UI 岛（`ui-plugins/`，独立分发）
 
@@ -171,11 +176,11 @@
 
 即：**`src/lib/` 的存在主要就是为这两个内置插件服务**。两者都外置化后，`src/lib/` 可大幅瘦身（岛要自带纯函数，`ui-plugins/order-insight/dist/lib.js` 已是这个模式的先例）。
 
-### F4 脚手架位置错误 + 两个 UI 岛样例重复
+### F4 脚手架位置错误 + 两个 UI 岛样例重复 —— ✅ 已处置（T4，2026-09-22）
 
-- `sk-hello` / `_template` 实际运行位置应是 `<userData>/plugins/`，放 `extensions/` 下既不被收录、又和真插件包混淆（基线文档自己也点出了这个语义冲突）。
-- **但二者都是构建脚本的活依赖**：`scripts/plugin-create.js:20` 的 `TEMPLATE_BG` 指向 `extensions/_template`；`scripts/plugins-install-demo.js:15` 的 `SOURCE` 指向 `extensions/sk-hello`。清理必须同步重指向，否则 `npm run plugins:create` / `plugins:demo:install` 直接坏掉。
-- UI 岛模板其实在 `scripts/ui-plugin-template`（`plugin-create.js` 的 `TEMPLATE_UI`），与 `ui-plugins/sk-ui-starter` 内容重复。
+- `sk-hello` / `_template` 实际运行位置应是 `<userData>/plugins/`，放 `extensions/` 下既不被收录、又和真插件包混淆（基线文档自己也点出了这个语义冲突）。**已迁出** → `scripts/templates/l2-demo` / `scripts/templates/l2-plugin`（`git mv`，历史连续）。
+- **二者都是构建脚本的活依赖**：原 `scripts/plugin-create.js:20` 的 `TEMPLATE_BG` 指向 `extensions/_template`、`scripts/plugins-install-demo.js:15` 的 `SOURCE` 指向 `extensions/sk-hello`。**已同步重指向**（现为 `scripts/templates/l2-plugin` / `scripts/templates/l2-demo`），并已实跑两个脚本验证不坏；连带同步了 `scripts/lib/module-roots.cjs`、`scripts/publish-plugin.js`、`AGENTS.md`、`PLUGIN_ARCHITECTURE.md`、`PLUGIN_DEVELOPMENT.md`、`PROJECT_BASELINE.md` 里的旧路径。
+- UI 岛模板其实在 `scripts/ui-plugin-template`（`plugin-create.js` 的 `TEMPLATE_UI`），与 `ui-plugins/sk-ui-starter` 内容重复 —— **本轮只做非破坏处置**（README 标注"样例岛"），是否下架待拍板（§7）。
 
 ### F5 文档已多处漂移（清理前后都应回写）
 
@@ -255,7 +260,7 @@
 
 ---
 
-### T4 · 脚手架归位（P2）
+### T4 · 脚手架归位（P2）—— ✅ 已完成（2026-09-22，执行记录见 §0）
 
 1. `git mv extensions/_template scripts/templates/l2-plugin`
 2. `git mv extensions/sk-hello scripts/templates/l2-demo`
@@ -264,7 +269,7 @@
 5. `npm run plugins:create test-x` 与 `npm run plugins:demo:install` 各跑一次验证不坏
 6. 顺带处置 `ui-plugins/sk-ui-starter`：与 `scripts/ui-plugin-template` 重复 → 从市场下架，或保留但 README 标明"样例岛，供参照非脚手架"
 
-### T5 · 文档回写（P2）
+### T5 · 文档回写（P2）—— ✅ 已完成（2026-09-22）
 
 - `README.md`：核心能力表按新形态改写（`shop-accounts` → 市场岛；`order-insight` → 市场岛；`quick-note`/`excel-copy` 按 T2/T3 结论）
 - `docs/baseline/PROJECT_BASELINE.md`：§2 目录职责、§3 规模表、§4 注册表与 UI 岛清单、§6 命名空间清单
@@ -291,6 +296,8 @@
 | 1 | `excel-copy` | **转为 UI 岛** | ✅ 已完成：岛 1.0.0 已发布（`market-out/excel-copy-1.0.0.zip`），内建包已从 `minimal`/`standard`/`pro` 三处下记，id 已释放 |
 | 2 | `quick-note` | **先保留** | ✅ 维持现状（`src/modules/` 保留活样例，`module-roots.cjs` 的 modules 根不悬空） |
 | 3 | `order-insight` | **下记内建，达到"市场安装可用 + 功能完善"** | ✅ 下记已完成（1.1.0 发布）；内建能力缺口已于 1.2.0 **全部补齐并清零**（见 §0） |
+| 4 | `ui-plugins/sk-ui-starter`（与 `scripts/ui-plugin-template` 内容重复） | **待用户决定**：① 从市场下架；② 保留但仅作样例岛 | 🟡 未拍板。本轮已做非破坏处置：README 顶部标注"样例岛，供参照非脚手架，脚手架是 `scripts/ui-plugin-template`"。**删除/下架不可逆，需用户拍板** |
+| 5 | `npm run plugins:create <id>` 的 L2 产物落点仍是 `extensions/<id>/` | **待用户决定**：是否一并迁出（如 `plugins/<id>/`），使 `extensions/` 彻底只含随宿主分发的视图插件包 | 🟡 未拍板。本轮按计划**只搬模板与示例、未改落点**（落点变更影响 `.gitignore` / 文档 / 用户习惯，改动面更大）。现状已在 `AGENTS.md` §1.9 与本文档 §2 注明 |
 
 ### 术语：什么叫「下记内建」
 

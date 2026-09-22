@@ -1,0 +1,167 @@
+diff --git a/src/core/plugin/host.ts b/src/core/plugin/host.ts
+index e96de22..fcc6cd0 100644
+--- a/src/core/plugin/host.ts
++++ b/src/core/plugin/host.ts
+@@ -40,15 +40,45 @@ async function unwrap<T>(p: Promise<{ success: boolean; data?: T; error?: string
+ // ---- 「TV 模版」业务域的入参消毒 ----
+ // iframe 消息不可信（红线 3）：插件可以往 db.call 里塞任意形状的载荷，
+ // 而 excel-copy 的 op 会把载荷喂给 xlsx 解析与规则引擎，故一律先做结构 + 规模约束。
+-const EC_MAX_RULES = 64;
+-const EC_MAX_RECORDS = 50000;
+-const EC_MAX_HEADERS = 256;
+-const EC_MAX_FIELDS = 256;
+-const EC_MAX_STR = 20000;
++//
++// 超限语义分两类（ADR-002，取代原先"一律静默 slice"）：
++//   ① **配置类**（规则条数 / 表头列数 / 单条字段数 / 文件体积）：
++//      这些由用户配置或文件本身决定，超限即为异常——静默截断会让用户拿到一份
++//      "看起来正常但结果不对"的数据。故**拒绝并报错**，让岛侧弹明确错误。
++//   ② **数据类**（记录行数 / 单元格字符串长度）：
++//      大 Excel 是真实场景，直接拒绝等于让用户什么都做不了。故**仍截断**，
++//      但必须回传截断元信息（droppedRecords / truncatedStrings），
++//      由岛侧决定是否提示"已处理前 N 行"——静默是问题，截断本身不是。
++const EC_MAX_RULES = 64; // ① 配置类
++const EC_MAX_HEADERS = 256; // ① 配置类
++const EC_MAX_FIELDS = 256; // ① 配置类
++const EC_MAX_EXCEL_BYTES = 64 * 1024 * 1024; // ① 配置类
++const EC_MAX_RECORDS = 50000; // ② 数据类
++const EC_MAX_STR = 20000; // ② 数据类
+ const EC_RULE_TYPES = new Set(['dateOffset', 'template', 'math', 'jsExpression']);
+ 
+ const ecStr = (v: unknown, max = EC_MAX_STR): string => (typeof v === 'string' ? v.slice(0, max) : '');
+ 
++/** 配置类超限：抛出（岛侧 try/catch → 弹错误提示） */
++function rejectOverLimit(what: string, actual: number, max: number): never {
++  throw new Error(`${what} 超限：${actual} > ${max}。请减少${what}后重试，或联系插件作者调整上限。`);
++}
++
++/** ① 配置类：Excel 体积上限（excel-copy 与 order-insight 两个域共用同一阈值） */
++function assertExcelBytes(buf: ArrayBuffer): void {
++  if (buf.byteLength > EC_MAX_EXCEL_BYTES) {
++    rejectOverLimit('Excel 文件大小', buf.byteLength, EC_MAX_EXCEL_BYTES);
++  }
++}
++
++/** 数据类截断的计数（只统计，不阻断） */
++interface EcTruncation {
++  /** 因超过 EC_MAX_RECORDS 被丢弃的行数 */
++  droppedRecords: number;
++  /** 因超过 EC_MAX_STR 被截断的单元格个数 */
++  truncatedStrings: number;
++}
++
+ /** 规则消毒：丢弃形状非法的条目（宁缺勿滥，绝不把未校验对象透给规则引擎） */
+ interface EcSanitizedRule {
+   id: string;
+@@ -70,8 +100,11 @@ interface EcSanitizedRecord {
+ 
+ function sanitizeRules(raw: unknown): EcSanitizedRule[] {
+   if (!Array.isArray(raw)) return [];
++  // ① 配置类：规则是用户在设置页手配的，64 条已是极端。超限说明配置异常或载荷伪造，
++  //    静默丢尾部会让用户"改了规则没生效"却找不到原因 → 明确报错。
++  if (raw.length > EC_MAX_RULES) rejectOverLimit('规则条数', raw.length, EC_MAX_RULES);
+   const out: EcSanitizedRule[] = [];
+-  for (const r of raw.slice(0, EC_MAX_RULES)) {
++  for (const r of raw) {
+     if (!r || typeof r !== 'object') continue;
+     const type = ecStr((r as { type?: unknown }).type, 32);
+     if (!EC_RULE_TYPES.has(type)) continue;
+@@ -98,18 +131,32 @@ function sanitizeRules(raw: unknown): EcSanitizedRule[] {
+   return out;
+ }
+ 
++interface EcSanitizeRecordsResult {
++  records: EcSanitizedRecord[];
++  /** 数据类截断统计（②）：0 表示未发生截断 */
++  truncation: EcTruncation;
++}
++
+ /** 记录消毒：仅保留 id/used/order + 字符串字段表 */
+-function sanitizeRecords(raw: unknown): EcSanitizedRecord[] {
+-  if (!Array.isArray(raw)) return [];
++function sanitizeRecords(raw: unknown): EcSanitizeRecordsResult {
++  const truncation: EcTruncation = { droppedRecords: 0, truncatedStrings: 0 };
++  if (!Array.isArray(raw)) return { records: [], truncation };
++  // ② 数据类：大文件是真实场景，整体拒绝等于让用户什么都做不了 → 截断但记账。
++  truncation.droppedRecords = Math.max(0, raw.length - EC_MAX_RECORDS);
+   const out: EcSanitizedRecord[] = [];
+   for (const r of raw.slice(0, EC_MAX_RECORDS)) {
+     if (!r || typeof r !== 'object') continue;
+     const fieldsIn = (r as { fields?: unknown }).fields;
+     const fields: Record<string, string> = {};
+     if (fieldsIn && typeof fieldsIn === 'object' && !Array.isArray(fieldsIn)) {
+-      const entries = Object.entries(fieldsIn as Record<string, unknown>).slice(0, EC_MAX_FIELDS);
++      const entries = Object.entries(fieldsIn as Record<string, unknown>);
++      // ① 配置类：列数由表头决定，256 列已是极端；超限说明载荷伪造或文件结构异常。
++      if (entries.length > EC_MAX_FIELDS) rejectOverLimit('单条记录字段数', entries.length, EC_MAX_FIELDS);
+       for (const [k, v] of entries) {
+-        if (typeof v === 'string') fields[String(k).slice(0, EC_MAX_HEADERS)] = v.slice(0, EC_MAX_STR);
++        if (typeof v !== 'string') continue;
++        // ② 数据类：超长单元格截断，但记数，供岛侧提示"有内容被截断"。
++        if (v.length > EC_MAX_STR) truncation.truncatedStrings++;
++        fields[String(k).slice(0, EC_MAX_HEADERS)] = v.slice(0, EC_MAX_STR);
+       }
+     }
+     const rid = (r as { id?: unknown }).id;
+@@ -121,7 +168,7 @@ function sanitizeRecords(raw: unknown): EcSanitizedRecord[] {
+       fields,
+     });
+   }
+-  return out;
++  return { records: out, truncation };
+ }
+ 
+ /** 业务库白名单：domain → op → 宿主 IPC 调用（禁止放行任意 SQL） */
+@@ -139,6 +186,8 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
+     parseExcel: async (p) => {
+       const r = await ipc.importExcelByPath(String(p?.filePath ?? ''));
+       if (!r.success || !r.data) throw new Error(r.error || '读取 Excel 失败');
++      // ① 配置类：体积由被选文件决定，超限即拒绝——否则整个文件会被读进内存再解析。
++      assertExcelBytes(r.data.data);
+       const { parseExcelBuffer } = await import('@/core/services/excel');
+       const parsed = parseExcelBuffer(r.data.data);
+       return { headers: parsed.headers, records: parsed.records ?? [] };
+@@ -147,6 +196,7 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
+     parseExcelBuffer: async (p) => {
+       const buf = p?.data;
+       if (!(buf instanceof ArrayBuffer)) throw new Error('parseExcelBuffer: data 必须是 ArrayBuffer');
++      assertExcelBytes(buf);
+       const { parseExcelBuffer } = await import('@/core/services/excel');
+       const parsed = parseExcelBuffer(buf);
+       return { headers: parsed.headers, records: parsed.records ?? [] };
+@@ -155,17 +205,21 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
+     applyRules: async (p) => {
+       const { applyFieldProcessor, computeRulesHash } = await import('@/lib/fieldProcessor');
+       const rules = sanitizeRules(p?.rules);
+-      const records = sanitizeRecords(p?.records);
+-      const headers = (Array.isArray(p?.headers) ? p.headers : [])
+-        .slice(0, EC_MAX_HEADERS)
+-        .map((h: unknown) => ecStr(h, 200))
+-        .filter(Boolean);
++      const { records, truncation } = sanitizeRecords(p?.records);
++      const rawHeaders = Array.isArray(p?.headers) ? p.headers : [];
++      // ① 配置类：原为静默丢尾部，用户只会看到"少了几列"而无任何提示 → 改明确报错。
++      if (rawHeaders.length > EC_MAX_HEADERS) {
++        rejectOverLimit('表头列数', rawHeaders.length, EC_MAX_HEADERS);
++      }
++      const headers = rawHeaders.map((h: unknown) => ecStr(h, 200)).filter(Boolean);
+       const result = applyFieldProcessor(records as never, headers, rules as never);
+       return {
+         records: result.records,
+         newHeaders: result.newHeaders,
+         errors: result.errors,
+         rulesHash: computeRulesHash(rules as never),
++        // 数据类截断统计（新增字段，向后兼容：不读它的岛行为与改动前一致）
++        truncation,
+       };
+     },
+     // 读取模板文本文件（「导入模板文件」得到 content，无需岛侧再走一次 dialog）
+@@ -224,6 +278,8 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
+     parseExcel: async (p) => {
+       const r = await ipc.importExcelByPath(String(p?.filePath ?? ''));
+       if (!r.success || !r.data) throw new Error(r.error || '读取 Excel 失败');
++      // ① 配置类：体积由被选文件决定，超限即拒绝——否则整个文件会被读进内存再解析。
++      assertExcelBytes(r.data.data);
+       const { parseExcelBuffer } = await import('@/core/services/excel');
+       const parsed = parseExcelBuffer(r.data.data);
+       return { headers: parsed.headers, records: parsed.records ?? [] };

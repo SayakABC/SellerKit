@@ -53,7 +53,7 @@ extensions/<kebab-id>/        # 源码目录（脚手架生成）
 
 ## 3. manifest.json 字段说明
 
-以脚手架模板（`extensions/_template/manifest.json`）为例：
+以脚手架模板（`scripts/templates/l2-plugin/manifest.json`）为例：
 
 ```json
 {
@@ -273,8 +273,11 @@ git push          # 推到 https://github.com/SayakABC/SellerKitPlugin main
 ### 8.3 批量发布多个/全部插件
 
 ```bash
+# 注 1：脚手架模板与演示示例已于 2026-09-22 迁到 scripts/templates/（l2-plugin / l2-demo），
+#       不再混在 extensions/ 里，故原「跳过 _template」一行已删除。
+# 注 2：extensions/ 下另有 excel-copy / order-insight 两个**已下记的留档源码包**（非 L2 插件），
+#       批量发布时请按需排除。
 for d in extensions/*/; do
-  [ "$(basename "$d")" = "_template" ] && continue
   node scripts/publish-plugin.js --dir "${d%/}" \
     --base https://raw.githubusercontent.com/SayakABC/SellerKitPlugin/main \
     --out market-out || exit 1

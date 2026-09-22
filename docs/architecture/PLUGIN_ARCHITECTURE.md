@@ -453,7 +453,7 @@ SDK 原则：**类型即文档**；SDK 只依赖 `packages/core` 的类型层与
 
 插件开发者体验依赖脚手架：目标形态 `pnpm create @sellerkit/plugin <id>`，生成 `manifest.json + index.ts（含示例 activate/deactivate）+ 示例 View.vue + tsconfig.json`。分两档落地（对齐单仓收敛现实与 §11 T2 目录分发）：
 
-- **单仓档（已落地）**：`extensions/_template/` 脚手架目录（manifest.json + index.js，含命令 order 与通配订阅示例）+ `scripts/plugin-create.js`——`npm run plugins:create <kebab-id>`（复制目录 + 替换 `__PLUGIN_ID__` 占位符，支持 `--install` 直装 `<userData>/plugins/<id>`）；生成物对齐外置插件目录分发约束——`manifest.name` = 目录名、entry 为单文件 ESM `./index.js`、`capabilities` 显式声明。
+- **单仓档（已落地；模板目录 2026-09-22 归位）**：`scripts/templates/l2-plugin/` 脚手架目录（manifest.json + index.js，含命令 order 与通配订阅示例）+ `scripts/plugin-create.js`——`npm run plugins:create <kebab-id>`（复制目录 + 替换 `__PLUGIN_ID__` 占位符，支持 `--install` 直装 `<userData>/plugins/<id>`）；生成物对齐外置插件目录分发约束——`manifest.name` = 目录名、entry 为单文件 ESM `./index.js`、`capabilities` 显式声明。
 - **独立包档（未来）**：待 `@sellerkit/plugin-sdk` 独立成包（§四 monorepo 化）后，脚手架升格为独立 CLI 包（`create-@sellerkit/plugin`），示例类型从 SDK 包引用。
 
 ---
@@ -538,7 +538,7 @@ SDK 原则：**类型即文档**；SDK 只依赖 `packages/core` 的类型层与
 - T3（已裁决）：Level 2 沙箱**不提供声明式 UI 面**——外置插件为后台贡献型（命令进 ⌘K / 设置贡献），Worker 计算沙箱于 Phase 4 落地；iframe UI 沙箱整体暂缓，为未来方向（见 §14）。
 - T4：插件市场与签名/更新器是否立项（Phase 4 未，维持本机自装）；§6.1 已预留 `icon/screenshots/homepage/repository` 市场元信息字段（字段只增不消费，立项时才启用校验与展示）。
 - T5（已裁决）：`db/excel/fs` 等主进程域能力面**暂缓引入**（§7 原计划随 Phase 3 引入，实际未实现）——当前外置插件能力面为渲染层六域 + `ctx.storage`，excel 仅经 `dialog.openFile({ kind: 'excel' })`；何时需要：先由业务侧提出具体调用场景，再按 §7 契约补主进程域实现与权限门映射。
-- T6（已落地·单仓档）：开发工具链 create-plugin（§8.1）——`extensions/_template/` + `scripts/plugin-create.js`，命令 `npm run plugins:create <kebab-id>`（支持 `--install` 直装 `<userData>/plugins/`）；生成物对齐 T2 目录分发约束。独立 CLI 包档待 SDK 成包（monorepo）后升格；暂不预研 npm 发布。
+- T6（已落地·单仓档）：开发工具链 create-plugin（§8.1）——`scripts/templates/l2-plugin/`（原 `extensions/_template/`，2026-09-22 归位）+ `scripts/plugin-create.js`，命令 `npm run plugins:create <kebab-id>`（支持 `--install` 直装 `<userData>/plugins/`）；生成物对齐 T2 目录分发约束。独立 CLI 包档待 SDK 成包（monorepo）后升格；暂不预研 npm 发布。
 - T7（待裁决）：插件间请求-响应 API——`ctx.api.expose('plugin.method', fn)` / `ctx.api.call('plugin.method', args)`（事件总线只适合广播/通知，稳定 API 面用请求-响应）。设计要点：方法 id 全局命名空间（冲突拒绝）；call 需可序列化返回/错误传播与超时；外置插件跨沙箱调用需扩展桥消息面（`call` 出站 + 宿主中转为对目标插件的 `run-api`）并把"公开方法"本身视为调用授权面；trustLevel 差异（L2 调用 L0 内建）需宿主裁定。涉及桥协议红线 20，**等待真实跨插件调用场景再启动**，不提前铺面。
 - T8（已落地）：贡献点统一排序——`commands/views/settings` 一律支持 `order?: number`（§5.3）。`commands` 已在 ⌘K 消费点升序（`pluginManager.getActiveCommands/getPluginCommands`，内建 + 沙箱命令均透传 order）；`settings` order 随 spec 透传、待 T1 设置渲染器消费。
 - T9（已落地）：事件总线通配符订阅 `'plugin:*'`/`'order:*'`（§5.2）——type 尾部 `*` 前缀匹配、emit 精确优先；宿主 `eventBus.ts` 通用实现（`meta.eventType`）+ Worker `sandboxRuntime.ts` 内联判定本地路由；冒烟覆盖（`scripts/sandbox-smoke.mjs`）。
@@ -553,7 +553,7 @@ SDK 原则：**类型即文档**；SDK 只依赖 `packages/core` 的类型层与
 | **0（已完成）** | 构建期模块化 | REFACTOR_PLAN | — |
 | **1（已完成）** | 插件内核落地 `src/core/plugin/`（pluginManager + 贡献点注册表 + 生命周期状态机）；AppShell/侧栏/⌘K 改由注册表驱动；三内建模块以插件身份注册 | core/plugin + 消费点改造 | 三模块功能逐一手动回归；build/vue-tsc 通过；UI 无感 |
 | **2（已完成）** | SDK（`plugin/sdk.ts`：ctx/host/storage/contributions）+ HostApi 六域收敛；excel-copy 示范迁移到模块态 | sdk + 迁移示范 | vue-tsc/build 通过；既有设置页/持久化行为一致 |
-| **3（已完成）** | 权限门（`security.ts` 能力判定 + 审计环 + `gatedHost.ts` Level 1 包装）；外置插件目录 `<userData>/plugins` 扫描/读取/卸载 IPC（`electron/plugins-handlers.ts`）；manifest 严格校验（`externalManifest.ts`）；管理 UI（设置→插件 `PluginCenter.vue`）；示例插件 `extensions/sk-hello` | 运行时管理器 + 设置插件面板 + 审计展示 | 手动安装示例插件（`npm run plugins:demo:install`）→ ⌘K 命令可用；越权（dialog/跨命名空间）被拒并在审计区展示；内建插件零回归。注：Phase 4 已用 Worker 沙箱取代主线程 Blob 加载（`externalLoader.ts` 精简为纯 discovery，`loadExternalPluginLifecycle` 移除） |
+| **3（已完成）** | 权限门（`security.ts` 能力判定 + 审计环 + `gatedHost.ts` Level 1 包装）；外置插件目录 `<userData>/plugins` 扫描/读取/卸载 IPC（`electron/plugins-handlers.ts`）；manifest 严格校验（`externalManifest.ts`）；管理 UI（设置→插件 `PluginCenter.vue`）；示例插件 `scripts/templates/l2-demo`（原 `extensions/sk-hello`） | 运行时管理器 + 设置插件面板 + 审计展示 | 手动安装示例插件（`npm run plugins:demo:install`）→ ⌘K 命令可用；越权（dialog/跨命名空间）被拒并在审计区展示；内建插件零回归。注：Phase 4 已用 Worker 沙箱取代主线程 Blob 加载（`externalLoader.ts` 精简为纯 discovery，`loadExternalPluginLifecycle` 移除） |
 | **4 强化隔离（Worker 沙箱已完成；UI 沙箱经 T3 决策暂缓）** | Worker 计算沙箱（`sandboxRuntime.ts` 运行时 + `sandbox.ts` 宿主桥 + token 鉴权/rid 关联 + 崩溃熔断）+ 管理面板信任级徽标；**裁剪** iframe UI 沙箱（外置插件=后台贡献型、无视图） | 沙箱桥 + 审计 UI | 外置插件在独立 Worker realm 执行，无法直达 `window.electronAPI`/DOM/localStorage；越权调用在宿主主线程被权限门拒绝并写审计；boot→命令→跨桥调用→停用全链路经 Node vm 冒烟（`scripts/sandbox-smoke.mjs`，`npm run plugins:sandbox:smoke`）+ 手动 `sk-hello` 回归 |
 | **5（已完成，机制 A：随宿主分发视图插件）** | 把两大视图模块外挂化并**保留完整视图能力**：`src/modules/excel-copy|order-insight` 迁至 `extensions/<id>/src` + `manifest.json`（`kind: view`）；registry 生成器双根解析（src/modules ↔ extensions/<id>/src）+ 生成 `pluginPackageInfos`/`settingsPanelLoaders`；设置面板贡献化（插件包 `settings.ts` → SettingsModal 分类/内容注册式，去 4 硬 import）；运行时按包启停（`pluginManager.setPluginEnabled/applyDisabled` + `plugins` 命名空间持久化 + PluginCenter 内建行启停按钮）；`tsconfig.json` include 纳入 extensions | 插件包结构 + 启停 + 贡献化设置面板 | 两插件视图/数据/设置零回归；停用即侧栏/⌘K/设置分类消失且视图不可激活；quick-note（src/modules 对照组）正常；vite build + tsc 通过 |
 

@@ -193,9 +193,15 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 | 数据访问 | 直接用自己的 store（Pinia + `useModuleStorage`） | 只能经 host 能力域（`storage` / `db` / `clipboard` / `dialog` / `secrets` / `mail`），受 `gatedHost` 权限门约束 |
 | 分发 | `npm run dist` 随包 | 打成 zip 走插件市场（`market-out/`） |
 | 注册登记 | 必须在 `modules.config.json` 的 profile 中登记 | **禁止**登记进 profile（否则内建记录占用同名 id，市场安装的 UI 岛无法注册） |
-| 当前实例 | **无**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记，目录仅作源码留档，不在 registry 中） | `ae-profit` / `excel-copy` / `order-insight` / `shop-accounts` / `sk-ui-starter` |
+| 当前实例 | **无**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记；`extensions/` 下只剩 `excel-copy` / `order-insight` 两个**留档源码包**，不在 registry 中；脚手架已迁 `scripts/templates/`） | `ae-profit` / `excel-copy` / `order-insight` / `shop-accounts` / `sk-ui-starter` |
 
-⚠️ **`extensions/` 目录当前还承载第三类内容**：`npm run plugins:create` 生成的**外置插件脚手架/示例**（`_template` / `sk-hello`，manifest 有 `entry: './index.js'` 但**无 `src/meta.ts`**）。这类产物不被 registry 收录，其实际运行位置应是 `<userData>/plugins/`。新增文件时不要混淆——放错位置的脚手架不会被构建收录，也不会被打包。
+⚠️ **脚手架已归位（2026-09-22，T4）**：`npm run plugins:create` 的**模板**与**示例**曾寄居在 `extensions/` 下（`_template` / `sk-hello`），
+现全部迁到 `scripts/templates/` —— L2 后台插件模板 `scripts/templates/l2-plugin/`、L2 演示插件 `scripts/templates/l2-demo/`。
+它们是**第 4 类脚手架**（manifest 有 `entry: './index.js'` 但**无 `src/meta.ts`**），不被 registry 收录、不随包分发，
+真实运行位置是 `<userData>/plugins/`。因此 **`extensions/` 下的目录 = 随宿主分发的视图插件包**这条直觉现在成立，不要再把脚手架放回去。
+
+> `npm run plugins:create <id>` 的**生成产物**默认仍落在 `extensions/<id>/`（模板变了，落点未变）；
+> 它是 L2 后台插件，最终要 `--install` 到 `<userData>/plugins/<id>` 才生效。生成后别把它当成视图插件包去登记 profile。
 
 > 保留红线 23：**禁止把 UI 岛 id 登记进 `modules.config.json` 的 profile**；**禁止依赖 `extensions/` 下无 `src/meta.ts` 的目录被构建收录**。
 >

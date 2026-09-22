@@ -99,6 +99,20 @@
                 {{ p.source === 'external' ? '未声明（所有受限能力被拒）' : 'Level 0（内建可信）' }}
               </span>
             </div>
+            <!--
+              能力明细（H-02 配套）：只显示 `db` 这样的能力 id 时，"同意"是不可判断的 ——
+              同一个 `db` 既可能只是"读自己的数据"，也可能是"读写你磁盘上的任意文件"。
+              这里展开域 / 动作 / 命名空间 / 地址白名单，让权限范围可见（仅展示，不参与判定）。
+            -->
+            <ul v-if="p.capabilityDetails?.length" class="mt-1 space-y-0.5">
+              <li
+                v-for="d in p.capabilityDetails"
+                :key="d"
+                class="text-[10px] text-[var(--wb-text-muted)] font-mono leading-4 break-all"
+              >
+                {{ d }}
+              </li>
+            </ul>
           </div>
           <!-- 内建（含随宿主分发视图插件）：运行时按包启停（侧栏/⌘K/设置分类即时增减） -->
           <div v-if="p.source === 'builtin'" class="flex-shrink-0 flex items-center gap-2">

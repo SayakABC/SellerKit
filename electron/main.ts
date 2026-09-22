@@ -7,6 +7,10 @@ export {};
 const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
+
+/** 开发服务器地址（dev 模式 loadURL 与导航白名单共用一处，避免两处漂移） */
+const DEV_SERVER_URL = 'http://localhost:5173';
 
 // 网络请求 IPC（渲染进程经 axios IPC adapter 调用，主进程用 Electron net 发起请求）
 require('./ipc-handlers');
@@ -34,6 +38,13 @@ require('./company-handlers');
 // 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
 const mailEngine = require('./mail-engine');
 require('./mail-handlers');
+// 「用户显式选择过的文件」白名单：收紧 read-file / save-template / check-file-exists 的路径权限（H-02）
+const {
+  initApprovedUserFiles,
+  approveUserFile,
+  isUserFileAllowed,
+  MAX_TEMPLATE_CHARS,
+} = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {
@@ -136,6 +147,9 @@ async function initStore() {
     console.warn('electron-store not available, using SimpleStore:', err);
     store = new SimpleStore({ defaults: defaultStoreData });
   }
+
+  // 装载「用户已选文件」白名单（H-02）。必须在任何按路径读写的通道被调用之前完成。
+  initApprovedUserFiles(store);
 }
 
 function createWindow() {
@@ -154,17 +168,31 @@ function createWindow() {
     },
   });
 
-  mainWindow.webContents.on('will-navigate', (e: any) => {
-    if (e.url.startsWith('file://')) {
-      const filePath = decodeURIComponent(e.url.replace('file://', ''));
-      if (filePath.endsWith('.xlsx') || filePath.endsWith('.xls')) {
-        e.preventDefault();
-      }
-    }
+  // —— 导航收敛：只放行「应用自身的 URL」，其余一律拦下 ——
+  // 原实现只拦 `.xlsx/.xls` 两种后缀，等于把「把任意本地 .html 拖进窗口」放行：
+  // 该文档会在**主窗口**内加载，而 preload 绑定在 webContents 上、不随 URL 变化
+  // → 这个第三方页面直接拥有 window.electronAPI（全部暴露键）。
+  // 业务上「文件来自第三方（供应商 Excel、别人发来的模板）」是常态，这条路径足够现实。
+  // 注：loadURL/loadFile 这类主进程发起的导航不触发 will-navigate，SPA 的 pushState 也不触发，
+  // 因此这里拦不到正常流程。
+  const ownUrls = new Set([
+    DEV_SERVER_URL,
+    pathToFileURL(path.join(__dirname, '../renderer/index.html')).toString(),
+  ]);
+  mainWindow.webContents.on('will-navigate', (e: any, url: string) => {
+    const target = String(url || e?.url || '');
+    // 同文档内的 hash/query 变化不算导航
+    if (ownUrls.has(target.split(/[?#]/)[0])) return;
+    e.preventDefault();
   });
 
+  // —— 禁止 window.open() / target="_blank" 真的开出新窗口 ——
+  // 新窗口会继承同样的 preload 与 IPC 暴露面。当前无任何正当用途，故一律拒绝；
+  // 将来若需外链，应走 shell.openExternal 的显式白名单，而不是让渲染进程自己开窗。
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL(DEV_SERVER_URL);
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -208,6 +236,8 @@ ipcMain.handle('select-excel', async () => {
       return { success: false, error: 'User canceled' };
     }
     const filePath = result.filePaths[0];
+    // 用户经对话框真实选过 → 落白名单，后续 read-file / check-file-exists 才放行（H-02）
+    approveUserFile(filePath);
     const buffer = fs.readFileSync(filePath);
     const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     return { success: true, data: { filePath, data: arrayBuffer } };
@@ -227,6 +257,8 @@ ipcMain.handle('select-template', async () => {
       return { success: false, error: 'User canceled' };
     }
     const filePath = result.filePaths[0];
+    // 同上：模板文件同样要落白名单，否则「导入模板 → 保存写回文件」会在下次启动失败
+    approveUserFile(filePath);
     const content = fs.readFileSync(filePath, 'utf-8');
     return { success: true, data: { filePath, content } };
   } catch (err: any) {
@@ -234,8 +266,15 @@ ipcMain.handle('select-template', async () => {
   }
 });
 
+// 按路径读取（模板 .txt / Excel .xlsx）。
+// 安全（H-02）：**只允许**宿主内置模板文件与用户经对话框真实选过的文件。
+// 本通道在 `src/` 里的唯一调用点是插件内核 `host.ts` 的业务库白名单，
+// 也就是 UI 岛的能力面 —— 不设限就等于"声明了 db 域的岛 = 全盘读"。不要放宽。
 ipcMain.handle('read-file', async (_event: any, filePath: string) => {
   try {
+    if (!isUserFileAllowed(filePath, [getDefaultTemplatePath()])) {
+      return { success: false, error: 'path not allowed' };
+    }
     if (!fs.existsSync(filePath)) {
       return { success: false, error: 'File not found' };
     }
@@ -262,8 +301,24 @@ ipcMain.handle('write-clipboard', async (_event: any, text: string) => {
   }
 });
 
+// 写回模板文件。
+// 安全（H-02）：路径同 read-file 的白名单；另加内容长度上限（原实现无上限）。
+// 这一条尤其要紧 —— 原实现等于"任意可写文件的覆写原语"，而 op 名叫 saveTemplateFile，
+// 严重低估了它的实际权力。
 ipcMain.handle('save-template', async (_event: any, filePath: string, content: string) => {
   try {
+    if (!isUserFileAllowed(filePath, [getDefaultTemplatePath()])) {
+      return { success: false, error: 'path not allowed' };
+    }
+    if (typeof content !== 'string') {
+      return { success: false, error: 'invalid content' };
+    }
+    if (content.length > MAX_TEMPLATE_CHARS) {
+      return {
+        success: false,
+        error: `模板内容过大（上限 ${Math.round(MAX_TEMPLATE_CHARS / 1024)}KB）`,
+      };
+    }
     fs.writeFileSync(filePath, content, 'utf-8');
     return { success: true };
   } catch (err: any) {
@@ -290,8 +345,16 @@ ipcMain.handle('set-store', async (_event: any, data: Record<string, any>) => {
   }
 });
 
+// 路径存在性探测。
+// 安全（H-02）：它本身就是一个"信息面"。不允许的路径一律返回 false ——
+// 与"文件不存在"不可区分，不泄露任何信息；也不抛错，岛侧 `if (r) reload()` 的写法
+// 会自然跳过，行为等同于"上次那个文件已不在了"（拖拽导入时 filePath 只是文件名占位，
+// 走的正是这条分支，原本也查不到）。
 ipcMain.handle('check-file-exists', async (_event: any, filePath: string) => {
   try {
+    if (!isUserFileAllowed(filePath, [getDefaultTemplatePath()])) {
+      return { success: true, data: false };
+    }
     return { success: true, data: fs.existsSync(filePath) };
   } catch (err: any) {
     return { success: false, error: err.message };

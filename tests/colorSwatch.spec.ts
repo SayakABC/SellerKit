@@ -1,12 +1,16 @@
 // tests/colorSwatch.spec.ts
-// 款色色块字典的回归网（R3-5 把内联字典抽成 extensions/order-insight/src/lib/colorSwatch.ts）。
+// 款色色块字典的回归网（R3-5 把内联字典抽成独立文件；2026-09-22 由 extensions/ 迁入 src/lib/）。
 //
 // 为什么值得单测：这批 hex 是**业务数据**（款色 → 现实颜色的映射），抽文件只是为了
 // 让组件不再出现硬编码色值，语义必须与抽取前逐字节一致——否则款色色块会静默变色，
 // 而这是"看起来没坏"的一类缺陷（用户只会觉得颜色不对，不会认为功能有问题）。
+//
+// 为什么用 @/lib 而不是相对路径指向 extensions/（2026-09-22）：extensions/order-insight
+// 已下记为市场 UI 岛、目录只作源码留档，测试若从那里 import，删留档目录会**连带打挂本测试
+// 与 vue-tsc**（且报错不会提示"因为留档被删了"）。迁到 src/lib 后留档目录才真的不进任何链路。
 
 import { describe, expect, it } from 'vitest';
-import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '../extensions/order-insight/src/lib/colorSwatch';
+import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '@/lib/colorSwatch';
 
 describe('colorSwatch · 款色色块', () => {
   it('字典为 16 个常见颜色，键为中文色名', () => {

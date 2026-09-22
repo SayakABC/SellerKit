@@ -1,4 +1,5 @@
-// 「店铺账号管家」（extensions/shop-accounts）主进程数据访问层，基于 electron/db.ts 公共层。
+// 「店铺账号管家」主进程数据访问层，基于 electron/db.ts 公共层。
+// 视图侧现为市场分发的 UI 岛 `ui-plugins/shop-accounts`（`extensions/shop-accounts/` 已于 2026-09-16 删除）。
 //
 // 业务模型：一行 = **一套店铺**（店群中的一个邮箱主体，邮箱为业务主键）：
 //   邮箱 + 店铺密码（平台登录密码）/ 邮箱密码 / 关联手机号 / 关联企业名称

@@ -500,10 +500,29 @@ function onGlobalKeydown(e: KeyboardEvent) {
   }
 }
 
+// 全局拖放兜底：把文件拖到窗口任意位置时，Chromium 的默认动作是**导航到该文件**——
+// 拖一个 .html 进来就等于在主窗口把它加载起来，而 preload 绑定在 webContents 上、
+// 不随 URL 变化，于是那个外来页面直接拥有 window.electronAPI（主进程侧已同步收敛导航白名单，
+// 这里是渲染层第二道，且能在不触发 IPC 的情况下就拦掉）。
+// 只拦「文件」拖放：拖文本/链接要留给输入框的默认插入行为。
+// 用捕获阶段：即使某个子视图的 drop 处理里忘了 preventDefault，也不会漏掉导航这条默认动作；
+// 不 stopPropagation，故各视图自己的投放区（以及 iframe 岛内的投放）照常工作。
+function dragHasFiles(e: DragEvent) {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
+function onGlobalDragOver(e: DragEvent) {
+  if (dragHasFiles(e)) e.preventDefault();
+}
+function onGlobalDrop(e: DragEvent) {
+  if (dragHasFiles(e)) e.preventDefault();
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown);
   window.addEventListener('open-settings', onOpenSettings);
   window.addEventListener('switch-module', onSwitchModule);
+  document.addEventListener('dragover', onGlobalDragOver, true);
+  document.addEventListener('drop', onGlobalDrop, true);
 
   // 初始化主题（外观设置）
   await initTheme();
@@ -622,6 +641,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   window.removeEventListener('open-settings', onOpenSettings);
   window.removeEventListener('switch-module', onSwitchModule);
+  document.removeEventListener('dragover', onGlobalDragOver, true);
+  document.removeEventListener('drop', onGlobalDrop, true);
   stopStateWatch?.();
   stopUpdaterEvents?.();
 });

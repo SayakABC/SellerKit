@@ -2,14 +2,20 @@ import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { resolve } from 'path';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
-import { resolveModuleKind, entryPath as sharedEntryPath } from './scripts/lib/module-roots.cjs';
+import {
+  resolveModuleKind,
+  isUndocked,
+  entryPath as sharedEntryPath,
+} from './scripts/lib/module-roots.cjs';
 
 const root = process.cwd();
 
 // 模块源码双根解析：
-//   - src/modules/<id>/      —— 常规内建业务模块（保留 modules 机制）
+//   - src/modules/<id>/      —— 常规内建业务模块（保留 modules 机制，当前唯一实例是 quick-note）
 //   - extensions/<id>/src/   —— 随宿主分发的视图插件包（kind=view，构建期随包编译）
-// 物理外置后 excel-copy / order-insight 走 extensions 根；quick-note 等仍在 src/modules。
+// 当前分布与实例清单见 docs/baseline/PROJECT_BASELINE.md §3/§4，此处不重复（易滞后）。
+// 另注：excel-copy / order-insight 已下记为市场 UI 岛，其 extensions/ 目录仅为源码留档，
+//       不会再走这条路径（由下方 isUndocked 守卫硬拦）。
 // 规则唯一权威在 scripts/lib/module-roots.cjs（与 scripts/select-build.js 共用），避免二次漂移。
 function resolveModuleRoot(id: string): 'modules' | 'extensions' | null {
   return resolveModuleKind(root, id);
@@ -55,6 +61,17 @@ for (const id of enabled) {
   const r = resolveModuleRoot(id);
   if (!r) {
     console.error(`[vite] ⚠ module/plugin "${id}" not found in src/modules or extensions/<id>/src — skipped`);
+    continue;
+  }
+  // 红线 23：已下记为市场 UI 岛的 id 不得再进 registry。
+  // 收录它会让 managerDiscover 先占 id，registerUiIsland() 静默 return，
+  // 于是从市场装的岛永远没有侧栏入口，且整条依赖链（如 xlsx）被重新打进包。
+  // 这里必须**报错**而非静默跳过 —— 能走到这一行说明调用方（MODULE_IDS / 预设）本身写错了。
+  if (isUndocked(root, id)) {
+    console.error(
+      `[vite] ⛔ "${id}" 已下记为市场 UI 岛（ui-plugins/${id} 存在），不可再打进宿主 registry — 已忽略。` +
+        `请改用市场分发，或修正 MODULE_IDS / modules.config.json。`,
+    );
     continue;
   }
   roots[id] = r;

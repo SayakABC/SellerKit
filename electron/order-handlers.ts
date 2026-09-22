@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
 const orderDb = require('./order-db');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
+const { isUserFileAllowed } = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
 /** 主图缓存目录：userData/order-images/ */
 const IMAGE_DIR = () => path.join(app.getPath('userData'), 'order-images');
@@ -763,11 +764,21 @@ register('order-cleanup-orphan-images', async () => {
 });
 
 // 读用户指定的本地图片（产品库导入「图片」列用）：payload { localPath } → { mime, dataUrl }
-// 安全边界：仅图片扩展名 + 文件存在 + ≤10MB；与 order-read-image 不同，允许任意路径——
-// 该文件是用户在导入对话框主动选择的本地产品图，属明确授权的读取范围。
+// 读取「产品库导入」图片列里的本地图片路径。
+//
+// 安全（H-02）：仅图片扩展名 + 文件存在 + ≤10MB 之外，另加「用户已选文件」白名单。
+// 原注释称"该文件是用户在导入对话框主动选择的本地产品图"，与实现不符：
+// 路径实际来自**用户导入的 Excel 单元格内容**（旧版 store.readImageForImport(raw) 的 `raw`）。
+// 也就是说，一份表格里的文本就能驱动宿主去读本机任意图片并以 base64 回吐 —— 这属于
+// 由数据（而非用户动作）决定的读取范围，必须收回。现收紧为：只读用户经对话框真实选过的文件。
+// 若将来确实需要"表格里写本地图片路径"，正确做法是给 dialog.openFile 增加一个 image 类型
+// （由用户确认），而不是放宽这里的判据。
 register('order-read-local-image', async (payload) => {
   if (!isPlainObject(payload) || typeof payload.localPath !== 'string' || payload.localPath.length === 0 || payload.localPath.length > 4096) {
     return { success: false, error: 'invalid path' };
+  }
+  if (!isUserFileAllowed(payload.localPath)) {
+    return { success: false, error: 'path not allowed' };
   }
   const ext = path.extname(payload.localPath).toLowerCase();
   if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png' && ext !== '.webp' && ext !== '.bmp') {

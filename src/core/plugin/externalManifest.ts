@@ -81,10 +81,28 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
     return { ok: false, error: `manifest.entry 非法（须为 ./ 开头的相对路径）: ${entry}` };
   }
 
-  // 懒激活事件：白名单识别（onStartup / onCommand:xxx ...）；其余忽略不影响加载
-  const activationEvents: ActivationEvent[] = Array.isArray(raw.activationEvents)
-    ? raw.activationEvents.filter(isStr).slice(0, 16).filter((e) => e === 'onStartup') as ActivationEvent[]
+  // 懒激活事件：**当前只支持 `onStartup`**，其余一律丢弃。
+  //
+  // 旧注释写成"白名单识别（onStartup / onCommand:xxx ...）"，与实现不符：
+  // 按注释写了 `onCommand:xxx` 的插件作者会得到"装上了、永远不激活"，且没有任何提示。
+  // 现改为把被丢弃的声明**明确告警** —— 丢弃本身仍是既有行为（不新增激活语义），
+  // 但不再静默（AGENTS §2.3）。
+  const declaredEvents = Array.isArray(raw.activationEvents)
+    ? raw.activationEvents.filter(isStr).slice(0, 16)
     : [];
+  const activationEvents: ActivationEvent[] = [];
+  const droppedEvents: string[] = [];
+  for (const e of declaredEvents) {
+    if (e === 'onStartup') activationEvents.push(e as ActivationEvent);
+    else droppedEvents.push(e);
+  }
+  if (droppedEvents.length) {
+    console.warn(
+      `[plugin] manifest.activationEvents 目前仅支持 'onStartup'，已忽略: ${droppedEvents.join(
+        ', ',
+      )} —— 该插件不会被这些事件激活`,
+    );
+  }
 
   // 能力声明：结构校验 + 上限约束
   const capabilities: PluginCapability[] = [];
@@ -106,6 +124,17 @@ export function validateExternalManifest(raw: unknown): ManifestValidationResult
       if (allowErr) return { ok: false, error: allowErr };
       const domainsErr = checkStrArray(c.domains, 64, 16, `capabilities.${id}.domains`);
       if (domainsErr) return { ok: false, error: domainsErr };
+      // `secrets` 无域粒度：gatedHost 传的是 { capability:'secrets', action:'status' }，不带 domain，
+      // 而 security.ts 只在请求带 domain 时才做域校验 —— 所以这里声明 domains 会被**静默忽略**。
+      // 不报错（避免打断既有 manifest），但必须让作者知道：否则会以为自己"限定了范围"，
+      // 而实际放行与否与 domains 无关。
+      if (id === 'secrets' && Array.isArray(c.domains) && c.domains.length) {
+        console.warn(
+          `[plugin] capabilities.secrets 不支持 domains（该能力无域粒度），已忽略: ${(c.domains as string[]).join(
+            ', ',
+          )}`,
+        );
+      }
       const cap: PluginCapability = { id };
       if (Array.isArray(c.actions) && c.actions.length) cap.actions = c.actions as string[];
       if (Array.isArray(c.namespaces) && c.namespaces.length) cap.namespaces = c.namespaces as string[];

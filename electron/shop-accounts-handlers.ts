@@ -1,5 +1,7 @@
 // electron/shop-accounts-handlers.ts
-// 「店铺账号管家」（extensions/shop-accounts）渲染层 IPC（语义化通道，electron/main.ts require 后自动生效）。
+// 「店铺账号管家」渲染层 IPC（语义化通道，electron/main.ts require 后自动生效）。
+// 视图侧现为市场分发的 UI 岛 `ui-plugins/shop-accounts`；`extensions/shop-accounts/` 已于 2026-09-16 删除，
+// 不再存在随宿主分发的视图包（本文件与它的目录位置无关，勿按旧路径去找）。
 //   shop-account-db-ensure   幂等建表（视图首次激活时调用）
 //   shop-account-list        店铺套列表（关键字 / 状态 / 平台过滤，永不含明文密码）
 //   shop-account-get         单套详情（含解密敏感字段，仅编辑时使用）

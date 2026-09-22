@@ -106,24 +106,34 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 
 ### 1.5 设置页扩展机制（SettingsModal）
 
-- 左右布局：左侧分类导航（`categories` 数组）+ 右侧内容区。
-- 当前分类：`general`（通用）/ `excel`（TV模版，含二级 Tab：模板配置 / 字段规则 / 显示列）。
+- 左右布局：左侧分类导航 + 右侧内容区。
+- **基础分类固定两个**：`general`（通用）/ `plugins`（插件）；其余分类一律由**设置贡献**动态生成，
+  不得硬编码进 `SettingsModal.vue`（见下方两类贡献）。当前实有分类清单见
+  `docs/baseline/PROJECT_BASELINE.md` §6 —— 本文件只写规则，不写"当前有哪些"（实例最易滞后）。
 - **设置项收拢原则**：业务功能设置一律收进设置页，内容页只留高频操作（筛选 Tab 等）。
 - 模块内组件需要"打开设置页并定位"时，dispatch 全局事件（AppShell 已监听）：
   ```typescript
-  window.dispatchEvent(new CustomEvent('open-settings', { detail: { category: 'excel', tab: 'columns' } }));
+  // 基础分类
+  window.dispatchEvent(new CustomEvent('open-settings', { detail: { category: 'plugins' } }));
+  // 设置贡献分类：视图插件包用其 settings.ts 的自定 id；UI 岛用 '<pluginId>:settings'
+  window.dispatchEvent(
+    new CustomEvent('open-settings', { detail: { category: 'shop-accounts:settings' } }),
+  );
   ```
   AppShell 通过 `initialCategory` / `initialTab` props 传给 SettingsModal 完成定位。
+  注意 `initialTab` 只对**声明了二级 Tab 的分类**有效 —— 目前只有视图插件包的 `settings.ts` 能声明 `tabs`；
+  UI 岛的 `manifest.settings` 是单页（`islandPanels` 无 tabs 字段），对它传 `tab` 会被忽略。
 - 设置面板组件同时用于"设置页内嵌"与"独立抽屉"两种形态时，用 `embedded?: boolean` prop 条件渲染外壳（参考 `TemplateManager.vue` / `FieldRuleManager.vue` / `ColumnSelector.vue`）。
 - **两类插件设置贡献（2026-09-18 起，二者同队列按 order 排序）**：
 
   | 形态 | 声明位置 | 内容承载 | 分类 id |
   |---|---|---|---|
-  | 视图插件包（`extensions/`，随宿主分发） | `settings.ts` → `settingsPanelLoaders` | 宿主内 Vue 组件（`embedded` 内嵌） | 自定（如 `excel`） |
+  | 视图插件包（`extensions/`，随宿主分发） | `settings.ts` → `settingsPanelLoaders` | 宿主内 Vue 组件（`embedded` 内嵌；**唯一可声明二级 Tab 的形态**） | 自定 |
   | **UI 岛（`ui-plugins/`，市场安装）** | `manifest.settings = { entry, displayName?, icon?, order? }` | `IslandSettingsPanel.vue` → `sk-plugin://<id>/<entry>` iframe 岛（复用 `__sk` 受控桥，权限同白名单） | 固定 `<pluginId>:settings` |
 
   - 岛设置页由岛工程**独立入口**产出（Vite 多入口：`index.html` 主视图 + `settings.html` 设置页），`entry` 须与 `manifest.entry` 同子树（发布脚本 `scripts/publish-plugin.js` 强校验）。
   - 岛内不再重复实现设置页：宿主是唯一入口；岛侧只需一个「设置」按钮，调用既有桥能力 `sk.host.ui.openSettings('<pluginId>:settings')`（`ui` 属轻量能力，gatedHost 默认放行，**不得写入 capabilities**）——宿主内部 dispatch `open-settings`，AppShell 打开 SettingsModal 并定位分类。
+    ⚠ **已知偏差（待收敛）**：`excel-copy` / `order-insight` 的设置自带在**岛内视图**（未声明 `manifest.settings`），理由是它们与工作台联动密切（改模板即时看预览）。代价是不进「设置」模态的分类导航，与本节"宿主是唯一入口"不一致；是否收编进宿主见 `docs/reviews/HOST_REVIEW_2026-09-22.md`。
   - 岛被停用/卸载时分类即时消失（`managerSettings.getIslandSettingCategories()` 读 `ctx.uiIslands` + `ctx.disabled`）。
 
 ### 1.6 主题设计令牌（--wb-* CSS 变量）
@@ -141,7 +151,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
   | 情形 | 处置 | 现有实例 |
   |---|---|---|
   | 界面配色（底色/边框/文字/语义色/阴影） | **必须令牌化**；缺令牌就先在两套主题各加一个 | `--wb-shadow`（R3-5 新增，抽屉投影） |
-  | 业务数据颜色（色名 → 色值，表达现实世界的颜色） | 集中到独立文件并注明"不参与主题切换" | `extensions/order-insight/src/lib/colorSwatch.ts`（款色色卡，17 个 hex） |
+  | 业务数据颜色（色名 → 色值，表达现实世界的颜色） | 集中到独立文件并注明"不参与主题切换" | `src/lib/colorSwatch.ts`（款色色卡，17 个 hex；2026-09-22 由 `extensions/order-insight/src/lib/` 迁入，理由见该文件头注释） |
   | 非 UI 像素（canvas 像素数据、图片生成探测等） | 就地保留 + 注释说明"非界面配色" | `src/core/ai/openaiCompatible.ts`（视觉探针图 `#e05a3a`） |
   | `var(--wb-x, #hex)` 的 fallback 值 | **允许**：令牌缺失时的保险；但取值须与 `index.css` 的令牌定义一致，令牌改名时同步 | `src/core/components/UiIslandView.vue` |
   业务数据色若被"顺手令牌化"，深色主题下"白色"款色会变成深灰块——颜色识别失效，属反向破坏。
@@ -169,7 +179,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 - **权限门**（`security.ts`）：manifest `capabilities` 显式声明 → 逐调用判定（能力域 / 动作 / 命名空间 / URL 前缀）→ 未声明即抛 `PluginPermissionError` 并写入审计环（`auditDenied()` 供「设置 → 插件」面板展示）；自身命名空间经 `ctx.storage` 走 raw host 直通。
 - **T8/T9（已落地）**：贡献点统一 `order?: number`（⌘K 消费点升序渲染：`pluginManager.getActiveCommands/getPluginCommands` 按 order 排序；沙箱命令经 `register-command` 透传 order）；事件总线支持尾部 `*` 通配订阅（`meta.eventType` 携带实际事件名，`sandboxRuntime.ts` 内联 pattern 判定本地路由，与 `eventBus.ts` 双端一致——见红线 20）。
 - **外置插件无视图**：按"后台贡献型"处理（命令进 ⌘K 的"外置插件命令"分组），与内建视图切换语义解耦；「设置 → 插件」面板以 `内建 · L0` / `外置 · L2` 徽标区分信任级别。
-- **随宿主分发视图插件（Phase 5，机制 A）**：excel-copy / order-insight 已外挂为 `extensions/<id>/` 视图插件包——`manifest.json`（`kind: view` + displayName/version/description/author）+ `src/` 源码随宿主编译（registry 双根收录），**保留完整 Vue 视图/数据/设置能力**。设置面板贡献化：插件包 `settings.ts`（导出 `settingPanels`）经 registry `settingsPanelLoaders` 注册，SettingsModal 分类导航/内容区按贡献生成（已去硬 import）。运行时按包启停：`pluginManager.setPluginEnabled/applyDisabled`（停用 → 移除静态视图贡献 → 侧栏/⌘K/设置分类消失、`activate` 拒绝；启用 → 恢复静态贡献）；停用集经 `plugins` 命名空间持久化；PluginCenter 内建行提供启停按钮。安装/移除 = 增删 `extensions/<id>/` 目录（构建期收录），与 src/modules 模块同受 `MODULE_IDS`/profile 裁剪。
+- **随宿主分发视图插件（Phase 5，机制 A；当前无实例）**：机制仍在，但曾用它的三个模块已全部**下记**为市场 UI 岛——`excel-copy` / `order-insight` / `shop-accounts` 的 `extensions/<id>/` 目录**仅为源码留档，不进构建**（当前实例与分布见 `docs/baseline/PROJECT_BASELINE.md` §3/§4）。机制本身：`manifest.json`（`kind: view` + displayName/version/description/author）+ `src/` 源码随宿主编译（registry 双根收录），**保留完整 Vue 视图/数据/设置能力**。设置面板贡献化：插件包 `settings.ts`（导出 `settingPanels`）经 registry `settingsPanelLoaders` 注册，SettingsModal 分类导航/内容区按贡献生成（已去硬 import）。运行时按包启停：`pluginManager.setPluginEnabled/applyDisabled`（停用 → 移除静态视图贡献 → 侧栏/⌘K/设置分类消失、`activate` 拒绝；启用 → 恢复静态贡献）；停用集经 `plugins` 命名空间持久化；PluginCenter 内建行提供启停按钮。安装/移除 = 增删 `extensions/<id>/` 目录（构建期收录），与 src/modules 模块同受 `MODULE_IDS`/profile 裁剪。
 
 ### 1.9 `extensions/` 与 `ui-plugins/` 的判定规则（易混）
 
@@ -177,17 +187,22 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 
 | | `extensions/<id>/` | `ui-plugins/<id>/` |
 |---|---|---|
-| 判定标志 | 存在 `src/meta.ts`；manifest `kind: 'view'` | manifest `kind: 'ui'`；`entry: './dist/index.html'` |
+| 判定标志 | 存在 `src/meta.ts` **且未被下记**（`ui-plugins/<id>` 不存在）；manifest `kind: 'view'` | manifest `kind: 'ui'`；`entry: './dist/index.html'` |
 | 形态 | 随宿主分发的**视图插件包**，完整 Vue 视图/数据/设置能力 | **UI 岛**：独立构建的静态产物，iframe 运行时 + `window.__sk` 桥 |
 | 加载 | `vite.config.ts` 双根探测（`MODULE_ROOTS`）收录进 registry，随宿主编译 | 运行时由宿主注入 UI 岛协议加载，**不进主 bundle** |
 | 数据访问 | 直接用自己的 store（Pinia + `useModuleStorage`） | 只能经 host 能力域（`storage` / `db` / `clipboard` / `dialog` / `secrets` / `mail`），受 `gatedHost` 权限门约束 |
 | 分发 | `npm run dist` 随包 | 打成 zip 走插件市场（`market-out/`） |
 | 注册登记 | 必须在 `modules.config.json` 的 profile 中登记 | **禁止**登记进 profile（否则内建记录占用同名 id，市场安装的 UI 岛无法注册） |
-| 当前实例 | `excel-copy` / `order-insight` / `shop-accounts` | `ae-profit` / `order-insight` / `shop-accounts` / `sk-ui-starter` |
+| 当前实例 | **无**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记，目录仅作源码留档，不在 registry 中） | `ae-profit` / `excel-copy` / `order-insight` / `shop-accounts` / `sk-ui-starter` |
 
 ⚠️ **`extensions/` 目录当前还承载第三类内容**：`npm run plugins:create` 生成的**外置插件脚手架/示例**（`_template` / `sk-hello`，manifest 有 `entry: './index.js'` 但**无 `src/meta.ts`**）。这类产物不被 registry 收录，其实际运行位置应是 `<userData>/plugins/`。新增文件时不要混淆——放错位置的脚手架不会被构建收录，也不会被打包。
 
 > 保留红线 23：**禁止把 UI 岛 id 登记进 `modules.config.json` 的 profile**；**禁止依赖 `extensions/` 下无 `src/meta.ts` 的目录被构建收录**。
+>
+> 2026-09-22 补强：下记后源码留档仍含 `src/meta.ts`，故"有 meta.ts 即模块"的枚举会把已下记 id 重新算成**打包候选**。
+> 现由 `scripts/lib/module-roots.cjs` 的 `isUndocked()`（判据：`ui-plugins/<id>` 存在）在**枚举与构建两处**硬拦：
+> `select-build.js` 把这类目录单列为"已下记为市场 UI 岛"、不进候选；`vite.config.ts` 对 `MODULE_IDS` 里出现的已下记 id **报错并忽略**。
+> 因此**也不得用 `MODULE_IDS=<已下记 id>` 打包**。
 
 ---
 
@@ -293,12 +308,12 @@ ipcMain.handle('xxx', async (_e: any, ...args) => {
 | 场景 | 必须步骤 |
 |------|----------|
 | 新增业务模块 | 见 §1.3 SOP；meta.id 与目录一致；modules.config.json 登记 |
-| 新增随宿主分发视图插件 / 大模块外挂化 | 代码放 `extensions/<id>/src/`（meta/index/store/view/components 自包含）+ `manifest.json`（`kind: view`）；设置面板在包内写 `settings.ts` 导出 `settingPanels`（分类/tab + 组件）；在 modules.config `enabledModules`/相关 profile 登记 id 进包；SettingsModal 不新增硬 import（分类/内容注册式，参考 excel-copy / order-insight） |
+| 新增随宿主分发视图插件 / 大模块外挂化 | 代码放 `extensions/<id>/src/`（meta/index/store/view/components 自包含）+ `manifest.json`（`kind: view`）；设置面板在包内写 `settings.ts` 导出 `settingPanels`（分类/tab + 组件）；在 modules.config `enabledModules`/相关 profile 登记 id 进包；SettingsModal 不新增硬 import（分类/内容注册式）。机制保留但**当前无实例**，可参考下记留档的 `extensions/excel-copy`；若该 id 同时存在 `ui-plugins/<id>`，按 UI 岛走，别登记进 profile（红线 23） |
 | 停用/启用插件 | 「设置 → 插件」内建行按钮，或 `pm.setPluginEnabled(id, enabled)` / 启动时 `pm.applyDisabled(list)`；停用集自动持久化 `plugins` 命名空间；停用后侧栏/⌘K/设置分类消失、视图不可激活 |
 | 新增模块状态 | `store.ts` 中 `defineStore` setup 语法；经 `useModuleStorage('<模块id>')` 持久化；用 `scheduleSave` |
 | 新增 IPC 通道 | main.ts（或 ipc-handlers.ts）注册 handler → preload.ts 暴露 → `ipc.ts` 封装 → `src/types.ts` 声明 → 调用方只依赖服务层；主进程 .ts 记得加 `export {}` |
 | 业务功能需要 HTTP 请求 | 经 `src/core/network/request.ts` 的 `http` 实例调用；Token 用 `setToken/getToken`；新域名/方法需评估 `http-client.ts` 白名单与 §1.7 安全边界 |
-| 定制打包范围 | 预设：`MODULE_PROFILE=minimal npm run build`；自定义清单：`MODULE_IDS=excel-copy,quick-note npm run build`（优先级最高）；交互勾选：`npm run dist:select`；未选模块不进 bundle（见 §1.3） |
+| 定制打包范围 | 预设：`MODULE_PROFILE=minimal npm run build`；自定义清单：`MODULE_IDS=quick-note npm run build`（优先级最高）；交互勾选：`npm run dist:select`；未选模块不进 bundle（见 §1.3）。⚠ **只能填未下记的 id**：写入已下记为 UI 岛的 id 会被构建报错并忽略（红线 23） |
 | 新增设置分类/Tab | SettingsModal 加 categories 项 / 二级 Tab 数组；面板组件实现 `embedded` 支持；如需入口定位则 dispatch `open-settings` |
 | 新增 UI 颜色 | 先在 `index.css` 两套主题定义 `--wb-*`，再引用；主色底文字用 `--wb-primary-contrast` |
 | 新增命令面板项 | 模块 `index.ts` 的 `commands` 数组添加 `{ id, title, shortcut?, run }` |
@@ -401,11 +416,16 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 
 `npm test` → vitest（`vitest.config.mts`，`environment: 'node'`，固定 `TZ=Asia/Shanghai` 以免日期断言随机器时区漂移）。
 
-- **覆盖范围**：① `src/lib/` 纯函数层——`excelParser` / `templateEngine` / `fieldProcessor` /
-  `orderRowSplitter` / `aggregator` / `orderClassifier` / `styleMatcher`；
+- **覆盖范围**（当前 13 个文件；用例数随门禁输出为准，不在此写死）：
+  ① `src/lib/` 纯函数层——`excelParser` / `templateEngine` / `fieldProcessor` /
+  `orderRowSplitter` / `aggregator` / `orderClassifier` / `styleMatcher` / `colorSwatch`；
   ② `electron/ipc-util.ts` 的 IPC 注册契约（`tests/ipcUtil.spec.ts` 用 `vi.mock('electron')` 假 ipcMain，
-  钉住返回形状、异常兜底、两套 fallback 文案——129 个通道都经它注册，改错即全盘失效）。
-  **组件、Pinia store、主进程业务逻辑、插件沙箱均无自动化覆盖**，这些改动仍须手动回归，别把"测试全绿"当成整体已验证。
+  钉住返回形状、异常兜底、两套 fallback 文案——**主进程现注册 137 个通道**都经它注册，改错即全盘失效。
+  该数字随 handler 增减变化，以 `npm run verify` 输出为准）；
+  ③ **插件体系静态守卫**——`pluginManifest`（manifest schema）/ `pluginSettingsIsland`（岛设置分类聚合）/
+  `pluginTriage`（红线 23：预设不得占用岛 id；岛的 db 调用必须全在 manifest 声明内）/ `uiIslandThemeTokens`（岛主题令牌）。
+  **组件、Pinia store、主进程业务逻辑、插件 Worker 沙箱运行时均无自动化覆盖**，这些改动仍须手动回归；
+  岛本身还有一层无头冒烟（见技能 `esm-spa-headless-smoke`），别把"测试全绿"当成整体已验证。
 - **夹具**：一律用 `tests/fixtures/` 内自造的小 Excel（`node tests/fixtures/generate-fixtures.mjs` 可重新生成，
   已入库）。**不得依赖根目录 `导出测试.xlsx`**——它被 `.gitignore` 忽略，他机不存在。
 - **断言纪律**：钉住契约（缺失字段标记、两位小数四舍五入、记录 id 起始值与空行间隙、掩码优先级等），

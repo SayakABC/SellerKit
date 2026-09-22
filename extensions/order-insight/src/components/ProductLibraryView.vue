@@ -158,7 +158,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { StyleRecord } from '@/types';
-import { swatchOf } from '../lib/colorSwatch';
+import { swatchOf } from '@/lib/colorSwatch';
 import { useOrderInsightStore } from '../store';
 import OrderThumb from './OrderThumb.vue';
 

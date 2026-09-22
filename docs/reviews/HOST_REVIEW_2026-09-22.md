@@ -14,16 +14,18 @@
 
 | 编号 | 级别 | 一句话 |
 |---|---|---|
-| **H-01** | 🔴 P1 | `npm run dist:select` 把已下记的 `excel-copy` / `order-insight` 当**可打包模块**列出；勾选即占用岛 id（违反 AGENTS 红线 23），并顺带把 492 KB 的 `xlsx` 打回包 |
+| **H-01** | 🔴 P1 | `npm run dist:select` 把已下记的 `excel-copy` / `order-insight` 当**可打包模块**列出；勾选即占用岛 id（违反 AGENTS 红线 23），从市场装的同名岛将永远没有侧栏入口 |
 | **H-02** | 🔴 P1 | `db` 域 `excel-copy` 的 `readTextFile` / `saveTemplateFile` / `checkFileExists` 接受**任意绝对路径**；主进程 `read-file` / `save-template` 无路径约束、无大小上限 → 任何声明该域的岛获得**全盘读 + 任意文件覆写** |
 | **H-03** | 🔴 P1 | **HEAD 停在 2026-09-16，工作区领先 87 项未提交改动**；`AGENTS.md`、`docs/baseline|plans|reviews/`、`ui-plugins/excel-copy/`（整岛）、4 个测试文件**全部是未跟踪状态** → 一次 `git clean -fd` 即不可逆丢失；且无法回滚 / bisect。补救计划 R0-0 早已点出，至今未执行 |
+| **H-04** | 🔴 P1 | **（复查中追加）** `.gitignore` 的 `dist/` 通配吞掉了 `excel-copy` / `order-insight` 两个岛的**全部源码**——这两个岛无构建步骤，源码就手写在 `dist/` 下。仓库里长期存着「`manifest.entry` 指向不存在文件」的坏岛（`order-insight` 1.2.0 已发布仍如此）。**且它会让"序 0 检查点"本身变成陷阱**：`git add -A` 只收录 `manifest.json` + `README.md` |
 | **M-01** | 🟠 P2 | `will-navigate` 只拦 `.xlsx/.xls`；无全局 `dragover/drop` 拦截、无 `setWindowOpenHandler` → 生产环境把任意本地 HTML 拖进窗口，该文档在宿主窗口内加载且 **preload 仍生效**（`window.electronAPI` 可用） |
 | **M-02** | 🟠 P2 | 桥层无载荷体积上限，而 `applyRules` 单次可收 50000×256×20000 字符 → 可撑爆渲染进程 |
 | **M-03** | 🟠 P2 | `AGENTS.md` 多处陈述已被下记推翻，且 §5 仍在示范 `MODULE_IDS=excel-copy,quick-note`（**正是 H-01 的违规操作**） |
+| **M-04** | 🟠 P2 | **（复查中追加）** `excel-copy` / `order-insight` 的设置自带在**岛内视图**里，未声明 `manifest.settings` → 不进「设置」模态的分类导航，与 AGENTS §1.5「岛内不再重复实现设置页、宿主是唯一入口」不一致（`shop-accounts` 走了正路） |
 | **L-01** | 🟡 P3 | 「留档」的 `extensions/order-insight` 被 `tests/colorSwatch.spec.ts` 直接 import → 按计划 `git rm -r` 会打挂门禁；该纯函数按 §1.2 本应在 `src/lib/` |
 | **L-02** | 🟡 P3 | `PLUGIN_DEVELOPMENT.md` 称 `secrets` 需声明 `domains`，实际 `gatedHost.secrets.status()` 不传 domain → 该声明**无任何作用**（文档与实现不一致） |
 | **L-03** | 🟡 P3 | `engines.sellerkit` 只校验"是非空字符串"，从不做范围比对 → 兼容性声明是**装饰性的** |
-| **L-04** | 🟡 P3 | `CHANGELOG.md` 未记录两轮下记；`LICENSE` 仍缺（R4-6 只完成一半）；4 处注释滞后于事实 |
+| **L-04** | 🟡 P3 | `CHANGELOG.md` 未记录三轮下记与 UI 岛体系；4 处注释/文档滞后于事实（`LICENSE` 缺失属**有意挂起**，见勘误，不计入） |
 
 ---
 
@@ -48,7 +50,6 @@ $ node scripts/select-build.js --list
 
 ```
 $ MODULE_IDS=excel-copy npx vite build
-dist/renderer/assets/xlsx-BPQe_nU_.js  492.36 kB   ← 492 KB xlsx 被打回包
 ✓ built in 588ms
 
 $ head -3 src/registry.generated.ts
@@ -56,6 +57,15 @@ import * as excelcopy from '../extensions/excel-copy/src/meta';
 export const enabledModuleMetas = [excelcopy.meta];
 export const moduleViewLoaders = Record<string, ...> = { 'excel-copy': () => import('...'),};
 ```
+
+> **勘误（2026-09-22，修复时实测发现）**：本节初稿还写了「并顺带把 492 KB 的 `xlsx` 打回包」。
+> 修复过程中对比构建产物后确认**该归因不成立**：`xlsx`（492 KB）在**默认预设下同样在包里**
+> （`modules=[quick-note]`、registry 无 excel-copy 时依然产出 `xlsx-*.js`），因为宿主必须为
+> 岛的 `db[excel-copy]` 域提供 Excel 解析（CSP 禁 `unsafe-eval`，解析只能留在宿主），
+> 于是 `host.ts → core/services/excel → lib/excelParser → xlsx` 成为**常驻依赖**。
+> 勾选 excel-copy 的影响只是"该模块自身进 registry 并占 id"，与 xlsx 体积无关。
+> 另记一条**低优先级优化**（L-05）：该 chunk 目前是入口的静态依赖（启动即加载），
+> 若改成在 `db[excel-copy]` 的 op 内动态 `import()`，可让不使用该域的启动路径省下这份解析开销。
 
 **后果链**：注册表收录 `excel-copy` → `managerDiscover.discover()` 先占 id →
 `registerUiIsland()` 见 `records.has(id)` **静默 return** → 从市场装的 excel-copy 岛**永远没有侧栏入口**
@@ -108,7 +118,15 @@ ipcMain.handle('save-template', (_e, filePath, content) => { fs.writeFileSync(fi
 2. **安装期的同意是不知情的**。`PluginCenter.vue:88-97` 只把 capability **id 标签**（`db`、`clipboard`…）显示成
    chip，不展开 domain/action。用户看到"db"无法推断出"可覆写我的任意文件"。
 
-**同源问题（既存，非本轮引入）**：`order-insight` 域的 `readImage` / `readLocalImage` 也是任意路径读取。
+**同源问题（既存，非本轮引入）——经修复时逐条核对后收窄**：
+
+| op | 初稿判断 | 实测 | 处置 |
+|---|---|---|---|
+| `readImage` / `imageThumb` / `imageThumbBatch` | 「也是任意路径读取」 | ❌ **判断有误**：`electron/order-handlers.ts` 的 `order-read-image` 已做三段校验（`realpathSync` → 父目录名必须为 `order-images` → 扩展名白名单），缩略图走同一 `resolveThumbPath` | 无需改动 |
+| `readLocalImage` | 「任意路径读取」 | ✅ 属实，**且比初稿写的更糟**：路径不是"用户在导入对话框选的"，而是**用户导入的 Excel 单元格内容**（旧版 `store.readImageForImport(raw)` 的 `raw` → `orderReadLocalImage(raw)`）。即一份表格里的文本就能驱动宿主读本机任意图片并以 base64 回吐 | 已用同一白名单收紧（见 §5） |
+
+> 该文件的注释原本写着「该文件是用户在导入对话框主动选择的本地产品图，属明确授权的读取范围」——
+> 与实现不符，已一并改写。
 
 **这是否有正当需求？** 查调用方：`saveTemplate` / `readFile` 在 `src/` 里**只有 `host.ts` 这一个使用点**，
 即"仅供插件访问"。不存在"内建代码本来就需要任意路径写"的理由，因此收紧成本很低。
@@ -167,7 +185,54 @@ Phase 1–3 的每一轮整改都是在**没有检查点**的工作区上继续�
 git add -A && git commit -m "chore: 检查点——三轮下记（shop-accounts/order-insight/excel-copy）+ UI 岛体系 + 工程化整改"
 git tag -a v1.1.0 -m "新增 UI 岛体系；全部业务模块下记为市场岛"
 ```
-（是否补打历史 tag 仍按 `CHANGELOG.md` 的既有决策：**不补**。）
+
+> **执行记录（2026-09-22）**：已完成，但**先修掉了 H-04 才提交**（否则 `git add -A` 会提交出一个
+> "有 manifest、无源码"的坏仓库）；tag 也未按此处提议打 `v1.1.0`，理由见 §5 的两点偏差说明。
+
+---
+
+### H-04 🔴 P1 · `.gitignore` 的 `dist/` 通配吞掉了两个岛的**全部源码**
+
+**位置**：`.gitignore:3`（`dist/`，无锚点 → 匹配任意层级的 `dist/` 目录）
+
+**形态**：`ui-plugins/` 下两种岛并存，而 `.gitignore` 只认名字：
+
+| 岛 | `package.json` | `src/` | `dist/` 是什么 | 提交什么才对 |
+|---|---|---|---|---|
+| `ae-profit` / `shop-accounts` / `sk-ui-starter` | 有 | 有 | **构建产物**（Vite 现场构建） | `src/`（`dist/` 忽略正确） |
+| `excel-copy` / `order-insight` | **无** | **无** | **手写 ESM 源码本身** | `dist/`（忽略即丢源码） |
+
+后两者的 `manifest.entry` 都指向 `./dist/index.html` —— 而 `.gitignore` 把它们整目录排除了。
+
+**实测**：
+
+```
+$ git check-ignore -v ui-plugins/excel-copy/dist/main.js
+.gitignore:3:dist/     ui-plugins/excel-copy/dist/main.js
+
+$ git add -A --dry-run ui-plugins/excel-copy/
+add 'ui-plugins/excel-copy/README.md'
+add 'ui-plugins/excel-copy/manifest.json'      ← 2,167 行源码一条都没进
+
+$ git ls-files ui-plugins/order-insight | wc -l
+2                                              ← 只有 README.md 与 manifest.json
+```
+
+**影响**：
+
+1. **已发布的岛在仓库里是坏的**。`order-insight` 1.2.0 已经作为 zip 发布出去，但仓库从来没有它的源码
+   —— 克隆 / 回滚 / 换机后拿到的是一个 `entry` 指向不存在文件的岛（3,135 行缺失）。
+2. **检查点本身会被污染**。H-03 的处置动作是 `git add -A && git commit`；若不先修本项，
+   这一步会**立刻**产出一个"看着有存档、实际无源码"的提交 —— 比不提交更隐蔽。
+3. **不会报错**。本地磁盘上文件都在（构建与冒烟都正常），只有从仓库取代码时才暴露；
+   而 README 里"`dist/` 即源码"的说明在忽略规则面前不起作用。
+
+**建议修法**（已在 §5 落地）：在 `.gitignore` 里为这两个岛加**定向例外**，并加一条守卫
+（岛的"源码真相"必须未被忽略）钉住 —— 守卫见 `tests/pluginTriage.spec.ts` 的
+「岛的运行入口必须真实入库」分组。
+
+> **守卫实现的一个坑（实测）**：`git check-ignore` 默认会先查索引，而**已被跟踪的路径永远不报"被忽略"**
+> —— 用它写断言时，回归（去掉例外）后测试**依然全绿**。必须加 `--no-index` 才是纯规则判定。
 
 ---
 
@@ -197,20 +262,24 @@ mainWindow.webContents.on('will-navigate', (e) => {
 `window.electronAPI`**，即 `read-file` / `save-template` / 全部 141 个暴露键。对"文件来自第三方（供应商 Excel、别人发的模板）"
 就是常态的业务来说，这条路径足够现实。它和 H-02 是同一类后果（任意文件读写），只是入口不同。
 
-**建议修法**：
+**建议修法**（已在 §5 落地，实施时比初稿更严一点）：
+
 ```js
-// main.ts
-mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+// main.ts —— 白名单按集合比较，而不是前缀 startsWith（避免 http://localhost:5173.evil.com 这类绕过）
+const ownUrls = new Set([DEV_SERVER_URL, pathToFileURL(indexHtmlPath).toString()]);
 mainWindow.webContents.on('will-navigate', (e, url) => {
-  if (!url.startsWith(DEV_SERVER) && !url.startsWith(APP_INDEX_URL)) e.preventDefault();
+  if (ownUrls.has(String(url).split(/[?#]/)[0])) return;   // 同文档 hash/query 变化不算导航
+  e.preventDefault();
 });
+mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 ```
-渲染层再加一条全局兜底（顺手解决拖放）：
+
 ```js
-['dragover', 'drop'].forEach((t) =>
-  document.addEventListener(t, (e) => e.preventDefault()));
+// AppShell.vue —— 渲染层第二道；**只拦文件拖放**，否则拖文本进输入框的默认插入行为会被一起干掉
+document.addEventListener('dragover', onGlobalDragOver, true);   // 捕获阶段：子视图忘了 preventDefault 也拦得住
+document.addEventListener('drop', onGlobalDrop, true);
 ```
-（岛内的拖拽导入在自己的 iframe 里 `preventDefault`，不受影响。）
+（岛内的拖拽导入在自己的 iframe 里 `preventDefault`，是另一个文档，不受影响。）
 
 ---
 
@@ -258,6 +327,35 @@ const EC_MAX_STR     = 20000;   // 每个值字符数
 
 ---
 
+### M-04 🟠 P2 · 两个岛把设置页做在岛内，与 AGENTS 的「宿主是唯一入口」不一致
+
+**位置**：`AGENTS.md` §1.5（两类设置贡献表 + 「岛内不再重复实现设置页：宿主是唯一入口」）
+对照三个岛的 `manifest.json` 实测：
+
+```
+shop-accounts   settings={"entry":"./dist/settings.html","displayName":"账号管家","icon":"key","order":50}  ✅ 走正路
+excel-copy      settings=无    ← 设置是**岛内视图**（复制工作台 / 设置 两个页签）
+order-insight   settings=无    ← 同上
+```
+
+**为什么算问题**：
+
+- 按 AGENTS §1.5 的约定，岛的设置应由 `manifest.settings` 贡献给宿主，由 `IslandSettingsPanel.vue`
+  以 iframe 承载、进「设置」模态的**分类导航**；岛内只需一个「设置」按钮调 `sk.host.ui.openSettings(...)`。
+- 实际做法（岛内自建设置页签）把设置**关在岛里**：用户无法从「设置」模态直达，
+  ⌘K / 设置搜索也覆盖不到；同时它与宿主设置页的交互惯例（tab 切换、返回、草稿保存）是各写一套。
+- 这不是"坏了"，而是一处**机制分叉**：两种形态并存会让后来者不知道该照哪个写
+  （`AGENTS.md` §5 的 SOP 表也在用 `excel-copy` / `order-insight` 当"参考实现"）。
+
+**为什么不建议立刻改**：这两个模块的设置与工作台是**强联动**的 —— excel-copy 改模板要立刻看复制预览、
+order-insight 的字段规则要对着当前订单列表调。搬到宿主设置模态后，用户的"改一下、看一眼"循环会被打断。
+所以这需要一次**产品判断**（见 §6 待决策项），而不是纯技术收编。
+
+**本轮处置**：在 `AGENTS.md` §1.5 就地标注**已知偏差**并说明理由与代价，避免规则与实际继续各说各话；
+实际收编与否留待决策。
+
+---
+
 ### L-01 🟡 P3 · 「留档」目录其实是半挂载：被测试与类型检查引用
 
 ```ts
@@ -300,7 +398,11 @@ import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '../extensions/order-insi
 
 - `CHANGELOG.md` 停在 `## [Unreleased]`（内容为 R3 依赖升级），**三轮下记（shop-accounts / order-insight / excel-copy）
   与 UI 岛设置贡献之外的新增均未记录**；`package.json` 版本仍 `1.0.4`。
-- `LICENSE` 不存在（`CONTRIBUTING.md` 已在）—— R4-6 只完成一半。
+- ~~`LICENSE` 不存在（`CONTRIBUTING.md` 已在）—— R4-6 只完成一半。~~
+  **勘误（2026-09-22）**：`LICENSE` 缺失**不是疏漏，而是有意挂起**。`docs/plans/REMEDIATION_PLAN.md`
+  的 R4-6（`:392` / `:394` / `:513`）写明：「`LICENSE` ❗**待用户选定协议**——源项目为 fork，
+  许可证类型不宜代拟」，风险栏也标注「需你确认许可类型后再写」。
+  故本轮**不代拟 LICENSE**；这条从缺陷清单移出，转为**待用户决策项**（见 §6）。
 - 注释滞后 4 处：
   - `vite.config.ts:12`「物理外置后 excel-copy / order-insight 走 extensions 根」——现已下记；
   - `electron/shop-accounts-handlers.ts:2`、`electron/shop-accounts-db.ts:1` 仍称「（`extensions/shop-accounts`）」——该目录 2026-09-16 已删；
@@ -364,14 +466,91 @@ import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '../extensions/order-insi
 
 ---
 
+## 5. 修复记录（2026-09-22）
+
+### 5.1 处置结果
+
+| 序 | 对应 | 结果 | 落点 |
+|---|---|---|---|
+| **0** | H-03 **+ H-04** | ✅ 先修 `.gitignore` 的 `dist/` 例外，再 `git add -A && git commit`（`9a0f623`）；工作区归零，两岛源码入库（`order-insight` 19 文件 / `excel-copy` 12 文件） | `.gitignore`、git 历史 |
+| 1 | H-01、M-03 | ✅ `isUndocked()` 判据进单一事实源，**枚举与构建两处**硬拦；选择器单列「已下记为市场 UI 岛」；`AGENTS.md` 示例改 `quick-note` | `scripts/lib/module-roots.cjs`（+`.d.cts`）、`scripts/select-build.js`、`vite.config.ts`、`AGENTS.md` |
+| 2 | M-01 | ✅ `will-navigate` 收敛为「只放行应用自身 URL」集合比对；加 `setWindowOpenHandler(deny)`；渲染层加**捕获阶段**的 document 级拖放兜底（只拦文件拖放） | `electron/main.ts`、`src/core/AppShell.vue` |
+| 3 | H-02 **+ H-04 守卫** | ✅ 新增「用户已选文件白名单」（跨会话持久化），收紧 `read-file` / `save-template` / `check-file-exists` / `order-read-local-image`；写模板加 2MB 上限；未授权路径的存在性探测返回 `false`（不泄露信息）。配套：`PluginOverview.capabilityDetails` 把能力明细暴露到管理面板 | `electron/user-file-allowlist.ts`（新）、`electron/main.ts`、`electron/order-handlers.ts`、`src/core/plugin/managerOverview.ts`、`src/core/components/PluginCenter.vue` |
+| 4 | M-02 | ✅ 桥层加 64MB 载荷预算（**带早退**的估算，`--` 海量小值也拦得住） | `src/core/plugin/payloadBudget.ts`（新）、`src/core/plugin/uiBridgeHost.ts`、`tests/payloadBudget.spec.ts`（新） |
+| 5 | M-03、L-04 | ✅ §1.5 / §1.8 / §1.9 改「规则 + 指针」；通道数 129 → 137；清理 4 处滞后注释并将**被静默忽略的声明**（`onCommand:*`、`secrets.domains`）改为明确告警 | `AGENTS.md`、`vite.config.ts`、`electron/shop-accounts-{handlers,db}.ts`、`src/core/plugin/externalManifest.ts` |
+| 6 | L-01 | ✅ `colorSwatch.ts` 迁 `src/lib/`；测试与留档组件改指向新址 | `src/lib/colorSwatch.ts`（新）、`tests/colorSwatch.spec.ts`、`extensions/order-insight/src/components/ProductLibraryView.vue`、`AGENTS.md` |
+| 7 | L-02、L-03、L-04 | ✅ `secrets` 无域粒度、`engines` 不做范围比对、合法能力 id「四项→七项」三处修正；CHANGELOG 补三轮下记与本轮修复条目 | `docs/architecture/PLUGIN_DEVELOPMENT.md`、`CHANGELOG.md` |
+| 追加 | **H-04** | ✅ `tests/pluginTriage.spec.ts` 新增「岛的运行入口必须真实入库」分组（按岛形态判定「源码真相」位置）；已实测**回退即变红** | `tests/pluginTriage.spec.ts` |
+| 追加 | **M-04** | ⏸ 仅就地标注已知偏差 + 理由（改动涉及产品判断，见 §6） | `AGENTS.md` §1.5 |
+
+### 5.2 两处与 §4 原计划的偏差（及理由）
+
+1. **没有打 `v1.1.0` tag。** §4 提议在检查点打 `v1.1.0`，但 `package.json` 仍是 `1.0.4`，
+   而仓库里 `v1.0.0/1/2/4` 四个 tag 本就指向同一 commit（`CHANGELOG.md` 已声明「不再补打历史 tag」）。
+   这时候补一个"看起来像正式发布"的 `v1.1.0` 会再制造一个错位的版本坐标。
+   故改打语义明确的检查点 tag：**`remediation-checkpoint-2026-09-22` → `9a0f623`**。
+   是否升版为 `v1.1.0` 属发布决策，留给项目方（见 §6）。
+2. **`sanitize*` 没有改成「超限即拒绝」。** §4 序 4 的后半句是「`sanitize*` 超限改拒绝并报错」，
+   本轮**只加了桥层体积门禁**。原因：`host.ts` 的 `EC_MAX_RECORDS = 50000` 是**与内建版一致的
+   兼容上限**，而 `parseExcel` 返回记录数**不设上限** —— 若把 `applyRules` 改成超限即拒，
+   一个 6 万行的 Excel 会从"静默截断到 5 万"变成"整个规则应用报错"，属**行为变更**，
+   且会打挂现有大文件流程。这个取舍需要项目方拍板（见 §6），不宜在修复轮里顺手改掉。
+
+### 5.3 验证
+
+| 门禁 | 结果 |
+|---|---|
+| `npx vue-tsc --noEmit` | ✅ 0 error |
+| `npx tsc -p tsconfig.electron.json --noEmit` | ✅ 0 error |
+| `npx vitest run` | ✅ **14 文件 / 207 用例**（本轮 197 → 207：`payloadBudget` 10 例 + `pluginTriage` 27 → 33 例） |
+| `npm run verify` | ✅ 141 / 141 / 137，契约一致（本轮未增删 IPC 通道） |
+| `npm run verify:docs` | ✅ 无悬空引用 |
+| `npx eslint .` | ✅ 0 error |
+| H-01 实测 | `--list` 不再列出已下记模块；`MODULE_IDS=excel-copy` 构建时**报错并忽略**，registry 无该 id |
+| H-04 守卫实测 | 三态验证：正常绿 → 去掉 `.gitignore` 例外变红（3 例）→ 恢复后绿 |
+| 构建 | `MODULE_PROFILE=minimal`（空预设）与默认 `standard` 均成功 |
+
+---
+
+## 6. 待决策项（本轮**未**擅自处理）
+
+| # | 事项 | 为什么需要你决定 |
+|---|---|---|
+| 1 | **`LICENSE` 协议类型** | `REMEDIATION_PLAN.md` R4-6 已注明「源项目为 fork，许可证类型不宜代拟」。本轮**未创建** `LICENSE`（报告初稿把它误列为"未完成"，已勘误） |
+| 2 | **是否把 `excel-copy` / `order-insight` 的设置收编进宿主「设置」模态**（M-04） | 涉及产品判断：收编后统一入口，但会打断"改模板 → 立刻看预览"的联动循环 |
+| 3 | **`sanitize*` 超限：保持静默截断，还是改为拒绝并报错**（M-02 的后半段） | 影响 >50000 行 Excel 的行为语义（见 §5.2 第 2 条）。若改为拒绝，需同时决定 `parseExcel` 是否也设上限 |
+| 4 | **是否升版并发布** | `package.json` 仍为 `1.0.4`；本轮只落了一个检查点 tag。是否作为 `v1.1.0` 正式发布由项目方决定 |
+| 5 | **`xlsx` chunk 是否改懒加载**（L-05，低优先） | 现为入口静态依赖（启动即加载 492 KB chunk）；改动态 `import()` 可省启动开销，但要动宿主 `db[excel-copy]` 的 op 实现 |
+
+---
+
 ## 附录 · 复现命令
 
 ```bash
 # H-01：交互式选择器把已下记模块当候选
 node scripts/select-build.js --list
-# H-01：勾选后 id 被占回（含 492KB xlsx 回包）
+# H-01：勾选后 id 被占回（修复前）
 MODULE_IDS=excel-copy npx vite build && head -4 src/registry.generated.ts
 npm run build            # ← 复原（默认预设，注册表只剩 quick-note）
+
+# 修复后：构建对被下记的 id 报错并忽略，registry 不含 excel-copy
+MODULE_IDS=excel-copy npx vite build 2>&1 | grep '⛔'
+grep -c 'excel-copy' src/registry.generated.ts    # -> 0
+
+# 勘误核对：xlsx 是常驻依赖，与是否勾选 excel-copy 无关
+npm run build 2>&1 | grep xlsx                    # -> dist/renderer/assets/xlsx-*.js 492.36 kB
+grep -rn "from 'xlsx'" src/                       # -> src/lib/excelParser.ts（经 core/services/excel 被 host.ts 引用）
+
+# H-04：`dist/` 通配吞掉岛源码（修复前）
+git check-ignore -v ui-plugins/excel-copy/dist/main.js      # -> .gitignore:3:dist/
+git add -A --dry-run ui-plugins/excel-copy/                 # -> 只有 manifest.json + README.md
+git ls-files ui-plugins/order-insight | wc -l               # -> 2（修复后 19）
+
+# H-04 守卫的三态验证（必须用 --no-index，否则已跟踪路径不报"被忽略"）
+git check-ignore -q --no-index -- ui-plugins/excel-copy/dist/main.js; echo "exit=$?"   # -> 1（未忽略）
+grep -v '^!ui-plugins/' .gitignore > /tmp/gi && cp /tmp/gi .gitignore   # 临时去掉例外
+npx vitest run tests/pluginTriage.spec.ts                               # -> 预期 3 例变红
+# （验证完务必还原 .gitignore）
 
 # H-01：确认留档目录仍被解析为「可打包」
 node -e "const {resolveModuleKind}=require('./scripts/lib/module-roots.cjs');

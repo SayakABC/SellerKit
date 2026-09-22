@@ -14,6 +14,7 @@
 import type { HostApi } from './sdk';
 import type { PluginManifest } from './types';
 import type { EventBus } from './eventBus';
+import { exceedsByteBudget, MAX_PAYLOAD_BYTES } from './payloadBudget';
 
 /** 双端协议常量（镜像 electron/plugin-ui-runtime.js 顶部 TYPE——改动必须双端同步） */
 export const UI_MSG = {
@@ -286,6 +287,21 @@ export function attachUiIslandBridge(iframe: HTMLIFrameElement, opts: UiIslandBr
         id,
         ok: false,
         error: `桥参数数量不符: ${String(domain)}.${String(method)} 期望 ${spec.arity} 实收 ${args.length}`,
+      });
+      return;
+    }
+    // 载荷体积预算（M-02）：arity 只保证"参数个数对"，不保证"参数不大"。
+    // 超限直接回错，不让它进入下游的消毒复制与规则引擎遍历。
+    // 注：结构化克隆在此之前的 postMessage 阶段已完成，此处拦的是后续放大。
+    if (exceedsByteBudget(args)) {
+      post({
+        __sk: 1,
+        type: UI_MSG.callResult,
+        id,
+        ok: false,
+        error: `桥拒绝超大载荷: ${String(domain)}.${String(method)} 超过 ${Math.round(
+          MAX_PAYLOAD_BYTES / 1024 / 1024,
+        )}MB 预算`,
       });
       return;
     }

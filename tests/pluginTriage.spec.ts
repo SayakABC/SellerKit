@@ -15,6 +15,7 @@
 //   "调用 ⊆ 声明"只管越权，管不了"声明了却从没调用" —— 后者是下记后的主要回退形态，故另立一组。
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
@@ -42,11 +43,35 @@ const walk = (dir: string, acc: string[] = []): string[] => {
 
 type IslandManifest = {
   name?: string;
+  entry?: string;
   capabilities?: Array<{ id?: string; domains?: string[]; actions?: string[] }>;
 };
 
 const readManifest = (id: string): IslandManifest =>
   JSON.parse(readFileSync(resolve(root, 'ui-plugins', id, 'manifest.json'), 'utf-8'));
+
+/**
+ * 该路径是否被 .gitignore 忽略（**纯规则判定**）。
+ * - true  = 被忽略（`git check-ignore` 退出码 0）
+ * - false = 未被忽略（退出码 1）
+ * - null  = 无法判定（不是 git 工作树 / 没装 git；退出码 128 等）→ 调用方按"跳过"处理，
+ *           别把守卫变成"必须处于某个环境"的硬依赖
+ *
+ * ⚠ 必须带 `--no-index`：默认行为会先查索引，而**已被跟踪的文件永远不报"被忽略"** ——
+ * 于是对已入库的路径，这个守卫会无条件通过（等于没守）。本守卫要的正是"按规则判断"，
+ * 与当前是否已跟踪无关。这个坑是实测出来的：去掉 .gitignore 例外后断言仍未变红。
+ */
+const isGitIgnored = (relPath: string): boolean | null => {
+  try {
+    execFileSync('git', ['check-ignore', '-q', '--no-index', '--', relPath], {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    return true;
+  } catch (e) {
+    return (e as { status?: number }).status === 1 ? false : null;
+  }
+};
 
 describe('内建预设不得占用 UI 岛的 id（AGENTS 红线 23）', () => {
   const cfg = JSON.parse(readFileSync(resolve(root, 'modules.config.json'), 'utf-8')) as {
@@ -160,6 +185,43 @@ describe('UI 岛的 db 能力调用必须全部在 manifest 中声明', () => {
 describe('UI 岛的 manifest.name 与目录名一致', () => {
   it.each(islandIds())('%s', (id) => {
     expect(readManifest(id).name).toBe(id);
+  });
+});
+
+describe('岛的运行入口必须真实入库（防 .gitignore 静默吞掉源码）', () => {
+  // 背景（2026-09-22 H-04）：`.gitignore` 的 `dist/` 通配会匹配**任意层级**的 dist 目录。
+  // excel-copy / order-insight 是「无构建步骤」的岛 —— 没有 package.json / vite.config，
+  // 源码直接手写在 dist/ 下，manifest.entry 指向 ./dist/index.html。
+  // 于是 `git add -A` 只收录了 manifest.json + README.md，仓库里长期存着两个
+  // 「entry 指向不存在文件」的坏岛（order-insight 1.2.0 已发布，仓库里却从来没有它的源码）。
+  // 该缺陷在本地磁盘上完全看不出来（文件都在），只在克隆 / 回滚 / 换机后才暴露 —— 故必须由守卫钉住。
+  // 两种形态的"源码真相"位置不同，判据也必须分开（当前实测两者完全对应）：
+  //   有 package.json ⟺ 有 src/ ⟺ dist/ 是构建产物（忽略 dist、提交 src 才对）
+  //   无 package.json ⟺ 无 src/ ⟺ dist/ 就是源码（忽略 dist = 丢源码）
+  it.each(islandIds())('%s：源码真相未被 .gitignore 吞掉', (id) => {
+    const abs = resolve(root, 'ui-plugins', id);
+    if (existsSync(resolve(abs, 'package.json'))) {
+      // 构建产物型：随包提交的是 src/（dist/ 由发布脚本现场构建）
+      expect(existsSync(resolve(abs, 'src'))).toBe(true);
+      expect(isGitIgnored(`ui-plugins/${id}/src/`)).not.toBe(true);
+      return;
+    }
+    // 无构建步骤型：源码就在 dist/ 下，manifest.entry 也指向它 —— 必须真实入库
+    const entry = readManifest(id).entry;
+    expect(typeof entry).toBe('string');
+    const rel = `ui-plugins/${id}/${String(entry).replace(/^\.\//, '')}`;
+    expect(existsSync(resolve(root, rel))).toBe(true);
+    expect(isGitIgnored(rel)).not.toBe(true);
+  });
+
+  it('至少存在一个「无构建步骤」的岛，且其 dist/ 全部未被忽略', () => {
+    // 这一条是上一条的反向兜底：若哪天所有岛都改成带构建脚本，
+    // 上面那个分支就再也不会被执行，守卫会静默失效 —— 这里把它钉住。
+    const noBuild = islandIds().filter(
+      (id) => !existsSync(resolve(root, 'ui-plugins', id, 'package.json')),
+    );
+    expect(noBuild.length).toBeGreaterThan(0); // 当前为 excel-copy / order-insight
+    expect(noBuild.filter((id) => isGitIgnored(`ui-plugins/${id}/dist/`) === true)).toEqual([]);
   });
 });
 

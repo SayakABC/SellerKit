@@ -227,7 +227,9 @@
 
 > 外置插件 / UI 岛能写哪些命名空间由 manifest 的 `capabilities[storage].namespaces` 决定：声明了就必须命中，
 > 未声明则默认只放行插件自身命名空间（`src/core/plugin/security.ts`）。因此**新增一个用 storage 的岛 = 新增一个命名空间**，
-> 本节清单应随岛的 manifest 同步刷新。内建侧落 electron-store 的是 `app-shell`（外壳状态 + 插件停用集）与 `quick-note`（便签列表）。
+> 本节清单应随岛的 manifest 同步刷新。内建侧只有 `app-shell`（外壳状态）与 `plugins`（插件停用集）两个命名空间；
+> `quick-note` **不占命名空间** —— 它的 3 个源文件（`meta.ts` / `index.ts` / `QuickNoteView.vue`）里没有任何
+> storage / localStorage / 读写调用，便签内容随会话存在、重启即失（若要持久化，需新增 `quick-note` 命名空间并走 `useModuleStorage`）。
 > 下记**不迁移**命名空间：内建与同名岛共用 `modules.<id>`，这正是"配置自动继承"的实现方式（见 §4）。
 >
 > ⚠️ `AGENTS.md` §1.4 仍只列 `app-shell` / `excel-copy` 两个命名空间（已滞后，本次快照已补全，详见审查报告 P2-3）。

@@ -3,7 +3,7 @@
 // 计算 sha256，并写入/更新 catalog.json（用于 GitHub 静态托管的插件市场）。
 //
 // 用法：
-//   node scripts/publish-plugin.js --dir extensions/sk-hello \
+//   node scripts/publish-plugin.js --dir scripts/templates/l2-demo \
 //     --base https://raw.githubusercontent.com/SayakABC/SellerKitPlugin/main \
 //     [--out market-out] [--catalog market-out/catalog.json] [--build]
 //

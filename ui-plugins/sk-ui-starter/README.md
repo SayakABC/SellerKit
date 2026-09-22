@@ -1,5 +1,10 @@
 # sk-ui-starter（UI 岛）
 
+> ⚠️ **这是「样例岛」，不是脚手架。**
+> 它是一份已发布到市场的**参照实现**（与 `scripts/ui-plugin-template` 内容重复），用来演示「UI 岛长什么样」；
+> **新建 UI 岛请不要复制本目录**，请用脚手架 `npm run plugins:create:ui <kebab-id>`（模板源：`scripts/ui-plugin-template/`）。
+> 是否从市场下架本样例岛，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §7 待决策（需用户拍板）。
+
 SellerKit **UI 形态包**脚手架产物：静态站点经 `sk-plugin://` 只读协议在宿主 iframe（独立 JS realm）内运行，通过宿主注入的 `window.__sk` 桥调用宿主能力（权限门按 `manifest.json` 的 `capabilities` 判定）。
 
 ## 目录

@@ -9,7 +9,8 @@
  * 判定规则（唯一权威）：**目录下存在 meta.ts 入口**才算一个可打包模块。
  *   - src/modules/<id>/meta.ts
  *   - extensions/<id>/src/meta.ts
- * 没有 meta.ts 的目录（脚手架 _template / 示例 sk-hello / 纯 UI 岛源码）不参与打包裁剪。
+ * 没有 meta.ts 的目录（纯 UI 岛源码 / plugins:create 生成的 L2 产物）不参与打包裁剪。
+ * （脚手架模板与示例已于 2026-09-22 迁到 scripts/templates/：l2-plugin / l2-demo，不再位于 extensions/ 下）
  *
  * ⚠ 例外：**已下记为市场 UI 岛的 id 不是可打包模块**（见 isUndocked）。
  * 下记只把 id 从 modules.config.json 摘掉、并让源码留档在 extensions/<id>/，

@@ -10,8 +10,8 @@
       <span class="wb-metric">识别库 <b>{{ counts.styles }}</b> 款</span>
     </div>
 
-    <!-- 工具条：查询 + 刷新 + 批量识别。
-         识别按钮放主位（这是本页唯一的"批量动作"，其余都是逐行的）。 -->
+    <!-- 工具条：查询 + 刷新。本页**只剩逐行动作** —— 原「识别未归类」批量按钮已于 2026-10-05
+         按用户要求删除（为什么删见 script 头注释），不要再加回来而不改冒烟。 -->
     <div class="cl-bar">
       <input
         v-model="search"
@@ -24,22 +24,8 @@
       <button type="button" class="wb-btn wb-btn--sm" data-act="cl-reload" :disabled="loading" @click="reload">
         刷新
       </button>
-      <span class="cl-grow"></span>
-      <button
-        type="button"
-        class="wb-btn wb-btn--sm wb-btn--primary"
-        data-act="cl-recognize"
-        :disabled="loading || running || !rows.length"
-        @click="recognizeAll"
-      >
-        {{ running ? `识别中 ${done}/${queue.length}…` : '识别未归类' }}
-      </button>
-      <button v-if="running" type="button" class="wb-btn wb-btn--sm" data-act="cl-stop" @click="stop">
-        停止
-      </button>
     </div>
 
-    <p v-if="progress" class="wb-notice" data-act="cl-progress">{{ progress }}</p>
     <p v-if="error" class="wb-notice wb-notice--error" data-act="cl-error">{{ error }}</p>
 
     <section class="wb-panel">
@@ -191,20 +177,31 @@
 // 「归类核对」页签 = 发货流程第 2 步（2026-10-05 从「订单归类」岛内建过来）。
 //
 // **这一页干什么**：订单导进来只是"有这些单"，还不知道每单是什么款 —— 本页把"还没归到款的行"
-// 逐条核对/修正。两条归类路径**互为补充**，页面上都要给：
-//   · **批量**：识别未归类的图（宿主「设置 › 识别」配引擎 + Key，本页只调用）——
-//     走的是与导入/产品库**同一份**归一化与指纹算法，所以识别出来的款与人工核对的款
-//     会落到同一个款编码上；
-//   · **逐行**：改品类/颜色/Logo，或在下拉里直接点名某个款编码。改字段 → 按指纹重归类；
-//     点名 → 挂到该款并把指纹记入它（**后续自动识别会命中同一款**）。
+// 逐条核对/修正。两个动作，都在行内：
+//   · **改品类/颜色/Logo** → 保存时按指纹重归类（`orderUpdate(reclassify)`）；
+//   · **在下拉里点名某个款** → 挂到该款并把指纹记入它（**后续同样的指纹会命中同一款**）。
+//
+// ⚠️ **「识别未归类」批量动作已于 2026-10-05 按用户要求删除**（原按钮 `data-act="cl-recognize"`）。
+//   它做的事是"对本页 30 行里有图无款的行，逐张跑视觉模型并直接落库"。删它的三条理由：
+//     ① **慢得离谱且绑住界面**：串行识图 20~60s/张 ⇒ 跑满一页十几分钟；
+//     ② **范围是"当前页"而不是"所有未归类"**：翻页要重跑，用户以为全跑了其实只跑了一页；
+//     ③ **直接落库**（reclassify + 写指纹），错了要逐条回退 —— 识别这种事更适合"先给建议、
+//        人看一眼再定"，而不是替用户下结论。
+//   ⇒ **识别该以什么形态回来尚未拍板**（导入时后台跑 / 逐行「识这张图」按钮 / 只做建议不落库）。
+//   在拍板前本页只留逐行核对这条**必然正确**的路径。
+//
+//   ⚠️ 连带：识别原语（`readEngine` / `recognizeOrder`）仍保留在 `../classify.ts`，**当前无调用方**
+//   —— 留着是因为「设置 › 识别」写的那份引擎配置必须有个读取方，且它们正是重新接入识别时要用的现成件。
+//   若最终决定不做自动识别，**两者与「设置 › 识别」页应一并删除**（别让它们烂在那里）。
 //
 // **照功能不照样式**：移植自原「订单归类」岛的**纠正页**（该岛已于 2026-10-05 整体下架，
 // 源码留档不入库，`CHANGELOG.md` 的 Removed 段有清单）—— 原页用自己的 `.panel/.bar/.btn`；
 // 内建页一律走 `.wb-*`（见 `src/styles/index.css`）。
 //
 // **这一页砍掉了什么（"哪些在流程里有用的"的裁量，2026-10-05）**：
+//   · **「识别未归类」批量识别按钮** —— 见上方 ⚠️（慢 / 只跑当前页 / 直接落库）。
 //   · 岛里的「导入与识别」队列页（`oi_queue` 中间表 + 断点续跑）—— 宿主的导入**直落订单表**，
-//     队列是多余的中间层；本页的批量识别直接对"已在库里的未归类订单"跑，不需要队列。
+//     队列是多余的中间层。
 //   · 行内改**款式展示名** —— 展示名是主数据，维护在「货与成本 › 产品」；本页只做"核对归类"，
 //     一个输入框能改的东西越少，核对这件事越不容易被误操作。
 //   · 岛的「识别库 / 透视 / 明细 / 设置」四个页 —— 都不是每日动作（主数据 / 分析 / 配置）。
@@ -219,8 +216,6 @@ import {
   listStyles,
   markCorrected,
   pendingCounts,
-  readEngine,
-  recognizeOrder,
   saveCorrection,
 } from '../classify';
 
@@ -411,73 +406,11 @@ async function confirmAll(): Promise<void> {
   }
 }
 
-// ─────────────────────────────────────────────── 批量识别
-
-const running = ref(false);
-const stopFlag = ref(false);
-const queue = ref<OrderRecord[]>([]);
-const done = ref(0);
-const progress = ref('');
-/** 逐条失败原因（只留前几条显示 —— 几十条全铺出来会把页面顶掉） */
-const failed = ref<string[]>([]);
-
-function stop(): void {
-  stopFlag.value = true;
-}
-
-/**
- * 批量识别**当前页里还没归类的**订单（有图的才在队列里）。
- *
- * 串行、失败不中断（与岛里的队列主循环同策略）：识图一次 20~60s，
- * 并行只会撞限流；而一条失败就整体停，用户要自己找断点。
- */
-async function recognizeAll(): Promise<void> {
-  error.value = '';
-  progress.value = '';
-  failed.value = [];
-  const { engine, reason } = await readEngine();
-  if (!engine) {
-    error.value = reason;
-    toast(reason, 'error');
-    return;
-  }
-  const targets = rows.value.filter((o) => !o.styleCode && o.localPath);
-  if (!targets.length) {
-    toast('当前页没有"有图但还没归类"的订单', 'info');
-    return;
-  }
-  queue.value = targets;
-  done.value = 0;
-  stopFlag.value = false;
-  running.value = true;
-  try {
-    for (const o of targets) {
-      if (stopFlag.value) break;
-      progress.value = `识别中：${done.value + 1}/${targets.length}（订单 ${o.orderNo}）…`;
-      try {
-        const r = await recognizeOrder(o, engine);
-        done.value += 1;
-        progress.value = `已识别 ${done.value}/${targets.length}${r.styleCode ? ` · 归属 ${r.styleCode}` : ''}`;
-      } catch (e: unknown) {
-        failed.value.push(`${o.orderNo}：${e instanceof Error ? e.message : '识别失败'}`);
-        done.value += 1;
-      }
-    }
-  } finally {
-    running.value = false;
-    const stopped = stopFlag.value && done.value < targets.length;
-    progress.value = stopped
-      ? `已停止：识别 ${done.value}/${targets.length}`
-      : `识别完成：${targets.length - failed.value.length}/${targets.length} 条归到款`;
-    if (failed.value.length) {
-      error.value = `${failed.value.length} 条没识别成功：${failed.value.slice(0, 3).join('；')}${
-        failed.value.length > 3 ? ' …' : ''
-      }`;
-    }
-    toast(progress.value, failed.value.length ? 'error' : 'success');
-    bump();
-  }
-}
+// ~~批量识别（`cl-recognize` / `cl-stop` / 进度条 `cl-progress`）~~
+// **已删（2026-10-05，用户要求）** —— 原因见 script 头注释的三条（慢 / 只跑当前页 / 直接落库）。
+// 原实现留档在 git 历史（该提交同时删掉 `readEngine` / `recognizeOrder` 在本页的调用）。
+// ⚠️ 重新加回来时必须同步 `scripts/today-ui-smoke.mjs` 的 `classify` 段 —— 那里现在有一条
+//    **反向断言**「工具条不再有识别按钮」，加了按钮它会红，那是设计如此（逼你确认是"要加回来"）。
 
 onMounted(() => void load());
 // 保活的代价要还回去：容器 `token` 变了（导入 / 别处改了订单）就重取本页
@@ -504,9 +437,6 @@ watch(
 .cl-search {
   width: 300px;
   max-width: 40vw;
-}
-.cl-grow {
-  flex: 1;
 }
 /* 面板头右侧动作区（`.wb-panel__head` 是 flex，无"推右"工具类） */
 .cl-actions {

@@ -80,7 +80,6 @@ const FAKE_BRIDGE = `<script>
   window.__noPurchaseOrders = false;
   window.__noPendingOrders = false;
   window.__noShopAlloc = false;
-  window.__apiKey = '';
 
   var IMPORTED = [{
     id: 1, orderNo: 'I-1', source: 'import', shop: '店A', orderTime: daysAgo(1) + ' 10:00:00',
@@ -152,11 +151,12 @@ const FAKE_BRIDGE = `<script>
   ];
 
   // ---- 归类核对域夹具（2026-10-05「归类核对」页签内建）----
-  // ⚠️ 三条**故意各缺一样**，让两个排除条件**各自独立可观测**（只放"唯一可选项"等于没测）：
-  //    · P-41：有图 + 未归类  → 批量识别的**唯一**目标；
-  //    · P-42：有图 + **已归类** → 排除它的理由只能是 !styleCode（图是有的，赖不到"没图"上）；
-  //    · P-43：**无图** + 未归类 → 排除它的理由只能是 localPath。
-  //    夹具若把 P-42 写成"无图"，!styleCode 这个条件就永远验不到（拿掉它也照样 1 条）。
+  // ⚠️ 三条**故意各缺一样**，让每个判据**各自独立可观测**（只放"唯一可选项"等于没测）：
+  //    · P-41：有图 + 未归类 → 「未归类」计数 + 缩略图合批都该算上它；
+  //    · P-42：有图 + **已归类** → 「归属款」下拉必须选中**它自己的款**（默认值不靠位置）；
+  //    · P-43：**无图** + 未归类 → 无图行不该进缩略图合批（进了就白跑一次往返，
+  //      而"少带一条"与"带对了"在调用数上完全看不出区别）。
+  //    夹具若把 P-43 写成"有图"，缩略图那条断言就永远验不到"排除无图行"。
   var PENDING_ORDERS = [
     { id: 41, imageId: 401, orderNo: 'P-41', shop: '店A', size: 'L', orderTime: '2026-10-04 10:00:00',
       category: 'T恤', color: '黑', logo: '', styleCode: '', styleName: '', styleColor: '',
@@ -297,8 +297,10 @@ const FAKE_BRIDGE = `<script>
     'purchaseShopAllocationDetail': function (p) { rec('purchaseShopAllocationDetail', p); return { success: true, data: SHOP_DETAIL }; },
 
     // ---- 归类核对域（2026-10-05「归类核对」页签内建）----
-    // ⚠️ 两条待核对订单**故意一条有图一条没图**：无图那条不能被算进"可识别"，
-    //    否则「跳过无图行」这条守卫恒绿（拿掉跳过分支，总数照样对得上）。
+    // ⚠️ 三条待核对订单**故意一条有图 + 一条已归类 + 一条无图**：
+    //    · P-41 有图未归类 / P-42 有图已归类 → 缩略图合批应当只带这两条（无图的 P-43 不能混进去，
+    //      否则白跑一次往返，而"少带一条"与"带对了"在调用数上看不出区别）；
+    //    · P-42 已归类 → 「归属款」下拉必须选中**它自己的款**而不是第一个选项（默认值不靠位置）。
     'orderList': function (p) {
       rec('orderList', p);
       if (window.__noPendingOrders) return { success: true, data: { rows: [], total: 0 } };
@@ -319,15 +321,9 @@ const FAKE_BRIDGE = `<script>
         return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       }) } };
     },
-    'orderReadImage': function (p) {
-      rec('orderReadImage', p);
-      return { success: true, data: { mime: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,AAAA' } };
-    },
-    'orderImageSave': function (p) { rec('orderImageSave', p); return { success: true }; },
-    // 密钥默认**空**：点「识别未归类」应当**拦住并指路**（而不是跑一半才逐行失败）。
-    // 需要验证"有 Key 时会去读图"时把 window.__apiKey 置上。
-    'orderApiKeyGet': function () { rec('orderApiKeyGet', {}); return { success: true, data: { apiKey: window.__apiKey || '' } }; },
-    'orderApiKeySet': function (p) { rec('orderApiKeySet', p); return { success: true, data: { stored: true } }; },
+    // ~~识别链路的四个桩（orderReadImage / orderImageSave / orderApiKeyGet / orderApiKeySet）~~
+    // **已随「识别未归类」一起删除（2026-10-05）**：它们只服务那条批量识别链路。
+    // 假桥里留着没人用的桩会让下一个人以为"识别在这里还有覆盖" —— 要用时再加回来。
   };
 
   window.electronAPI = new Proxy({}, {
@@ -478,7 +474,7 @@ async function clickRefresh() {
  * 点一个按钮 —— **先等它可点**。
  *
  * ⚠️ 与 confirmOk 同一条教训，只是换了个对象：页面上凡"写操作期间自锁"的按钮
- *    （保存 / 确认无误 / 全部确认 / 识别未归类 / 登记付款）在 busy 期间都是 disabled 的。
+ *    （保存 / 确认无误 / 全部确认 / 登记付款）在 busy 期间都是 disabled 的。
  *    假桥的 IPC 立刻 resolve，脚本常常在上一个 await 链还没走完时跑到下一步：
  *    点在一个 disabled 的按钮上 → .click() 静默无效 → 断言变成"请求没发出去"，
  *    排查方向会被带到"接线没接上"（实测：cl-all-ok 就是这么假红的）。
@@ -1071,8 +1067,9 @@ async function main() {
 
     step('classify');
     // 「归类核对」页签（2026-10-05 内建；从「订单归类」岛搬来，功能照搬、样式走 .wb-*）。
-    // 三个重点：① 取数真落到宿主通道；② 批量识别**只挑"有图且未归类"的行**（最容易写成"全部行"）；
-    // ③ 没配 Key 时**当场拦住并指路**（跑一半才逐行失败是最糟的体验）。
+    // 三个重点：① 取数真落到宿主通道；② 逐行动作（保存 / 确认无误 / 全部确认）各自发对通道；
+    // ③ **只剩下逐行动作** —— 原「识别未归类」批量按钮已按用户要求删除，本段末尾有一条
+    //    反向断言钉住"它不在"，避免它悄悄长回来（要加回来就同步改那条断言）。
     await activateTab('classify');
     await waitFor(function () {
       return !!card('classify-panel') && flat(card('cl-stats')).indexOf('待核对') >= 0 && !!card('cl-table');
@@ -1183,38 +1180,25 @@ async function main() {
       okMkAll && JSON.stringify(calls('orderMarkCorrected')[mkA]) === '{"all":true}',
       JSON.stringify(calls('orderMarkCorrected')[mkA]));
 
-    // ---- 批量识别：先拦"没配 Key"，再验"只挑有图且未归类的行" ----
-    var roB = calls('orderReadImage').length;
-    await clickReady('cl-recognize');
-    var okBlocked = true;
-    try { await waitFor(function () { return !!card('cl-error'); }, 8000); }
-    catch (e) { okBlocked = false; }
-    report('没配识别 Key 时点「识别未归类」**当场拦住并指路**（不是跑一半才逐行失败）',
-      okBlocked && flat(card('cl-error')).indexOf('设置') >= 0 &&
-        calls('orderReadImage').length === roB,
-      (card('cl-error') ? flat(card('cl-error')) : 'no-error') +
-        ' | orderReadImage+' + (calls('orderReadImage').length - roB));
-
-    window.__apiKey = 'sk-smoke';
-    var roB2 = calls('orderReadImage').length;
-    await clickReady('cl-recognize');
-    var okRead = true;
-    try { await waitFor(function () { return calls('orderReadImage').length > roB2; }, 10000); }
-    catch (e) { okRead = false; }
-    var readPaths = (calls('orderReadImage') || []).slice(roB2);
-    report('有 Key 时**只对"有图且未归类"的行读图**（有图但已归类的 P-42、无图的 P-43 都不进队列）',
-      okRead && readPaths.length === 1 && readPaths[0] === '/tmp/p41.jpg',
-      JSON.stringify(readPaths));
-    window.__apiKey = '';
-    // 等这一轮跑完再往下走（识别按钮在 running 期间是禁用的，不等就会点在一个 disabled 的按钮上）
-    try {
-      await waitFor(function () { var b = card('cl-recognize'); return !!b && !b.disabled; }, 15000);
-    } catch (e) { /* 识别链路在假桥下必然失败（analyze throw），这里只求"跑完" */ }
-    // ⚠️ 队列大小要**单独**验：读图次数只证明"读了几条"，没证明"有没有把不能识别的行排进队列"——
-    //    无图行在 recognizeOrder 第一行就抛错（读图一次都不发），从调用数上完全看不出来。
-    report('识别队列只排 1 条（无图 / 已归类的行不进队列，免得跑出一条"跳过"的假进度）',
-      flat(card('cl-progress')).indexOf('0/1 条归到款') >= 0,
-      flat(card('cl-progress')));
+    // ---- 反向断言：批量识别已删除（2026-10-05 用户要求）----
+    // 删功能**必须留一条"它不在了"的守卫**，否则哪天有人把按钮加回来，冒烟照样全绿、
+    // 而且没人会想起来"这个动作是被有意拿掉的"。判据钉在 data-act 上（比文案稳）：
+    // 文案随时可以改，data-act 里的动作名 cl-recognize 才是刻意不再启用的那个判据。
+    // ⚠️ 本段整块是**注入脚本的内容**（在 ASSERT_SCRIPT 模板串里）⇒ 注释里不能出现反引号，
+    //    否则会把模板串提前闭合、整段代码变成语法错误（本文件第 9 行本来就写着这条）。
+    // ⚠️ 真要加回识别入口时，**改这条断言**（而不是绕开它）—— 那一刻就是"重新确认设计"的时机。
+    // **自证非空转**：下一条 report 用**同一个** card() 取到了 cl-query / cl-reload 两个真元素
+    // ⇒ 上面的 !card(...) 不可能是"因为查不到任何元素才恒绿"（同一个查找函数，同一页同一时刻）。
+    report('工具条不再有「识别未归类」批量按钮（该动作已按用户要求删除，本页只留逐行动作）',
+      !card('cl-recognize') && !card('cl-stop') && !card('cl-progress'),
+      'cl-recognize=' + (card('cl-recognize') ? '仍在' : '已无') +
+        ' cl-stop=' + (card('cl-stop') ? '仍在' : '已无') +
+        ' cl-progress=' + (card('cl-progress') ? '仍在' : '已无'));
+    report('删除后工具条仍能用：查询 / 刷新都在，且没有任何按钮停在 disabled',
+      !!card('cl-query') && !card('cl-query').disabled &&
+        !!card('cl-reload') && !card('cl-reload').disabled,
+      'query=' + (card('cl-query') ? String(card('cl-query').disabled) : 'missing') +
+        ' reload=' + (card('cl-reload') ? String(card('cl-reload').disabled) : 'missing'));
 
     // ---- 空态：待核对清零 ----
     window.__noPendingOrders = true;

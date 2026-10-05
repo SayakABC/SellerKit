@@ -16,6 +16,12 @@
 // 存储口径：本页与内建「归类核对」页共用同一命名空间（两边可互通、不会各写一份）：
 //   · 引擎 → electron-store `modules.order-insight.engine`（`{provider, baseUrl, model, temperature}`）
 //   · 密钥 → 宿主机密存储（`orderApiKeySet`，safeStorage 加密）；本页只判断"有没有配过"，不回显明文。
+//
+// ⚠️ **当前没有启用自动识别的入口（2026-10-05）**：「归类核对」页的「识别未归类」批量按钮已按
+//   用户要求删除，识别原语仍留在 `src/modules/today/classify.ts`。⇒ 本页现在是"配置齐备但无入口"，
+//   文案**刻意不指向任何页面**（原先指的「归类核对」页已经没有这个动作了 —— 指向已删入口是实打实的
+//   用户可见 bug，`tests/uxEntryNames.spec.ts` 上次就抓到过一次）。
+//   识别入口落地时，**这一句要跟着改**；若最终决定不做自动识别，本页应与那两个原语一并删除。
 
 import { computed, onMounted, ref } from 'vue';
 import { useModuleStorage } from '@/core/services/storage';
@@ -110,7 +116,7 @@ onMounted(() => {
     <template v-else>
       <section class="rs-block">
         <div class="rs-title">视觉识别引擎</div>
-        <div class="rs-note">用于 Excel 导入后的款式 / 颜色识别（在「今天」的「归类核对」页签里跑）。</div>
+        <div class="rs-note">用于订单主图的款式 / 颜色 / Logo 识别（识别结果用来把订单归到款）。</div>
         <div class="rs-grid">
           <label class="rs-field">
             <span>服务商</span>

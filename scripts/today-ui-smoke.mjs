@@ -308,7 +308,10 @@ const FAKE_BRIDGE = `<script>
     },
     'orderStyleList': function () { rec('orderStyleList', {}); return { success: true, data: STYLES }; },
     'orderUpdate': function (p) { rec('orderUpdate', p); return { success: true, data: { styleCode: 'S1', styleColorCode: 'S1-黑' } }; },
-    'orderStyleAssign': function (p) { rec('orderStyleAssign', p); return { success: true, data: { styleCode: 'S1', styleColorCode: 'S1-黑' } }; },
+    // ⭐ 点名款时宿主会**回流**「(店铺, 商品ID) → 款 + 色」（写 pl_shop_sku + 回填存量订单），
+    //    结果随 skuBackfill 回来。这里刻意给**最值得说**的那一种：记住了 + 顺带归好 2 单
+    //    —— 界面若不把回执说出来，用户永远不知道"记住过一次"这件事存在（下面有断言钉它）。
+    'orderStyleAssign': function (p) { rec('orderStyleAssign', p); return { success: true, data: { styleCode: 'S2', styleColorCode: 'S2-黑', skuBackfill: { status: 'written', reassigned: 2, spec: '黑', conflictCode: '' } } }; },
     'orderMarkCorrected': function (p) { rec('orderMarkCorrected', p); return { success: true, data: { updated: Array.isArray(p) ? p.length : 2 } }; },
     'orderImageThumbBatch': function (p) {
       rec('orderImageThumbBatch', p);
@@ -1065,6 +1068,19 @@ async function main() {
     report('数据回来后界面跟着回来（保活 + token 联动，不是一次性的）',
       okBack, flat(card('pu-stats')));
 
+    // 提示（toast）的读取工具。**必须"全部提示里有没有"**，不能用 querySelector 取第一条：
+    // 同一时刻界面上可以并排好几条（本页跑完累计几十条），第一条往往是**旧**提示 ——
+    // 症状是"新提示没出来"，排查方向会整个反掉（这条已在真实事故里踩过）。
+    function toastTexts() {
+      return Array.prototype.map.call(document.querySelectorAll('[data-act="toast"]'), function (el) {
+        return el.textContent;
+      });
+    }
+    function toastHas(part) {
+      return toastTexts().some(function (t) { return t.indexOf(part) >= 0; });
+    }
+    function toastDump() { return toastTexts().join(' | '); }
+
     step('classify');
     // 「归类核对」页签（2026-10-05 内建；从「订单归类」岛搬来，功能照搬、样式走 .wb-*）。
     // 三个重点：① 取数真落到宿主通道；② 逐行动作（保存 / 确认无误 / 全部确认）各自发对通道；
@@ -1139,6 +1155,22 @@ async function main() {
       JSON.stringify(cu));
     report('没点名款时不挂款（自动匹配走重归类，不走 orderStyleAssign）',
       calls('orderStyleAssign').length === asgBefore, '');
+    // ⚠️ 这条是下面那条正面断言的**反向守卫**：只改品类/颜色那次没有回流（宿主根本没收到点名），
+    //    提示里就不能出现"已记住这个商品" —— 否则那句提示成了恒显示的噪音，
+    //    真回流时用户也不会再多看一眼（"狼来了"）。
+    // ⚠️⚠️ 必须**先等这次保存的提示渲染出来**再断言"里面没有那句话"。踩过的坑（本轮实测）：
+    //    假桥是在 invoke 的**同步**阶段记录调用的，而 toast 要等 await 回来才 push、再等 Vue
+    //    渲染才进 DOM；直接在"通道被调用"的那一刻取 DOM，只会得到"还没有提示"——
+    //    于是这条**反向**断言恒绿（"提示还没渲染"和"提示里没有那句话"长得一模一样），
+    //    把提示改成恒显示那句、它照样全绿。等待判据钉在**只有这次保存才会有**的那句话上。
+    var saveToastSeen = true;
+    try {
+      await waitFor(function () { return toastHas('已保存，归属 S1'); }, 4000);
+    } catch (e) { saveToastSeen = false; }
+    report('保存提示真的渲染出来了（下面"没有那句话"必须有这个前提才算数）',
+      saveToastSeen, toastDump());
+    report('没点名款的那次保存**不**谎称"已记住这个商品"（回流提示只在真的回流时出现）',
+      saveToastSeen && !toastHas('已记住这个商品'), toastDump());
 
     // 等重取完成（bump → token → load → orderList）再做"点名款"那一段
     var okReload = true;
@@ -1160,6 +1192,17 @@ async function main() {
     var ca = calls('orderStyleAssign')[asg2] || {};
     report('点名某个款时把**指纹记入该款**（后续自动识别会命中同一编码）{orderId:41, styleId:6}',
       okAsg && ca.orderId === 41 && ca.styleId === 6 && !!ca.fingerprint, JSON.stringify(ca));
+
+    // ---- ⭐ 回流被**说出来**（"记住了"这件事不说，用户就不知道它可以重复发生）----
+    // 同样要先**等**它出现（理由同上：通道被调用的那一刻提示还没进 DOM）。
+    // 判据钉在**只有回流成功才会有**的那句话上（含顺带归好的单数）——
+    // 只断言"出现了某个提示"会被上一条保存的提示满足（同族假绿）。
+    var backfillToastSeen = true;
+    try {
+      await waitFor(function () { return toastHas('另有 2 单一起归好了'); }, 4000);
+    } catch (e) { backfillToastSeen = false; }
+    report('回流被说出来：点名款后提示「已记住这个商品 → 款和颜色，另有 2 单一起归好了」',
+      backfillToastSeen && toastHas('已记住这个商品'), toastDump());
 
     // ---- 确认无误：单行 / 全部两条分支 ----
     var mkB = calls('orderMarkCorrected').length;

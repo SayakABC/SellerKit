@@ -1177,6 +1177,39 @@ export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
 }
 
 /**
+ * 店铺**原文** → (店铺实体 id, 平台)：`resolveOrderSku` 的第一步单独抽出来。
+ *
+ * 为什么必须抽出来而不是让调用方自己拼：**人工核对回流**那条链路手上只有订单原文的店铺名，
+ * 却要写 `pl_shop_sku`（那张表的键是 `(平台, 店铺 id, 商品ID)`）。规则与
+ * `resolveOrderSku` / 待关联队列必须是**同一份** —— 各写一遍的症状是"队列里说这家店已归一、
+ * 回流却写不进去"，而且两边分别看都正常，只能靠对着读才发现。
+ *
+ * @returns `shopId = 0` = 店铺尚未归一。此时**不得**写映射：订单里没有平台，
+ *          拿空平台硬塞会把不同平台的同名店铺并到同一个键上（见 `shopSku.ts` 口径 3）。
+ */
+export function resolveShopRef(shop: unknown): { shopId: number; platform: string } {
+  const key = toNameKey(shop);
+  if (!key) return { shopId: 0, platform: '' };
+  const shopId = manualShopIdByKey().get(key) ?? uniqueShopByKey().get(key)?.id ?? 0;
+  if (!shopId) return { shopId: 0, platform: '' };
+  return { shopId, platform: shopLabelMap().get(shopId)?.platform ?? '' };
+}
+
+/**
+ * 款编码 → 产品库 id。`pl_products.code` 是订单域（`oi_styles.code`）与产品域之间**唯一**的锚点
+ * （ADR-002 D1），映射行存的 `product_id` 必须是它 —— 拿 `oi_styles.id` 去填会指向别的产品，
+ * 而界面上两边都显示同一个款编码，症状是"配了 A 款、订单归到 B 款"。
+ *
+ * @returns 0 = 产品库还没建 / 该编码在产品库不存在。两种都是"**现在写不了映射**"，
+ *          不是错误（老库还没跑交接时会短暂落到这一支，重跑一次就好）
+ */
+export function productIdByCode(code: unknown): number {
+  const c = str(code, MAX.code);
+  if (!c || !productSchemaReady()) return 0;
+  return num(dbGet<{ id: number }>(`SELECT id FROM pl_products WHERE code = ?`, [c])?.id);
+}
+
+/**
  * 一条订单行命中的**全部**产品（一对多 / 套装）—— `resolveOrderSku` 的复数版。
  *
  * 命中规则：店铺原文先归一（人工归一优先 → 同名唯一精确命中，与 `resolveOrderSku` **同一套规则**），

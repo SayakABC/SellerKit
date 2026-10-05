@@ -11,10 +11,17 @@
     aria-relevant="additions text"
   >
     <transition-group name="toast">
+      <!--
+        `data-act="toast"` 是给冒烟用的**稳定判据**：提示文案随时可以改（也一直在改），
+        用文案当断言等于把测试钉在会变的字符串上；`data-act` 钉的是"这里有一条提示"这件事。
+        ⚠️ 断言"某条提示出现过"时不要用 `querySelector`（取第一条）—— 上一条提示还在界面上时
+        会**读到旧的那条**（看起来像新功能没生效）。用 `querySelectorAll(...).some(...)`。
+      -->
       <div
         v-for="t in toasts"
         :key="t.id"
         class="wb-toast"
+        data-act="toast"
         :class="
           t.type === 'success'
             ? 'wb-toast--success'

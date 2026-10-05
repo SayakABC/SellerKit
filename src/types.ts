@@ -145,7 +145,7 @@ export interface ElectronAPI {
     styleId: number;
     color: string;
     fingerprint?: string;
-  }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
+  }) => Promise<APIResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
   // 修改款式展示名（款编码级）
   orderStyleRename: (payload: {
     code: string;
@@ -1535,6 +1535,33 @@ export interface SkuMapSummary {
   byStatus: { status: string; count: number }[];
   byPlatform: { platform: string; count: number }[];
   byShop: { shopId: number; shopName: string; platform: string; count: number }[];
+}
+
+/**
+ * ⭐ 人工核对的**回流**结果：「归类核对」页点名某个款时，有没有把
+ * 「(店铺, 商品ID) → 款 + 色」记进确定性层（`pl_shop_sku`）。
+ *
+ * 与主进程 `electron/order-db.ts` 的 `SkuBackfillOutcome` 结构一致（两端各自声明，
+ * 主进程不 import 渲染层）。**它是附加产物，不是成功判据**：
+ * `status !== 'written'` 时"归属已改"照样是成功的 —— 界面必须把两者分开说，
+ * 否则用户会把"没记住这个商品"读成"没保存"。
+ */
+export interface SkuBackfillOutcome {
+  status:
+    | 'written'
+    | 'already'
+    | 'conflict'
+    | 'noItemId'
+    | 'shopUnresolved'
+    | 'noProduct'
+    | 'failed'
+    | 'disabled';
+  /** 顺带自动归款的**存量**订单行数（不含刚点名的那一单） */
+  reassigned: number;
+  /** 真正记进映射的颜色；`''` = 只记到款级 */
+  spec: string;
+  /** `conflict` 时对方的产品编码（说清"没覆盖掉谁"） */
+  conflictCode: string;
 }
 
 /** 待关联队列的一行（`status='shopUnresolved'` 时**不允许**写映射：不拿空平台硬塞） */

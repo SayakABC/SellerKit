@@ -26,7 +26,7 @@ import { ipc, type ApiResult } from '@/core/services/ipc';
 import { useModuleStorage } from '@/core/services/storage';
 import { classifyResult } from '@/lib/orderClassifier';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
-import type { OrderRecord, StyleRecord } from '@/types';
+import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
 
 /** 取单个值：失败抛错 */
 async function need<T>(p: Promise<ApiResult<T>>): Promise<T> {
@@ -143,6 +143,17 @@ export interface CorrectionInput {
   fieldsChanged: boolean;
 }
 
+export interface CorrectionResult {
+  /** 本次归属的款编码（空串 = 没归到任何款） */
+  styleCode: string;
+  /**
+   * ⭐ **回流**结果：点名某个款时，宿主顺带把「(店铺, 商品ID) → 款 + 色」记进确定性层
+   * （`pl_shop_sku`），使该商品的**后续订单自动归类**、不再进待核对队列。
+   * 只有"点名款"这条路有它 —— 只改品类/颜色走的是指纹重归类，不涉及商品级结论。
+   */
+  skuBackfill?: SkuBackfillOutcome;
+}
+
 /**
  * 保存一行核对结果，返回本次归属的款编码（空串 = 没归到任何款）。
  *
@@ -151,9 +162,10 @@ export interface CorrectionInput {
  *      ⚠️ 重归类分支的条件是 `input.reclassify && input.fingerprint`，**必须带指纹**；
  *         只传 `reclassify` 而不传指纹是个**静默空操作**（旧版岛里就漏传过）。
  *   2. `orderStyleAssign` —— 仅当用户显式选了款、且与当前归属不同；把订单图挂到目标款并把
- *      指纹记入该款，使**后续自动识别**命中同一款编码。
+ *      指纹记入该款，使**后续自动识别**命中同一款编码。宿主在这一步还会做**商品ID 回流**
+ *      （写 `pl_shop_sku` + 回填存量），结果随 `skuBackfill` 回来 —— 见 `CorrectionResult`。
  */
-export async function saveCorrection(input: CorrectionInput): Promise<{ styleCode: string }> {
+export async function saveCorrection(input: CorrectionInput): Promise<CorrectionResult> {
   const fpHint = input.features ?? [];
   const fingerprint =
     input.targetStyleId > 0 || input.fieldsChanged
@@ -173,6 +185,7 @@ export async function saveCorrection(input: CorrectionInput): Promise<{ styleCod
     })
   );
   let styleCode = String(r?.styleCode ?? '');
+  let skuBackfill: SkuBackfillOutcome | undefined;
 
   if (input.targetStyleId > 0 && fingerprint) {
     const assigned = await ipc.orderStyleAssign({
@@ -182,8 +195,12 @@ export async function saveCorrection(input: CorrectionInput): Promise<{ styleCod
       fingerprint,
     });
     if (assigned.success && assigned.data?.styleCode) styleCode = assigned.data.styleCode;
+    // ⚠️ 只读 `assigned.data`（**不是** `r`）：回流的入参是"用户点名的那个款"，
+    //    而 `r` 是上一步重归类的产物，两者在"点名了款"这条路上必然是同一个款、
+    //    但来源不同 —— 写混了会让"回填的是哪个商品"跟着重归类结果漂。
+    skuBackfill = assigned.success ? assigned.data?.skuBackfill : undefined;
   }
-  return { styleCode };
+  return { styleCode, skuBackfill };
 }
 
 /** 标记已核对（单行 / 全部）。返回实际更新行数 */

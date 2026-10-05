@@ -37,7 +37,16 @@ import {
   tableExists,
   type MigrationStep,
 } from './db';
-import { adoptProduct, ensureProductSchema, productSchemaReady, renameProduct, resolveOrderSku } from './product-db';
+import {
+  adoptProduct,
+  ensureProductSchema,
+  productIdByCode,
+  productSchemaReady,
+  renameProduct,
+  resolveOrderSku,
+  resolveShopRef,
+  upsertSkuMappings,
+} from './product-db';
 import { extractOrderMoney } from './orderMoney';
 // 采集侧口径的**纯原语**（收入 = 商品+买家运费；外币 × 汇率 → 分）。
 // 回填走**同一组**函数而不是另写一遍算式 —— 两份口径必然漂移（AGENTS §4.2）。
@@ -759,9 +768,10 @@ export function assignOrderStyle(input: {
   styleId: number;
   color: string;
   fingerprint?: string;
-}): { styleCode: string; styleColorCode: string } {
+}): { styleCode: string; styleColorCode: string; skuBackfill: SkuBackfillOutcome } {
   const d = getDb();
-  return dbTransaction(() => {
+  const color = String(input.color ?? '').trim();
+  const assigned = dbTransaction(() => {
     const order = d.prepare(`SELECT image_id FROM oi_orders WHERE id = ?`).get(input.orderId) as
       | { image_id: number }
       | undefined;
@@ -770,7 +780,6 @@ export function assignOrderStyle(input: {
       | { id: number; code: string }
       | undefined;
     if (!style) throw new Error(`款式不存在: id=${input.styleId}`);
-    const color = String(input.color ?? '').trim();
     let sc = d.prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`).get(style.id, color) as
       | { id: number; code: string }
       | undefined;
@@ -809,6 +818,11 @@ export function assignOrderStyle(input: {
     if (prevStyleId && prevStyleId !== style.id) mergeOrphanStyle(prevStyleId, style.id);
     return { styleCode: style.code, styleColorCode: sc.code };
   });
+  // ⭐ 回流「商品ID → 款 + 色」在**事务外**做：它是"顺手记住"，失败绝不能影响
+  // "归属已改"这个**已提交**的事实（`skuBackfillFromOrder` 内部不抛）。
+  // 顺序也不能反：回流要用本次真正落下的款编码（`assigned.styleCode`），而不是入参里的猜测。
+  const skuBackfill = skuBackfillFromOrder({ orderId: input.orderId, styleCode: assigned.styleCode, color });
+  return { ...assigned, skuBackfill };
 }
 
 /** 修改款式展示名（款编码级，全局生效；仅展示，不参与指纹匹配）。
@@ -1151,6 +1165,128 @@ export function reassignOrdersByItemIds(itemIds: string[]): number {
     if (after?.style_color_id) n += 1;
   }
   return n;
+}
+
+// ---- ⭐ 人工核对的**回流**：订单 → 「商品ID → 款 + 色」映射 ----
+
+/** 回流结果（`assignOrderStyle` 的附加产物；界面据此说清"记住了什么 / 为什么没记住"） */
+export type SkuBackfillStatus =
+  /** 写进映射了（并顺带回填了存量订单） */
+  | 'written'
+  /** 映射里已经是这个结论：不重复写（避免把既有行的 source/note 刷掉） */
+  | 'already'
+  /** 该商品已有**别的**产品的映射：不动它（改绑的影响面是它所有订单） */
+  | 'conflict'
+  /** 订单里没有商品ID列/值为空：这条链路无从查起 */
+  | 'noItemId'
+  /** 店铺还没归一：没有平台，写进去会把不同平台的同名店并到一起 */
+  | 'shopUnresolved'
+  /** 产品库里没有这个款编码（老库还没跑交接） */
+  | 'noProduct'
+  /** 写库时抛了（约束冲突之类）；归属本身不受影响 */
+  | 'failed'
+  /** 产品域还没建表 */
+  | 'disabled';
+
+export interface SkuBackfillOutcome {
+  status: SkuBackfillStatus;
+  /** 本次顺带自动归款的**存量**订单行数（不含刚点名的那一单） */
+  reassigned: number;
+  /** 真正写进映射的颜色；`''` = 只记到款级（没有可信的颜色可用） */
+  spec: string;
+  /** `conflict` 时对方的产品编码——让界面能说清"没覆盖掉谁" */
+  conflictCode: string;
+}
+
+/**
+ * ⭐ 人工核对的**回流**：把"这个商品属于哪个款、什么色"写回**确定性层**
+ * （`pl_shop_sku`：`(平台, 店铺, 商品ID) → 款 + 色`）。
+ *
+ * **为什么必须有**：归款是**写时触发**的（`autoAssignByMap`，订单落库那一刻跑一次），而人工核对
+ * 写的是**指纹 → 款**（`orderStyleAssign`）。指纹只覆盖"图长得一样"的那些单，**商品ID**才覆盖
+ * "同一件商品的每一单"。不回流的后果是：用户把某个商品判对 10 次，第 11 条订单**照样进待核对队列**
+ * —— 人工工作量不随时间递减。而真实库上 42 行订单的商品ID **去重后只有 17 个**：十几条映射
+ * 就能覆盖绝大多数行，这是"更方便归类"里最省力的那一步（顺序本来就是 映射 → 指纹 → 模型）。
+ *
+ * **三条边界**（都为了"不替人下结论 / 不放大单次判断的影响面"）：
+ *
+ *   · **只写、不覆盖**：该 `(店铺, 商品ID)` 已有生效映射且指向**别的产品**时一律跳过并回报
+ *     `conflict`。理由不是"保守"，是**影响面不对等**：在这里顺手改绑，等于让那个商品
+ *     **所有**（含历史）订单一起改判，而用户此刻只看了眼前这一单。真要改绑请走
+ *     「货与成本 › 商品ID 映射」——那里配完会说清影响了几行。
+ *   · **颜色只填不猜**：颜色为空 / 是占位（`未分类`）时写款级 `'*'`（= 色从订单取），
+ *     不把"还没定"固化成结论。已经有同产品同色的映射时更不该重写（`already`）。
+ *   · **失败不外抛**：这是"顺手记住"的附加动作，绝不能让它把**已经提交**的"归属已改"
+ *     报成失败 ⇒ 整段吞异常，调用方看到 `status: 'failed'`，归属照常生效。
+ *
+ * 写入成功后**顺带回填存量**（`reassignOrdersByItemIds`）：同一商品的历史未归款订单当场一起归到位
+ * —— 没有这一步，"已经记住了"在界面上看不出任何变化，用户不会信它真的发生了。
+ *
+ * @returns 见 `SkuBackfillOutcome`；**任何分支都不抛**
+ */
+export function skuBackfillFromOrder(input: {
+  orderId: number;
+  /** 目标款编码（`oi_styles.code`，与产品库同锚点） */
+  styleCode: string;
+  /** 本次核对认定的颜色（**原文**，与写进款色的那份同值——两处归一不一致会拆出两个款色） */
+  color: string;
+}): SkuBackfillOutcome {
+  const none: SkuBackfillOutcome = { status: 'disabled', reassigned: 0, spec: '', conflictCode: '' };
+  try {
+    if (!productSchemaReady()) return none;
+    const order = dbGet<{ shop: string; raw_fields: string }>(
+      `SELECT shop, raw_fields FROM oi_orders WHERE id = ?`,
+      [input.orderId],
+    );
+    if (!order) return { ...none, status: 'noItemId' };
+
+    let rawFields: Record<string, string> = {};
+    try {
+      const v = JSON.parse(String(order.raw_fields ?? '{}'));
+      if (v && typeof v === 'object') rawFields = v as Record<string, string>;
+    } catch {
+      rawFields = {}; // 一条脏 raw_fields 只让这一单回流不了，不该往外抛
+    }
+    const { itemId } = extractSkuFields(rawFields);
+    if (!itemId) return { ...none, status: 'noItemId' };
+
+    const shop = resolveShopRef(order.shop);
+    if (!shop.shopId) return { ...none, status: 'shopUnresolved' };
+
+    const productId = productIdByCode(input.styleCode);
+    if (!productId) return { ...none, status: 'noProduct' };
+
+    const color = String(input.color ?? '').trim();
+    // 占位色不是"颜色"：写进映射会把兜底名固化成该商品的颜色（以后再也回不去"从订单取"）
+    const spec = color && color !== MAPPED_FALLBACK_COLOR ? color : '';
+
+    const existing = resolveOrderSku({ shop: order.shop, itemId });
+    if (existing && existing.productId !== productId) {
+      return { ...none, status: 'conflict', conflictCode: existing.productCode };
+    }
+    // 已命中同产品：只有"能补上颜色"才值得再写一行（`existing.spec` 非空时带色行优先，
+    // 再写一行款级不会有任何效果，只会让映射表变脏）
+    if (existing && (!spec || existing.spec === spec)) {
+      return { ...none, status: 'already', spec: existing.spec };
+    }
+
+    const out = upsertSkuMappings([
+      {
+        platform: shop.platform,
+        shopId: shop.shopId,
+        itemId,
+        spec: spec || '*',
+        productId,
+        status: 'confirmed',
+        note: '归类核对页点名某款时记住',
+      },
+    ]);
+    if (out.failed.length) return { ...none, status: 'failed' };
+
+    return { status: 'written', reassigned: reassignOrdersByItemIds([itemId]), spec, conflictCode: '' };
+  } catch {
+    return { ...none, status: 'failed' };
+  }
 }
 
 /** 插入一条订单明细，返回自增 id */

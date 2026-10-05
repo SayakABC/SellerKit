@@ -467,6 +467,216 @@ check('映射汇总：总数 / 状态分布 / 按店铺（店铺被删也留行�
   assert.strictEqual(after.byShop.find((x) => x.shopId === shops[1]).shopName, '');
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ 人工核对**回流**：在「归类核对」页点名某个款 → 顺手记住「(店铺, 商品ID) → 款 + 色」
+//
+// 为什么必须钉在**数据层**而不是界面：回流的意义是"影响**后续**订单"——
+// 写进 `pl_shop_sku` + 回填存量未归款订单，这两件事界面都看不见。
+// 假桥冒烟最多只能证明"界面把回执渲染出来了"，证明不了"真的写进去了、写对了对象"。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let fpSeq = 0;
+
+/**
+ * 每条订单**自己的**图片行。
+ * ⚠️ 不能复用 `seedOrders`（那批订单共用一张图）：回填是按图片算的
+ * （`oi_images.style_color_id IS NULL`），共用一张图时"回填了几单"根本无法区分。
+ */
+function seedOrderRows(rows) {
+  const ids = [];
+  for (const r of rows) {
+    fpSeq += 1;
+    const img = dbRun(
+      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      [`fp-cls-${fpSeq}`, `ufp-cls-${fpSeq}`, '', ''],
+    ).lastInsertRowid;
+    const id = dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
+      img,
+      `CO-${fpSeq}`,
+      r.shop,
+      JSON.stringify(r.fields),
+    ]).lastInsertRowid;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * 回流夹具：一家**已归一**的店（店1 → 店铺1 / amazon）+ 产品库里的两个款 + 两条订单。
+ * 款走 `importStyles` 建（**真实路径**：同时写 `oi_styles` 与 `adoptProduct`），
+ * 不手搓 `oi_styles` 一行 —— 手搓会把"两域锚点"这个最容易取错的地方抹平，让错误实现恒绿。
+ */
+function seedClassify() {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles']) dbRun(`DELETE FROM ${t}`);
+  seedShops(2);
+  mapShopNames(2);
+  seedProducts(2); // P-0001 / P-0002
+  const imp = odb.importStyles([
+    { code: 'P-0001', name: '产品1', color: '黑色', fingerprint: 'fp-cls-a' },
+    { code: 'P-0002', name: '产品2', color: '白色', fingerprint: 'fp-cls-b' },
+  ]);
+  assert.strictEqual(imp.errors.length, 0, `建款失败：${JSON.stringify(imp.errors)}`);
+  const style1 = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'P-0001'`).id);
+  const style2 = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'P-0002'`).id);
+  return { style1, style2 };
+}
+
+/** 某条订单的图片落在哪个款色上（"回填存量"唯一可观测的落点） */
+function styleColorOfOrder(orderId) {
+  return dbGet(
+    `SELECT c.color AS color, s.code AS code FROM oi_orders o
+       JOIN oi_images i ON i.id = o.image_id
+       LEFT JOIN oi_style_colors c ON c.id = i.style_color_id
+       LEFT JOIN oi_styles s ON s.id = c.style_id
+      WHERE o.id = ?`,
+    [orderId],
+  );
+}
+
+check('点名某个款 → 把「(店铺, 商品ID) → 款 + 色」记进映射（人工核对不再白干一遍）', () => {
+  const { style1 } = seedClassify();
+  const [orderId] = seedOrderRows([{ shop: '店1', fields: { 商品ID: 'B0MAP', 商品标题: 'T恤' } }]);
+  const res = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.styleCode, 'P-0001');
+  assert.strictEqual(res.skuBackfill.status, 'written');
+  assert.strictEqual(res.skuBackfill.spec, '黑色');
+
+  const r = queryMap({ search: 'B0MAP' });
+  assert.strictEqual(r.total, 1, '映射没写进去 → 这个商品的下一条订单还会再进一次待核对队列');
+  assert.strictEqual(r.rows[0].productCode, 'P-0001');
+  assert.strictEqual(r.rows[0].spec, '黑色', '颜色没带上 → 以后自动归类又要"每单看一次图"');
+  assert.strictEqual(r.rows[0].status, 'confirmed', 'pending 不生效：回流写了一行却永远不命中，等于白做');
+  // 店铺必须是**归一后的实体**：拿原文当键会让映射与待关联队列的键对不上（明明配了却查不中）
+  assert.strictEqual(r.rows[0].shopName, '店铺1');
+  assert.strictEqual(r.rows[0].platform, 'amazon');
+});
+
+check('两个款各自回流 → 各指各的 pl_products.id（锚点取错会张冠李戴）', () => {
+  const { style1, style2 } = seedClassify();
+  const [oa, ob] = seedOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0AAA' } },
+    { shop: '店1', fields: { 商品ID: 'B0BBB' } },
+  ]);
+  assert.strictEqual(odb.assignOrderStyle({ orderId: oa, styleId: style1, color: '黑色' }).skuBackfill.status, 'written');
+  assert.strictEqual(odb.assignOrderStyle({ orderId: ob, styleId: style2, color: '白色' }).skuBackfill.status, 'written');
+  const a = queryMap({ search: 'B0AAA' }).rows[0];
+  const b = queryMap({ search: 'B0BBB' }).rows[0];
+  assert.strictEqual(a.productCode, 'P-0001');
+  assert.strictEqual(b.productCode, 'P-0002');
+  // 两条映射的 product_id 必须**不同**：实现若拿 oi_styles.id 去填，两个 id 会互换/串行
+  assert.notStrictEqual(a.productId, b.productId, '两个款的映射指向了同一个产品');
+  assert.strictEqual(a.productId, productByCode('P-0001').id, '映射的 product_id 不是产品库的 id（锚点取错）');
+});
+
+check('回流顺带回填**存量**：同一商品还没归款的订单当场一起归好', () => {
+  const { style1 } = seedClassify();
+  const [o1, o2] = seedOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0FILL' } },
+    { shop: '店1', fields: { 商品ID: 'B0FILL' } }, // 同一件商品的另一单，此刻还没归款
+  ]);
+  assert.strictEqual(styleColorOfOrder(o2).color, null, '夹具前提：第二单本来是未归款的');
+  const res = odb.assignOrderStyle({ orderId: o1, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.skuBackfill.status, 'written');
+  assert.strictEqual(res.skuBackfill.reassigned, 1, '"记忆生效"这件事必须当场在其它订单上看得见');
+  const sc = styleColorOfOrder(o2);
+  assert.strictEqual(sc.code, 'P-0001');
+  assert.strictEqual(sc.color, '黑色', '颜色与映射不一致 → 会有两个款色（同款拆款）');
+});
+
+check('⚠️ 不覆盖既有映射：该商品已配别的产品时只回报 conflict，映射一行不动', () => {
+  const { style1 } = seedClassify();
+  const itemId = 'B0KEEP';
+  const shopId = shopByName('店铺1').id;
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId, itemId, spec: '蓝色', productId: productByCode('P-0002').id },
+  ]);
+  const before = dbGet(
+    `SELECT id, product_id, spec, status, source FROM pl_shop_sku WHERE item_id = ?`,
+    [itemId],
+  );
+
+  const [orderId] = seedOrderRows([{ shop: '店1', fields: { 商品ID: itemId } }]);
+  const res = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.styleCode, 'P-0001', '归属本身必须照常改（回流只是附加动作）');
+  assert.strictEqual(res.skuBackfill.status, 'conflict');
+  assert.strictEqual(res.skuBackfill.conflictCode, 'P-0002');
+
+  const rows = queryMap({ search: itemId }).rows;
+  assert.strictEqual(rows.length, 1, '冲突时不该新增一行');
+  assert.strictEqual(rows[0].productCode, 'P-0002', '既有映射被改绑了 —— 它会影响那个商品**所有**订单');
+  const after = dbGet(`SELECT id, product_id, spec, status, source FROM pl_shop_sku WHERE item_id = ?`, [itemId]);
+  assert.deepStrictEqual(after, before, '冲突分支不该动既有行（连 source/更新时刻都不该刷）');
+  // 自证非空转：同一个 (店, 商品) 换个没有映射的商品ID 时**会**写 success —— 说明 conflict
+  // 不是"因为整条链路都写不进去"才出现的
+  const [other] = seedOrderRows([{ shop: '店1', fields: { 商品ID: 'B0FREE' } }]);
+  assert.strictEqual(
+    odb.assignOrderStyle({ orderId: other, styleId: style1, color: '黑色' }).skuBackfill.status,
+    'written',
+  );
+});
+
+check('颜色只填不猜：没有可信颜色时只记到**款级**（`*`），不把占位名固化成结论', () => {
+  const { style1 } = seedClassify();
+  const [o1, o2] = seedOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0NOC1' } },
+    { shop: '店1', fields: { 商品ID: 'B0NOC2' } },
+  ]);
+  const r1 = odb.assignOrderStyle({ orderId: o1, styleId: style1, color: '' });
+  assert.strictEqual(r1.skuBackfill.status, 'written');
+  assert.strictEqual(r1.skuBackfill.spec, '');
+  assert.strictEqual(queryMap({ search: 'B0NOC1' }).rows[0].spec, '*');
+
+  const r2 = odb.assignOrderStyle({ orderId: o2, styleId: style1, color: '未分类' });
+  assert.strictEqual(r2.skuBackfill.spec, '');
+  assert.strictEqual(
+    queryMap({ search: 'B0NOC2' }).rows[0].spec,
+    '*',
+    '把兜底名写成颜色 → 该商品以后永远回不到"颜色从订单取"',
+  );
+});
+
+check('已有**款级**映射时点名带色 → 补出带色行并生效（"配了色却没用"是最难查的一类）', () => {
+  const { style1 } = seedClassify();
+  const itemId = 'B0UP';
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shopByName('店铺1').id, itemId, productId: productByCode('P-0001').id },
+  ]);
+  assert.strictEqual(pdb.resolveOrderSku({ shop: '店1', itemId }).spec, '', '夹具前提：先只有款级映射');
+  const [orderId] = seedOrderRows([{ shop: '店1', fields: { 商品ID: itemId } }]);
+  const res = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.skuBackfill.status, 'written', '同产品+能补色时不该判成 already');
+  assert.strictEqual(pdb.resolveOrderSku({ shop: '店1', itemId }).spec, '黑色', '带色行没生效');
+});
+
+check('重复点名同一个款 → already（不新增行、不重复写）', () => {
+  const { style1 } = seedClassify();
+  const [orderId] = seedOrderRows([{ shop: '店1', fields: { 商品ID: 'B0DUP' } }]);
+  assert.strictEqual(odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' }).skuBackfill.status, 'written');
+  const again = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(again.skuBackfill.status, 'already');
+  assert.strictEqual(queryMap({ search: 'B0DUP' }).total, 1, '重复点名写成了两行');
+});
+
+check('回流的三条"不写"分支：无商品ID / 店铺未归一 / 产品库没这个款', () => {
+  const { style1 } = seedClassify();
+  // ① 订单里没有商品ID列
+  const [noId] = seedOrderRows([{ shop: '店1', fields: { 订单号: 'X-1', 数量: '2' } }]);
+  assert.strictEqual(odb.assignOrderStyle({ orderId: noId, styleId: style1, color: '黑色' }).skuBackfill.status, 'noItemId');
+  // ② 店铺还没归一（野店不在 sk_name_map 里）
+  const [wild] = seedOrderRows([{ shop: '野店A', fields: { 商品ID: 'B0WILD' } }]);
+  assert.strictEqual(odb.assignOrderStyle({ orderId: wild, styleId: style1, color: '黑色' }).skuBackfill.status, 'shopUnresolved');
+  // ③ 产品库里没有这个款编码（老库还没跑交接）：直接造一个只有 oi_styles 的款
+  dbRun(`INSERT INTO oi_styles (code, fingerprint) VALUES ('STYLE-777', 'fp-cls-orphan')`);
+  const orphanId = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'STYLE-777'`).id);
+  const [orphanOrder] = seedOrderRows([{ shop: '店1', fields: { 商品ID: 'B0ORPH' } }]);
+  assert.strictEqual(
+    odb.assignOrderStyle({ orderId: orphanOrder, styleId: orphanId, color: '黑色' }).skuBackfill.status,
+    'noProduct',
+  );
+  assert.strictEqual(queryMap().total, 0, '三种"不写"里任何一种写了映射都会让它指向不存在的对象');
+});
+
 // ---- P3 验收原文 ----
 // 验收原文①：「导入 1000 行陌生订单 → 全部进待关联队列、无丢行」
 check('验收①：1000 行陌生订单 → 1000 组全部进队列，无丢行', () => {

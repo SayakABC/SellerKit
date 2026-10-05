@@ -32,7 +32,7 @@
       <div class="wb-panel__head">
         <span>待核对订单</span>
         <span class="wb-muted">
-          改完点「保存」重归类；识别结果没问题的点「确认无误」，之后不再出现在这里
+          改完点「保存」重归类；识别结果没问题的点「确认无误」，之后不再出现在这里。在下拉里点名某个款＝认定这个商品，以后它的订单会自动归类
         </span>
         <span class="cl-actions">
           <button
@@ -208,7 +208,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
-import type { OrderRecord, StyleRecord } from '@/types';
+import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
 import { useShipping } from '../flowCtx';
 import {
   PAGE_SIZE,
@@ -354,6 +354,38 @@ function reload(): void {
   void load();
 }
 
+/**
+ * ⭐ 回流结果的一句话（点名校时宿主会把「(店铺, 商品ID) → 款 + 色」记进确定性层，
+ * 该商品**以后**的订单就自动归类、不再进本页）。
+ *
+ * 只对**用户需要知道**的三种情况说话：
+ *   · `written`  —— 记住了（含"顺带把历史几单也归好了"）。不说这句，用户不会知道这条“省力”存在，
+ *                  也就不会去"多判几次"——而这件事的价值恰恰来自重复发生；
+ *   · `conflict` —— **没**覆盖既有映射。这是最需要说清的一支：不说的话用户会以为记住了，
+ *                  下次看到"同商品还是旧款"会完全查不出原因；
+ *   · `shopUnresolved` —— 店铺没归一，暂时记不住，并指出去哪解决（否则又是一次"点了没反应"）。
+ * 其余（无商品ID / 产品库还没这个款 / 产品域未建）不打断：那几种情况下**本来就无处可记**，
+ * 弹一句技术原因只会让人以为出错了。
+ */
+function backfillNote(bf?: SkuBackfillOutcome): string {
+  switch (bf?.status) {
+    case 'written': {
+      const more = bf.reassigned > 0 ? `，同一商品另有 ${bf.reassigned} 单一起归好了` : '';
+      return `；已记住这个商品 → ${bf.spec ? '款和颜色' : '款'}，以后它自动归类${more}`;
+    }
+    case 'conflict':
+      // ⚠️ 入口名必须写**真实存在**的（「货与成本」是模块名，映射清单是它页内的一段）——
+      //    写成「货与成本 › 商品ID 映射」这种自造路径会被 `tests/uxEntryNames.spec.ts` 判悬空入口名：
+      //    用户照着提示去找不到东西，而这条错只有人真去点才会发现。
+      return `；这个商品已配过映射（${bf.conflictCode || '其他款'}），没敢覆盖 —— 要改绑请到「货与成本」的映射清单里改`;
+    case 'shopUnresolved':
+      // 店铺登记在「店铺账号管家」岛里（与「货与成本 › 商品ID 映射」页给用户的指路完全一致）
+      return '；这家店还没归一，暂时记不住这个商品（请先到「店铺账号管家」的「店铺登记」把这家店认下来）';
+    default:
+      return '';
+  }
+}
+
 async function saveOne(o: OrderRecord): Promise<void> {
   const d = draftOf(o);
   if (!isDirty(o)) return;
@@ -369,7 +401,10 @@ async function saveOne(o: OrderRecord): Promise<void> {
       targetStyleId: d.styleId,
       fieldsChanged,
     });
-    toast(r.styleCode ? `已保存，归属 ${r.styleCode}` : '已保存（未归到款）', 'success');
+    const base = r.styleCode ? `已保存，归属 ${r.styleCode}` : '已保存（未归到款）';
+    // 回流"没生效"时用 info 色调：归属是成功的，别让红/绿把两件事混成一件
+    const tone = r.skuBackfill?.status === 'conflict' || r.skuBackfill?.status === 'shopUnresolved' ? 'info' : 'success';
+    toast(base + backfillNote(r.skuBackfill), tone);
     bump();
   } catch (e: unknown) {
     toast(e instanceof Error ? e.message : '保存失败', 'error');

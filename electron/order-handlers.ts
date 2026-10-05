@@ -376,7 +376,13 @@ register('order-style-assign', async (payload) => {
       color,
       fingerprint: fingerprint || undefined,
     });
-    return { success: true, data: { styleCode: res.styleCode, styleColorCode: res.styleColorCode } };
+    // `skuBackfill` = ⭐ 人工核对的**回流**（这次点名顺带把「商品ID → 款+色」记进确定性层了吗）。
+    // 它是**附加产物**：`status !== 'written'` 时归属照样是改成功的，界面必须把两者分开说，
+    // 否则用户会把"没记住商品"读成"没保存"（见 `SkuBackfillOutcome` 的边界说明）。
+    return {
+      success: true,
+      data: { styleCode: res.styleCode, styleColorCode: res.styleColorCode, skuBackfill: res.skuBackfill },
+    };
   } catch (err: any) {
     return { success: false, error: err.message };
   }

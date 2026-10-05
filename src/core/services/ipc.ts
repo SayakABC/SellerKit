@@ -70,6 +70,7 @@ import type {
   ShopSummary,
   UnmappedShopRow,
   NameMapKind,
+  SkuBackfillOutcome,
   SkuMapStatus,
   ShopSkuRow,
   SkuMapInputPayload,
@@ -254,7 +255,7 @@ export interface ElectronApi {
     styleId: number;
     color: string;
     fingerprint?: string;
-  }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
+  }): Promise<ApiResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
   // 修改款式展示名（款编码级）
   orderStyleRename(payload: {
     code: string;

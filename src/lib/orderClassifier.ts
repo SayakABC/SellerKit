@@ -129,9 +129,25 @@ function detectColumn(headers: string[], keywords: string[]): string {
   return '';
 }
 
-/** 主图列自动探测：优先匹配含"主图/图片/图/img/image/pic"的列名 */
+/** 主图列关键词族（顺序即优先级；strict 版与界面默认值共用这一份，规则只此一处） */
+export const IMAGE_COLUMN_KEYWORDS = ['主图', '图片', '图', 'img', 'image', 'pic'];
+
+/**
+ * 主图列**严格**探测：只有列名真的像图列才返回，**不回落第一列**。
+ *
+ * 为什么要有它（与 `detectImageColumn` 分开）：自动导入拿这个列名去**拆多产品行**
+ * （`orderRowSplitter` 的 `cols.image`）。若回落到"第一列"，一张没有图片列的报表
+ * （如速卖通 47 列订单报表，第一列根本不是图列）会被当成"有图片列" → 拆出来的行图片全空、
+ * 并**逐行误标缺图**（凭空制造待补图），而且全程无异常。
+ * 界面让人选列时用 `detectImageColumn`（给个默认可改），自动导入一律用本函数。
+ */
+export function detectImageColumnStrict(headers: string[]): string {
+  return detectColumn(headers, IMAGE_COLUMN_KEYWORDS);
+}
+
+/** 主图列自动探测：先严格匹配，认不出回落第一列（**仅供界面给出可选默认值**；自动导入请用 strict 版） */
 export function detectImageColumn(headers: string[]): string {
-  return detectColumn(headers, ['主图', '图片', '图', 'img', 'image', 'pic']) || headers[0] || '';
+  return detectImageColumnStrict(headers) || headers[0] || '';
 }
 
 /** 订单号列自动探测（常见导出模板：订单号/订单编号/平台单号/order_no…） */

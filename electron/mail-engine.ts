@@ -43,6 +43,7 @@ import {
   type MailMessageUpsertRow,
   type MailMessageDetail,
 } from './mail-db';
+import { normalizeContentId } from './mail-html';
 import { resolveMailProvider, type MailProviderPreset } from './mail-providers';
 import { revealShopAccountSecret } from './shop-accounts-db';
 import { readMailAttachmentCache, writeMailAttachmentCache } from './mail-cache';
@@ -555,16 +556,12 @@ async function syncMailFolder(
           }
           let textBody = '';
           let htmlBody = '';
-          let attachments: { filename: string; mime: string; size: number }[] = [];
+          let attachments: { filename: string; mime: string; size: number; contentId: string }[] = [];
           try {
             const parsed = await simpleParser(msg.source, { skipHtmlToText: true });
             textBody = String(parsed.text || '');
             htmlBody = String(parsed.html || '').slice(0, BODY_HTML_MAX);
-            attachments = (parsed.attachments || []).map((a: any) => ({
-              filename: String(a.filename || '').slice(0, 300),
-              mime: String(a.contentType || '').slice(0, 120),
-              size: Number(a.size || 0),
-            }));
+            attachments = toAttachmentMeta(parsed);
           } catch (parseErr: any) {
             updateMailParsed(hit.id, { preview: '(正文解析失败)' });
             continue;
@@ -660,11 +657,15 @@ async function fetchSourceByUid(client: ImapFlow, uid: number, maxBytes: number)
 }
 
 /** MIME 解析结果 → 附件元信息（与同步路径同口径） */
-function toAttachmentMeta(parsed: any): { filename: string; mime: string; size: number }[] {
+function toAttachmentMeta(
+  parsed: any,
+): { filename: string; mime: string; size: number; contentId: string }[] {
   return (parsed?.attachments || []).map((a: any) => ({
     filename: String(a.filename || '').slice(0, 300),
     mime: String(a.contentType || '').slice(0, 120),
     size: Number(a.size || 0),
+    // contentId 是内联图片（正文 src="cid:..."）唯一的映射键，必须与同步路径同口径落库
+    contentId: normalizeContentId(a.contentId),
   }));
 }
 
@@ -823,6 +824,45 @@ export async function resolveMailAttachment(
     data.content,
   ).catch(() => '');
   return { filename: data.filename, mime: data.mime, size: data.size, path: cached, content: data.content };
+}
+
+/**
+ * 惰性回填附件 `content_id`（内联图片修复的存量迁移路径）。
+ *
+ * 为什么必须单独有这一步：增量同步只处理新 UID，而正文已缓存的邮件不会再进正文轮 ——
+ * 对老邮件来说，`content_id` 列补出来永远只能是空串，正文里的 `cid:` 引用永远映射不上。
+ * 触发点在 `mail-message-get`：发现"正文引用了 cid、但附件行一条 content_id 都没有"才走这里
+ * （判定见 mail-html.ts 的 needsInlineBackfill）。
+ *
+ * 与 fetchMailBody 的差异：只刷附件元信息，**不重写正文**（正文没变，重写只会多一次大对象写库）；
+ * 复用同一套按需限流与只读连接，因此不会与同步抢连接。
+ *
+ * @returns 是否真的重解析过（false = 邮件不存在/服务端已删/取原文失败，调用方不必重取详情）
+ */
+export async function refreshMailAttachmentContentIds(messageId: number): Promise<boolean> {
+  ensureMailSchema();
+  const message = getMailMessage(Number(messageId));
+  if (!message) return false;
+
+  await acquireOnDemandSlot();
+  const { account, client } = await openOnDemandClient(Number(message.accountId), message.folder);
+  try {
+    const maxBytes = Math.max(Number(account.maxBodyBytes) || 0, ON_DEMAND_MAX_BYTES);
+    const source = await fetchSourceByUid(client, message.uid, maxBytes);
+    if (!source) return false;
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
+    const attachments = toAttachmentMeta(parsed);
+    // 空清单也走一遍 replaceMailAttachments：库里可能有陈旧行需要清掉
+    replaceMailAttachments(message.id, attachments);
+    return attachments.length > 0;
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      /* 忽略登出异常 */
+    }
+    releaseOnDemandSlot();
+  }
 }
 
 /** 服务端文件夹条目（设置页勾选同步目录） */

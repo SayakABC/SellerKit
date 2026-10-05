@@ -9,7 +9,7 @@
 //   mail-sync-cancel     取消同步
 //   mail-sync-state      当前同步队列状态
 //   mail-messages-list   邮件列表（**纯本地查询**）
-//   mail-message-get     邮件详情（含正文与附件元信息）
+//   mail-message-get     邮件详情（含正文与附件元信息；缺内联图映射时顺带重解析一次回填 content_id）
 //   mail-body-fetch      按需补拉正文（M2-1：超大邮件点开时现拉原文）
 //   mail-attachment-save 附件另存（M2-2：重拉原文解析后落盘，弹系统保存对话框）
 //   mail-attachment-preview 附件预览（M3-1：本地缓存命中直接读盘，图片返回 data URL）
@@ -51,9 +51,11 @@ import {
   cancelMailSync,
   getMailSyncState,
   fetchMailBody,
+  refreshMailAttachmentContentIds,
   resolveMailAttachment,
   listMailRemoteFolders,
 } from './mail-engine';
+import { needsInlineBackfill } from './mail-html';
 import { getShopAccount, setShopAccountSecret } from './shop-accounts-db';
 import { MAIL_PROVIDERS, CUSTOM_MAIL_PROVIDER } from './mail-providers';
 import {
@@ -78,6 +80,11 @@ const MAX_LEN = {
 const PREVIEW_MIME_PREFIX = 'image/';
 /** 预览附件大小上限：超出不转 data URL，避免大 base64 撑爆渲染进程 */
 const PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * 内联图片映射回填的等待上限（仅存量邮件首次打开时可能触发）。
+ * 取 6s：常见 163/126 连接 + 单封拉取在 1–2s 内完成，够用；再久就不该让用户盯着"加载正文…"。
+ */
+const INLINE_BACKFILL_WAIT_MS = 6000;
 
 /** 正整数收敛（非法值回落到 fallback） */
 function toInt(value: unknown, fallback: number): number {
@@ -209,11 +216,23 @@ handle('mail-messages-list', (payload: any) => {
   });
 });
 
-handle('mail-message-get', (payload: any) => {
+// 详情（含正文与附件元信息）。内联图片(cid)映射缺失时**顺带做一次重解析回填**（见下）
+handle('mail-message-get', async (payload: any) => {
   ensureMailSchema();
   const id = toInt(payload?.id, 0);
   if (id <= 0) throw new Error('邮件不存在');
-  return getMailMessage(id);
+  const detail = getMailMessage(id);
+  if (!needsInlineBackfill(detail)) return detail;
+
+  // 存量迁移路径：content_id 列是后加的，已同步过的邮件附件行全是空串，
+  // 而增量同步不会再解析正文已缓存的邮件 ⇒ 不主动重解析一次，老邮件正文里的内嵌图永远显示不出来。
+  // 超时兜底：正文渲染（岛侧"加载正文…"）不该被一次慢连接拖住；超时就按现状先显示，
+  // 回填仍在后台继续，落库后下次打开即正常。
+  await Promise.race([
+    refreshMailAttachmentContentIds(id).catch(() => false),
+    new Promise((resolve) => setTimeout(resolve, INLINE_BACKFILL_WAIT_MS)),
+  ]);
+  return getMailMessage(id) || detail;
 });
 
 // 本地已读标记（IMAP 只读，不改服务端 flag；有效已读 = 服务端 seen || 本地 read_at）

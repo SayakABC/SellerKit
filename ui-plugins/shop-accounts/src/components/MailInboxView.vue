@@ -13,9 +13,48 @@ const purgeDays = ref(0);
 const showPurge = ref(false);
 /** 正在下载附件的 id（用于按钮 loading 态，0 = 空闲） */
 const savingAttachmentId = ref(0);
+/**
+ * 是否放行远程图片（**默认放行**）。
+ * 正文文档的图片由 sk-mail:// 通道渲染，`?remote=1` 才在正文文档的 CSP 里放行 http(s)。
+ *
+ * 为什么默认放行：本项目的邮件收件箱里，正文图**几乎全是远程图**（实测 103/103 封，
+ * 附件表 0 行、`cid:` 0 条）——例如网易 goods 的商品长图。默认拦截的净效果是
+ * "用户打开任何一封邮件都是空白"，而绝大多数邮件客户端的默认行为也是直接加载。
+ * 反追踪需求保留为一次点击：点「拦截远程图片」即回到 `?remote=` 缺省态。
+ */
+const showRemote = ref(true);
 
 onMounted(() => {
   void mail.ensureReady().then(() => mail.loadMessages());
+});
+
+/**
+ * 换邮件**不重置**这个开关：它是用户的一次性偏好（"我不想让发件方看到我打开了邮件"），
+ * 不是每封邮件的状态。之前每封重置，用户拦住一封后换一封又要再点一次。
+ */
+
+/**
+ * 正文文档地址。**必须走 sk-mail:// 而不是 iframe srcdoc**：
+ * srcdoc 文档会继承岛页面的 CSP（`img-src 'self' data:`），邮件里的图和 `cid:` 引用全被拦。
+ */
+const bodyUrl = computed(() => {
+  const id = mail.detail?.id;
+  if (!id) return 'about:blank';
+  return `sk-mail://body/${id}${showRemote.value ? '?remote=1' : ''}`;
+});
+
+/**
+ * 正文里的远程图数量：决定要不要出「拦截/显示远程图片」这一行的数字。
+ * 只做提示判据，计数口径与宿主侧一致即可——img 标签 + CSS 背景图 url()。
+ */
+const remoteImageCount = computed(() => {
+  const html = mail.detail?.htmlBody || '';
+  if (!html) return 0;
+  const byTag = (html.match(/<img\b[^>]*>/gi) || []).filter((t) =>
+    /src\s*=\s*["']?\s*(?:https?:)?\/\//i.test(t),
+  ).length;
+  const byCss = (html.match(/url\(\s*["']?\s*(?:https?:)?\/\//gi) || []).length;
+  return byTag + byCss;
 });
 
 const accountLabel = computed(() => {
@@ -272,13 +311,21 @@ const folderOptions = computed(() =>
                 </div>
               </div>
             </header>
+            <div v-if="mail.detail.htmlBody && remoteImageCount" class="remote-hint">
+              <IconGlyph name="eye" :size="13" />
+              <span v-if="showRemote">已加载 {{ remoteImageCount }} 张远程图片</span>
+              <span v-else>已拦截 {{ remoteImageCount }} 张远程图片（防发件方追踪）</span>
+              <button class="btn-mini" type="button" @click="showRemote = !showRemote">
+                {{ showRemote ? '拦截远程图片' : '显示远程图片' }}
+              </button>
+            </div>
             <div class="detail-body">
               <iframe
                 v-if="mail.detail.htmlBody"
                 class="html-frame"
                 title="邮件正文"
                 sandbox=""
-                :srcdoc="mail.detail.htmlBody"
+                :src="bodyUrl"
               />
               <pre v-else class="text-body">{{ mail.detail.textBody || '（无正文）' }}</pre>
               <p v-if="mail.detail.truncated" class="warn">正文超过单封缓存上限，已截断保存。</p>
@@ -607,6 +654,27 @@ const folderOptions = computed(() =>
   min-height: 320px;
   border: none;
   background: #fff;
+}
+
+/* 远程图拦截提示：夹在详情头与正文之间的一条细横条（正文 iframe 高度不受它影响） */
+.remote-hint {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--wb-border);
+  background: var(--wb-surface-2);
+  font-size: 11px;
+  color: var(--wb-text-muted);
+}
+
+.remote-hint span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .text-body {

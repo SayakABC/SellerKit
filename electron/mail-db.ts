@@ -21,6 +21,7 @@
 export {};
 
 import { getDb, dbMigrate, dbTransaction, dbRun } from './db';
+import { normalizeContentId } from './mail-html';
 
 /**
  * 预处理语句类型。
@@ -140,6 +141,12 @@ export interface MailAttachmentRow {
   filename: string;
   mime: string;
   size: number;
+  /**
+   * MIME `Content-ID`（已剥掉尖括号，如 `image001.png@01D9...`）。
+   * 正文里的 `<img src="cid:...">` 靠它映射到本行——这是内联图片能显示的唯一依据
+   * （见 electron/mail-body-protocol.ts）。非内联附件为空串。
+   */
+  contentId: string;
 }
 
 /** 同步批次内待落库的邮件元数据 */
@@ -219,7 +226,8 @@ const MAIL_SCHEMA: string[] = [
     message_id INTEGER NOT NULL REFERENCES sk_mail_messages(id) ON DELETE CASCADE,
     filename TEXT NOT NULL DEFAULT '',
     mime TEXT NOT NULL DEFAULT '',
-    size INTEGER NOT NULL DEFAULT 0
+    size INTEGER NOT NULL DEFAULT 0,
+    content_id TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_attachments_msg ON sk_mail_attachments(message_id)`,
   // 多文件夹：每个文件夹独立记录增量游标（M3）
@@ -274,6 +282,7 @@ export function ensureMailSchema(): void {
   dbMigrate(MAIL_SCHEMA);
   ensureMailAccountColumns();
   ensureMailMessageColumns();
+  ensureMailAttachmentColumns();
   ensureMailFtsTable();
   seedMailFolders();
   backfillMailFts();
@@ -295,6 +304,19 @@ function ensureMailMessageColumns(): void {
     String(c.name),
   );
   if (!cols.includes('read_at')) dbRun(`ALTER TABLE sk_mail_messages ADD COLUMN read_at TEXT NOT NULL DEFAULT ''`);
+}
+
+/**
+ * 存量库补列：sk_mail_attachments.content_id（内联图片映射键）。
+ * 已同步过的行补出来是空串——旧数据的内联图要等该邮件被**重解析**一次才会显示；
+ * 重解析由 mail-body-protocol.ts 在渲染正文时惰性触发（见 refreshMailAttachmentContentIds）。
+ */
+function ensureMailAttachmentColumns(): void {
+  const cols = (getDb().prepare(`PRAGMA table_info(sk_mail_attachments)`).all() as { name: string }[]).map((c) =>
+    String(c.name),
+  );
+  if (!cols.includes('content_id'))
+    dbRun(`ALTER TABLE sk_mail_attachments ADD COLUMN content_id TEXT NOT NULL DEFAULT ''`);
 }
 
 /** 有效已读态：服务端 seen 或 本地已读过（列表/详情/统计统一用它，避免口径不一致） */
@@ -838,7 +860,7 @@ export function saveMailBody(
  */
 export function replaceMailAttachments(
   messageId: number,
-  items: { filename: string; mime: string; size: number }[],
+  items: { filename: string; mime: string; size: number; contentId?: string }[],
 ): void {
   ensureMailSchema();
   const mid = Number(messageId);
@@ -846,10 +868,11 @@ export function replaceMailAttachments(
     filename: String(it.filename || '').slice(0, 300),
     mime: String(it.mime || '').slice(0, 120),
     size: Number(it.size) || 0,
+    contentId: normalizeContentId(it.contentId),
   }));
   dbTransaction(() => {
     const existing = (
-      stmt(`SELECT id, filename, mime, size FROM sk_mail_attachments WHERE message_id = ? ORDER BY id ASC`).all(
+      stmt(`SELECT id, filename, mime, size, content_id FROM sk_mail_attachments WHERE message_id = ? ORDER BY id ASC`).all(
         mid,
       ) as Record<string, any>[]
     ).map((r) => ({
@@ -857,9 +880,15 @@ export function replaceMailAttachments(
       filename: String(r.filename || ''),
       mime: String(r.mime || ''),
       size: Number(r.size || 0),
+      contentId: String(r.content_id || ''),
     }));
-    const insert = stmt(`INSERT INTO sk_mail_attachments (message_id, filename, mime, size) VALUES (?, ?, ?, ?)`);
+    const insert = stmt(
+      `INSERT INTO sk_mail_attachments (message_id, filename, mime, size, content_id) VALUES (?, ?, ?, ?, ?)`,
+    );
     const remove = stmt(`DELETE FROM sk_mail_attachments WHERE id = ?`);
+    // content_id 单独回填：**不进合并键**——否则旧行（空 content_id）会被判成"另一个附件"而换 id，
+    // 已落盘的附件缓存与 sk_mail_attachment_cache 索引会整批失效。
+    const setContentId = stmt(`UPDATE sk_mail_attachments SET content_id = ? WHERE id = ?`);
     const pool = new Map<string, number[]>();
     // 复合键同 collectMessageIds：filename / mime 都可能含空格或 '-'，故用 \x00 分隔（转义写法，见上）
     for (const e of existing) {
@@ -871,10 +900,14 @@ export function replaceMailAttachments(
       const key = `${it.filename}\x00${it.mime}\x00${it.size}`;
       const bucket = pool.get(key);
       if (bucket && bucket.length) {
-        kept.add(Number(bucket.shift()));
+        const reuseId = Number(bucket.shift());
+        kept.add(reuseId);
+        const prev = existing.find((e) => e.id === reuseId);
+        // 只在"新解析出了值、旧行还空着"时写，避免重名附件互相覆盖
+        if (it.contentId && prev && !prev.contentId) setContentId.run(it.contentId, reuseId);
         continue;
       }
-      insert.run(mid, it.filename, it.mime, it.size);
+      insert.run(mid, it.filename, it.mime, it.size, it.contentId);
     }
     for (const e of existing) {
       if (!kept.has(e.id)) remove.run(e.id);
@@ -1025,6 +1058,7 @@ export function getMailMessage(id: number): MailMessageDetail | null {
       filename: String(a.filename || ''),
       mime: String(a.mime || ''),
       size: Number(a.size || 0),
+      contentId: String(a.content_id || ''),
     })),
   };
 }
@@ -1242,6 +1276,7 @@ export function getMailAttachmentRow(id: number): MailAttachmentRow | null {
     filename: String(row.filename || ''),
     mime: String(row.mime || ''),
     size: Number(row.size || 0),
+    contentId: String(row.content_id || ''),
   };
 }
 

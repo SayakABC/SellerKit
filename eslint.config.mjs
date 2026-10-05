@@ -5,7 +5,6 @@
 //
 // 覆盖范围（有意收窄，避免噪声淹没真问题）：
 //   ✅ src/**                渲染进程（ESM + Vue）
-//   ✅ extensions/**         随宿主分发的视图插件包（同样是宿主 bundle 的一部分）
 //   ✅ electron/**           主进程（CommonJS + TS）
 //   ✅ scripts/**            构建 / 发布 / 校验脚本
 //   ✅ tests/**              单元测试（vitest）
@@ -119,7 +118,6 @@ export default tseslint.config(
       '.vite/**',
       'market-out/**',
       'ui-plugins/**',
-      'scripts/poc-ui-hello/**',
       'src/registry.generated.ts',
       // 与 .gitignore 对齐：本地暂时性文件
       'debug-name.js',
@@ -182,8 +180,7 @@ export default tseslint.config(
     rules: {
       // ★ 样式令牌纪律：硬编码色值 = error（AGENTS.md §1.6）
       'vue/no-restricted-class': ['error', ...forbiddenClassPatterns],
-      // 存量代码中组件名为单词（ToastHost / AppShell 等已合规），
-      // 但 extensions 下仍有单词组件名，降为 warn 不阻塞
+      // 存量代码中组件名为单词（ToastHost / AppShell 等已合规），降为 warn 不阻塞
       'vue/multi-word-component-names': 'warn',
       // 格式类规则交由 Prettier，此处关闭以避免与编辑器格式化打架
       'vue/max-attributes-per-line': 'off',
@@ -193,9 +190,9 @@ export default tseslint.config(
     },
   },
 
-  // 渲染层 / 插件包：浏览器环境
+  // 渲染层：浏览器环境（插件包 `extensions/**` 已于 2026-09-30 随 C3 删除，留档不再进本 lint 图）
   {
-    files: ['src/**/*.{ts,vue}', 'extensions/**/*.{ts,vue}'],
+    files: ['src/**/*.{ts,vue}'],
     // 注意：flat config 下 plugins 只在「同一配置对象」内生效（否则报
     // "could not find plugin"）。.vue 文件不被上方 TS 预设匹配，故此处显式注册。
     plugins: { '@typescript-eslint': tseslint.plugin },
@@ -239,7 +236,7 @@ export default tseslint.config(
   // 单元测试（tests/）：node 环境，跑在 vitest 里
   //  - 必须显式降级 any：tests/ 不落在下面任何带降级规则的 files 匹配里，
   //    会继承 typescript-eslint recommended 的 error 级 no-explicit-any，
-  //    与 src/extensions「any 一律 warn」的存量策略自相矛盾（R2-6 实测踩到）。
+  //    与 src「any 一律 warn」的存量策略自相矛盾（R2-6 实测踩到）。
   //  - mock/替身代码里 any 本就是常态（vi.mock 工厂、假 ipcMain 回调），
   //    与业务代码同等对待即可。
   {
@@ -266,5 +263,5 @@ export default tseslint.config(
   },
 
   // 关闭所有与 Prettier 冲突的格式规则（必须放最后）
-  configPrettier,
+  configPrettier
 );

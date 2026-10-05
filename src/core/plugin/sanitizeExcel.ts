@@ -35,7 +35,7 @@ export function rejectOverLimit(what: string, actual: number, max: number): neve
   throw new Error(`${what} 超限：${actual} > ${max}。请减少${what}后重试，或联系插件作者调整上限。`);
 }
 
-/** ① 配置类：Excel 体积上限（excel-copy 与 order-insight 两个域共用同一阈值） */
+/** ① 配置类：Excel 体积上限（excel-copy 域；原 order-insight 域同一阈值，该域已于 2026-10-05 下架） */
 export function assertExcelBytes(buf: ArrayBuffer): void {
   if (buf.byteLength > EC_MAX_EXCEL_BYTES) {
     rejectOverLimit('Excel 文件大小', buf.byteLength, EC_MAX_EXCEL_BYTES);

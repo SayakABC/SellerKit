@@ -15,7 +15,7 @@
  *    跳过 http/https/mailto/tel/data；以 `/` 开头按仓库根解析，否则按所在文件目录解析。
  *
  * ② 反引号里的「路径形态」token（含 `/` 且以已知扩展名结尾）—— 依次尝试四种基准：
- *    a. 仓库根相对    → `src/lib/aggregator.ts`
+ *    a. 仓库根相对    → `src/lib/excelParser.ts`
  *    b. 所在文件目录  → `docs/README.md` 里的 `archive/manual.md`
  *    c. `docs/` 相对  → 审查报告里的 `architecture/PLUGIN_ARCHITECTURE.md`
  *    d. 后缀匹配      → 仓库内存在任一文件以 `/<token>` 结尾
@@ -29,6 +29,15 @@
  * ③ 代码文件中的**文档引用**（仅匹配 `docs/**` 与根级 `*.md`）—— 删除一份文档会让
  *    代码注释里的引用悬空（审查报告 §5.5 记录过 6 处这类引用）。只查这一类，
  *    不查代码里的普通路径，避免误伤。
+ *
+ * ④ `docs/notes/` 结论层的**反向守卫** —— 方向与 ①–③ 相反：那三条查"引用指向的文件是否存在"，
+ *    这条查"存在的笔记是否被人知道"。多 AI 工具交替开工时，结论只有落进仓库才带得走
+ *    （见 `AGENTS.md` §0 跨工具协作契约）；而"写了但没人索引到"与"没写"等价，所以
+ *    `docs/notes/*.md`（除 `README.md`）必须同时满足：
+ *      a. 文件名为 `YYYY-MM-DD-<slug>.md`（按日期可排序）；
+ *      b. 在 `AGENTS.md` / `CHANGELOG.md` / `docs/README.md` / `docs/notes/README.md`
+ *         之一里被引用（出现文件名或 slug 即算）。
+ *    零条目时打印"未验证任何内容"而非静默通过 —— 扫描型守卫必须自证非空转。
  *
  * 豁免表的边界（重要）
  * ------------------
@@ -81,8 +90,28 @@ const DOC_TOKEN_RE = /`((?:docs\/[A-Za-z0-9_./-]+\.md)|(?:AGENTS|README|CHANGELO
 /** ① Markdown 链接 */
 const MD_LINK_RE = /\]\(([^)#\s]+?)(?:#[^)]*)?\)/g;
 
-/** 依赖 / 产物目录：指向它们的 token 按设计不存在于仓库，直接跳过 */
-const NON_REPO_HEADS = new Set(['node_modules', 'dist', 'release', 'out']);
+/** 依赖 / 产物 / AI 工具私有数据：指向它们的 token 按设计不存在于仓库，直接跳过 */
+const NON_REPO_HEADS = new Set([
+  'node_modules',
+  'dist',
+  'release',
+  'out',
+  // AI 工具本机数据（见 AGENTS.md §0）：`git clone` 后本就不存在，
+  // 引用它们的文档不算悬空 —— 与 node_modules 同理。
+  '.workbuddy',
+  '.codebuddy',
+  '.qoder',
+]);
+
+/** ④ docs/notes 结论层：命名规范 + 必须被索引（反向守卫） */
+const NOTES_DIR = join(DOCS, 'notes');
+const NOTE_NAME_RE = /^\d{4}-\d{2}-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
+const NOTE_INDEX_FILES = [
+  join(ROOT, 'AGENTS.md'),
+  join(ROOT, 'CHANGELOG.md'),
+  join(DOCS, 'README.md'),
+  join(NOTES_DIR, 'README.md'),
+];
 
 /**
  * 豁免表：文档**有意引用不存在的路径**之处（句子本身在陈述"它不存在"）。
@@ -125,6 +154,98 @@ const DELIBERATELY_MISSING = new Map([
     'scripts/lib/module-roots.js',
     'R1-1 的**提议名**（原计划措辞），实际落地为 module-roots.cjs；同处已加复核修正说明',
   ],
+  [
+    'docs/features/__pp_probe.md',
+    '《CHANGELOG》的**删除记录**：该 0 字节探针残留已被删（句子正在说"为何删它"）',
+  ],
+  [
+    'ui-plugins/product-library/__pp_probe.md',
+    '同上（同次清理里删掉的零字节探针残留）',
+  ],
+  [
+    'ui-plugins/product-library/README.md',
+    '该岛已整体下架（2026-10-01，见 `docs/features/PRODUCT_LIBRARY.md` §0-A）；CHANGELOG 与 §7.5 记录的是当时的发布流程，属历史记录',
+  ],
+  [
+    'src/ProductLibraryView.vue',
+    '同上：岛根 Vue 文件（无 `ui-plugins/` 前缀的写法）；§7.5 验收表记录的是当时实跑结果',
+  ],
+  [
+    'scripts/product-library-ui-smoke.mjs',
+    '该冒烟脚本随岛一起下线（断言已整组迁入 `scripts/goods-ui-smoke.mjs`）；§0-A 的下架清单正在陈述"它已下线"',
+  ],
+  [
+    'scripts/debug-order-db.js',
+    'C7 的**删除记录**：该一次性调试脚本已删（句子正在说"删了它"）；改指现存文件则句子不成立',
+  ],
+  [
+    'ui-plugins/ae-profit/src/components/CostRatesPanel.vue',
+    'UX 审查（取数时点 2026-09-30）记录的是**当时**该面板的文案问题；同日 C9 收编把「成本与汇率」并入宿主',
+  ],
+  [
+    'ui-plugins/order-insight/dist/views/picking.js',
+    'C2 的**删除记录**：岛内「拣货」页签随"入口唯一"撤回（发布前，1.5.0 未发布）；句子正在说"删了它"',
+  ],
+  [
+    'tests/orderInsightPicking.spec.ts',
+    '同上（C2）：该接线守卫随页签一起删；多处文档记录的是"曾经有、现已删"',
+  ],
+  [
+    'src/lib/productWeight.ts',
+    '**删除记录**（2026-10-01 领域裁定）：克重是 SKU 属性而非商品ID 属性，`pl_item_weights` + 该解析文件整条删除、改挂 `pl_variants.weight_g`。CHANGELOG 与运费岛计划里的引用是"当时做过、现已删"，三处均已就地标注 ⚠️；改指现存文件则句子不成立',
+  ],
+  [
+    'scripts/order-insight-picking-ui-smoke.mjs',
+    '同上（C2）：该假桥冒烟随页签一起删；现役样板见 `scripts/shipping-rate-ui-smoke.mjs`',
+  ],
+  // —— 下面这组是 C3（删 `extensions/` 留档包，2026-09-30）的**历史记录**：
+  // 句子都出自"当时"的评审/计划（或 CHANGELOG 的删除记录），说的是"曾经有、现已删"，不是悬空引用。
+  [
+    'extensions/order-insight/src/store.ts',
+    'C3 的**删除记录**：`extensions/` 留档源码已于 2026-09-30 删除（AGENTS §1.9 / 计划 / CHANGELOG 多处引用的是当时路径）',
+  ],
+  [
+    'extensions/order-insight/src/stock-in/store.ts',
+    '同上（C3）：留档包的拿货对账 store，已随目录删除',
+  ],
+  [
+    'extensions/excel-copy/src/store.ts',
+    '同上（C3）：留档包的扁平存储 store（`AppState` 的唯一引用方），已随目录删除',
+  ],
+  [
+    'extensions/excel-copy/src/settings.ts',
+    '同上（C3）：留档包的设置贡献入口，其分类早已随下记消失、目录亦已删除',
+  ],
+  [
+    'extensions/order-insight/src/components/ProductLibraryView.vue',
+    '同上（C3）：留档包里的产品库视图（HOST_REVIEW 记录的是旧路径），已随目录删除',
+  ],
+  [
+    'stock-in/store.ts',
+    '同上（C3）的**后缀写法**：PLUGIN_TRIAGE_PLAN 描述当时留档布局时用的相对路径；该文件已随目录删除',
+  ],
+  // —— 下面这组是「订单归类」岛整体下架（2026-10-05）的历史记录：引用都出自 CHANGELOG 的
+  // **当时条目**与一份**当时的评审快照**，句子正在说"当时改的是它 / 当时它长这样"，不是悬空引用。
+  [
+    'ui-plugins/order-insight/manifest.json',
+    'CHANGELOG 的历史条目（1.4.0 升版当时改的就是这个文件）；该岛已于 2026-10-05 整体下架，见 docs/notes/2026-10-01-ui-island-retirement.md §6',
+  ],
+  [
+    'tests/orderInsightShopAtImport.spec.ts',
+    'CHANGELOG 记录的是"1.4.0 当时新增了这个接线守卫"；该 spec 已随岛下架删除（守卫的坑已由内建页的 today:ui 冒烟承接）',
+  ],
+  [
+    'ui-plugins/order-insight/dist/splitter.js',
+    'CHANGELOG 的分割条修复记录（当时是双份拷贝同改：留档源码 + 岛产物）；该岛已整体下架',
+  ],
+  [
+    'ui-plugins/order-insight/dist/views/stockin.js',
+    'docs/reviews 的 UI 评审快照（写于 2026-09-22，记的是**当时**该岛的命中点）；岛已下架，改成现存路径则句子不成立',
+  ],
+  [
+    'scripts/order-insight-settings-ui-smoke.mjs',
+    'CHANGELOG 的删除记录 + 下架笔记 §6.2 说的正是"它**从未被 git 跟踪**、也已随岛删除"；改指现存文件则句子不成立',
+  ],
 ]);
 
 // ---------------------------------------------------------------- 文件索引
@@ -160,7 +281,16 @@ const codeFiles = allFiles.filter((f) => /\.(ts|tsx|vue|js|cjs|mjs)$/.test(f));
 // ---------------------------------------------------------------- 校验
 
 const errors = [];
-const stats = { links: 0, tokens: 0, codeRefs: 0, baseResolved: 0, suffixResolved: 0, exempted: 0 };
+const stats = {
+  links: 0,
+  tokens: 0,
+  codeRefs: 0,
+  baseResolved: 0,
+  suffixResolved: 0,
+  exempted: 0,
+  notes: 0,
+  notesIndexed: 0,
+};
 const exemptHits = new Map();
 
 /** 依次尝试四种基准，返回命中的基准名（未命中返回 null） */
@@ -228,6 +358,38 @@ for (const file of codeFiles) {
   }
 }
 
+// ④ docs/notes 结论层：命名规范 + 必须被索引（反向守卫）
+if (existsSync(NOTES_DIR)) {
+  const indexText = NOTE_INDEX_FILES.filter((f) => existsSync(f))
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n');
+  const noteFiles = readdirSync(NOTES_DIR)
+    .filter((n) => n.endsWith('.md') && n !== 'README.md')
+    .sort();
+
+  for (const name of noteFiles) {
+    stats.notes++;
+    if (!NOTE_NAME_RE.test(name)) {
+      errors.push({
+        file: `docs/notes/${name}`,
+        target: name,
+        kind: '笔记命名不合规（应为 YYYY-MM-DD-<slug>.md）',
+      });
+      continue;
+    }
+    const slug = name.slice(0, -'.md'.length);
+    if (indexText.includes(name) || indexText.includes(slug)) {
+      stats.notesIndexed++;
+      continue;
+    }
+    errors.push({
+      file: `docs/notes/${name}`,
+      target: name,
+      kind: '笔记未被索引（在 AGENTS.md / CHANGELOG.md / docs/README.md / docs/notes/README.md 中均未出现）',
+    });
+  }
+}
+
 // ---------------------------------------------------------------- 输出
 
 console.log('文档引用校验（scripts/check-doc-links.mjs）');
@@ -238,6 +400,11 @@ console.log(
 console.log(
   `  通过：路径直解 ${stats.baseResolved} 条、后缀/包内相对 ${stats.suffixResolved} 条、` +
     `有意缺失豁免 ${stats.exempted} 条`,
+);
+console.log(
+  stats.notes === 0
+    ? '  ④ docs/notes 结论层：0 条笔记 —— ⚠️ 本项未验证任何内容（不等于"通过"）'
+    : `  ④ docs/notes 结论层：${stats.notes} 条笔记，已登记 ${stats.notesIndexed} 条`,
 );
 if (exemptHits.size) {
   console.log('\n  有意缺失的引用（豁免，逐项核对理由）：');
@@ -256,5 +423,7 @@ for (const e of errors) {
   console.log(`  ${e.file}\n    → ${e.target}\n      ${e.kind}`);
 }
 console.log('\n修法：① 改文档指向正确路径（首选）；② 若句子本就在陈述"它不存在"，');
-console.log('      加入脚本头部 DELIBERATELY_MISSING 并写明理由。');
+console.log('      加入脚本头部 DELIBERATELY_MISSING 并写明理由；');
+console.log('      ③ 笔记类（docs/notes/…）：改名到 YYYY-MM-DD-<slug>.md，');
+console.log('        并在 docs/notes/README.md 的索引表登记一行。');
 process.exit(1);

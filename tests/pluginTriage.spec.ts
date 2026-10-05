@@ -43,6 +43,7 @@ const walk = (dir: string, acc: string[] = []): string[] => {
 
 type IslandManifest = {
   name?: string;
+  version?: string;
   entry?: string;
   capabilities?: Array<{ id?: string; domains?: string[]; actions?: string[] }>;
 };
@@ -98,79 +99,243 @@ describe('内建预设不得占用 UI 岛的 id（AGENTS 红线 23）', () => {
   });
 });
 
-/** 剥掉注释（守卫必须看真实代码：注释里出现的同名字符串会让断言假通过 —— 见 §reclassify 注释） */
-const stripComments = (s: string): string =>
-  s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-
-/** 某个岛的全部源码文本（dist 为准，回退 src），已剥注释 */
-const islandSource = (id: string): string => {
-  const parts: string[] = [];
-  for (const sub of ['dist', 'src']) {
-    const dir = resolve(root, 'ui-plugins', id, sub);
-    if (!existsSync(dir)) continue;
-    for (const f of walk(dir)) {
-      if (/\.(js|mjs|ts|vue)$/.test(f)) parts.push(stripComments(readFileSync(f, 'utf-8')));
+/**
+ * 剥掉注释（守卫必须看真实代码：注释里出现的同名字符串会让断言假通过 —— 见 §reclassify 注释）。
+ *
+ * ⚠️ 必须**逐字符扫描**，不能写成两条正则（块注释一条 + 行注释一条）：
+ * 行注释里出现的「斜杠 + 星号」会被正则当成块注释开头，一路吞到**很后面**的下一个
+ * 「星号 + 斜杠」，中间的真实代码整段消失。实测（2026-09-27）：ae-profit/src/api.js 第 3 行
+ * 注释里写了 `@/core/services/` 再跟一个通配星号，就是这么把第 8 行的 `const DOMAIN_AE = 'ae'`
+ * 吃掉的 —— 症状是「守卫把一个域解析成了常量名 `DOMAIN_AE` 本身」，看起来像 manifest 越权。
+ * 字符串字面量（含模板串）要跳过，否则串里的行注释 / 块注释标记同样会误判。
+ */
+const stripComments = (s: string): string => {
+  let out = '';
+  let i = 0;
+  let start = 0; // 上一段"确定要保留"的起点（整段 slice 追加，别逐字符 +=）
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i++;
+      while (i < s.length && s[i] !== c) i += s[i] === '\\' ? 2 : 1;
+      i++;
+      continue;
     }
+    if (c === '/' && s[i + 1] === '/') {
+      out += s.slice(start, i);
+      const nl = s.indexOf('\n', i);
+      i = nl === -1 ? s.length : nl;
+      start = i;
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '*') {
+      out += s.slice(start, i);
+      const close = s.indexOf('*/', i + 2);
+      const end = close === -1 ? s.length : close + 2;
+      // 块注释内部的换行要按原数量补回：行首锚点（如 hostDomainOps 的 `^ {4}key:`）依赖它
+      const inner = s.slice(i, end);
+      let n = 0;
+      for (let k = inner.indexOf('\n'); k !== -1; k = inner.indexOf('\n', k + 1)) n++;
+      i = end;
+      start = i;
+      if (n > 0) out += '\n'.repeat(n);
+      continue;
+    }
+    i++;
+  }
+  return out + s.slice(start);
+};
+
+/**
+ * 剥注释后的文件文本（**按路径缓存**）。
+ * 岛产物是几百 KB 的 bundle，而同一个文件会被"正向越权检查 / 反向能力缺口 / 各岛专属断言"
+ * 反复读 —— 不缓存时 `pluginTriage.spec.ts` 单文件要跑 30 s 以上，会把并发跑的其他测试
+ * 挤到 5 s 超时（实测 2026-09-27：全量跑只剩本文件红，单跑却全绿，看起来像"随机失败"）。
+ * 同一次运行内源文件不会变，缓存是安全的。
+ */
+const strippedCache = new Map<string, string>();
+const readStripped = (file: string): string => {
+  const hit = strippedCache.get(file);
+  if (hit !== undefined) return hit;
+  const text = stripComments(readFileSync(file, 'utf-8'));
+  strippedCache.set(file, text);
+  return text;
+};
+
+/** 递归列目录的结果缓存（同上：一次运行内目录结构不变） */
+const fileListCache = new Map<string, string[]>();
+const walkCached = (dir: string): string[] => {
+  const hit = fileListCache.get(dir);
+  if (hit) return hit;
+  const list = walk(dir);
+  fileListCache.set(dir, list);
+  return list;
+};
+
+/**
+ * 该岛「文本检查」该扫哪个目录：**有 `src/` 就只看 `src/`，没有才看 `dist/`**。
+ *
+ * 为什么不是两个都扫（并集更保险，但本仓库付不起这个代价）：
+ *   ① **dist/ 不入库**（.gitignore 通了配）。新克隆 / CI 上只有 `src/` —— 守卫必须在那种
+ *      环境里照样工作，把 dist 设成必需反而是把守卫变成"只在本机成立"。
+ *   ② 构建型岛的 dist 是 `src/` 的**派生物**（含整个 Vue runtime，product-library 261 KB
+ *      vs src 41 KB）。文本检查该看人写的那份。
+ *   ③ 实测（2026-09-27）：本机文件读取很慢（36 个文件 414 KB 要 683 ms），全量并发跑时
+ *      还会再放大数倍。并集扫描让 `pluginTriage.spec.ts` 从 2.2 s 涨到 17 s，并直接把并发
+ *      跑的其他 spec 挤到 5 s 超时（表现为"单跑全绿、全量红"，极易误判成随机失败）。
+ * 残余缺口（已知、接受）：dist 里有而 src 里没有的调用不被这里检查 —— 对 product-library
+ * 由下面那条「dist 与 src 的 db 调用点必须一致」断言补上；其余构建型岛暂无覆盖。
+ */
+const islandTextDir = (id: string): string => {
+  const src = resolve(root, 'ui-plugins', id, 'src');
+  return existsSync(src) ? src : resolve(root, 'ui-plugins', id, 'dist');
+};
+
+/** 某个岛的源码文本（`islandTextDir` 决定扫哪个目录），已剥注释 */
+const islandSource = (id: string): string => {
+  const dir = islandTextDir(id);
+  if (!existsSync(dir)) return '';
+  const parts: string[] = [];
+  for (const f of walkCached(dir)) {
+    if (/\.(js|mjs|ts|vue)$/.test(f)) parts.push(readStripped(f));
   }
   return parts.join('\n');
 };
 
-type ApiBinding = { helper: string; domain: string };
+/**
+ * 岛 api 层里「一次 db 调用」的形态描述。
+ * `call` 必须**带 g 标志**，且第 1 捕获组是 **op 名字面量** —— 两个方向的比对全靠它：
+ *   · 正向「调用 ⊆ 声明」（越权）；
+ *   · 反向「声明的每个 op 都真被调用」（能力缺口）。
+ * op 名若被拼成变量传进去（`helper(op)`），两组断言都会静默失效。
+ *
+ * ⚠️ 引号必须写成 `['"]`：vite 工程的产物经 Rollup 后，**单引号会被改成双引号**
+ * （实测 product-library 的 dist 里全是 `plib("list"`）。只认单引号 = 对构建型岛零命中。
+ */
+type ApiBinding = { domain: string; call: RegExp };
+
+/** op 名字面量（单/双引号都认） */
+const OP_LIT = `['"]([A-Za-z][A-Za-z0-9]*)['"]`;
 
 /**
- * 从岛的 api.js 解析 helper → 宿主能力域映射。
- * 各岛统一写法：`export const oi = (op, payload) => db('order-insight', op, payload)`。
- * 有了这层映射，守卫就能按域分别校验，而不是把所有 op 名混在一起比对一个白名单。
+ * 从岛的 api 层解析 db 调用形态（域 + 调用点正则）。
+ *
+ * 候选路径必须覆盖 **三种** 既有写法，否则守卫会**整岛静默跳过**（外层 `bindings.length === 0`
+ * 就 return）：① 无构建步骤的岛与新式 vite 岛：`export const oi = (op, payload) => db('shop-accounts', op, payload)`，
+ * 调用点写作 `oi('list', …)`；
+ *   ② ae-profit：`dbCall(DOMAIN_AE, 'summary', …)` —— 域是**第一个实参**（另需解析 `const DOMAIN_AE = 'ae'`）；
+ *   ③ shop-accounts：`dbCall('summary', …)` —— 域硬编码在 bridge.js 的 `host.db.call('shop-accounts', …)`。
+ *
+ * 历史坑（2026-09-27 发现，实测）：候选路径原先是 `dist/api.js` + `src/api.ts`，而两个 vite
+ * 工程岛（ae-profit / shop-accounts）的源码是 `src/api.js` —— 它们连同其 manifest 一起长期
+ * 逃过这组守卫：断言年年全绿、实际覆盖为零。**「守卫零命中」和「守卫通过」在报告里长得一模一样**，
+ * 所以下面每个岛都以 `expect(bindings.length).toBeGreaterThan(0)` 自证不是空转。
  */
 const apiBindings = (id: string): ApiBinding[] => {
-  const candidates = [
-    resolve(root, 'ui-plugins', id, 'dist/api.js'),
-    resolve(root, 'ui-plugins', id, 'src/api.ts'),
-  ];
-  const file = candidates.find((f) => existsSync(f));
-  if (!file) return [];
+  const dir = resolve(root, 'ui-plugins', id);
   const out: ApiBinding[] = [];
-  for (const m of readFileSync(file, 'utf-8').matchAll(
-    /export const (\w+)\s*=\s*\([^)]*\)\s*=>\s*db\('([^']+)'/g,
-  )) {
-    out.push({ helper: m[1], domain: m[2] });
+
+  // ① 形态：helper 直接绑域（`= (…) => db('domain', …)`）
+  for (const rel of ['dist/api.js', 'src/api.js', 'dist/api.ts', 'src/api.ts']) {
+    const file = resolve(dir, rel);
+    if (!existsSync(file)) continue;
+    const text = readStripped(file);
+    for (const m of text.matchAll(
+      /export const (\w+)\s*=\s*\([^)]*\)\s*=>\s*db\(\s*['"]([^'"]+)['"]/g,
+    )) {
+      out.push({ domain: m[2], call: new RegExp(`\\b${m[1]}\\(${OP_LIT}`, 'g') });
+    }
+    // ② 形态：域是 dbCall 的第一个实参，值是常量名
+    const consts = new Map(
+      [...text.matchAll(/const\s+(\w+)\s*=\s*['"]([^'"]+)['"]/g)].map((m) => [m[1], m[2]]),
+    );
+    for (const m of text.matchAll(/\bdbCall\(\s*(\w+)\s*,\s*['"]([^'"]+)['"]/g)) {
+      out.push({
+        domain: consts.get(m[1]) ?? m[1],
+        call: new RegExp(`\\bdbCall\\(\\s*${m[1]}\\s*,\\s*${OP_LIT}`, 'g'),
+      });
+    }
+  }
+
+  // ③ 形态：桥里硬编码域，api 层只传 op（shop-accounts）
+  const bridge = resolve(dir, 'src/bridge.js');
+  if (existsSync(bridge)) {
+    const text = readStripped(bridge);
+    for (const m of text.matchAll(/host\.db\.call\(\s*['"]([^'"]+)['"]/g)) {
+      out.push({ domain: m[1], call: new RegExp(`\\bdbCall\\(${OP_LIT}`, 'g') });
+    }
   }
   return out;
 };
 
-/** 宿主 DB_OPS 中某个域登记的全部 op（权威来源：src/core/plugin/host.ts） */
-const hostDomainOps = (domain: string): string[] => {
+/**
+ * 宿主 DB_OPS 里某个域的**整块源码**（已剥注释）。
+ *
+ * ⚠️ 域键有两种写法，两种都要认：含 `-` 的 id 必须加引号（`'shipping-rate': {`），
+ * 单个词的实体名则是裸标识符（`product: {` —— ADR-002 N4 要求主数据域用实体名，
+ * 不用插件 id）。只认带引号那种时 `hostDomainBlock('product')` 会返回空串，
+ * 而调用方多半写成 `expect(ops.length).toBeGreaterThan(0)` —— 那样只是变红，
+ * 看不出真正的病因是"域键写法没覆盖"（2026-09-27 实测踩到）。
+ */
+const hostDomainBlock = (domain: string): string => {
   const text = readFileSync(resolve(root, 'src/core/plugin/host.ts'), 'utf-8');
-  const start = text.indexOf(`\n  '${domain}': {`);
-  if (start === -1) return [];
-  const rest = text.slice(start + 1);
+  const hit = new RegExp(`\n {2}'?${domain}'?: \\{`).exec(text);
+  if (!hit) return '';
+  const rest = text.slice(hit.index + 1);
   const end = rest.indexOf('\n  },\n');
-  const block = end === -1 ? rest : rest.slice(0, end);
-  return [...block.matchAll(/^ {4}([A-Za-z][A-Za-z0-9]*):/gm)].map((m) => m[1]);
+  return stripComments(end === -1 ? rest : rest.slice(0, end));
 };
 
-describe('UI 岛的 db 能力调用必须全部在 manifest 中声明', () => {
+/** 宿主 DB_OPS 中某个域登记的全部 op（权威来源：src/core/plugin/host.ts） */
+const hostDomainOps = (domain: string): string[] =>
+  [...hostDomainBlock(domain).matchAll(/^ {4}([A-Za-z][A-Za-z0-9]*):/gm)].map((m) => m[1]);
+
+/** DB_OPS 对象体（从 `const DB_OPS … = {` 到下一个顶格 `};`）。只在体内找域名，避免误收嵌套对象。 */
+const dbOpsBody = (): string => {
+  const text = readFileSync(resolve(root, 'src/core/plugin/host.ts'), 'utf-8');
+  const start = text.indexOf('const DB_OPS');
+  if (start === -1) throw new Error('host.ts 里找不到 DB_OPS 声明');
+  const end = text.indexOf('\n};', start);
+  if (end === -1) throw new Error('DB_OPS 对象没有找到收尾的 "};"');
+  return text.slice(start, end);
+};
+
+/** DB_OPS 里登记的全部域 key（两种域键写法都认，理由同 hostDomainBlock） */
+const hostDomains = (): string[] =>
+  [...dbOpsBody().matchAll(/\n {2}'?([a-z][a-z0-9-]*)'?: \{/g)].map((m) => m[1]);
+
+// 本组每个用例都要把该岛的整个 `src/`（或 dist/）读成文本再正则扫描 —— 数据量不大
+// （全部岛合计约 700 KB），但**本机文件读取很慢**，单独跑 0.3–0.6 s/岛，全量并发跑会放大数倍。
+// 默认 5 s 会在并发时随机踩线（表现是"单跑绿、全量红"）。这里给足余量：断言本身仍然是硬的，
+// 变慢只会让它晚一点出结果，不会把失败变成通过。
+describe('UI 岛的 db 能力调用必须全部在 manifest 中声明', { timeout: 20000 }, () => {
   it.each(islandIds())('%s：能力域与 op 均被 capabilities 覆盖', (id) => {
     const bindings = apiBindings(id);
-    if (bindings.length === 0) return; // 不使用 db 域的岛跳过
     const dbCap = (readManifest(id).capabilities ?? []).find((c) => c.id === 'db');
-    if (!dbCap) return;
+    if (!dbCap) {
+      // 声明了 db 能力却解析不出任何绑定形态 = 守卫看不见这个岛，必须报出来
+      expect(bindings.length).toBe(0);
+      return;
+    }
+    // 有 db 能力就必须能解析出绑定形态，否则本岛整段守卫是空转（历史坑见 apiBindings 注释）
+    expect(bindings.length).toBeGreaterThan(0);
 
     const declaredDomains = new Set(dbCap.domains ?? []);
     const declared = new Set(dbCap.actions ?? []);
 
-    const distDir = resolve(root, 'ui-plugins', id, 'dist');
-    const srcDir = resolve(root, 'ui-plugins', id, 'src');
-    const dir = existsSync(distDir) ? distDir : srcDir;
+    // 只扫 `islandTextDir(id)` 一个目录（有 src 就只看 src）：理由见该函数注释 ——
+    // 并集扫描会让本文件在全量并发跑时把其他 spec 挤到超时。
+    const dir = islandTextDir(id);
     if (!existsSync(dir)) return;
 
     const usedDomains = new Set<string>();
     const usedOps = new Set<string>();
-    for (const f of walk(dir)) {
+    for (const f of walkCached(dir)) {
       if (!/\.(js|mjs|ts|vue)$/.test(f)) continue;
-      const text = readFileSync(f, 'utf-8');
-      for (const { helper, domain } of bindings) {
-        for (const m of text.matchAll(new RegExp(`\\b${helper}\\('([A-Za-z][A-Za-z0-9]*)'`, 'g'))) {
+      // 先剥注释：注释里写的调用字样不是"真调用"。不剥的话，注释能把断言喂饱 —— 假通过。
+      const text = readStripped(f);
+      for (const { domain, call } of bindings) {
+        for (const m of text.matchAll(call)) {
           usedDomains.add(domain);
           usedOps.add(m[1]);
         }
@@ -190,10 +355,11 @@ describe('UI 岛的 manifest.name 与目录名一致', () => {
 
 describe('岛的运行入口必须真实入库（防 .gitignore 静默吞掉源码）', () => {
   // 背景（2026-09-22 H-04）：`.gitignore` 的 `dist/` 通配会匹配**任意层级**的 dist 目录。
-  // excel-copy / order-insight 是「无构建步骤」的岛 —— 没有 package.json / vite.config，
+  // excel-copy / shipping-rate 是「无构建步骤」的岛 —— 没有 package.json / vite.config，
   // 源码直接手写在 dist/ 下，manifest.entry 指向 ./dist/index.html。
   // 于是 `git add -A` 只收录了 manifest.json + README.md，仓库里长期存着两个
-  // 「entry 指向不存在文件」的坏岛（order-insight 1.2.0 已发布，仓库里却从来没有它的源码）。
+  // 「entry 指向不存在文件」的坏岛（其中 order-insight 1.2.0 已发布、仓库里却从来没有它的源码 ——
+  // 该岛已于 2026-10-05 整体下架，但**这类缺陷与它无关**，故守卫保留）。
   // 该缺陷在本地磁盘上完全看不出来（文件都在），只在克隆 / 回滚 / 换机后才暴露 —— 故必须由守卫钉住。
   // 两种形态的"源码真相"位置不同，判据也必须分开（当前实测两者完全对应）：
   //   有 package.json ⟺ 有 src/ ⟺ dist/ 是构建产物（忽略 dist、提交 src 才对）
@@ -220,57 +386,19 @@ describe('岛的运行入口必须真实入库（防 .gitignore 静默吞掉源�
     const noBuild = islandIds().filter(
       (id) => !existsSync(resolve(root, 'ui-plugins', id, 'package.json')),
     );
-    expect(noBuild.length).toBeGreaterThan(0); // 当前为 excel-copy / order-insight
+    expect(noBuild.length).toBeGreaterThan(0); // 当前为 excel-copy / shipping-rate（order-insight 已随岛下架）
     expect(noBuild.filter((id) => isGitIgnored(`ui-plugins/${id}/dist/`) === true)).toEqual([]);
   });
 });
 
-describe('order-insight 岛已对齐内建版能力（缺口不得再悄悄回退）', () => {
-  // 背景（2026-09-21/22）：内建视图包下记后，岛一度仍缺 6 项内建能力，
-  // 用户侧表现为「功能凭空消失」——而这些 op 在 manifest 里早已声明，只是岛源码从未调用，
-  // 因此上面的「调用 ⊆ 声明」断言完全覆盖不到。这里补一条反向断言：必须被真实引用。
-
-  const ISLAND = 'order-insight';
-  const REQUIRE_OPS = [
-    'orderGet', // 拿货单查看
-    'orderUpdate', // 拿货单编辑
-    'priceHistory', // 单价记忆回填
-    'ignoreRemove', // 待拿货缺口「取消忽略」
-    'shopAllocation', // 店铺分摊汇总
-    'shopAllocationDetail', // 店铺分摊明细
-    'styleAssign', // 数据纠正「款编码手工指派」
-  ];
-  // 宿主 ReconciliationRow（src/types.ts）的真实字段名。
-  // 旧版岛按 payableCents / name 读取 —— 宿主并不存在这些键，表格恒显示 0/空且不报错。
-  const RECON_FIELDS = ['purchaseCents', 'paidCents', 'refundCents', 'balanceCents', 'orderCount'];
-
-  it.each(REQUIRE_OPS)('op %s 被岛源码真实调用', (op) => {
-    const text = islandSource(ISLAND);
-    expect(new RegExp(`\\b(oi|purchase)\\('${op}'`).test(text)).toBe(true);
-  });
-
-  it('对账表读取的是宿主真实字段名（防字段名错位导致的恒 0 展示）', () => {
-    const text = islandSource(ISLAND);
-    // 用词边界而非 includes：`purchaseCentsX` 这类错拼不应被当成命中
-    expect(RECON_FIELDS.filter((f) => !new RegExp(`\\b${f}\\b`).test(text))).toEqual([]);
-  });
-
-  it('数据纠正页的 reclassify 调用必须同时带 fingerprint（缺则静默空操作）', () => {
-    // 宿主分支条件：input.reclassify && input.fingerprint。
-    // 只传 reclassify 不传指纹 = 不报错、不生效，界面还提示「已重新归类」。
-    //
-    // 注意：必须**先剥掉注释**再找调用点（islandSource 已统一剥注释）。该文件的头注释里也写着
-    // `oi('update', { …, fingerprint, … })`，直接 indexOf 会命中注释 ——
-    // 那样即使真实调用丢了参数，断言照样通过（等于没守）。
-    const file = resolve(root, 'ui-plugins', ISLAND, 'dist/views/correction.js');
-    const code = stripComments(readFileSync(file, 'utf-8'));
-    const idx = code.indexOf("oi('update'");
-    expect(idx).toBeGreaterThan(-1);
-    const call = code.slice(idx, idx + 400); // 该调用点附近即其对象字面量
-    expect(call).toContain('fingerprint');
-    expect(call).toContain('reclassify');
-  });
-});
+// ~~`order-insight 岛已对齐内建版能力（缺口不得再悄悄回退）`~~ **整块已删（2026-10-05）**：
+// 那组反向断言（`REQUIRE_OPS` 七项必须被岛源码真实调用 / 对账字段名 / `reclassify` 必带指纹）
+// 服务的对象是**市场分发的那个岛**——它已整体下架，六步发货台由 `src/modules/today/**` 在宿主里做，
+// 岛源码不再存在于仓库 ⇒ 断言无对象、留着只会变红或空转。
+// 这些**坑**没有跟着消失，它们已经变成内建页的守卫：拿货单编辑/单价回填/取消忽略/店铺分摊的
+// 接线在 `today:ui` 的假桥冒烟里逐条断言（见 `scripts/today-ui-smoke.mjs` 的 `purchase` / `classify`
+// 两段）；字段名口径（`purchaseCents` / `paidCents` / `refundCents` / `balanceCents` / `orderCount`）
+// 由 `src/modules/today/purchase.ts` 直接以 TS 类型钉住（编译期，比扫字符串更强）。
 
 describe('excel-copy 岛已对齐内建版能力（下记后不得悄悄缩水）', () => {
   // 背景（2026-09-22）：excel-copy（TV模版）内建视图包下记后，功能由 ui-plugins/excel-copy 独家提供。
@@ -314,5 +442,155 @@ describe('excel-copy 岛已对齐内建版能力（下记后不得悄悄缩水�
     const m = store.match(/export async function saveTemplateToFile[\s\S]*?\n\}/);
     expect(m).toBeTruthy();
     expect(m![0]).toContain('name: tpl.name');
+  });
+});
+
+describe('shipping-rate 岛已对齐宿主能力（声明了却没用 = 能力缺口）', () => {
+  // 与 excel-copy 同一组反向守卫：上面的「调用 ⊆ 声明」只管越权，管不了
+  // 「manifest 声明了、岛却从没调用」—— 后者用户侧表现为"功能凭空消失"，任何 schema 校验都不会响。
+  const ISLAND = 'shipping-rate';
+
+  it('宿主 shipping-rate 域的每个 op 都被岛真实调用', () => {
+    const ops = hostDomainOps(ISLAND);
+    expect(ops.length).toBeGreaterThan(0); // 宿主域没登记 → 断言会空转，先钉住
+    const text = islandSource(ISLAND);
+    expect(ops.filter((op) => !new RegExp(`\\bsr\\('${op}'`).test(text))).toEqual([]);
+  });
+
+  it('岛内不得出现 eval / new Function（iframe CSP 禁 eval，且本岛不需要任何求值）', () => {
+    const text = islandSource(ISLAND);
+    expect(/\bnew\s+Function\s*\(/.test(text)).toBe(false);
+    expect(/(^|[^.\w])eval\s*\(/m.test(text)).toBe(false);
+  });
+
+  it('岛内不引入 xlsx/SheetJS（解析在宿主完成，岛无构建步骤也引不进来）', () => {
+    const text = islandSource(ISLAND);
+    expect(/from\s+['"](xlsx|sheetjs)['"]/i.test(text)).toBe(false);
+    expect(/require\(\s*['"](xlsx|sheetjs)['"]\s*\)/i.test(text)).toBe(false);
+  });
+
+  it('岛内不自行套用费率算式（档位/取整口径只有宿主一份实现）', () => {
+    // 计价必须走宿主 op：岛里一旦出现「费率 × 克重」这类算式，两边口径就会漂移。
+    // 判据刻意只钉"对费率做四则运算"——不钉 Math.round/Math.ceil，
+    // 因为岛里合法地用它做**展示**（克重取整、由宿主的续重金额反推段数），
+    // 一刀切会让守卫命中函数定义而非真正的算式（假绿/假红的典型来源）。
+    const text = islandSource(ISLAND);
+    for (const field of ['ratePerKg', 'registerFee', 'firstFee', 'stepFee']) {
+      expect(new RegExp(`\\b${field}\\s*[-+*/]`).test(text)).toBe(false);
+    }
+    expect(/\bsr\('quote'/.test(text)).toBe(true); // 计价确实经宿主 op 落地
+  });
+
+  it('配置命名空间为 shipping-rate（storage 自身命名空间恒放行，无需额外声明）', () => {
+    const bridge = readFileSync(resolve(root, 'ui-plugins', ISLAND, 'dist/bridge.js'), 'utf-8');
+    expect(bridge).toMatch(/export const NS = 'shipping-rate'/);
+  });
+
+  it('宿主读表不得回落取第一个 sheet（报价单的第 1 张是「目录」）', () => {
+    // 2026-09-24 真实故障：`want && includes(want) ? want : sheetNames[0]` 让"导入运价表"
+    // 必然失败 —— 运营商报价单是 **21 张 sheet 拼一本**，第 1 张是「目录」，目标表在第 10 张；
+    // 更糟的是它把原因误报成「该 sheet 不是报价单结构」，用户以为数据有问题。
+    // 正确做法是逐张体检后按名称提示/国家数自动挑（pickRateSheet，见 tests/shipRate.spec.ts §⑤）。
+    // 2026-09-30 起实现单源在 `core/services/importSheet`（宿主 op 只是薄包装，
+    // 内建导入入口与岛共用一份）→ 守卫要**顺着这条链**检查，而不是只看 host.ts：
+    //   ① 宿主 op 必须调服务（不许自己再解析一遍）；② 服务里必须用 pickRateSheet 挑表。
+    const block = hostDomainBlock('shipping-rate');
+    expect(block).not.toBe('');
+    expect(block).not.toMatch(/sheetNames\s*\[\s*0\s*\]/);
+    expect(block, '宿主 op 必须调统一导入服务').toContain('importSheet.importRateSheet');
+    const svc = stripComments(
+      readFileSync(resolve(root, 'src', 'core', 'services', 'importSheet.ts'), 'utf-8'),
+    );
+    expect(svc, '挑表必须用 pickRateSheet（不能回落取第一张）').toContain('pickRateSheet');
+    expect(svc).not.toMatch(/sheetNames\s*\[\s*0\s*\]/);
+  });
+
+  it('导入走"名称提示"而不是"显式点名"（换版后 sheet 改名不该让导入硬失败）', () => {
+    // 显式点名是"用户在下拉里选了哪张"，宿主会严格按它解析、不存在就报错。
+    // 首次导入若沿用点名语义，用户拿到一份改过 sheet 名的新报价单时就会直接失败；
+    // 传提示则能自动落到可用的表上（岛侧还有候选列表兜底，选错了可手动改）。
+    const store = stripComments(
+      readFileSync(resolve(root, 'ui-plugins', ISLAND, 'dist/store.js'), 'utf-8'),
+    );
+    const fn = store.match(/export async function importByDialog[\s\S]*?\n\}/);
+    expect(fn).toBeTruthy();
+    const call = fn![0].match(/api\.parseRateSheet\([^)]*\)/);
+    expect(call).toBeTruthy();
+    expect(call![0]).toContain('prefer');
+    expect(call![0]).not.toContain('sheetName');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ~~product-library 岛的能力对齐守卫~~ **已删（2026-10-01）**：该岛整组下架、功能收回内建
+// 「货与成本」，`DB_OPS` 里它的五个能力域（product / product-admin / product-image /
+// product-supplier / shop-products，共 32 op）随之删除 —— 反向守卫的两侧（岛声明 ↔ 宿主 op）
+// 已不复存在，留着只会读一个空目录。
+// 同样的契约现在由 `scripts/goods-ui-smoke.mjs` 在**内建页**上守着（38 条断言：一次性批量映射 /
+// 不跨店铺串数据 / 未解析店铺不可点 / 标失效按行 id / 部分 patch 不发空字段 / 供应商改名不改名 …）。
+// 将来再开岛时，按 excel-copy / shipping-rate 两组的形态写回来即可。
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 宿主 db 能力域的 op 预算（ADR-002 N5：新增域必须一次性给出 owner + 访问模式 + op 上限 ≤10）
+// ---------------------------------------------------------------------------
+//
+// 为什么要有这条守卫：N5 是**约束新增域的设计动作**，写成文档没人拦得住 —— 2026-09-27 实测
+// `product` 域从 6 涨到 8，而计划里还要再加 4 个只读 op（= 12 > 10）才被人工发现。
+// 域内 op 越堆越多，会连带把"声明本域即拿到该域全部 op"的授权面一起放大（C4 要防的正是这个）。
+//
+// 两类豁免：
+//   · 存量域（N6「存量域不为改名单独发版」）在冻结日已超 10，登记**当前数量**入表，**只允许变少**；
+//   · 新增域一律 ≤10，不得进豁免表 —— 豁免表里出现预算内的域就说明它在被滥用（有断言钉住）。
+describe('宿主 db 能力域的 op 预算（ADR-002 N5）', { timeout: 20000 }, () => {
+  /**
+   * 冻结日（2026-09-27）已超预算的存量域 → 当时实测数量。
+   * **只允许变少，加 op 必须先拆子域**（这两个都是历史遗留的"万能域"，也是 ADR-002 N4 里
+   * 点名要拆的：purchase 可再拆、shop-accounts → shop-set + company。
+   * 原先第三个 `order-insight`(37) 已随该岛 2026-10-05 整体下架**整域删除**，从表里移出 ——
+   * 它走后剩余域的最大值是 `purchase` 24，所以本组仍必须豁免，否则会立刻红）。
+   */
+  const GRANDFATHERED: Record<string, number> = {
+    'shop-accounts': 17,
+    purchase: 24,
+  };
+  const BUDGET = 10;
+
+  it('DB_OPS 能解析出来（否则本组整段空转）', () => {
+    const domains = hostDomains();
+    expect(domains.length).toBeGreaterThan(0);
+    // 这两个必须**同时**在：一个是**岛域**（多 op），一个是**主数据域**（少 op）。
+    // 若哪天读成了别的段落，这里先红，不至于让本组静默空转。
+    // 锚点换过一次：原为 `product` / `shop`（`product` 随产品库岛下架删除，2026-10-01 →
+    // 改钉 `order-insight`）→ 本次 `order-insight` 也随岛下架删除（2026-10-05）→ 改钉 `shop-accounts`。
+    expect(domains).toContain('shop-accounts');
+    expect(domains).toContain('shop');
+  });
+
+  it.each(hostDomains())('%s 域：op 数在预算内或不超过冻结基线', (domain) => {
+    const ops = hostDomainOps(domain);
+    // 域被解析出来却一个 op 都没有 = 解析写法没覆盖，属空转，必须变红（历史坑：域键写法）
+    expect(ops.length).toBeGreaterThan(0);
+    const baseline = GRANDFATHERED[domain];
+    if (baseline === undefined) {
+      expect(
+        ops.length,
+        `${domain} 域有 ${ops.length} 个 op，超过 N5 的 ${BUDGET} 上限 —— 请按 ADR-002 C4 拆只读子域，而不是继续加`,
+      ).toBeLessThanOrEqual(BUDGET);
+    } else {
+      expect(
+        ops.length,
+        `${domain} 是豁免的存量超额域（基线 ${baseline}），只允许变少`,
+      ).toBeLessThanOrEqual(baseline);
+    }
+  });
+
+  it('豁免表只装真超额的域：预算内的域不得登记豁免（防止豁免滥化）', () => {
+    for (const [domain, baseline] of Object.entries(GRANDFATHERED)) {
+      expect(hostDomains(), `豁免表里的 ${domain} 在 DB_OPS 里已不存在`).toContain(domain);
+      expect(
+        baseline,
+        `${domain} 现已降到预算内（基线却记着 ${baseline}），请从豁免表里删掉它`,
+      ).toBeGreaterThan(BUDGET);
+    }
   });
 });

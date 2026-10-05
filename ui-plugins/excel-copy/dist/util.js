@@ -24,9 +24,12 @@ export function truncate(str, len = 30) {
 }
 
 /**
- * 模板替换（与宿主 src/lib/templateEngine.ts#renderTemplate 语义一致）。
+ * 模板替换（语义对齐宿主内建版的 `renderTemplate`）。
  * 缺失字段替换为 [字段缺失: xxx] 而不是空串 —— 让"漏填"在复制结果里可见，
  * 避免用户把残缺文本发出去还以为是数据问题。
+ *
+ * ⚠️ 岛自带本副本：宿主侧原有一份同语义实现（`templateEngine`），随 excel-copy 下记为岛后
+ * 失去全部消费者，已于 2026-10-05 的孤儿代码清理中删除 —— **本文件是当前唯一实现**。
  */
 export function renderTemplate(template, fields) {
   return String(template ?? '').replace(/\{\{(.+?)\}\}/g, (_m, key) => {

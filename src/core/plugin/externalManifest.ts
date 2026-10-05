@@ -35,6 +35,8 @@ const VERSION_RE = /^\d+\.\d+\.\d+$/;
  * 宿主 DB_OPS 里 `order-insight` 域自身就有 37 个 op、`purchase` 域 24 个，
  * 而 order-insight 插件跨两个域声明 58 个动作 → 安装期直接被判定为非法 manifest、
  * 整个插件加载失败（报「capabilities.db.actions 条数超限（≤32）」），且该报错不指向业务真实原因。
+ * （上述数字是**当时**的实测值。`order-insight` 域已于 2026-10-05 随该岛整体下架删除；
+ *   现值最大的域是 `purchase` 24 / `shop-accounts` 17 —— 上限口径不受影响，故这段历史保留原样。）
  *
  * 上层语义：actions 是「插件自报的动作白名单」，真正的越权判定在宿主权限门
  * （security.ts decidePermission）+ DB_OPS 登记表，本上限只用于抵御病态/超大 manifest。

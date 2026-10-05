@@ -4,9 +4,24 @@
 //   oi_images         图片指纹库：内容指纹(SHA-256) 唯一，缓存 AI 识别结果，避免重复扣费；
 //                     style_color_id 归属款色（阶段1：识别后自动建立款式/款色并挂接）
 //   oi_orders         订单明细：归属图片 + 原始字段 + 归一化属性（款式/颜色/logo/材质）
-//   oi_styles         款编码库：code 唯一（STYLE-001）、name 可改、fingerprint 款式指纹唯一（匹配键）
+//   oi_styles         款编码库：code 唯一（STYLE-001）、fingerprint 款式指纹唯一（匹配键）
 //   oi_style_colors   款色库：款编码 + 归一化颜色 → 款色编码（STYLE-001-RED），唯一
 // 仅提供语义化方法；渲染进程经 order-handlers.ts 的 IPC 访问，不直接接触 SQL。
+//
+// ── 款式主数据权威：pl_products（ADR-002 D1 = 路径 A，2026-09-27 落地） ──
+// 本模块只维护**识别私有信息**：oi_styles 的 `code` / `fingerprint`、款色归属、附加指纹。
+// 款式的业务字段（`name` / `category` / `supplier_id` / `status` / `note`）唯一权威在
+// `pl_products`（electron/product-db.ts）：
+//   · 写：建款 / 改名 / 导入一律经 product-db（`upsertProduct` / `renameProduct`）；
+//   · 读：列表与联表查询按 `pl_products.code = oi_styles.code` **派生**，不再读 oi_styles.name。
+// `oi_styles.name` **已删列**（v3 迁移 `ALTER TABLE … DROP COLUMN name`，本文件的建表语句也不再有它）——
+// 历史展示名在迁移里一次性交接给 `pl_products`，此后 `name` 在结构上不可能出现两份分叉的值，
+// C1「同一语义只有一个写入方」不靠自觉、靠结构。
+//
+// ⚠️ **2026-10-05 更正**：此前这里写的是"列保留、写入固定空串哨兵"，与迁移（`DROP COLUMN`）**相反**。
+// 三处 INSERT 仍在写 `name`，于是**老库上任何"新建款"的路径必抛** `no such column: name`
+//（AI 识别建款、映射归款建款都中招；症状是"识别/归款静默失败、款表永远为空"）——
+// 而夹具建的是**新库**（建表带 `name`），于是冒烟恒绿、线上必崩。统一到"无该列"后两者形状才一致。
 
 export {};
 
@@ -18,7 +33,16 @@ import {
   dbRun,
   dbTransaction,
   getDb,
+  migrate,
+  tableExists,
+  type MigrationStep,
 } from './db';
+import { adoptProduct, ensureProductSchema, productSchemaReady, renameProduct, resolveOrderSku } from './product-db';
+import { extractOrderMoney } from './orderMoney';
+// 采集侧口径的**纯原语**（收入 = 商品+买家运费；外币 × 汇率 → 分）。
+// 回填走**同一组**函数而不是另写一遍算式 —— 两份口径必然漂移（AGENTS §4.2）。
+import { orderIncomeCcy, parseSkuProps, toCentsCny } from './aeMoney';
+import { extractSkuFields } from './shopSku';
 
 // ---- 类型（与渲染层 src/types.ts 对应，结构保持一致） ----
 
@@ -45,7 +69,8 @@ export type OrderStatus = 'pending' | 'shipped';
 
 export interface OrderRecord {
   id?: number;
-  imageId: number;
+  /** 归属图片；**null = 无图订单**（订单报表没有主图列，见 S2-b 免图导入） */
+  imageId: number | null;
   orderNo: string;
   shop: string;
   size: string;
@@ -140,22 +165,40 @@ export interface ResolveStyleInput {
   styleName?: string;
 }
 
-const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS oi_images (
+/**
+ * 利润用列（2026-09-29 加；真实报表实证见 `electron/orderMoney.ts` 的文件头）。
+ *
+ * 口径两条，都会影响后续算账，别改：
+ *   · **金额列可空（NULL = 不知道），故意不给 DEFAULT 0** —— 0 是"确实是 0"，NULL 是"报表里没有"，
+ *     混起来就会把"缺税"算成"零税"，预测利润凭空变大；
+ *   · 文字列空串 = 未知（`tax_platform` 空串 ≠ 非代征：前者是不知道谁承担，后者是明确我们承担）。
+ *
+ * 建表（新库）与老库补列**共用这一份**，避免两处列定义漂移。
+ */
+const ORDER_MONEY_COLS: { name: string; ddl: string }[] = [
+  { name: 'amount_cents', ddl: 'amount_cents INTEGER' },
+  { name: 'vat_cents', ddl: 'vat_cents INTEGER' },
+  { name: 'ddp_cents', ddl: 'ddp_cents INTEGER' },
+  { name: 'tax_platform', ddl: "tax_platform TEXT NOT NULL DEFAULT ''" },
+  { name: 'biz_status', ddl: "biz_status TEXT NOT NULL DEFAULT ''" },
+  // `ship_time` **不能删**：拣货的"未发货"判定读它（`picking-db`）
+  { name: 'ship_time', ddl: "ship_time TEXT NOT NULL DEFAULT ''" },
+];
+
+/**
+ * 主干列（2026-09-30，C1 合并）：`oi_orders` 是**唯一订单主干**，两条摄取通道都写它。
+ *   · `source` = 摄取通道（'import' 报表导入 / 'collect' 浏览器采集）—— 界面按它标来源；
+ *   · `qty` = 件数**真值**（采集帧每行自带）；NULL = 不知道（导入侧由渲染层解析"商品信息"块）。
+ */
+const ORDER_SPINE_COLS: { name: string; ddl: string }[] = [
+  { name: 'source', ddl: "source TEXT NOT NULL DEFAULT 'import'" },
+  { name: 'qty', ddl: 'qty INTEGER' },
+];
+
+/** `oi_orders` 建表/重建**共用一份**列定义（改列只改这里；重建见 `migrateOrderSpine`） */
+const ORDER_TABLE_DDL = `CREATE TABLE IF NOT EXISTS oi_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fingerprint TEXT NOT NULL UNIQUE,
-    url_fingerprint TEXT NOT NULL,
-    source_url TEXT NOT NULL,
-    local_path TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    result_json TEXT,
-    error TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  )`,
-  `CREATE TABLE IF NOT EXISTS oi_orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    image_id INTEGER NOT NULL REFERENCES oi_images(id) ON DELETE CASCADE,
+    image_id INTEGER REFERENCES oi_images(id) ON DELETE CASCADE,
     order_no TEXT NOT NULL,
     shop TEXT NOT NULL DEFAULT '',
     size TEXT NOT NULL DEFAULT '',
@@ -167,8 +210,27 @@ const SCHEMA = [
     material TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     corrected INTEGER NOT NULL DEFAULT 0,
+${ORDER_MONEY_COLS.map((c) => `    ${c.ddl}`).join(',\n')},
+${ORDER_SPINE_COLS.map((c) => `    ${c.ddl}`).join(',\n')},
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`;
+
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS oi_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    url_fingerprint TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    local_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result_json TEXT,
+    error TEXT,
+    style_color_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  `CREATE INDEX IF NOT EXISTS idx_oi_images_sc ON oi_images(style_color_id)`,
+  ORDER_TABLE_DDL,
   `CREATE INDEX IF NOT EXISTS idx_oi_images_url_fp ON oi_images(url_fingerprint)`,
   `CREATE INDEX IF NOT EXISTS idx_oi_orders_image ON oi_orders(image_id)`,
   `CREATE INDEX IF NOT EXISTS idx_oi_orders_shop ON oi_orders(shop)`,
@@ -176,7 +238,6 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS oi_styles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
     fingerprint TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
@@ -214,19 +275,144 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_oi_queue_batch ON oi_queue(batch_no, status, id)`,
 ];
 
-/** 幂等初始化：建表 + 索引 + 列迁移（应用启动 / 首次使用自动调用） */
+/** 幂等初始化：迁移 + 建表/索引 + 款式主数据权威交接（应用启动 / 首次使用自动调用）
+ *  顺序不能换：产品表要先存在，交接才有落点（见 migrateStyleAuthority）。 */
 export function ensureOrderSchema(): void {
   initDb();
+  // house convention：**自定义迁移先跑，再 dbMigrate(SCHEMA)** —— 老库缺列时才能补上，
+  // 依赖新增列的索引也就可以安全地留在 SCHEMA 里（见 `migrateColumns` 的旧注释）。
+  migrate('order.main', orderMigrationSteps());
   dbMigrate(SCHEMA);
-  migrateColumns();
+  ensureProductSchema();
 }
 
-/** 老库列迁移：补充历史建表语句缺失的列（order_time / style_color_id）。
+/** `oi_orders` / `oi_images` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`） */
+function orderMigrationSteps(): MigrationStep[] {
+  return [
+    { version: 1, name: 'oi_orders +order_time/status/corrected；oi_images +style_color_id', up: migrateColumns },
+    { version: 2, name: 'oi_orders +金额/状态/时点列（预测利润用）', up: addOrderMoneyColumns },
+    {
+      version: 3,
+      name: 'oi_orders 归一为唯一订单主干（image_id 可空 + source/qty；删 8 个零读者列）· oi_styles 去哨兵列 name',
+      up: migrateOrderSpine,
+    },
+    {
+      version: 4,
+      name: '历史采集单回填主干（ae_orders + ae_order_lines → oi_orders, source=collect）',
+      up: migrateLegacyCollectedOrders,
+    },
+  ];
+}
+
+/**
+ * v4 迁移：把**老采集表**里的历史订单回填进主干（2026-09-30，C9' 的前置）。
+ *
+ * 背景：C1 之后**新采集的**订单直接写主干，而 C1 之前采到的单只存在于 `ae_orders` / `ae_order_lines` ——
+ * 界面只读主干，于是那些单**看不见了**（本机实测 101 单）。删表（C9'）之前先把它们搬进来，
+ * 否则删表就是真丢数据。
+ *
+ * 口径与实时采集**完全同一组原语**（`electron/aeMoney.ts` + `upsertCollectedOrder`）：
+ * 整单收入 =（商品金额 + 买家付运费）× 汇率 → 分；`sku_props` 解析出颜色/尺码；行级明细按行落主干。
+ * **不迁** `ae_fees`：费用侧的真值源是「结算明细」（`ae_settle_lines`），采集侧的科目实测为空，
+ * 主干的模型里也没有费用科目列（见 `upsertOrderBatch` 的注释）。
+ *
+ * 幂等：`upsertCollectedOrder` 按 (order_no, source='collect') 先删后插 —— 迁移重入不会翻倍；
+ * 版本记账再兜一层（同一域同一版本只跑一次）。
+ * 可回滚：回填行的 `raw_fields.__migratedFrom = 'ae_orders'`，要撤就按这个标记删。
+ *
+ * ⚠️ 与所有迁移步骤同一条纪律：**迁移跑在表可能存在之前**，故先判表在不在（交接类步骤要自己保证目标表存在，
+ * 见 `docs/notes/2026-09-30-table-rebuild-traps.md`）。
+ */
+function migrateLegacyCollectedOrders(): void {
+  if (!tableExists('oi_orders') || !tableExists('ae_orders')) return; // 新库没有采集表 → 无事可做
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT id, order_id, shop_name, order_time, status, currency, goods_amount, shipping_income, raw_json
+     FROM ae_orders`,
+  );
+  if (!rows.length) return;
+
+  const linesByOrder = new Map<number, { productId: string; skuProps: string; qty: number }[]>();
+  if (tableExists('ae_order_lines')) {
+    for (const l of dbQuery<Record<string, unknown>>(
+      `SELECT ae_order_id, product_id, sku_props, qty FROM ae_order_lines`,
+    )) {
+      const key = Number(l.ae_order_id) || 0;
+      const list = linesByOrder.get(key) ?? [];
+      list.push({
+        productId: String(l.product_id ?? ''),
+        skuProps: String(l.sku_props ?? ''),
+        qty: Number(l.qty) || 1,
+      });
+      linesByOrder.set(key, list);
+    }
+  }
+
+  // 汇率表可能还没建（老库首次进入本域）→ 缺席时按"缺汇率"处理（金额留 null，不猜 1:1）
+  const rates = new Map<string, number>();
+  if (tableExists('ae_rates')) {
+    for (const r of dbQuery<Record<string, unknown>>(
+      `SELECT from_currency, rate_to_cny FROM ae_rates`,
+    )) {
+      const ccy = String(r.from_currency ?? '');
+      const v = Number(r.rate_to_cny);
+      if (ccy && v > 0) rates.set(ccy, v);
+    }
+  }
+
+  let migrated = 0;
+  for (const r of rows) {
+    const orderNo = String(r.order_id ?? '').trim();
+    if (!orderNo) continue;
+    const currency = String(r.currency ?? '') || 'USD';
+    const rate = currency === 'CNY' ? 1 : (rates.get(currency) ?? 0);
+    const amountCents = rate
+      ? toCentsCny(
+          orderIncomeCcy({
+            goodsAmount: Number(r.goods_amount) || 0,
+            shippingIncome: Number(r.shipping_income) || 0,
+          }),
+          rate,
+        )
+      : null;
+    const srcLines = linesByOrder.get(Number(r.id) || 0) ?? [];
+    upsertCollectedOrder({
+      orderNo,
+      orderTime: String(r.order_time ?? ''),
+      bizStatus: String(r.status ?? ''),
+      shop: String(r.shop_name ?? ''),
+      amountCents,
+      // 保真：原帧整段搬进来（与实时采集同一个 raw_fields 键名），另加一个可回滚的迁移标记
+      rawFields: {
+        采集帧: String(r.raw_json ?? '').slice(0, 20000),
+        __migratedFrom: 'ae_orders',
+      },
+      lines: srcLines.map((l) => {
+        const props = parseSkuProps(l.skuProps);
+        return {
+          itemId: l.productId.slice(0, 64),
+          qty: Math.max(1, Math.round(l.qty) || 1),
+          color: props.color.slice(0, 64),
+          size: props.size.slice(0, 64),
+        };
+      }),
+    });
+    migrated += 1;
+  }
+  if (migrated) {
+    console.log(
+      `[migrate] order.main v4：历史采集单 ${migrated} 单已回填主干（oi_orders, source=collect）`,
+    );
+  }
+}
+
+/** 老库列迁移：补充历史建表语句缺失的列（order_time / style_color_id / status / corrected）。
  *  注意：依赖新增列的索引必须在本函数内、加列成功后再创建，
  *  不能放进 SCHEMA——老库缺列时建索引会抛错导致整个 dbMigrate 事务回滚。 */
 function migrateColumns(): void {
   const d = getDb();
   const orderCols = d.prepare(`PRAGMA table_info(oi_orders)`).all() as { name: string }[];
+  // 表还不存在 = 新库（迁移先于 dbMigrate 跑）→ 跳过，别去 ALTER 一张没有的表
+  if (orderCols.length === 0) return;
   if (!orderCols.some((c) => c.name === 'order_time')) {
     dbRun(`ALTER TABLE oi_orders ADD COLUMN order_time TEXT NOT NULL DEFAULT ''`);
   }
@@ -242,6 +428,94 @@ function migrateColumns(): void {
   }
   dbRun(`CREATE INDEX IF NOT EXISTS idx_oi_images_sc ON oi_images(style_color_id)`);
 }
+
+/** 老库补「利润用列」（金额/状态/时点）；列定义与建表共用 `ORDER_MONEY_COLS`，不会漂移 */
+function addOrderMoneyColumns(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(oi_orders)`).map((r) =>
+    String(r.name ?? ''),
+  );
+  if (cols.length === 0) return; // 新库：由 dbMigrate 建表时带上这些列
+  const have = new Set(cols);
+  for (const c of ORDER_MONEY_COLS) {
+    if (!have.has(c.name)) dbRun(`ALTER TABLE oi_orders ADD COLUMN ${c.ddl}`);
+  }
+}
+
+/**
+ * **v3：`oi_orders` 归一为唯一订单主干**（2026-09-30，C1 合并的表侧）。
+ *
+ * 三件事**同一个事务**：
+ *   ① 款式名交接（原 `migrateStyleAuthority` 的两条语句）—— 必须**在删列之前**跑，
+ *      否则 `oi_styles.name` 一删，历史展示名就没了源头；
+ *   ② 重建 `oi_orders`：`image_id` 改**可空**（订单报表里没有主图列，S2-b 免图导入的前提）、
+ *      加 `source`/`qty`、删 8 个零读者列（`goods/ship_fee/shop_discount/platform_subsidy/
+ *      currency/biz_mode/paid_time/received_time`，投影早已不取）；
+ *   ③ `oi_styles` 去掉 `name`（SQLite ≥3.35 直接 `DROP COLUMN`；该列无索引引用，不必重建表）。
+ *
+ * 幂等判定：`oi_orders` 已有 `source` 列即视为已迁移（新库由 `ORDER_TABLE_DDL` 一次建到位）。
+ * ⚠️ 重建会**重置 `sqlite_sequence`**（AUTOINCREMENT 的行号记账）：显式插入历史 id 之后必须把它
+ * 追平，否则下一笔插入会从 1 开始撞主键。
+ */
+function migrateOrderSpine(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(oi_orders)`).map((r) => String(r.name ?? ''));
+  if (cols.length === 0) return; // 新库：建表即新形状
+  if (cols.includes('source')) return; // 已是主干形状
+  dbTransaction(() => {
+    // ⚠️ 交接必须有落点：本迁移跑在 `ensureOrderSchema` 的 `ensureProductSchema()` **之前**，
+    // 老库（订单域早于产品域）此时可能还没有 `pl_products` —— 那样交接会被跳过、而列却照删：
+    // **历史款名静默丢失**。所以这里主动把产品表建起来（幂等），保证交接永远有落点。
+    ensureProductSchema();
+    // ⚠️ 交接与删列都要先**探列**：老库此时通常还有 `name`（更要紧的是别白删），
+    // 但若某个库的 `oi_styles` 已是新形状（无 name），不判就 `no such column: name` 直接崩。
+    const styleCols = dbQuery<{ name: string }>(`PRAGMA table_info(oi_styles)`).map((r) =>
+      String(r.name ?? ''),
+    );
+    if (styleCols.includes('name')) {
+      dbRun(
+        `INSERT OR IGNORE INTO pl_products (code, name)
+         SELECT s.code, s.name FROM oi_styles s WHERE s.code <> ''`,
+      );
+    }
+    dbRun(`DROP TABLE IF EXISTS oi_orders_legacy_spine`);
+    dbRun(`ALTER TABLE oi_orders RENAME TO oi_orders_legacy_spine`);
+    dbRun(ORDER_TABLE_DDL);
+    // 老行**一律是报表导入来的**（当时没有第二条通道）→ source='import'；qty 留 NULL（由渲染层解析块内数量）
+    dbRun(
+      `INSERT INTO oi_orders (id, image_id, order_no, shop, size, order_time, raw_fields, category,
+                              color, logo, material, status, corrected,
+                              amount_cents, vat_cents, ddp_cents, tax_platform, biz_status, ship_time,
+                              created_at, source, qty)
+       SELECT id, image_id, order_no, shop, size, order_time, raw_fields, category,
+              color, logo, material, status, corrected,
+              amount_cents, vat_cents, ddp_cents, tax_platform, biz_status, ship_time,
+              created_at, 'import', NULL
+       FROM oi_orders_legacy_spine`,
+    );
+    dbRun(`DROP TABLE oi_orders_legacy_spine`);
+    // 追平 AUTOINCREMENT 行号（sqlite_sequence 无主键 → UPDATE，没有行时再 INSERT）
+    const seq = dbGet<{ seq: number }>(`SELECT seq FROM sqlite_sequence WHERE name = 'oi_orders'`);
+    const maxId = Number(dbGet<{ m: number }>(`SELECT COALESCE(MAX(id), 0) AS m FROM oi_orders`)?.m ?? 0);
+    if (seq) dbRun(`UPDATE sqlite_sequence SET seq = ? WHERE name = 'oi_orders'`, [maxId]);
+    else if (maxId > 0) dbRun(`INSERT INTO sqlite_sequence (name, seq) VALUES ('oi_orders', ?)`, [maxId]);
+    // oi_styles 去哨兵列（无索引引用它；SQLite ≥3.35 可直接 DROP COLUMN）
+    if (styleCols.includes('name')) dbRun(`ALTER TABLE oi_styles DROP COLUMN name`);
+  });
+}
+
+/**
+ * 款式主数据权威交接（D1 落地，幂等）：
+ *   1. 把历史库里 `oi_styles.name` 的展示名**灌进** `pl_products`（缺哪个补哪个，已有产品不动 ——
+ *      主数据优先于历史遗留值）。name 为空的历史款也补行，保证「oi_styles.code 必有对应产品」
+ *      这个关联不变量成立，否则读侧 LEFT JOIN 出来的空名会既看不出原因也修不了。
+ *   2. 交接完成后把 `oi_styles.name` 全部置空（哨兵）：留着旧值就是留着一份将来会分叉的副本，
+ *      哪天有人顺手读了它，C1 就又破了一次。置空让它**在结构上不可能**成为第二数据源。
+ *   两步同一事务：插入失败就不清源数据，不会丢名字。
+ *
+ * 幂等判定用 `INSERT OR IGNORE` + `WHERE name <> ''`：第二次起两边都是空操作，
+ * 可安全地挂在每次 `ensureOrderSchema()` 上。
+ */
+/** 原 `migrateStyleAuthority` 已**并入 v3 迁移**（`migrateOrderSpine` ①）：名字交接必须在
+ * `ALTER TABLE oi_styles DROP COLUMN name` **之前**跑，否则一删列历史展示名就没了源头。 */
 
 // ---- 图片指纹库 ----
 
@@ -302,6 +576,10 @@ const COLOR_CODE: Record<string, string> = {
   深灰: 'DARKGRAY',
   浅灰: 'LIGHTGRAY',
   藏蓝: 'NAVY',
+  // 与渲染层 `src/lib/colorSwatch.ts` 的键对齐：映射页的颜色下拉就用那张表的键
+  //（枚举分叉的症状是"这里能选、那边编码成 OTHER" —— `colorCode` 对表外色名回落 ASCII/OTHER）
+  藏青: 'NAVY',
+  军绿: 'ARMYGREEN',
   蓝色: 'BLUE',
   卡其: 'KHAKI',
   红色: 'RED',
@@ -337,9 +615,17 @@ function buildStyleName(category: string, features: string[]): string {
 
 /** 下一个款编码序号：按现有 code 的最大序号 +1（删除后不回收）。
  * 同时记录全部已占用 code，从 max+1 起向后找第一个未占用序号，
- * 避免手工改名/导入手工款号占用连续序号后仍返回同一编码造成复号。 */
+ * 避免手工改名/导入手工款号占用连续序号后仍返回同一编码造成复号。
+ *
+ * D1 后编码池有**两个**来源：`oi_styles`（识别建款）与 `pl_products`（产品库手工新建）。
+ * 只查前者会让 `STYLE-005` 被产品库先占用、又发给下一款识别 → 撞 pl_products 的唯一键
+ * （表现为「识别建款失败」，报错却指向产品库，方向全反）。 */
 function nextStyleCode(): string {
-  const rows = dbQuery<{ code: string }>(`SELECT code FROM oi_styles`);
+  const rows = dbQuery<{ code: string }>(
+    productSchemaReady()
+      ? `SELECT code FROM oi_styles UNION SELECT code FROM pl_products`
+      : `SELECT code FROM oi_styles`,
+  );
   const used = new Set<string>();
   let max = 0;
   for (const r of rows) {
@@ -351,6 +637,27 @@ function nextStyleCode(): string {
   let n = max + 1;
   while (used.has('STYLE-' + String(n).padStart(3, '0'))) n += 1;
   return 'STYLE-' + String(n).padStart(3, '0');
+}
+
+/**
+ * 找/建款色（款编码 + 归一化颜色 → 款色）。
+ * 编码冲突时加 `-2/-3` 后缀 —— 与 `importStyles` 同规则（同款多色 + 历史数据可能已占用编码）。
+ * 抽出来是因为映射自动归款（`autoAssignByMap`）也要落到款色上：两处各写一遍迟早分叉。
+ */
+function ensureStyleColor(styleId: number, styleCode: string, color: string): { id: number; code: string } {
+  const d = getDb();
+  const sc = d
+    .prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`)
+    .get(styleId, color) as { id: number; code: string } | undefined;
+  if (sc) return sc;
+  let scCode = `${styleCode}-${colorCode(color)}`;
+  let seq = 2;
+  while (d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`).get(scCode)) {
+    scCode = `${styleCode}-${colorCode(color)}-${seq}`;
+    seq += 1;
+  }
+  const r = d.prepare(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?, ?, ?)`).run(styleId, color, scCode);
+  return { id: Number(r.lastInsertRowid), code: scCode };
 }
 
 /**
@@ -369,46 +676,30 @@ export function resolveStyle(input: ResolveStyleInput): {
   const d = getDb();
   return dbTransaction(() => {
     let style = d
-      .prepare(`SELECT id, code, name FROM oi_styles WHERE fingerprint = ?`)
-      .get(input.fingerprint) as { id: number; code: string; name: string } | undefined;
+      .prepare(`SELECT id, code FROM oi_styles WHERE fingerprint = ?`)
+      .get(input.fingerprint) as { id: number; code: string } | undefined;
     // 主指纹未命中 → 查附加指纹表（用户手动归并款式时写入，使自动识别也能命中目标款编码）
     if (!style) {
       style = d
         .prepare(
-          `SELECT s.id, s.code, s.name FROM oi_style_fingerprints f
+          `SELECT s.id, s.code FROM oi_style_fingerprints f
            JOIN oi_styles s ON s.id = f.style_id WHERE f.fingerprint = ?`,
         )
-        .get(input.fingerprint) as { id: number; code: string; name: string } | undefined;
+        .get(input.fingerprint) as { id: number; code: string } | undefined;
     }
     if (!style) {
       const code = nextStyleCode();
       const name = (input.styleName && input.styleName.trim()) || buildStyleName(input.category, input.features);
+      // D1：oi_styles 只留识别私有信息（code + 指纹），展示名写产品库（唯一权威）。
+      // 这里必须是**空串哨兵**，不能顺手把 name 也写进来 —— 那又是一份会分叉的副本。
       const r = d
-        .prepare(`INSERT INTO oi_styles (code, name, fingerprint) VALUES (?, ?, ?)`)
-        .run(code, name, input.fingerprint);
-      style = { id: Number(r.lastInsertRowid), code, name };
+        .prepare(`INSERT INTO oi_styles (code, fingerprint) VALUES (?, ?)`)
+        .run(code, input.fingerprint);
+      style = { id: Number(r.lastInsertRowid), code };
+      adoptProduct({ code, name });
     }
-    const sc = d
-      .prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`)
-      .get(style.id, input.color) as { id: number; code: string } | undefined;
-    if (sc) {
-      return { styleId: style.id, styleColorId: sc.id, styleCode: style.code, styleColorCode: sc.code };
-    }
-    let scCode = `${style.code}-${colorCode(input.color)}`;
-    let seq = 2;
-    while (d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`).get(scCode)) {
-      scCode = `${style.code}-${colorCode(input.color)}-${seq}`;
-      seq += 1;
-    }
-    const r = d
-      .prepare(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?, ?, ?)`)
-      .run(style.id, input.color, scCode);
-    return {
-      styleId: style.id,
-      styleColorId: Number(r.lastInsertRowid),
-      styleCode: style.code,
-      styleColorCode: scCode,
-    };
+    const sc = ensureStyleColor(style.id, style.code, input.color);
+    return { styleId: style.id, styleColorId: sc.id, styleCode: style.code, styleColorCode: sc.code };
   });
 }
 
@@ -520,11 +811,23 @@ export function assignOrderStyle(input: {
   });
 }
 
-/** 修改款式展示名（款编码级，全局生效；仅展示，不参与指纹匹配） */
+/** 修改款式展示名（款编码级，全局生效；仅展示，不参与指纹匹配）。
+ *
+ *  D1：唯一权威是 `pl_products` —— 只写产品库。产品库尚无该 code 时补建一行
+ *  （历史库还没跑交接、或产品被删过），避免「改名改到没有的地方」变成静默空操作。
+ *
+ *  入口边界：本函数以**识别编码池**为准（code 必须能在 oi_styles 里查到），因为它是
+ *  「订单归类」的款名编辑入口 —— 没参与过订单、只在产品库手工新建的产品不在它视野里，
+ *  那种产品改名走产品库界面自己的 `upsert`。故这里保持"查不到就抛错"，
+ *  不为了多覆盖一种情况就静默改判（会让调用方以为改成功了）。 */
 export function renameStyle(code: string, name: string): void {
-  const style = dbQuery<{ id: number }>(`SELECT id FROM oi_styles WHERE code = ?`, [code]);
-  if (!style.length) throw new Error(`款式不存在: code=${code}`);
-  dbRun(`UPDATE oi_styles SET name = ? WHERE code = ?`, [String(name ?? '').trim().slice(0, 50), code]);
+  const c = String(code ?? '').trim();
+  const style = dbQuery<{ id: number }>(`SELECT id FROM oi_styles WHERE code = ?`, [c]);
+  if (!style.length) throw new Error(`款式不存在: code=${code}（识别编码池无此编码）`);
+  const next = String(name ?? '').trim().slice(0, 50);
+  if (!renameProduct(c, next).changed) {
+    adoptProduct({ code: c, name: next }, { overwriteName: true });
+  }
 }
 
 /** 按 款编码+款色 取一张已下载的代表图（本地路径），供拿货单 Excel 导出嵌入图片；查不到返回 null */
@@ -593,8 +896,8 @@ export function importStyles(items: StyleImportItem[]): StyleImportResult {
       }
       // 按款编码查/建（同一款编码多行 = 多个款色，仅首行生效的指纹/款式名）
       const existing = code
-        ? (d.prepare(`SELECT id, code, name, fingerprint FROM oi_styles WHERE code = ?`).get(code) as
-            | { id: number; code: string; name: string; fingerprint: string }
+        ? (d.prepare(`SELECT id, code, fingerprint FROM oi_styles WHERE code = ?`).get(code) as
+            | { id: number; code: string; fingerprint: string }
             | undefined)
         : undefined;
       let styleId: number;
@@ -604,7 +907,9 @@ export function importStyles(items: StyleImportItem[]): StyleImportResult {
         styleId = existing.id;
         styleCode = existing.code;
         styleMainFp = String(existing.fingerprint ?? '');
-        if (name) d.prepare(`UPDATE oi_styles SET name = ? WHERE id = ?`).run(name, styleId);
+        // D1：名字写产品库。这里是**显式的产品库导入**语义（用户拿一张产品表来覆盖），
+        // 与「识别时顺手建款」不同 —— 故允许覆盖既有主数据名。
+        if (name) adoptProduct({ code: styleCode, name }, { overwriteName: true });
       } else {
         // 主指纹占用检查：同指纹已有款式时——
         //   显式给了不同的款编码 → 冲突报错；未给/给同编码 → 归并（同款多色多行、重复导入同款）
@@ -626,11 +931,12 @@ export function importStyles(items: StyleImportItem[]): StyleImportResult {
             return;
           }
           const r = d
-            .prepare(`INSERT INTO oi_styles (code, name, fingerprint) VALUES (?, ?, ?)`)
-            .run(finalCode, name || '未命名款式', fp);
+            .prepare(`INSERT INTO oi_styles (code, fingerprint) VALUES (?, ?)`)
+            .run(finalCode, fp);
           styleId = Number(r.lastInsertRowid);
           styleCode = finalCode;
           styleMainFp = fp;
+          adoptProduct({ code: finalCode, name: name || '未命名款式' });
         }
       }
       // 附加指纹：用户自定义指纹 + 本次生成的主指纹（与款式主指纹不同时）→ 订单识别也能命中已有款编码
@@ -665,10 +971,24 @@ export function importStyles(items: StyleImportItem[]): StyleImportResult {
   return { imported, errors };
 }
 
+/**
+ * 款式展示名的派生片段（D1：权威在 `pl_products`，按 `code` 关联）。
+ *   · 产品表未就绪时降级为空名 —— 直接 JOIN 会抛「no such table」，把「产品域还没建」
+ *     报成「订单域坏了」，排查方向整个反掉；
+ *   · 用 LEFT JOIN 而非 INNER：oi_styles 有行而产品缺失时仍要能列出该款 ——
+ *     少一行比空名难查得多（这正是「读错对象」伪装成「对象有问题」的经典形态）。
+ */
+function styleNameJoin(): { join: string; name: string } {
+  return productSchemaReady()
+    ? { join: 'LEFT JOIN pl_products p ON p.code = s.code', name: 'p.name' }
+    : { join: '', name: `''` };
+}
+
 /** 产品库列表：款编码 + 款色数/图片数/订单数 + 款色明细（含图片数） */
 export function listStyles(): StyleRecord[] {
+  const n = styleNameJoin();
   const rows = dbQuery<Record<string, unknown>>(
-    `SELECT s.id, s.code, s.name, s.fingerprint, s.created_at,
+    `SELECT s.id, s.code, ${n.name} AS name, s.fingerprint, s.created_at,
        (SELECT COUNT(*) FROM oi_style_colors sc WHERE sc.style_id = s.id) AS color_count,
        (SELECT COUNT(*) FROM oi_images i JOIN oi_style_colors sc ON i.style_color_id = sc.id
          WHERE sc.style_id = s.id) AS image_count,
@@ -676,7 +996,7 @@ export function listStyles(): StyleRecord[] {
          JOIN oi_style_colors sc ON i.style_color_id = sc.id WHERE sc.style_id = s.id) AS order_count,
        (SELECT i.local_path FROM oi_images i JOIN oi_style_colors sc ON i.style_color_id = sc.id
          WHERE sc.style_id = s.id ORDER BY i.id DESC LIMIT 1) AS cover_path
-     FROM oi_styles s ORDER BY s.id`,
+     FROM oi_styles s ${n.join} ORDER BY s.id`,
   );
   return rows.map((r) => {
     const styleId = Number(r.id);
@@ -724,21 +1044,142 @@ export function updateImageResult(
 
 // ---- 订单明细 ----
 
+/** 映射命中但产品还没进过识别链路（产品库手工新建的款）时，给它建的占位款用的指纹前缀。
+ *  AI 指纹是内容/特征哈希，不可能以此开头 —— 故占位指纹既不会被真实指纹命中，
+ *  也不会反过来命中任何真实款（`resolveStyle` 是精确匹配）。
+ *  为什么不干脆不建：`oi_styles.fingerprint` 是 `NOT NULL UNIQUE`，没有指纹就落不下一行，
+ *  而订单的归款结论只能挂在款色上（`oi_style_colors.style_id`）。 */
+const MAPPED_FP_PREFIX = 'mapped:';
+
+/** 订单没有颜色字段时的兜底色名（映射只到"款"，色取自订单自身；取不到也得能落一个款色） */
+const MAPPED_FALLBACK_COLOR = '未分类';
+
+/**
+ * 订单落库时的**确定性归款**（P3 业务链路「先查 `pl_shop_sku`，查不到才走 AI 兜底」的落点）。
+ *
+ * 只认 `status='confirmed'` 的映射（`resolveOrderSku` 内部保证）：`pending`/`invalid` 不得替人下结论。
+ * 命中后把订单图片挂到该产品的款色 —— 颜色取自**订单自身字段**（映射只到"款"，不带颜色）。
+ * 未命中则什么都不做：保持 AI 识别结果不动（不覆盖、也不清空）。
+ *
+ * 不 catch 是**有意的**：这里能抛的只有真异常（表结构坏 / 约束冲突），吞掉会让
+ * "订单看着导入成功却没归款"变成查不出的问题。订单此时已落库，调用方重试会走 `insertOrder`
+ * 的幂等分支并**再次尝试本函数** —— 也就是一次可自愈的重试。
+ */
+function autoAssignByMap(
+  rec: Pick<OrderRecord, 'imageId' | 'shop' | 'color' | 'rawFields'>,
+): void {
+  if (!productSchemaReady()) return;
+  // 无图订单不参与归款（归款的落点是把**图片**挂到款色上）
+  if (!rec.imageId) return;
+  const { itemId } = extractSkuFields(rec.rawFields);
+  if (!itemId) return; // 订单没有商品ID → 这条链路无从查起（不是错误）
+  const hit = resolveOrderSku({ shop: rec.shop, itemId });
+  if (!hit) return;
+  const d = getDb();
+  let style = d.prepare(`SELECT id FROM oi_styles WHERE code = ?`).get(hit.productCode) as
+    | { id: number }
+    | undefined;
+  if (!style) {
+    d.prepare(`INSERT OR IGNORE INTO oi_styles (code, fingerprint) VALUES (?, ?)`).run(
+      hit.productCode,
+      `${MAPPED_FP_PREFIX}${hit.productCode}`,
+    );
+    style = d.prepare(`SELECT id FROM oi_styles WHERE code = ?`).get(hit.productCode) as
+      | { id: number }
+      | undefined;
+  }
+  if (!style) return;
+  // 颜色权威来源（D4）：**映射里配的颜色** > 订单自身字段 > 兜底。
+  // 顺序不能反 —— 订单侧的颜色在真实数据里几乎不可用（芒果待发货单该列恒空；采集帧里
+  // 39% 是 `Picture color` 这类"以图为准"的占位），"每单看一眼图"就是这么来的。
+  // 映射带了色就一律以它为准：它才是"这个商品ID 是什么颜色"的权威。
+  const mapped = String(hit.spec ?? '').trim();
+  const color =
+    mapped && mapped !== '*' ? mapped : String(rec.color ?? '').trim() || MAPPED_FALLBACK_COLOR;
+  const sc = ensureStyleColor(style.id, hit.productCode, color);
+  setImageStyleColor(rec.imageId, sc.id);
+}
+
+/**
+ * 映射新增/变更后，对**存量未归款订单**重跑确定性归款。
+ *
+ * 为什么必须有：归款是**写时触发**的（订单落库那一刻跑一次），而真实操作顺序常常反着来 ——
+ * 先导订单、后配映射。没有这个回填，用户配完映射**看不到任何变化**，只能把 Excel 重导一遍
+ *（同类先例：`syncPurchaseCosts` 上线前的拿货单没进 `ae_cost_map`，见 `purchase-cost-sync.ts`）。
+ *
+ * 三条边界（都为了"不覆盖人的结论"）：
+ *   · 只碰 `oi_images.style_color_id IS NULL` 的图 —— 已归款的（人工纠正 / AI 识别）一律不动；
+ *   · 只处理传入 `itemIds` 命中的行 —— 配了哪个商品就只回填那个商品，不顺手全库重算；
+ *   · `autoAssignByMap` 自身未命中就什么都不做（保持原状），所以这里不需要额外判空。
+ *
+ * @returns 本次**新归款成功**的行数（调用方据此在回执里说清"顺带关联了几行"）
+ */
+export function reassignOrdersByItemIds(itemIds: string[]): number {
+  if (!productSchemaReady()) return 0;
+  const want = new Set(
+    (Array.isArray(itemIds) ? itemIds : []).map((s) => String(s ?? '').trim()).filter(Boolean),
+  );
+  if (!want.size) return 0;
+
+  const rows = dbQuery<{ image_id: number; shop: string; color: string; raw_fields: string }>(
+    `SELECT o.image_id, o.shop, o.color, o.raw_fields
+       FROM oi_orders o JOIN oi_images i ON o.image_id = i.id
+      WHERE o.image_id IS NOT NULL AND i.style_color_id IS NULL`,
+  );
+  const d = getDb();
+  let n = 0;
+  for (const r of rows) {
+    let rawFields: Record<string, string> = {};
+    try {
+      const v = JSON.parse(String(r.raw_fields ?? '{}'));
+      if (v && typeof v === 'object') rawFields = v as Record<string, string>;
+    } catch {
+      continue; // 一条脏 raw_fields 不该毁掉整批回填
+    }
+    const { itemId } = extractSkuFields(rawFields);
+    if (!itemId || !want.has(itemId)) continue;
+    const imageId = Number(r.image_id);
+    autoAssignByMap({
+      imageId,
+      shop: String(r.shop ?? ''),
+      color: String(r.color ?? ''),
+      rawFields,
+    });
+    const after = d.prepare(`SELECT style_color_id FROM oi_images WHERE id = ?`).get(imageId) as
+      | { style_color_id: number | null }
+      | undefined;
+    if (after?.style_color_id) n += 1;
+  }
+  return n;
+}
+
 /** 插入一条订单明细，返回自增 id */
 export function insertOrder(rec: OrderRecord): number {
   const d = getDb();
   const orderNo = String(rec.orderNo ?? '').trim();
   // 幂等：订单号非空时，(订单号, 图片) 已存在则跳过，避免重复导入同一 Excel 产生重复行
   if (orderNo) {
+    // ⚠️ 用 `IS ?` 而不是 `= ?`：无图订单的 `image_id` 是 NULL，`= NULL` 永远不成立 →
+    // 重导同一份报表会不断插重复行（幂等当场失效）。
     const existing = d
-      .prepare(`SELECT id FROM oi_orders WHERE order_no = ? AND image_id = ?`)
+      .prepare(`SELECT id FROM oi_orders WHERE order_no = ? AND image_id IS ?`)
       .get(orderNo, rec.imageId);
-    if (existing) return Number((existing as { id: number }).id);
+    if (existing) {
+      const id = Number((existing as { id: number }).id);
+      // 幂等重入**也要再试一次归款**：映射很可能是这条订单之后才人工确认的，
+      // 不重试的话「先导订单、后确认映射」的人永远等不到自动命中（验收②的字面场景）。
+      autoAssignByMap(rec);
+      return id;
+    }
   }
   const status: OrderStatus = rec.status === 'shipped' ? 'shipped' : 'pending';
+  // 金额/状态/时点在**入库这一刻**从 raw_fields 提成正式列（口径见 `electron/orderMoney.ts`）——
+  // 放在主进程做，岛侧无需改，也就不必发版；其余 30 余列留在 raw_fields 里保真、随时可提。
+  const m = extractOrderMoney(rec.rawFields);
   const r = dbRun(
-    `INSERT INTO oi_orders (image_id, order_no, shop, size, order_time, raw_fields, category, color, logo, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO oi_orders (image_id, order_no, shop, size, order_time, raw_fields, category, color, logo, status,
+                            amount_cents, vat_cents, ddp_cents, tax_platform, biz_status, ship_time)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       rec.imageId,
       orderNo,
@@ -750,14 +1191,218 @@ export function insertOrder(rec: OrderRecord): number {
       rec.color,
       rec.logo,
       status,
+      m.amountCents,
+      m.vatCents,
+      m.ddpCents,
+      m.taxPlatformRaw,
+      m.bizStatus,
+      m.shipTime,
     ],
   );
+  autoAssignByMap(rec);
   return r.lastInsertRowid;
+}
+
+/**
+ * 把若干订单号**归属到某店铺**（写 `oi_orders.shop`）。
+ *
+ * 为什么需要它：实测 AE 的「订单列表/订单明细」导出**按店铺导出、报表里没有店铺列**
+ * （只有"店铺优惠"；岛侧"店铺列"是手选的，对这类报表选不出来）→ 店铺只能**在导入后由人指定**。
+ * 这里写的是店铺**名称原文**：`oi_orders.shop` 与 `purchase_sources.shop` / `ae_orders.shop_name` 一样是
+ * 自由文本，归一由 `sk_name_map` 在**查询时**旁挂完成（G2：历史文本不改写）。
+ *
+ * 一个订单号的多行（拆行后的多商品）会一起更新；`order_no` 为空的行不动。
+ * @returns updated = 实际改动的行数
+ */
+export function assignShopToOrders(orderNos: string[], shopName: string): { updated: number } {
+  const d = initDb();
+  const shop = String(shopName ?? '').trim();
+  const nos = [...new Set((Array.isArray(orderNos) ? orderNos : []).map((x) => String(x ?? '').trim()))]
+    .filter(Boolean)
+    .slice(0, 2000);
+  if (!shop || !nos.length) return { updated: 0 };
+  const stmt = d.prepare(`UPDATE oi_orders SET shop = ? WHERE order_no = ? AND shop <> ?`);
+  let updated = 0;
+  dbTransaction(() => {
+    for (const no of nos) updated += stmt.run(shop, no, shop).changes;
+  });
+  return { updated };
+}
+
+/**
+ * **采集通道写入主干**（C1 合并的写侧）：一单多行（每行一个商品），整体幂等替换。
+ *
+ * 为什么由**调用方**把金额折算好再进来：采集帧是**原币**（`ae_rates` 才认），而汇率属 ae 域的表 ——
+ * 让 order-db 去读别的域的表就是跨域耦合（本层只认 `oi_orders` 的语义，金额一律 CNY 分）。
+ * 调用方（`ae-db.upsertOrderBatch`）负责 `(商品金额 + 买家付运费) × 汇率 × 100` 与规格串解析。
+ *
+ * 幂等：同一订单号**已存在 collect 行就整单删掉重插**（重推一帧 = 更新那一单，与导入侧的"同单同图不重复插"同理）。
+ * `image_id` 恒 NULL（采集帧没有主图）—— 这正是本轮把该列改成可空的原因。
+ */
+export interface CollectedOrderInput {
+  orderNo: string;
+  orderTime: string;
+  bizStatus: string;
+  /** 店铺原文（采集帧常为空 —— 空就是空，不猜） */
+  shop?: string;
+  /** **整单**收入（CNY 分，未扣退款）；`null` = 缺汇率。每行都记整单金额，按件数分摊在算账层做 */
+  amountCents: number | null;
+  /** 采集帧原文（保真放进 `raw_fields`；键名前缀 `采集` 以免与报表列名族相撞） */
+  rawFields?: Record<string, string>;
+  lines: {
+    itemId: string;
+    qty: number;
+    color: string;
+    size: string;
+  }[];
+}
+
+export function upsertCollectedOrder(input: CollectedOrderInput): { rows: number; replaced: boolean } {
+  const d = initDb();
+  const orderNo = String(input?.orderNo ?? '').trim().slice(0, 64);
+  if (!orderNo) throw new Error('upsertCollectedOrder: 订单号不能为空');
+  const lines = Array.isArray(input?.lines) ? input.lines : [];
+  const rawJson = JSON.stringify(input?.rawFields ?? {});
+  const bizStatus = String(input?.bizStatus ?? '').slice(0, 64);
+  const orderTime = String(input?.orderTime ?? '').slice(0, 32);
+  const shop = String(input?.shop ?? '').slice(0, 120);
+  const amount = input?.amountCents === null || input?.amountCents === undefined ? null : Math.round(Number(input.amountCents));
+
+  let replaced = false;
+  let rows = 0;
+  dbTransaction(() => {
+    const existed = d
+      .prepare(`SELECT id FROM oi_orders WHERE order_no = ? AND source = 'collect' LIMIT 1`)
+      .get(orderNo) as { id: number } | undefined;
+    if (existed) {
+      d.prepare(`DELETE FROM oi_orders WHERE order_no = ? AND source = 'collect'`).run(orderNo);
+      replaced = true;
+    }
+    // 列与值一一对应（14 列 / 14 值 / 9 个参数）—— 别在这里做任何字符串拼接
+    const ins = d.prepare(
+      `INSERT INTO oi_orders (image_id, order_no, shop, size, order_time, raw_fields, category, color, logo,
+                              status, amount_cents, biz_status, source, qty)
+       VALUES (NULL, ?, ?, ?, ?, ?, '', ?, '', 'pending', ?, ?, 'collect', ?)`,
+    );
+    // 一单零行也落一行（订单数不能凭空少）；件数按 1（不猜 0）
+    for (const l of lines.length ? lines : [{ itemId: '', qty: 1, color: '', size: '' }]) {
+      ins.run(
+        orderNo,
+        shop,
+        String(l?.size ?? '').slice(0, 64),
+        orderTime,
+        rawJson,
+        String(l?.color ?? '').slice(0, 64),
+        amount,
+        bizStatus,
+        Math.max(1, Math.round(Number(l?.qty) || 1)),
+      );
+      rows += 1;
+    }
+  });
+  return { rows, replaced };
 }
 
 /** 最近订单列表（联图片指纹/路径），供界面明细展示 */
 export function listOrders(limit = 500): OrderRecord[] {
   return listOrdersPage({ limit }).rows;
+}
+
+/** 按订单算**运费/成本**所需的**最小原始行**（SHIPPING_RATE_ISLAND_PLAN §8）：
+ *  - 与 listOrdersPage 不同，这里**带 raw_fields**（收货国家 / 商品ID 都在里面）；
+ *  - 另带 `shop` / `order_time` / `style_code` / `style_color`（2026-09-29 加）：
+ *    前两者是"按店铺/按日"聚合的维度，后两者是**成本侧**的键（款级成本 `ae_cost_map`）；
+ *  - 仍**只回最小列**（不含订单明细的大字段），提取结果（国家/商品ID/克重/成本）收敛后再回渲染层，大载荷不过岛；
+ *  - 只读，不暴露任何写能力。 */
+export function shippingRows(
+  limit = 500,
+  opts: { source?: 'all' | 'import' | 'collect' } = {},
+): {
+  id: number;
+  orderNo: string;
+  /** 摄取通道（主干 `source`） */
+  source: 'import' | 'collect';
+  /** 件数真值（采集通道写入；`NULL` = 不知道，导入侧由渲染层解析块内数量） */
+  qty: number | null;
+  shop: string;
+  orderTime: string;
+  styleCode: string;
+  styleColor: string;
+  /** 颜色 / 尺码（SKU 粒度 = 款×色×码；拣货与统计要用） */
+  color: string;
+  size: string;
+  /** 供应商（经 `pl_products.supplier_id → suppliers`）；未识别款或未填厂家时为空 */
+  supplierId: number;
+  supplierName: string;
+  /** ---- 主线（算钱 + 拣货）真正读的列（金额单位：分；**null = 报表里没有**，不是 0）----
+   * 精简（2026-09-30，用户原则"非必要先删、必要再加"）：货值/买家运费/店铺优惠/平台补贴/币种/
+   * 业务模式/付款·收货时点一律不再投影（**零读者**）；原始整行仍在 `rawFields` 里保真，要加回来随时可提取。 */
+  amountCents: number | null;
+  vatCents: number | null;
+  ddpCents: number | null;
+  taxPlatform: string;
+  bizStatus: string;
+  rawFields: Record<string, string>;
+}[] {
+  const n = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+  // 摄取通道过滤（`all` = 两条都看 → 不加条件，也不占参数位）
+  const want = opts?.source === 'import' || opts?.source === 'collect' ? opts.source : 'all';
+  const conds: string[] = [];
+  const args: (string | number)[] = [];
+  if (want !== 'all') {
+    conds.push(`o.source = ?`);
+    args.push(want);
+  }
+  args.push(n);
+  // 款编码走**识别链** `oi_images.style_color_id → oi_style_colors → oi_styles`（与
+  // `purchase-db.outstanding()` 同一套 JOIN，口径只留一份）。一律 **LEFT JOIN**：
+  // 未识别的订单行必须仍然回得来 —— 丢了行，"缺的是哪一环"就看不出来了。
+  // 供应商**可选**：`suppliers` 表属采购域、可能还没建（各域表按域懒建）→ 先探再拼 JOIN，
+  // 缺表时回落空串（降级而非抛 `no such table`，与 product-db 的 `shopLabelMap` 同策略）。
+  const hasSupplier = tableExists('suppliers') && tableExists('pl_products');
+  const supplierSel = hasSupplier
+    ? `COALESCE(p.supplier_id, 0) AS supplier_id, COALESCE(sup.name, '') AS supplier_name`
+    : `0 AS supplier_id, '' AS supplier_name`;
+  const supplierJoin = hasSupplier
+    ? `LEFT JOIN pl_products p ON p.code = s.code
+       LEFT JOIN suppliers sup ON sup.id = p.supplier_id`
+    : '';
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT o.id, o.order_no, o.shop, o.order_time, o.raw_fields, o.color, o.size,
+            o.amount_cents, o.vat_cents, o.ddp_cents, o.tax_platform, o.biz_status, o.source, o.qty,
+            COALESCE(s.code, '') AS style_code, COALESCE(sc.color, '') AS style_color,
+            ${supplierSel}
+     FROM oi_orders o
+     LEFT JOIN oi_images i ON o.image_id = i.id
+     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     LEFT JOIN oi_styles s ON sc.style_id = s.id
+     ${supplierJoin}
+     ${conds.length ? `WHERE ${conds.join(' AND ')}` : ''}
+     ORDER BY o.id DESC LIMIT ?`,
+    args,
+  );
+  /** 金额列：NULL 原样返回（**不要** ?? 0 —— 那会把"报表没有"变成"金额为零"） */
+  const money = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  return rows.map((r) => ({
+    id: Number(r.id ?? 0),
+    orderNo: String(r.order_no ?? ''),
+    source: String(r.source ?? 'import') === 'collect' ? 'collect' : 'import',
+    qty: r.qty === null || r.qty === undefined ? null : Number(r.qty),
+    shop: String(r.shop ?? ''),
+    orderTime: String(r.order_time ?? ''),
+    styleCode: String(r.style_code ?? ''),
+    styleColor: String(r.style_color ?? ''),
+    color: String(r.color ?? ''),
+    size: String(r.size ?? ''),
+    supplierId: Number(r.supplier_id ?? 0) || 0,
+    supplierName: String(r.supplier_name ?? ''),
+    amountCents: money(r.amount_cents),
+    vatCents: money(r.vat_cents),
+    ddpCents: money(r.ddp_cents),
+    taxPlatform: String(r.tax_platform ?? ''),
+    bizStatus: String(r.biz_status ?? ''),
+    rawFields: safeJson(String(r.raw_fields ?? '')),
+  }));
 }
 
 /** 订单列表（分页 + corrected 过滤 + 关键字搜索）：
@@ -782,12 +1427,14 @@ export function listOrdersPage(
     conds.push('o.corrected = 0');
   }
   const search = typeof opts.search === 'string' ? opts.search.trim().slice(0, 100) : '';
+  // D1：款名的搜索目标随权威表一起换到 pl_products（搜索走的是展示名，不是遗留列）
+  const n = styleNameJoin();
   if (search) {
     const like = `%${search.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
     conds.push(
       `(o.order_no LIKE ? ESCAPE '\\' OR o.shop LIKE ? ESCAPE '\\' OR o.category LIKE ? ESCAPE '\\'
         OR o.color LIKE ? ESCAPE '\\' OR o.logo LIKE ? ESCAPE '\\'
-        OR s.code LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\' OR sc.color LIKE ? ESCAPE '\\')`,
+        OR s.code LIKE ? ESCAPE '\\' OR ${n.name} LIKE ? ESCAPE '\\' OR sc.color LIKE ? ESCAPE '\\')`,
     );
     params.push(like, like, like, like, like, like, like, like);
   }
@@ -798,6 +1445,7 @@ export function listOrdersPage(
        LEFT JOIN oi_images i ON o.image_id = i.id
        LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
        LEFT JOIN oi_styles s ON sc.style_id = s.id
+       ${n.join}
        ${where}`,
       params,
     )[0]?.n ?? 0,
@@ -806,11 +1454,12 @@ export function listOrdersPage(
     `SELECT o.id, o.image_id, o.order_no, o.shop, o.size, o.order_time,
             o.category, o.color, o.logo, o.material, o.status, o.corrected, o.created_at,
             i.fingerprint, i.source_url, i.local_path, i.result_json,
-            s.code AS style_code, s.name AS style_name, sc.color AS style_color
+            s.code AS style_code, ${n.name} AS style_name, sc.color AS style_color
      FROM oi_orders o
      LEFT JOIN oi_images i ON o.image_id = i.id
      LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
      LEFT JOIN oi_styles s ON sc.style_id = s.id
+     ${n.join}
      ${where} ORDER BY o.id DESC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );

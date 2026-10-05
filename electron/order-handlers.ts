@@ -68,34 +68,8 @@ function sha256File(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
-/**
- * 图片格式魔数嗅探：按文件头字节判断真实格式。
- * 背景：商品图 CDN 常以 WebP 返回，但下载逻辑曾一律落 .jpg 扩展名，
- *       扩展名与内容不符会让读取端按错误 MIME/解码器解析导致图片空白。
- * 统一按内容定格式：读取端决定 MIME、下载端决定落盘扩展名，存量错名文件亦兼容。
- * @param buf 图片文件字节（≥12 字节可完整判型）
- * @returns 'jpeg' | 'png' | 'webp'；无法识别返回 null
- */
-function sniffImageFormat(buf: Buffer): 'jpeg' | 'png' | 'webp' | null {
-  if (!buf || buf.length < 12) return null;
-  // JPEG: FF D8 FF
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
-  // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  // WebP: RIFF .... WEBP（VP8/VP8L/VP8X）
-  if (
-    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) return 'webp';
-  return null;
-}
-
-/** 格式 → 落盘扩展名（下载端用；读取端不依赖扩展名判断内容） */
-const IMG_EXT_BY_FORMAT: Record<'jpeg' | 'png' | 'webp', string> = {
-  jpeg: '.jpg',
-  png: '.png',
-  webp: '.webp',
-};
+// 图片格式魔数嗅探 sniffImageFormat / IMG_EXT_BY_FORMAT 已收敛到 ./ipc-util（order/product 两域共用）。
+const { sniffImageFormat, IMG_EXT_BY_FORMAT } = require('./ipc-util') as typeof import('./ipc-util');
 
 // 幂等建表（模块首次使用时调用）
 register('order-db-ensure', async () => {
@@ -137,7 +111,10 @@ register('order-image-save', async (payload) => {
 // 幂等：同 订单号+图片 重复插入直接返回已有 id（避免重复导入产生重复行）
 register('order-insert', async (payload) => {
   orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.imageId !== 'number') {
+  // `imageId` 允许 **null**（S2-b 订单报表免图导入）：订单报表没有主图列，
+  // 识别链只对有图的订单有意义；无图订单一律落 `image_id IS NULL`。
+  const hasImage = payload.imageId === null || typeof payload.imageId === 'number';
+  if (!isPlainObject(payload) || !hasImage) {
     return { success: false, error: 'invalid payload' };
   }
   const rec = {
@@ -179,6 +156,28 @@ register('order-list', async (payload) => {
 register('order-clear', async () => {
   orderDb.clearAll();
   return { success: true };
+});
+
+// 订单原始行（最小投影：id/order_no/raw_fields + shop/order_time/style_code/style_color；只读）——
+// 供「按订单算运费/成本」宿主 op 提取 收货国家/商品ID 消费，大载荷不回渲染层/岛
+// 订单归属店铺（实测 AE 导出按店铺、无店铺列 → 店铺由人指定；写 oi_orders.shop 原文）
+register('order-assign-shop', async (payload) => {
+  orderDb.ensureOrderSchema();
+  const orderNos = Array.isArray(payload?.orderNos)
+    ? payload.orderNos.slice(0, 2000).map((x: unknown) => (typeof x === 'string' ? x : ''))
+    : [];
+  const shopName = typeof payload?.shopName === 'string' ? payload.shopName.slice(0, 200) : '';
+  if (!shopName.trim()) {
+    return { success: false, error: 'order-assign-shop: shopName 不能为空' };
+  }
+  return { success: true, data: orderDb.assignShopToOrders(orderNos, shopName) };
+});
+
+register('order-shipping-rows', async (payload) => {
+  orderDb.ensureOrderSchema();
+  const limit = typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 1), 2000) : 500;
+  const src = payload?.source === 'import' || payload?.source === 'collect' ? payload.source : 'all';
+  return { success: true, data: orderDb.shippingRows(limit, { source: src }) };
 });
 
 // ---- 待识别队列（oi_queue）：导入行整批落库；失败/缺图重启不丢、可增量重试 ----
@@ -570,10 +569,14 @@ ipcMain.handle('order-export-excel', async (event: any, payload: any) => {
 });
 
 // 读图：payload { localPath } → { mime, dataUrl }（base64，供渲染层 <img> 展示）
-// 安全：仅允许应用自有主图缓存目录（order-images）内的图片文件，防止任意文件读取。
+// 安全：仅允许应用自有图片缓存目录（order-images / product-images）内的图片文件，防止任意文件读取。
+// product-images 是产品库图片（pl_images）的落盘目录 —— 展示复用同一套读图/缩略图通道，
+// 目录白名单在这里收敛为一份（新增缓存目录时加进 IMAGE_CACHE_DIRS 即可，别在 handler 里散写字面量）。
+const IMAGE_CACHE_DIRS = new Set(['order-images', 'product-images']);
+const IMAGE_EXT_OK = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 // 注意：dev（seller-kit）与打包版（SellerKit）的 userData 目录名不一致（连字符/大小写），
 //       DB 中可能残留另一运行形态写入的绝对路径，不能依赖 userData 前缀 startsWith；
-//       统一按缓存目录名 order-images + realpath 归一化校验，跨运行形态兼容。
+//       统一按缓存目录名 + realpath 归一化校验，跨运行形态兼容。
 register('order-read-image', async (payload) => {
   if (!isPlainObject(payload) || typeof payload.localPath !== 'string') {
     return { success: false, error: 'invalid path' };
@@ -585,13 +588,12 @@ register('order-read-image', async (payload) => {
   } catch {
     return { success: false, error: 'file not found' };
   }
-  // 文件必须直接位于 order-images 缓存目录内（不允许子目录/越权路径）
-  if (path.basename(path.dirname(realResolved)).toLowerCase() !== 'order-images') {
+  // 文件必须直接位于图片缓存目录内（不允许子目录/越权路径）
+  if (!IMAGE_CACHE_DIRS.has(path.basename(path.dirname(realResolved)).toLowerCase())) {
     return { success: false, error: 'path not allowed' };
   }
-  // 仅允许图片扩展名（本应用缓存只写 .jpg；顺带兼容 png/webp）
-  const ext = path.extname(realResolved).toLowerCase();
-  if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png' && ext !== '.webp') {
+  // 仅允许图片扩展名
+  if (!IMAGE_EXT_OK.has(path.extname(realResolved).toLowerCase())) {
     return { success: false, error: 'path not allowed' };
   }
   const buf = fs.readFileSync(realResolved);
@@ -659,13 +661,12 @@ function cacheThumb(cacheKey: string, dataUrl: string) {
   }
 }
 
-/** 路径校验：realpath 后必须位于 order-images 目录且为允许的图片扩展名；失败返回 null */
+/** 路径校验：realpath 后必须位于图片缓存目录且为允许的图片扩展名；失败返回 null */
 function resolveThumbPath(localPath: string): string | null {
   try {
     const realResolved = fs.realpathSync(path.resolve(localPath));
-    if (path.basename(path.dirname(realResolved)).toLowerCase() !== 'order-images') return null;
-    const ext = path.extname(realResolved).toLowerCase();
-    if (ext !== '.jpg' && ext !== '.jpeg' && ext !== '.png' && ext !== '.webp') return null;
+    if (!IMAGE_CACHE_DIRS.has(path.basename(path.dirname(realResolved)).toLowerCase())) return null;
+    if (!IMAGE_EXT_OK.has(path.extname(realResolved).toLowerCase())) return null;
     return realResolved;
   } catch {
     return null;

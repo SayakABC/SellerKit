@@ -151,25 +151,37 @@ const FAKE_BRIDGE = `<script>
   ];
 
   // ---- 归类核对域夹具（2026-10-05「归类核对」页签内建）----
-  // ⚠️ 三条**故意各缺一样**，让每个判据**各自独立可观测**（只放"唯一可选项"等于没测）：
+  // ⚠️ 四条**故意各缺一样**，让每个判据**各自独立可观测**（只放"唯一可选项"等于没测）：
   //    · P-41：有图 + 未归类 → 「未归类」计数 + 缩略图合批都该算上它；
   //    · P-42：有图 + **已归类** → 「归属款」下拉必须选中**它自己的款**（默认值不靠位置）；
-  //    · P-43：**无图** + 未归类 → 无图行不该进缩略图合批（进了就白跑一次往返，
-  //      而"少带一条"与"带对了"在调用数上完全看不出区别）。
-  //    夹具若把 P-43 写成"有图"，缩略图那条断言就永远验不到"排除无图行"。
+  //    · P-43：**无图** + 未归类 + **没有商品ID** → 无图行不该进缩略图合批（进了就白跑一次往返，
+  //      而"少带一条"与"带对了"在调用数上完全看不出区别）；
+  //    · P-44：有图 + 未归类 + **自己的商品ID**（店B / IT-B，本页只此一行）。
+  //    P-41 与 P-42 是**同一家店的同一个商品ID**（店A / IT-A）⇒ 这两行要标「同商品 ×2」。
+  //    ⭐ 「同商品」「独占商品」「没有商品ID」三种情况必须**各有一行**：
+  //       只有"两条同商品 + 一条无商品ID"时，「有商品ID 就标」这种错法也能全绿
+  //       （缺的正是 P-44 这样的"有商品ID 但只此一行"——它不该有徽标）。
   var PENDING_ORDERS = [
     { id: 41, imageId: 401, orderNo: 'P-41', shop: '店A', size: 'L', orderTime: '2026-10-04 10:00:00',
       category: 'T恤', color: '黑', logo: '', styleCode: '', styleName: '', styleColor: '',
       localPath: '/tmp/p41.jpg', fingerprint: 'fp41', features: ['圆领', '短袖'],
-      corrected: false, rawFields: {} },
-    { id: 42, imageId: 402, orderNo: 'P-42', shop: '店B', size: 'M', orderTime: '2026-10-04 11:00:00',
+      itemId: 'IT-A',
+      corrected: false, rawFields: { '商品ID': 'IT-A' } },
+    { id: 42, imageId: 402, orderNo: 'P-42', shop: '店A', size: 'M', orderTime: '2026-10-04 11:00:00',
       category: '裤子', color: '白', logo: '', styleCode: 'S1', styleName: '款一', styleColor: 'S1-白',
       localPath: '/tmp/p42.jpg', fingerprint: 'fp42', features: [],
-      corrected: false, rawFields: {} },
+      itemId: 'IT-A',
+      corrected: false, rawFields: { '商品ID': 'IT-A' } },
     { id: 43, imageId: null, orderNo: 'P-43', shop: '店C', size: 'S', orderTime: '2026-10-04 12:00:00',
       category: '帽子', color: '灰', logo: '', styleCode: '', styleName: '', styleColor: '',
       localPath: '', fingerprint: '', features: [],
+      itemId: '',
       corrected: false, rawFields: {} },
+    { id: 44, imageId: 404, orderNo: 'P-44', shop: '店B', size: 'XL', orderTime: '2026-10-04 13:00:00',
+      category: '外套', color: '蓝', logo: '', styleCode: '', styleName: '', styleColor: '',
+      localPath: '/tmp/p44.jpg', fingerprint: 'fp44', features: ['连帽'],
+      itemId: 'IT-B',
+      corrected: false, rawFields: { '商品ID': 'IT-B' } },
   ];
   // 识别库两行（款编码列表）—— 行内"归属款"下拉的数据源
   var STYLES = [
@@ -184,6 +196,19 @@ const FAKE_BRIDGE = `<script>
 
   // 芒果店长待发货订单样本（base64 在构建期由真实 xlsx 生成后插入 —— 解析路径必须真的走一遍 xlsx）
   var XLSX_MANGO_B64 = '${XLSX_MANGO_B64}';
+
+  // ⭐ 「已核对 = 离开待核对列表」的开关（默认关）。
+  //    宿主里 updateOrder / markOrdersCorrected 都写 corrected = 1，那一行随即不在
+  //    orderList({corrected:false}) 里 —— 夹具**默认不模拟**这一步，因为本页前半段的断言
+  //    要反复操作同一行（保存 → 再点名款 → 读提示），列表当场缩水那些断言就没法写。
+  //    到「回车＝保存并往下走」那一段再打开（window.__emulateCorrected = true）：
+  //    那一刻起夹具才与宿主对齐，而"焦点落到**顶上来**的那一条"这条断言**只有对齐后才有意义**
+  //    （列表不缩水时，任何下标看上去都"对"）。
+  function markCorrectedIfEmulating(id) {
+    if (!window.__emulateCorrected) return;
+    var n = Number(id);
+    if (n && (window.__correctedIds || []).indexOf(n) < 0) window.__correctedIds.push(n);
+  }
 
   var OVERRIDES = {
     'getAppVersion': function () { return { success: true, data: '0.0.0-smoke' }; },
@@ -304,15 +329,25 @@ const FAKE_BRIDGE = `<script>
     'orderList': function (p) {
       rec('orderList', p);
       if (window.__noPendingOrders) return { success: true, data: { rows: [], total: 0 } };
-      return { success: true, data: { rows: PENDING_ORDERS, total: PENDING_ORDERS.length } };
+      var gone = window.__correctedIds || [];
+      var rows = PENDING_ORDERS.filter(function (o) { return gone.indexOf(o.id) < 0; });
+      return { success: true, data: { rows: rows, total: rows.length } };
     },
     'orderStyleList': function () { rec('orderStyleList', {}); return { success: true, data: STYLES }; },
-    'orderUpdate': function (p) { rec('orderUpdate', p); return { success: true, data: { styleCode: 'S1', styleColorCode: 'S1-黑' } }; },
+    'orderUpdate': function (p) {
+      rec('orderUpdate', p);
+      markCorrectedIfEmulating(p && p.id);
+      return { success: true, data: { styleCode: 'S1', styleColorCode: 'S1-黑' } };
+    },
     // ⭐ 点名款时宿主会**回流**「(店铺, 商品ID) → 款 + 色」（写 pl_shop_sku + 回填存量订单），
     //    结果随 skuBackfill 回来。这里刻意给**最值得说**的那一种：记住了 + 顺带归好 2 单
     //    —— 界面若不把回执说出来，用户永远不知道"记住过一次"这件事存在（下面有断言钉它）。
     'orderStyleAssign': function (p) { rec('orderStyleAssign', p); return { success: true, data: { styleCode: 'S2', styleColorCode: 'S2-黑', skuBackfill: { status: 'written', reassigned: 2, spec: '黑', conflictCode: '' } } }; },
-    'orderMarkCorrected': function (p) { rec('orderMarkCorrected', p); return { success: true, data: { updated: Array.isArray(p) ? p.length : 2 } }; },
+    'orderMarkCorrected': function (p) {
+      rec('orderMarkCorrected', p);
+      if (Array.isArray(p)) p.forEach(markCorrectedIfEmulating);
+      return { success: true, data: { updated: Array.isArray(p) ? p.length : 2 } };
+    },
     'orderImageThumbBatch': function (p) {
       rec('orderImageThumbBatch', p);
       // ⚠️ 载荷是**裸数组**（orderImageThumbBatch(items)，见 src/types.ts 声明）；
@@ -1091,30 +1126,35 @@ async function main() {
       return !!card('classify-panel') && flat(card('cl-stats')).indexOf('待核对') >= 0 && !!card('cl-table');
     }, 10000);
 
-    report('归类指标条：三格都是真取数（待核对 3 / 未归类 2 / 识别库 2 款）',
-      flat(card('cl-stats')).indexOf('待核对 3') >= 0 &&
-        flat(card('cl-stats')).indexOf('未归类 2') >= 0 &&
-        flat(card('cl-stats')).indexOf('识别库 2 款') >= 0,
+    report('归类指标条：四格都是真取数（待核对 4 / 未归类 3 / 识别库 2 款 / 本页 2 个商品）',
+      flat(card('cl-stats')).indexOf('待核对 4') >= 0 &&
+        flat(card('cl-stats')).indexOf('未归类 3') >= 0 &&
+        flat(card('cl-stats')).indexOf('识别库 2 款') >= 0 &&
+        // 「本页 2 个商品」= 4 行里去重后的商品数（店A/IT-A 占 2 行、店B/IT-B 占 1 行；
+        //  P-43 没有商品ID ⇒ 不计入）。它把"这一页其实只有两件事要定"说出来。
+        flat(card('cl-stats')).indexOf('本页 2 个商品') >= 0,
       flat(card('cl-stats')));
-    report('待核对三条都在（P-41 / P-42 / P-43），店铺逐格对',
+    report('待核对四条都在（P-41 / P-42 / P-43 / P-44），店铺逐格对',
       (function () {
         var t = flat(card('cl-table'));
         return t.indexOf('P-41') >= 0 && t.indexOf('P-42') >= 0 && t.indexOf('P-43') >= 0 &&
+          t.indexOf('P-44') >= 0 &&
           t.indexOf('店A') >= 0 && t.indexOf('店B') >= 0 && t.indexOf('店C') >= 0;
       })(),
       flat(card('cl-table')));
     // ⚠️ 缩略图合批只该带**有图**的行：无图行的 localPath 是空串，混进去就是白跑一次往返
-    report('缩略图合批只带**有图**的行（P-41 + P-42 两条），无图的 P-43 不进请求',
+    report('缩略图合批只带**有图**的行（P-41 + P-42 + P-44 三条），无图的 P-43 不进请求',
       (calls('orderImageThumbBatch') || []).some(function (a) {
-        return Array.isArray(a) && a.length === 2 &&
+        return Array.isArray(a) && a.length === 3 &&
           a[0] && a[0].localPath === '/tmp/p41.jpg' &&
-          a[1] && a[1].localPath === '/tmp/p42.jpg';
+          a[1] && a[1].localPath === '/tmp/p42.jpg' &&
+          a[2] && a[2].localPath === '/tmp/p44.jpg';
       }),
       JSON.stringify((calls('orderImageThumbBatch') || []).slice(-1)[0] || null));
     report('有图的两行真的渲染出 <img>（核对是"拿图比"出来的，图不能只是空占位）',
       (function () {
         var t = card('cl-table');
-        return !!t && t.querySelectorAll('img').length === 2;
+        return !!t && t.querySelectorAll('img').length === 3;
       })(),
       'img数=' + (card('cl-table') ? card('cl-table').querySelectorAll('img').length : -1));
 
@@ -1127,6 +1167,24 @@ async function main() {
         !!card('cl-style-41') && card('cl-style-41').value === '0',
       'P-42=' + (card('cl-style-42') ? card('cl-style-42').value : '?') +
         ' P-41=' + (card('cl-style-41') ? card('cl-style-41').value : '?'));
+
+    // ---- ⭐「同商品」徽标：这一页到底有几件事要定 ----
+    // P-41 与 P-42 是**同一家店的同一个商品ID**（店A/IT-A）⇒ 两行都标「同商品 ×2」；
+    // P-43 没有商品ID、P-44 的商品只此一行 ⇒ 两者都**不许**有徽标。
+    // ⚠️ 这三个判据必须**分开看**：
+    //    · 只断言"P-41 有徽标" ⇒ "凡有商品ID 就标"这种错法照样全绿（P-44 正是用来打它的）；
+    //    · 只断言"P-43 没有" ⇒ "徽标恒显示"这种错法照样全绿（P-41/P-42 用来打它）。
+    // **自证非空转**：P-41/P-42 两个元素是同一个 card() 取到的真元素 ⇒ 下面 P-43/P-44 的
+    //    !card(...) 不可能是"因为查不到任何元素才恒绿"。
+    report('同商品徽标：同店同商品ID 的两行各标「同商品 ×2」（P-41 / P-42）',
+      !!card('cl-same-41') && flat(card('cl-same-41')).indexOf('同商品 ×2') >= 0 &&
+        !!card('cl-same-42') && flat(card('cl-same-42')).indexOf('同商品 ×2') >= 0,
+      'P-41=' + (card('cl-same-41') ? flat(card('cl-same-41')) : '无徽标') +
+        ' P-42=' + (card('cl-same-42') ? flat(card('cl-same-42')) : '无徽标'));
+    report('同商品徽标**不**乱标：没有商品ID 的 P-43、商品只此一行的 P-44 都没有徽标',
+      !card('cl-same-43') && !card('cl-same-44'),
+      'P-43=' + (card('cl-same-43') ? '有徽标（错）' : '无') +
+        ' P-44=' + (card('cl-same-44') ? '有徽标（错）' : '无'));
 
     // ---- 保存：出参必须带指纹 ----
     report('没改动时「保存」是禁用的（不做"点了没反应"的假动作）',
@@ -1203,6 +1261,43 @@ async function main() {
     } catch (e) { backfillToastSeen = false; }
     report('回流被说出来：点名款后提示「已记住这个商品 → 款和颜色，另有 2 单一起归好了」',
       backfillToastSeen && toastHas('已记住这个商品'), toastDump());
+
+    // ---- 键盘流：回车＝保存这一行，焦点自动交给**顶上来的**那一条 ----
+    // ⚠️ 从这里开始让夹具**模拟宿主的真实行为**：已核对的单离开待核对列表
+    //    （updateOrder 写 corrected = 1）。前面不开这一步是因为那些断言要反复操作同一行；
+    //    而下面这条断言**只有对齐之后才有意义** —— 列表不缩水时，焦点"回到第 N 行"永远成立，
+    //    根本分不出"往下走了一格"和"原地没动"。
+    window.__emulateCorrected = true;
+    window.__correctedIds = [];
+    var catEl2 = card('cl-cat-42');
+    catEl2.value = '长裤';
+    catEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    var okDirty3 = true;
+    try { await waitFor(function () { return !!card('cl-save-42') && card('cl-save-42').disabled === false; }, 4000); }
+    catch (e) { okDirty3 = false; }
+    report('回车流的前提就绪：改了品类后该行可保存', okDirty3, '');
+    var updKey = calls('orderUpdate').length;
+    // 在**行内输入框**上派发 Enter（会冒泡到 tr 上的 @keydown.enter）
+    catEl2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    var okKeySave = true;
+    try { await waitFor(function () { return calls('orderUpdate').length > updKey; }, 6000); }
+    catch (e) { okKeySave = false; }
+    report('行内按回车就能保存（不必去够鼠标点「保存」）',
+      okKeySave && (calls('orderUpdate')[updKey] || {}).id === 42,
+      JSON.stringify(calls('orderUpdate')[updKey] || {}));
+    // 等焦点落定：保存后该行离开列表，原 P-43 顶到它的位置 ⇒ 焦点应在 P-43 的归属款下拉上
+    var okFocus = true;
+    try {
+      await waitFor(function () {
+        return !card('cl-style-42') && !!card('cl-style-43') && document.activeElement === card('cl-style-43');
+      }, 6000);
+    } catch (e) { okFocus = false; }
+    report('保存后该行离开待核对列表，焦点自动落到**顶上来的**那一条（原 P-42 的位置 → 现在是 P-43）',
+      okFocus,
+      'P-42行=' + (card('cl-style-42') ? '仍在（错）' : '已离开') +
+        ' 焦点=' + (document.activeElement && document.activeElement.getAttribute
+          ? String(document.activeElement.getAttribute('data-act'))
+          : String(document.activeElement)));
 
     // ---- 确认无误：单行 / 全部两条分支 ----
     var mkB = calls('orderMarkCorrected').length;

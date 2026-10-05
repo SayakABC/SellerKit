@@ -818,6 +818,18 @@ export interface OrderRecord {
   /** 下单时间（可空，来自 Excel 下单时间列） */
   orderTime?: string;
   rawFields: Record<string, string>;
+  /**
+   * 派生字段：**商品ID**（主进程按 `extractSkuFields` 的列名族从 `rawFields` 里取）。
+   *
+   * 存在意义只有一个：让「归类核对」页看得出**哪几行是同一个商品** —— 给其中一行点名款，
+   * 宿主会把「(店铺, 商品ID) → 款 + 色」记下来（回流），该商品**其余的行以后自动归类**。
+   * 空串 = 这份报表没有商品ID 列，那条链路对它无从下手（不是错误）。
+   *
+   * ⚠️ 探测口径**只能有一份**：这个值刻意由主进程给（与回流写映射时用的是同一个
+   * `extractSkuFields`），渲染层不要自己再从 `rawFields` 推一遍 —— 推歪了就会出现
+   * "徽标说同商品、回流却按另一个键记"。
+   */
+  itemId?: string;
   /** 归一化款式 */
   category: string;
   /** 归一化颜色 */

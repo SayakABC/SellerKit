@@ -8,6 +8,12 @@
         未归类 <b>{{ counts.unclassified }}</b>
       </span>
       <span class="wb-metric">识别库 <b>{{ counts.styles }}</b> 款</span>
+      <!-- 「本页 N 个商品」= 这一页真正要**做决定**的量（同一商品的多行只需定一次）。
+           没有商品ID 的报表（免图/无该列）里这个数恒为 0 ⇒ 那时**不显示**这一格：
+           "0 个商品"会让人以为坏了，而实际是"这份数据没有这个维度"。 -->
+      <span v-if="distinctProducts" class="wb-metric" data-act="cl-metric-products">
+        本页 <b>{{ distinctProducts }}</b> 个商品
+      </span>
     </div>
 
     <!-- 工具条：查询 + 刷新。本页**只剩逐行动作** —— 原「识别未归类」批量按钮已于 2026-10-05
@@ -32,7 +38,7 @@
       <div class="wb-panel__head">
         <span>待核对订单</span>
         <span class="wb-muted">
-          改完点「保存」重归类；识别结果没问题的点「确认无误」，之后不再出现在这里。在下拉里点名某个款＝认定这个商品，以后它的订单会自动归类
+          改完点「保存」重归类；识别结果没问题的点「确认无误」，之后不再出现在这里。在下拉里点名某个款＝认定这个商品，以后它的订单会自动归类。行内按回车＝保存这一行并跳到下一条
         </span>
         <span class="cl-actions">
           <button
@@ -63,7 +69,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="o in rows" :key="o.id">
+            <tr v-for="o in rows" :key="o.id" @keydown.enter="onRowEnter(o, $event)">
               <td>
                 <!-- 核对必须看得见图：识别结果对不对，是**拿图比**出来的而不是读文字读出来的 -->
                 <img
@@ -74,7 +80,20 @@
                 />
                 <span v-else class="wb-thumb wb-thumb--empty" title="这条订单没有主图"></span>
               </td>
-              <td class="wb-mono">{{ o.orderNo }}</td>
+              <td class="wb-mono">
+                {{ o.orderNo }}
+                <!-- ⭐「同商品」徽标：这几行是**同一家店的同一个商品ID** ⇒ 只需定一次款。
+                     它只在 >1 时出现；没有商品ID 的行（`o.itemId` 空串）永远没有它 ——
+                     "同一个商品"与"没有商品ID"是两件事，别让它们长成一个样子。 -->
+                <span
+                  v-if="sameCount(o) > 1"
+                  class="wb-tag cl-same"
+                  :data-act="`cl-same-${o.id}`"
+                  :title="`本页有 ${sameCount(o)} 行是这家店的同一个商品。给其中任意一行点名款，其余行以后会自动归类`"
+                >
+                  同商品 ×{{ sameCount(o) }}
+                </span>
+              </td>
               <td>{{ o.shop || '—' }}</td>
               <td>
                 <input
@@ -205,7 +224,7 @@
 //   · 行内改**款式展示名** —— 展示名是主数据，维护在「货与成本 › 产品」；本页只做"核对归类"，
 //     一个输入框能改的东西越少，核对这件事越不容易被误操作。
 //   · 岛的「识别库 / 透视 / 明细 / 设置」四个页 —— 都不是每日动作（主数据 / 分析 / 配置）。
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
 import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
@@ -265,6 +284,85 @@ function currentStyleId(o: OrderRecord): number {
   return styles.value.find((s) => s.code === o.styleCode)?.id ?? 0;
 }
 
+// ───────────────────────────────────────── 「同商品」分组（这一页真正要做多少决定）
+
+/**
+ * 分组键 = **店铺原文 + 商品ID**。商品ID 由主进程给（`OrderRecord.itemId`），渲染层不自己推 ——
+ * 它与回流写映射时用的是同一个 `extractSkuFields`，推两遍就会出现"徽标说同商品、回流按另一个键记"。
+ *
+ * ⚠️ 已知的**欠算**：这里用的是店铺**原文**，而回流用的是归一后的店铺实体。同一家店在报表里
+ * 写法不同（多一个空格/全角括号）时，这里会当成两个商品（徽标少算）。刻意不修：要修就得把
+ * 店铺归一下沉到渲染层（那是 `sk_name_map` 的事，两处各判一次必分叉）。徽标是**提示**不是承诺，
+ * 少算只会让人多核对一次，不会把两件商品混成一件。
+ */
+function productKey(o: OrderRecord): string {
+  const itemId = String(o.itemId ?? '').trim();
+  if (!itemId) return '';
+  return `${String(o.shop ?? '').trim()}\u0000${itemId}`;
+}
+
+/** 本页每个商品占了几行（只收有商品ID 的行） */
+const productRows = computed(() => {
+  const m = new Map<string, number>();
+  for (const o of rows.value) {
+    const k = productKey(o);
+    if (!k) continue;
+    m.set(k, (m.get(k) ?? 0) + 1);
+  }
+  return m;
+});
+
+/** 这一行所属商品在本页占了几行；0 = 这行没有商品ID（**不是** 1 —— 两者含义完全不同） */
+function sameCount(o: OrderRecord): number {
+  const k = productKey(o);
+  return k ? (productRows.value.get(k) ?? 1) : 0;
+}
+
+/** 本页覆盖多少个商品（0 ⇒ 这份报表没有商品ID 列，指标格整格不显示） */
+const distinctProducts = computed(() => productRows.value.size);
+
+// ───────────────────────────────────────── 键盘流（回车＝保存并往下走）
+
+/** 下一次取数完成后要把焦点送到的**行下标**；-1 = 不送 */
+let focusRowIdx = -1;
+
+/**
+ * 把焦点送到目标行的「归属款」下拉 —— 这是逐行核对的**起点控件**（改品类/颜色是例外路径）。
+ *
+ * ⚠️ 用**下标**而不是订单 id：保存会把该单置为已核对（`updateOrder` 里 `corrected = 1`），
+ * 它随即离开待核对列表、后面的行**整体上移一位** ⇒ "下一条"在取数后正好落在同一下标上。
+ * 钉在 id 上会找不到元素（那一行已经不在了），症状是"焦点丢了"，很难查。
+ */
+async function applyFocus(): Promise<void> {
+  if (focusRowIdx < 0) return;
+  const i = Math.min(focusRowIdx, Math.max(rows.value.length - 1, 0));
+  focusRowIdx = -1;
+  const o = rows.value[i];
+  if (!o) return;
+  await nextTick();
+  document.querySelector<HTMLElement>(`[data-act="cl-style-${o.id}"]`)?.focus();
+}
+
+/**
+ * 行内回车：**有改动就保存**（保存完焦点自动落到下一条），没有改动就单纯往下走一格。
+ *
+ * 焦点在按钮上时直接放行 —— 按钮的原生"回车＝点击"照常发生（Tab 到「保存」再按回车
+ * 是一条很自然的路径，在这里拦掉会让它变成"按了没反应"）。
+ */
+function onRowEnter(o: OrderRecord, ev: KeyboardEvent): void {
+  if (busy.value) return;
+  const t = ev.target as HTMLElement | null;
+  if (t?.tagName === 'BUTTON') return;
+  const idx = rows.value.findIndex((r) => Number(r.id) === Number(o.id));
+  if (isDirty(o)) {
+    focusRowIdx = idx; // 该行会被置为已核对并离开列表 ⇒ 同一下标就是"下一条"
+    void saveOne(o);
+    return;
+  }
+  focusRowIdx = idx + 1; // 没改动 ⇒ 什么都不消失，直接去下一行
+  void applyFocus();
+}
+
 /** 取（并按需建立）一行的草稿 —— 行是主进程给的只读快照，编辑态单独放，避免和"刷新"打架 */
 function draftOf(o: OrderRecord): Draft {
   const id = Number(o.id ?? 0);
@@ -319,6 +417,9 @@ async function load(): Promise<void> {
     for (const k of Object.keys(drafts)) delete drafts[Number(k)];
     for (const o of rows.value) draftOf(o);
     await loadThumbs();
+    // 键盘流：保存后（或按回车往下走）把焦点送回目标行 —— 必须在**取数之后**做，
+    // 否则元素还是上一批的老 DOM（保存会把那一行移走、后面的行整体上移）
+    await applyFocus();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取待核对订单失败';
   } finally {
@@ -490,6 +591,11 @@ watch(
 }
 .cl-thumb-col {
   width: 48px;
+}
+/* 「同商品」徽标紧跟在单号后面：它是**这一行的属性**，不是独立一列
+   （独立成列会让"没有商品ID"的行留一个大空格，看着像缺数据） */
+.cl-same {
+  margin-left: 6px;
 }
 .cl-style-col {
   min-width: 180px;

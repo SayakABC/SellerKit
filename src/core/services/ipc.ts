@@ -152,7 +152,7 @@ export interface ElectronApi {
   }): Promise<ApiResult<unknown>>;
   orderInsert(order: OrderRecord): Promise<ApiResult<{ id: number }>>;
   orderGroupStats(dimensions: string[]): Promise<ApiResult<GroupStat[]>>;
-  /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total }；列表不含 raw_fields */
+  /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total } */
   orderList(payload?: {
     offset?: number;
     limit?: number;

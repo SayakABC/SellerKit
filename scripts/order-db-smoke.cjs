@@ -229,6 +229,24 @@ check('列表分页/搜索可用', () => {
   assert.strictEqual(page.rows.length, 1);
   assert.ok(page.total >= 2);
 });
+check('列表回带商品ID 与原始整行（归类核对页按「同商品」分组靠它）', () => {
+  // 这一条钉的是**主进程侧**的推导：渲染层拿到的 itemId 不是自己正则匹配出来的，
+  // 而是 `mapOrderRow` 用 `extractSkuFields` 从 raw_fields 取的（与回流写映射同一个函数）。
+  const hit = odb.listOrdersPage({ limit: 5 }).rows.find((r) => r.itemId);
+  assert.ok(hit, '带商品ID 的行必须回带 itemId');
+  assert.strictEqual(hit.itemId, '1005011764572483', 'itemId 应取自原始行的「商品ID」列');
+  assert.ok(Object.keys(hit.rawFields).length > 0, '原始整行要一起回来（itemId 就是从它推出来的）');
+  // 反向：原始行里**没有**商品ID 列时回空串 —— 不能是 undefined、更不能抓一个像但不是的列名
+  // （「商品名称」是刻意放的**干扰项**：只放"唯一可选项"等于没测）
+  const id = odb.insertOrder({
+    imageId: null, orderNo: 'NO-ITEM', shop: '店Z', size: '', orderTime: '',
+    category: '', color: '', logo: '', rawFields: { 订单号: 'NO-ITEM', 商品名称: '不是商品ID' },
+  });
+  const without = odb.listOrdersPage({ limit: 50 }).rows.find((r) => Number(r.id) === Number(id));
+  assert.ok(without, '临时行应能查到');
+  assert.strictEqual(without.itemId, '', '没有商品ID 列时应回空串（而不是抓到名字相近的列）');
+  dbRun(`DELETE FROM oi_orders WHERE id = ?`, [id]); // 用完即清：后面的用例按行数断言
+});
 
 console.log('\n[5] 队列（oi_queue）');
 check('入队 / 统计 / 分页', () => {

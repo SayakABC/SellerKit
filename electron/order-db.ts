@@ -86,6 +86,9 @@ export interface OrderRecord {
   /** 下单时间（可空，来自 Excel 下单时间列） */
   orderTime?: string;
   rawFields: Record<string, string>;
+  /** 派生字段：商品ID（由 `extractSkuFields(rawFields)` 取出，供归类核对页标「同商品」）。
+   *  ⚠️ 本接口与渲染层 `src/types.ts` 的 `OrderRecord` **逐字对应**，改一处必须改两处。 */
+  itemId?: string;
   category: string;
   color: string;
   logo: string;
@@ -1586,8 +1589,11 @@ export function listOrdersPage(
       params,
     )[0]?.n ?? 0,
   );
+  // ⚠️ 这里**必须**带上 `o.raw_fields`：`OrderRecord.itemId` 由它推出来（见 `mapOrderRow`），
+  //    而归类核对页要靠 itemId 标出"本页哪几行是同一个商品"。之前漏了它，`rawFields` 恒为 `{}`
+  //    —— 那是个静默陷阱：类型上写着"原始整行"，用的人读到的却是空对象。
   const rows = dbQuery<Record<string, unknown>>(
-    `SELECT o.id, o.image_id, o.order_no, o.shop, o.size, o.order_time,
+    `SELECT o.id, o.image_id, o.order_no, o.shop, o.size, o.order_time, o.raw_fields,
             o.category, o.color, o.logo, o.material, o.status, o.corrected, o.created_at,
             i.fingerprint, i.source_url, i.local_path, i.result_json,
             s.code AS style_code, ${n.name} AS style_name, sc.color AS style_color
@@ -1959,6 +1965,7 @@ export function lastActiveQueueBatch(): { batchNo: string; stats: OrderQueueStat
 }
 
 function mapOrderRow(row: Record<string, unknown>): OrderRecord {
+  const rawFields = safeJson(String(row.raw_fields ?? ''));
   return {
     id: Number(row.id),
     imageId: Number(row.image_id),
@@ -1966,7 +1973,11 @@ function mapOrderRow(row: Record<string, unknown>): OrderRecord {
     shop: String(row.shop ?? ''),
     size: String(row.size ?? ''),
     orderTime: String(row.order_time ?? ''),
-    rawFields: safeJson(String(row.raw_fields ?? '')),
+    rawFields,
+    // ⭐ 商品ID 由**主进程**从原始行里取（`extractSkuFields`），刻意不交给渲染层自己正则匹配：
+    //    这个值是「归类核对页按商品分组」的键，而回流（`skuBackfillFromOrder`）写映射时用的
+    //    也是同一个函数 —— 两处各写一套列名族，就会出现"徽标说同商品、回流却按另一个键记"。
+    itemId: extractSkuFields(rawFields).itemId,
     category: String(row.category ?? ''),
     color: String(row.color ?? ''),
     logo: String(row.logo ?? ''),

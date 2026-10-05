@@ -1,22 +1,27 @@
 // UI 岛 manifest 能力声明 × 宿主权限门 —— 钉住「声明写法」与「门判定口径」的一致性。
 //
 // 背景（2026-09-17 真实故障）：宿主权限门对 ctx.host.clipboard.writeText 请求的动作名是
-// `clipboard.write`（见 gatedHost.ts），而 shop-accounts / order-insight 的 manifest 声明成了
-// `["writeText"]`，结果点了复制就报「动作越权: clipboard.write 不在声明白名单 [writeText]」。
+// `clipboard.write`（见 gatedHost.ts），而当时的 shop-accounts / order-insight 的 manifest
+// 声明成了 `["writeText"]`，结果点了复制就报「动作越权: clipboard.write 不在声明白名单 [writeText]」。
 // 这类错误只在运行时暴露、且错误信息不指向 manifest，故在这里用真实 decidePermission 兜住。
+//
+// ⚠️ 这里的岛清单要跟着 `ui-plugins/` 走：`order-insight` 已于 2026-10-05 整体下架，
+//    现换成 `excel-copy`（同为**手写 dist 岛**）。每项的第三个值是该岛**真实声明的**一个 db 动作
+//    —— 显式写出来，不从 manifest 里现取（现取会让断言变成"拿声明去验声明"，恒真）。
 import { describe, it, expect } from 'vitest';
 import { decidePermission } from '@/core/plugin/security';
 import { validateExternalManifest } from '@/core/plugin/externalManifest';
 import type { PluginManifest } from '@/core/plugin/types';
 import shopAccounts from '../ui-plugins/shop-accounts/manifest.json';
-import orderInsight from '../ui-plugins/order-insight/manifest.json';
+import excelCopy from '../ui-plugins/excel-copy/manifest.json';
 
 const check = (pluginId: string, manifest: unknown, req: Parameters<typeof decidePermission>[2]) =>
   decidePermission(pluginId, manifest as PluginManifest, req);
 
-const ISLANDS: Array<[string, unknown]> = [
-  ['shop-accounts', shopAccounts],
-  ['order-insight', orderInsight],
+/** [岛 id, manifest, 一个该岛真实声明的 db 动作] */
+const ISLANDS: Array<[string, unknown, string]> = [
+  ['shop-accounts', shopAccounts, 'list'],
+  ['excel-copy', excelCopy, 'parseExcel'],
 ];
 
 describe('UI 岛 manifest 能力声明应通过宿主权限门', () => {
@@ -28,8 +33,8 @@ describe('UI 岛 manifest 能力声明应通过宿主权限门', () => {
     expect(check(id, m, { capability: 'storage', action: 'load', namespace: id }).ok).toBe(true);
   });
 
-  it.each(ISLANDS)('%s：db 业务域放行', (id, m) => {
-    expect(check(id, m, { capability: 'db', domain: id, action: 'list' }).ok).toBe(true);
+  it.each(ISLANDS)('%s：db 业务域放行', (id, m, act) => {
+    expect(check(id, m, { capability: 'db', domain: id, action: act }).ok).toBe(true);
   });
 });
 

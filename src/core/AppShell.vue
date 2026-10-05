@@ -108,6 +108,15 @@
               <span>设置</span>
             </button>
 
+            <!--
+              「插件中心」直达（UX 审查 A2）：业务功能全是插件，安装/更新/卸载却埋在
+              设置 › 插件 › 市场 三层里 —— 给一个两级内可达的快捷入口（仍复用设置里的同一个组件）。
+            -->
+            <button class="wb-menu-item" data-act="menu-plugins" @click="openSettings('plugins')">
+              <span v-html="pluginIcon"></span>
+              <span>插件中心</span>
+            </button>
+
             <!-- 外观：文字 + 右侧 Tab 切换 -->
             <div
               class="px-3 py-2 flex items-center justify-between rounded-lg transition-colors cursor-default"
@@ -149,9 +158,16 @@
       <!-- 工作区：模块内容直接铺满（工作台与工作区一体化） -->
       <main class="flex-1 min-w-0 relative">
         <component :is="activeView" v-if="activeView" class="h-full" />
-        <!-- §15 UI 岛（外置富 UI 插件）：宿主双通道渲染——activeIslandId 非空时替代 activeView -->
+        <!-- §15 UI 岛（外置富 UI 插件）：宿主双通道渲染——activeIslandId 非空时替代 activeView。
+             `:key` 是**必须**的（2026-09-24 修「重启后点导航一片空白」）：
+             Vue 对同一位置的同类型组件做**复用**，没有 key 时切岛只改 prop、组件实例不重建，
+             于是 UiIslandView 里已建的桥（绑定旧岛 origin/token）被沿用 → 新岛握手消息被静默丢弃
+             （postMessage 的 targetOrigin 不匹配是**静默**失败，不抛错、不打印）→ 新岛永久停在
+             「等待桥握手」，表现为点任意非首个岛都是空白页。加 key 强制按岛重建，桥随组件重建。 -->
         <UiIslandView
           v-else-if="activeIslandId"
+          ref="islandRef"
+          :key="activeIslandId"
           :plugin-id="activeIslandId"
           :manager="pm"
           class="h-full"
@@ -198,7 +214,9 @@
           <span class="font-medium text-[var(--wb-text)]"
             >正在下载{{ updVersion ? ` v${updVersion}` : '更新' }}</span
           >
-          <span class="text-[var(--wb-text-muted)] tabular-nums">{{ Math.round(updPercent) }}%</span>
+          <span class="text-[var(--wb-text-muted)] tabular-nums"
+            >{{ Math.round(updPercent) }}%</span
+          >
         </div>
         <div class="mt-2 h-1.5 rounded-full bg-[var(--wb-surface-2)] overflow-hidden">
           <div
@@ -216,10 +234,7 @@
             v{{ updVersion || '' }} 下载完成，重启后生效
           </p>
         </div>
-        <button
-          class="flex-shrink-0 px-2.5 py-1 rounded-md bg-[var(--wb-primary)] text-[var(--wb-primary-contrast)] text-xs font-medium hover:opacity-90 transition-opacity"
-          @click="restartToInstall"
-        >
+        <button class="wb-btn wb-btn--sm wb-btn--primary flex-shrink-0" @click="restartToInstall">
           立即重启
         </button>
       </div>
@@ -273,9 +288,12 @@ const collapsed = ref(false);
 const paletteOpen = ref(false);
 const menuOpen = ref(false);
 const hoveredAppearance = ref(false);
-const settingsOpen = ref(false);const settingsInitial = ref<{ category?: string; tab?: string }>({});
+const settingsOpen = ref(false);
+const settingsInitial = ref<{ category?: string; tab?: string }>({});
 // §15 UI 岛（外置富 UI 插件）双通道：activeIslandId 非空 → 渲染 UiIslandView（桥会话生命周期随组件）
 const activeIslandId = ref<string>('');
+/** 当前 UiIslandView 实例（插件装/更新后外壳按需调它的 reload()；见 `reload-island` 监听） */
+const islandRef = ref<InstanceType<typeof UiIslandView> | null>(null);
 
 const activeMeta = computed(() => sortedMetas.value.find((m) => m.id === activeId.value) || null);
 /** 业务流来源模块（switch-module 跨模块跳转时记录），TitleBar 据此显示「返回」入口 */
@@ -313,13 +331,26 @@ function refreshPluginCommands() {
   pluginCommands.value = pm.getPluginCommands();
 }
 
-/** Phase 3：扫描 <userData>/plugins 并激活 activationEvents 含 onStartup 的外置插件（失败只提示，不阻塞主流程） */
-async function discoverAndStartExternalPlugins() {
+/** Phase 3：扫描 <userData>/plugins 并登记外置插件（失败只提示，不阻塞主流程）。
+ *
+ *  ⚠️ **必须在「恢复上次所在模块」之前 await 执行**：UI 岛（kind: 'ui'）只在 discoverExternal 里登记，
+ *  而恢复逻辑用 `pm.has(id)` 判定 → 扫描晚于恢复时，上次所在的岛尚未登记 → 恢复被静默跳过、
+ *  回落首个非岛模块（表现为「重启后不回到上次的岛」）。顺序见 onMounted 里的注释。
+ *  岛 meta 的 order 固定 120（pluginManager.sortedMetas），故提前扫描**不会**改变无存档时的默认落点。 */
+async function scanExternalPlugins(): Promise<void> {
   try {
     const found = await pm.discoverExternal();
-    // §15：发现 UI 形态包（kind: 'ui'）时其侧栏 meta 需同步刷新
+    // §15：发现 UI 形态包（kind: 'ui'）时其侧栏 meta 需同步刷新（恢复逻辑之外，⌘K 也依赖）
     if (found.uiCount > 0) refreshMetas();
     for (const e of found.errors) toast.error(`外置插件 ${e.id} 加载失败: ${e.error}`);
+  } catch (e) {
+    toast.error(`外置插件扫描失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** 激活 activationEvents 含 onStartup 的外置插件（扫描之后执行；不阻塞首屏激活，故不 await） */
+async function startStartupExternalPlugins(): Promise<void> {
+  try {
     const started = await pm.activateStartupPlugins();
     for (const e of started.errors) toast.error(`外置插件 ${e.id} 启动失败: ${e.error}`);
     refreshPluginCommands();
@@ -327,7 +358,7 @@ async function discoverAndStartExternalPlugins() {
       toast.success(`外置插件就绪：${started.activated.length} 个已激活`);
     }
   } catch (e) {
-    toast.error(`外置插件扫描失败: ${e instanceof Error ? e.message : String(e)}`);
+    toast.error(`外置插件启动失败: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -419,6 +450,14 @@ function islandHostPing() {
 
 /** §15 UI 岛「返回」：切回默认视图插件（首个非 UI 岛模块） */
 function backFromIsland() {
+  // 「从哪来回哪去」：优先复用 TitleBar 那套 `backId`（跨模块跳转记下的来源模块）。
+  // 旧写法固定回退到"首个非岛模块"（当时是便签）—— 用户点「返回」却跳到一个他没去过的地方，
+  // 是 UX 审查 C1 那条"岛的返回语义与预期不符"。
+  if (backId.value) {
+    goBack();
+    return;
+  }
+  // 没有来源（直接从侧栏点进岛）时的兜底：仍回首个非岛模块 —— 至少保证有路可走。
   const fallback = sortedMetas.value.find((m) => !pm.isUiIsland(m.id)) ?? sortedMetas.value[0];
   if (fallback) void activateCore(fallback.id);
   else {
@@ -444,13 +483,25 @@ function onOpenSettings(e: Event) {
  * 模块加载是异步的，事件先于目标模块挂载完成；带 action 时暂存到一次性窗口标记，
  * 由目标模块 onMounted 消费（避免丢失跳转意图）。detail 可携带 payload。 */
 function onSwitchModule(e: Event) {
-  const detail = (e as CustomEvent<{ moduleId?: string; action?: string; payload?: unknown }>).detail;
+  const detail = (e as CustomEvent<{ moduleId?: string; action?: string; payload?: unknown }>)
+    .detail;
   if (!detail?.moduleId) return;
   menuOpen.value = false;
   if (detail.action) {
     (window as any).__switchModuleAction = { ...detail };
   }
   activateFromSwitch(detail.moduleId);
+}
+
+/**
+ * 全局事件：插件装好/更新后重载正在打开的那个岛（由 `PluginCenter` 派发，见 UX 审查 A3）。
+ * 只认"正是当前打开的这个岛" —— 装了别的插件不该把用户正在看的页面刷掉。
+ */
+function onReloadIsland(e: Event) {
+  const detail = (e as CustomEvent<{ pluginId?: string }>).detail;
+  if (!activeIslandId.value) return;
+  if (detail?.pluginId && detail.pluginId !== activeIslandId.value) return;
+  islandRef.value?.reload();
 }
 
 // 软件更新：点击入口（真实检测；结果经 updater-event 事件异步送达，见 onMounted 订阅）
@@ -521,6 +572,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown);
   window.addEventListener('open-settings', onOpenSettings);
   window.addEventListener('switch-module', onSwitchModule);
+  window.addEventListener('reload-island', onReloadIsland as EventListener);
   document.addEventListener('dragover', onGlobalDragOver, true);
   document.addEventListener('drop', onGlobalDrop, true);
 
@@ -544,6 +596,10 @@ onMounted(async () => {
   }
   refreshMetas();
 
+  // ⚠️ 顺序敏感：先扫描并登记外置插件/UI 岛，再恢复上次所在模块。
+  //    反了的话，上次所在的岛还没登记 → 下面 `pm.has()` 判假 → 静默回落到首个非岛模块。
+  await scanExternalPlugins();
+
   // 恢复上次活动模块与侧边栏状态（被停用插件不参与恢复，回退默认模块）
   let initialId = sortedMetas.value[0]?.id || '';
   try {
@@ -564,7 +620,7 @@ onMounted(async () => {
   // 订阅插件状态变更：
   //  - 插件停用/启用 → 刷新侧栏/⌘K 数据源并持久化停用集；当前视图插件被停用时回退第一个启用插件
   //  - 外置插件激活/停用 → 刷新 ⌘K「外置插件命令」区
-  //  - 随后扫描独立插件目录并懒激活 onStartup 外置插件
+  //  - 随后懒激活 onStartup 外置插件（扫描已在恢复上次模块**之前**完成，见上方 scanExternalPlugins 注释）
   // 订阅更新事件：检测结果 / 下载完成 → toast 提示（下载完成后由主进程弹「立即重启」原生对话框）
   stopUpdaterEvents = ipc.onUpdaterEvent((ev) => {
     switch (ev.type) {
@@ -572,9 +628,7 @@ onMounted(async () => {
         updPhase.value = 'downloading';
         updVersion.value = ev.version || '';
         updPercent.value = 0;
-        toast.info(
-          ev.version ? `发现新版本 v${ev.version}，开始下载…` : '发现新版本，开始下载…',
-        );
+        toast.info(ev.version ? `发现新版本 v${ev.version}，开始下载…` : '发现新版本，开始下载…');
         break;
       case 'download-progress':
         if (ev.percent !== undefined) {
@@ -634,13 +688,14 @@ onMounted(async () => {
       if (id === activeIslandId.value) backFromIsland();
     }
   });
-  void discoverAndStartExternalPlugins();
+  void startStartupExternalPlugins();
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown);
   window.removeEventListener('open-settings', onOpenSettings);
   window.removeEventListener('switch-module', onSwitchModule);
+  window.removeEventListener('reload-island', onReloadIsland as EventListener);
   document.removeEventListener('dragover', onGlobalDragOver, true);
   document.removeEventListener('drop', onGlobalDrop, true);
   stopStateWatch?.();
@@ -651,18 +706,14 @@ function iconSvg(icon?: string): string {
   const map: Record<string, string> = {
     table:
       '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>',
-    tool:
-      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 7a3 3 0 10-4 4l-6 6 2 2 6-6a3 3 0 004-4l-2 2-2-2 2-2z"/></svg>',
-    box:
-      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v6c0 4-3 7-8 8-5-1-8-4-8-8V7z"/></svg>',
+    tool: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 7a3 3 0 10-4 4l-6 6 2 2 6-6a3 3 0 004-4l-2 2-2-2 2-2z"/></svg>',
+    box: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v6c0 4-3 7-8 8-5-1-8-4-8-8V7z"/></svg>',
     chart:
       '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
     sparkles:
       '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
-    note:
-      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11l4 4v12H5z"/><path d="M15 4v5h5M9 13h6M9 17h6"/></svg>',
-    key:
-      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
+    note: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11l4 4v12H5z"/><path d="M15 4v5h5M9 13h6M9 17h6"/></svg>',
+    key: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
   };
   return map[icon || ''] || map.box;
 }
@@ -675,4 +726,7 @@ const paletteIcon =
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1 .8-1.8 1.8-1.8H17a4 4 0 004-4c0-4.4-4-7.7-9-7.7z"/><circle cx="7.5" cy="11" r="1"/><circle cx="11" cy="7.5" r="1"/><circle cx="15" cy="8" r="1"/></svg>';
 const updateIcon =
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12a9 9 0 11-3-6.7"/><path d="M21 4v4h-4"/></svg>';
+/** 插件中心（拼图块） */
+const pluginIcon =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 3h6a2 2 0 012 2v2h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v2a2 2 0 01-2 2H9a2 2 0 01-2-2v-2H5a2 2 0 01-2-2v-2h2.5a1.5 1.5 0 000-3H3V9a2 2 0 012-2h2V5a2 2 0 012-2z"/></svg>';
 </script>

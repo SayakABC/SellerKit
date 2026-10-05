@@ -126,11 +126,13 @@ const IMAGE_TIMEOUT_MS = 30000;
  * 复用协议白名单与超时机制；响应体上限 20MB。
  * @param url 图片地址（http/https）
  * @param destPath 落盘路径（自动创建父目录）
+ * @param opts.noCache 强制回源验证（见下方注释；市场目录/插件包必须传 true）
  * @returns { ok, status, size, error? }
  */
 function downloadFile(
   url: string,
   destPath: string,
+  opts?: { noCache?: boolean },
 ): Promise<{ ok: boolean; status: number; size: number; error?: string }> {
   return new Promise((resolve) => {
     let parsed: URL;
@@ -145,7 +147,17 @@ function downloadFile(
       return;
     }
 
-    const request = net.request({ method: 'GET', url });
+    // ⚠️ noCache：市场 catalog / 插件包属于「同一 URL 内容会变」的易变资源，必须每次回源验证。
+    // 不能指望服务端发对缓存头——绝大多数静态托管（含 `python -m http.server`、部分 CDN 默认档）
+    // 只发 `Last-Modified`，Chromium（Electron net 走的就是它）会套用启发式新鲜度
+    // `freshness = (Date - Last-Modified) × 10%`。一旦目录文件两天没动，新鲜期就能算出好几小时，
+    // 期间连请求都不发、直接吃旧副本 —— 症状就是「新插件已发布，宿主刷新市场却看不到」。
+    // 显式 no-cache 把「直接用缓存」降级为「带 If-Modified-Since 回源验证」：没变走 304，变了拿新的。
+    const request = net.request({
+      method: 'GET',
+      url,
+      headers: opts?.noCache ? { 'Cache-Control': 'no-cache', Pragma: 'no-cache' } : {},
+    });
     let settled = false;
     let size = 0;
     const timer = setTimeout(() => {

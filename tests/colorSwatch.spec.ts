@@ -8,6 +8,7 @@
 // 为什么用 @/lib 而不是相对路径指向 extensions/（2026-09-22）：extensions/order-insight
 // 已下记为市场 UI 岛、目录只作源码留档，测试若从那里 import，删留档目录会**连带打挂本测试
 // 与 vue-tsc**（且报错不会提示"因为留档被删了"）。迁到 src/lib 后留档目录才真的不进任何链路。
+// （补记 2026-10-05：那个岛本身也已整体下架，宿主是这份色卡的唯一引用方 —— 该迁移判断再次成立。）
 
 import { describe, expect, it } from 'vitest';
 import { COLOR_SWATCH, UNKNOWN_SWATCH, swatchOf } from '@/lib/colorSwatch';

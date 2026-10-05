@@ -11,8 +11,8 @@
 // 位置说明（2026-09-22 迁入）：原挂在 `extensions/order-insight/src/lib/` 下 ——
 // 它是纯函数字典（AGENTS §1.2 目录语义归 `src/lib/`），而 extensions 下的 order-insight
 // 已下记为市场 UI 岛、目录仅作源码留档，把测试挂在那里会让"删留档目录"连带打挂门禁。
-// 现在两侧引用都指向这里：宿主侧任何视图、以及留档源码。
-// 岛自己的实现（ui-plugins/order-insight/dist）不引本文件 —— 岛是手写 ESM、无构建步骤。
+// 宿主侧任何视图都从这里引；原岛自己的实现（手写 ESM、无构建步骤）**另有一份**，
+// 不引本文件 —— 该岛已于 2026-10-05 整体下架，现役引用方只剩宿主（内建页）。
 
 /** 常见颜色名 → 色值（键为中文色名；匹配时用 `includes`，故"深蓝色"能命中"蓝色"） */
 export const COLOR_SWATCH: Record<string, string> = {

@@ -1,11 +1,47 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SellerKit</title>
+    <!--
+      首屏防闪白 / 防闪黑：
+      真正的主题模式存在 electron-store（appearance 命名空间），只能经 IPC 异步读取，
+      而 initTheme() 要等应用 onMounted 之后才跑 —— 在那之前 <html> 上没有 data-theme，
+      页面按浅色渲染。系统是深色的用户每次启动都会看到一帧白屏。
+      这里用**同步**可得的 prefers-color-scheme 先定一个初值，覆盖绝大多数「跟随系统」的用户；
+      显式选过浅色/深色的用户，会在 initTheme() 落定后被校正（只差一帧，且方向一致）。
+    -->
+    <script>
+      (function () {
+        try {
+          var mql = window.matchMedia('(prefers-color-scheme: dark)');
+          document.documentElement.setAttribute('data-theme', mql.matches ? 'dark' : 'light');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+    <!--
+      同一目的的第二道：主样式表是 <script type="module"> 的同级产物，解析前 body 会先按 UA 默认色（白）绘制一次。
+      此处内联给画布色兜底，使「首帧白 → 主题色」变成「一直就是主题色」。
+      数值必须与 src/styles/index.css 的 --wb-bg 保持一致（此处不能读 CSS 变量：变量正来自还没加载的那张表）。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #f6f7f9;
+      }
+      html[data-theme='dark'],
+      html[data-theme='dark'] body {
+        background: #15171c;
+      }
+    </style>
   </head>
-  <body class="bg-gray-100 min-h-screen">
+  <!-- 画布色由 src/styles/index.css 的 body 规则统一负责（原先在这里硬编码 bg-gray-100，
+       与 --wb-bg 差 2 级色阶，超滚动时会看到一条色差）。 -->
+  <body class="min-h-screen">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

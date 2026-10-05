@@ -60,7 +60,7 @@ describe('UI 岛设置分类聚合（createSettingsOps.getIslandSettingCategorie
           order: 50,
         }),
       ],
-      ['order-insight', islandManifest('order-insight')],
+      ['excel-copy', islandManifest('excel-copy')],
     ]);
     const cats = createSettingsOps(ctx).getIslandSettingCategories();
     expect(cats).toHaveLength(1);

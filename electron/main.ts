@@ -25,7 +25,10 @@ require('./plugins-handlers');
 // 插件市场 IPC（Market：拉取 catalog + 下载 zip 安装外置插件，主进程防线）
 require('./plugins-market-handlers');
 // P0 POC：外置富 UI 插件运行时协议 sk-plugin://（模块顶层 registerSchemesAsPrivileged 须在 app ready 前执行）
-const { ensurePocPackageSeeded, initPluginUiProtocol } = require('./plugin-ui-protocol');
+const { initPluginUiProtocol } = require('./plugin-ui-protocol');
+// 邮件正文渲染协议 sk-mail://（同样须在 app ready 前注册 scheme）—— 正文里的 cid/远程图片靠它显示
+const { registerMailBodyScheme, initMailBodyProtocol } = require('./mail-body-protocol');
+registerMailBodyScheme();
 // 自动更新 IPC（GitHub Releases：checkForUpdates / quitAndInstall + updater-event 广播）
 const updater = require('./updater');
 // 速卖通利润追踪：localhost 接收端（应用就绪后自启）+ 语义化查询 IPC（ae-db-ensure / ae-order-list / ae-summary / ae-receiver-status）
@@ -35,16 +38,23 @@ require('./ae-handlers');
 require('./shop-accounts-handlers');
 // 企业管理 IPC（企业基本信息 CRUD + 欧代/土代/德国包装法等合规资料）
 require('./company-handlers');
+// 产品库 IPC（产品主数据 CRUD + 汇总；pl_products 属主数据层，随宿主分发 —— ADR-002 C3）
+require('./product-handlers');
+// 店铺实体 IPC（sk_shops / sk_name_map：店铺登记 + 三处历史店铺名的归一）
+// 同属主数据层，随宿主分发 —— 历史文本不改写，靠映射旁挂关联（DOMAIN_INTEGRATION_PLAN S1/G2）
+require('./shop-handlers');
+// 店铺商品清单 IPC（商品清单导入/列表/删除 + 商品↔产品一对多关联；表结构由 product-db 建，见 pl_shop_sku）
+require('./shop-product-handlers');
+// 运价表快照 IPC（报价单导入时留档 + 算账按生效日取当时那份；运价表属主数据，挂宿主中立层 —— ADR-002 C3）
+require('./ship-rate-handlers');
+// 拣货 IPC（未发货订单行投影：款色码 + 三层回落图 + 供应商；**只回投影，聚合与口径在渲染层纯函数**）
+require('./picking-handlers');
 // 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
 const mailEngine = require('./mail-engine');
 require('./mail-handlers');
 // 「用户显式选择过的文件」白名单：收紧 read-file / save-template / check-file-exists 的路径权限（H-02）
-const {
-  initApprovedUserFiles,
-  approveUserFile,
-  isUserFileAllowed,
-  MAX_TEMPLATE_CHARS,
-} = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
+const { initApprovedUserFiles, approveUserFile, isUserFileAllowed, MAX_TEMPLATE_CHARS } =
+  require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {
@@ -205,9 +215,10 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initStore();
-  // P0 POC：种子 demo UI 包 + 注册 sk-plugin:// 请求处理（先于窗口创建，保证 iframe 首次导航即可命中）
-  ensurePocPackageSeeded();
+  // 注册 sk-plugin:// 请求处理（先于窗口创建，保证 iframe 首次导航即可命中）
   initPluginUiProtocol();
+  // 注册 sk-mail:// 请求处理：邮件正文（含内联/远程图片）的渲染入口
+  initMailBodyProtocol();
   createWindow();
   // 注入窗口引用：updater.ts 随即注册 autoUpdater 事件（向渲染层广播 updater-event）
   updater.initUpdater(() => mainWindow);
@@ -239,8 +250,32 @@ ipcMain.handle('select-excel', async () => {
     // 用户经对话框真实选过 → 落白名单，后续 read-file / check-file-exists 才放行（H-02）
     approveUserFile(filePath);
     const buffer = fs.readFileSync(filePath);
-    const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    const arrayBuffer = buffer.buffer.slice(
+      buffer.byteOffset,
+      buffer.byteOffset + buffer.byteLength
+    );
     return { success: true, data: { filePath, data: arrayBuffer } };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 选择图片文件（产品库主图 / 商品ID覆盖图）。只返回路径不读内容 ——
+// 内容由 product-image-attach 等写通道按需读取并复制进 product-images 缓存。
+// 用户经对话框真实选过 → 落白名单（与 select-excel 同一 H-02 语义）。
+ipcMain.handle('select-image', async () => {
+  try {
+    if (!mainWindow) return { success: false, error: 'No window' };
+    const result = await dialog.showOpenDialog(mainWindow, {
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
+      properties: ['openFile'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, error: 'User canceled' };
+    }
+    const filePath = result.filePaths[0];
+    approveUserFile(filePath);
+    return { success: true, data: { filePath } };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -281,7 +316,10 @@ ipcMain.handle('read-file', async (_event: any, filePath: string) => {
     const ext = path.extname(filePath).toLowerCase();
     if (ext === '.xlsx' || ext === '.xls') {
       const buffer = fs.readFileSync(filePath);
-      const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      const arrayBuffer = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength
+      );
       return { success: true, data: { filePath, data: arrayBuffer } };
     } else {
       const content = fs.readFileSync(filePath, 'utf-8');
@@ -320,25 +358,6 @@ ipcMain.handle('save-template', async (_event: any, filePath: string, content: s
       };
     }
     fs.writeFileSync(filePath, content, 'utf-8');
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-});
-
-ipcMain.handle('get-store', async () => {
-  try {
-    return { success: true, data: store.store };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-});
-
-ipcMain.handle('set-store', async (_event: any, data: Record<string, any>) => {
-  try {
-    for (const [key, value] of Object.entries(data)) {
-      store.set(key, value);
-    }
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -404,9 +423,15 @@ ipcMain.handle('get-module-state', async (_event: any, moduleId: string) => {
           };
           store.set(nsKey, legacy);
           // 清理旧的扁平 key，避免与新命名空间并存造成混淆
-          ['lastExcelPath', 'lastTemplatePath', 'records', 'templateConfigs', 'activeTemplateId', 'processingRules', 'visibleColumns'].forEach(
-            (k) => store.set(k, undefined),
-          );
+          [
+            'lastExcelPath',
+            'lastTemplatePath',
+            'records',
+            'templateConfigs',
+            'activeTemplateId',
+            'processingRules',
+            'visibleColumns',
+          ].forEach((k) => store.set(k, undefined));
           data = legacy;
         }
       }

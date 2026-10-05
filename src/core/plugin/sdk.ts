@@ -33,8 +33,8 @@ export interface PluginHttpOptions {
   headers?: Record<string, string>;
 }
 
-/** 打开文件对话框的选项（渲染层收敛现有 selectExcel/selectTemplate/selectDirectory） */
-export type DialogKind = 'excel' | 'template' | 'directory';
+/** 打开文件对话框的选项（渲染层收敛现有 selectExcel/selectImage/selectTemplate/selectDirectory） */
+export type DialogKind = 'excel' | 'image' | 'template' | 'directory';
 
 export interface DialogOptions {
   kind: DialogKind;

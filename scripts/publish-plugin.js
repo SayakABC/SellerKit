@@ -19,6 +19,14 @@
 //   - --out  输出目录（默认 market-out，zip 与 catalog 都会放这里）
 //   - 校验与主进程 electron/plugins-market-handlers.ts 同语义：manifest.name===目录名、
 //     version x.y.z、entry 仅 ./ 相对、zip 内无 .. 穿越条目
+//
+// 同版本重发布守卫（2026-09-29）：
+//   宿主与市场的更新判据只有「版本号」（compareVersions >= 0 即拒绝安装），因此
+//   ①同版本换了内容 → 已装用户永远拿不到（2026-09-28「商品清单」页签事故的根因）；
+//   ②同版本覆盖旧包 → 先前拉过的人的 sha256 校验对不上。
+//   故本脚本在写产物前按「打包内容摘要」（zip 内每个条目的路径+字节）比对：
+//     内容一致 → 幂等放行（zip 条目时间戳固定，同内容产出同字节同 sha256）
+//     内容不同 → 中止，要求升 manifest.version；确需覆盖时显式加 --force
 'use strict';
 
 const fs = require('fs');
@@ -45,10 +53,13 @@ const SKIP_FILES_UI = new Set([
   'vite.config.ts',
 ]);
 const SKIP_DIRS_UI = new Set(['src']);
+// zip 内条目统一使用固定时间戳：让「同内容 → 同字节 → 同 sha256」成立（JSZip 默认取当前时间）
+const ZIP_ENTRY_DATE = new Date('2020-01-01T00:00:00Z');
 
 function usage() {
-  console.log(`用法: node scripts/publish-plugin.js --dir <插件目录> --base <URL前缀> [--out market-out] [--catalog <catalog.json>] [--build]`);
+  console.log(`用法: node scripts/publish-plugin.js --dir <插件目录> --base <URL前缀> [--out market-out] [--catalog <catalog.json>] [--build] [--force]`);
   console.log(`  --build  仅 UI 形态包：entry 产物缺失时先执行 npm run build（先构建后打包）`);
+  console.log(`  --force  同版本已存在且内容不同时仍强行覆盖（正常流程应改为升版本号）`);
   process.exit(1);
 }
 
@@ -63,7 +74,37 @@ const baseUrl = opt('--base');
 const outDir = opt('--out') || 'market-out';
 const catalogArg = opt('--catalog') || path.join(outDir, 'catalog.json');
 const withBuild = args.includes('--build');
+const forceRepublish = args.includes('--force');
 if (!pluginDirArg) usage();
+
+// ---- 打包内容摘要：zip 内每个条目的「路径 + 字节」做 sha256 ----
+// 判据不能用 zip 自身 sha256：JSZip 默认给条目打当前时间戳，同内容两次打包字节就不同；
+// 也不能只看 manifest 字段 —— 内容改没改只有文件字节知道。
+async function contentDigestOfZip(buffer) {
+  const z = await JSZip.loadAsync(buffer);
+  const names = Object.keys(z.files)
+    .filter((n) => !z.files[n].dir)
+    .sort();
+  if (!names.length) return null;
+  const h = crypto.createHash('sha256');
+  for (const n of names) {
+    h.update(n.replace(/\\/g, '/'));
+    h.update('\0');
+    h.update(await z.files[n].async('nodebuffer'));
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+function contentDigestOfFiles(list) {
+  const h = crypto.createHash('sha256');
+  for (const f of [...list].sort((a, b) => a.rel.localeCompare(b.rel))) {
+    h.update(f.rel);
+    h.update('\0');
+    h.update(fs.readFileSync(f.abs));
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
 
 // ---- 读取并校验 manifest ----
 const pluginDir = path.resolve(ROOT, pluginDirArg);
@@ -216,14 +257,70 @@ for (const f of files) {
     console.error(`[publish-plugin] 目录含越界条目，拒绝打包: ${f.rel}`);
     process.exit(1);
   }
-  zip.file(f.rel, fs.readFileSync(f.abs));
+  zip.file(f.rel, fs.readFileSync(f.abs), { date: ZIP_ENTRY_DATE });
 }
+// 自动创建的目录条目（dist/ 等）走的是 JSZip 默认选项，日期仍是当前时间 → 统一固定
+for (const name of Object.keys(zip.files)) zip.files[name].date = ZIP_ENTRY_DATE;
 const zipName = `${pluginId}-${manifest.version}.zip`;
 (async () => {
   const content = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   const sha256 = crypto.createHash('sha256').update(content).digest('hex');
-  fs.mkdirSync(path.resolve(ROOT, outDir), { recursive: true });
   const zipPath = path.resolve(ROOT, outDir, zipName);
+
+  // ---- 读 catalog（提前：同版本比对需要旧条目，且写入前必须完成全部判定）----
+  const catalogPath = path.resolve(ROOT, catalogArg);
+  let catalog = { plugins: [] };
+  if (fs.existsSync(catalogPath)) {
+    try {
+      catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
+      if (!Array.isArray(catalog.plugins)) catalog = { plugins: [] };
+    } catch {
+      catalog = { plugins: [] };
+    }
+  }
+  const existingEntry = catalog.plugins.find((p) => p.id === pluginId) || null;
+
+  // ---- 同版本重发布守卫（见文件头说明）----
+  const newDigest = contentDigestOfFiles(files);
+  let prevDigest = null;
+  let prevReadable = false;
+  if (fs.existsSync(zipPath)) {
+    try {
+      prevDigest = await contentDigestOfZip(fs.readFileSync(zipPath));
+      prevReadable = !!prevDigest;
+    } catch {
+      prevReadable = false;
+    }
+  }
+  if (prevReadable && prevDigest !== newDigest) {
+    if (!forceRepublish) {
+      console.error(
+        `[publish-plugin] 拒绝发布：${zipName} 已存在，但打包内容与本次不同\n` +
+          `  已存在内容摘要: ${prevDigest.slice(0, 12)}…\n` +
+          `  本次内容摘要  : ${newDigest.slice(0, 12)}…\n` +
+          `  版本号是宿主/市场唯一的更新判据 —— 同版本换内容等于「发了等于没发」，已装用户永远拿不到。\n` +
+          `  请升 ${path.relative(ROOT, manifestPath)} 的 version（UI 岛还需同步 package.json）后重跑；\n` +
+          `  确需原地覆盖（例如刚发出就发现打坏包）加 --force。`,
+      );
+      process.exit(1);
+    }
+    console.warn(
+      `[publish-plugin] ⚠ --force 覆盖同版本且内容不同的产物（${zipName}）：\n` +
+        `  已存在 ${prevDigest.slice(0, 12)}… → 本次 ${newDigest.slice(0, 12)}…\n` +
+        `  已安装该版本的用户不会收到更新，需手动重装。`,
+    );
+  } else if (prevReadable) {
+    console.log(`[publish-plugin] 同版本同内容（摘要 ${newDigest.slice(0, 12)}…）：幂等重发布，产物字节不变`);
+  } else if (fs.existsSync(zipPath)) {
+    console.warn(`[publish-plugin] ⚠ ${zipName} 已存在但无法解析为 zip（按覆盖处理）`);
+  } else if (existingEntry && existingEntry.version === manifest.version) {
+    console.warn(
+      `[publish-plugin] ⚠ catalog 已登记 ${pluginId}@${manifest.version}，但本地没有 ${zipName} 可比对内容。\n` +
+        `  若本次内容与线上那份不同，已装用户拿不到更新 —— 建议先升版本号。`,
+    );
+  }
+
+  fs.mkdirSync(path.resolve(ROOT, outDir), { recursive: true });
   fs.writeFileSync(zipPath, content);
 
   // ---- 校验 zip 可被安全解压的条目（发布侧预检，模拟主进程语义）----
@@ -248,16 +345,6 @@ const zipName = `${pluginId}-${manifest.version}.zip`;
     homepage: '',
     ...(isUi ? { kind: 'ui' } : {}), // UI 形态包标记（宿主市场列表/安装可提前识别；L2 后台插件缺省不带）
   };
-  const catalogPath = path.resolve(ROOT, catalogArg);
-  let catalog = { plugins: [] };
-  if (fs.existsSync(catalogPath)) {
-    try {
-      catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
-      if (!Array.isArray(catalog.plugins)) catalog = { plugins: [] };
-    } catch {
-      catalog = { plugins: [] };
-    }
-  }
   const idx = catalog.plugins.findIndex((p) => p.id === pluginId);
   if (idx >= 0) catalog.plugins[idx] = item;
   else catalog.plugins.push(item);
@@ -266,10 +353,11 @@ const zipName = `${pluginId}-${manifest.version}.zip`;
   console.log(`[publish-plugin] 完成`);
   console.log(`  zip      : ${zipPath} (${(content.length / 1024).toFixed(1)} KB)`);
   console.log(`  sha256   : ${sha256}`);
+  console.log(`  内容摘要 : ${newDigest}（同版本重发布以此判定，与 zip 字节无关）`);
   console.log(`  kind     : ${isUi ? 'ui（iframe 运行时岛）' : 'extension（L2 Worker 后台）'}`);
   console.log(`  catalog  : ${catalogPath}（含 ${catalog.plugins.length} 个插件）`);
   console.log(`  downloadUrl 应为: ${item.downloadUrl}`);
-  console.log(`  本地验证：cd market-out && python3 -m http.server 8000`);
+  console.log(`  本地验证：npm run market:serve（发 no-store，别用 python3 -m http.server）`);
   console.log(`  然后应用「插件市场」填入 http://127.0.0.1:8000/catalog.json`);
 })().catch((e) => {
   console.error('[publish-plugin] 失败:', e instanceof Error ? e.message : e);

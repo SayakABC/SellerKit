@@ -76,6 +76,92 @@ export function dbMigrate(statements: string[]): void {
   });
 }
 
+/** 一条演进步骤：`version` 从 1 起、按域内连续升序；`up` 只做这一步，不依赖后续步骤 */
+export interface MigrationStep {
+  version: number;
+  name: string;
+  up: () => void;
+}
+
+/**
+ * 按域 key 的**版本化迁移**（有序 + 只跑一次 + 记录版本）。
+ *
+ * 与 `dbMigrate` 的分工（两者都要，别互相替代）：
+ *   · `dbMigrate(statements)` —— 幂等 DDL（`CREATE TABLE/INDEX IF NOT EXISTS`），每次 ensure 都能跑，
+ *     负责"**新库**一次建到当前形状"；
+ *   · `migrate(key, steps)` —— **演进**（补列 / 重建表 / 改唯一键 / 搬数据），只跑未应用的版本，
+ *     负责"**老库**追上来"。
+ *
+ * 为什么必须有它（2026-09-29 实测教训）：`pl_shop_sku` 的唯一键在一对多改造时由 4 列扩成 5 列，
+ * 而 `CREATE TABLE IF NOT EXISTS` **不会重建老库** —— 于是老库是 4 列键、新库是 5 列键，
+ * 代码里那个对旧形状的假设（`ON CONFLICT(platform, shop_id, item_id, spec)`）在**新库上必失败、
+ * 在老库上看不出来**。形状差异只能靠一次性迁移收敛，幂等 DDL 永远收敛不了。
+ *
+ * 记账表 `sk_schema_migrations` 按域 key 分别记版本（各域仍自己拥有 schema，不共用一个全局版本号）。
+ * @returns 实际应用的步骤数（0 = 已是最新；测试与日志用）
+ */
+export function migrate(key: string, steps: MigrationStep[]): number {
+  const d = getDb();
+  d.exec(`CREATE TABLE IF NOT EXISTS sk_schema_migrations (
+    key TEXT PRIMARY KEY,
+    version INTEGER NOT NULL DEFAULT 0,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`);
+
+  const current = migrationVersion(key);
+  const pending = (Array.isArray(steps) ? steps : [])
+    .filter((s) => Number(s.version) > current)
+    .sort((a, b) => Number(a.version) - Number(b.version));
+  if (!pending.length) return 0;
+
+  dbTransaction(() => {
+    for (const step of pending) {
+      step.up();
+      dbRun(
+        `INSERT INTO sk_schema_migrations (key, version, applied_at)
+         VALUES (?, ?, datetime('now','localtime'))
+         ON CONFLICT(key) DO UPDATE SET version = excluded.version, applied_at = excluded.applied_at`,
+        [key, Number(step.version)],
+      );
+    }
+  });
+  return pending.length;
+}
+
+/** 某域已应用的迁移版本（0 = 从未迁移过；记账表不存在时也是 0） */
+export function migrationVersion(key: string): number {
+  if (!tableSql('sk_schema_migrations')) return 0;
+  const row = dbGet<{ version: number }>(
+    `SELECT version FROM sk_schema_migrations WHERE key = ?`,
+    [key],
+  );
+  return row ? Number(row.version) || 0 : 0;
+}
+
+/**
+ * 表是否存在 —— 各域表**按域懒建**，跨域读之前先探一下：缺表时**降级**（回落空值），
+ * 而不是抛 `no such table`（那会被误读成"自己的 SQL 坏了"，排查方向整个反掉）。
+ *
+ * 唯一一份：原先 `product-db` / `shop-db` / `shop-product-db` 各抄了一份（口径一样但四处维护），
+ * 2026-09-29 收拢到这里。
+ */
+export function tableExists(name: string): boolean {
+  const row = dbGet<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name = ?`,
+    [name],
+  );
+  return Number(row?.n ?? 0) > 0;
+}
+
+/** 对象的建表/建索引 SQL 原文（形状判定用：如"唯一键含不含 product_id"）；不存在返回 '' */
+export function tableSql(name: string): string {
+  const row = dbGet<{ sql: string | null }>(
+    `SELECT sql FROM sqlite_master WHERE name = ?`,
+    [name],
+  );
+  return String(row?.sql ?? '');
+}
+
 /** 查询多条记录 */
 export function dbQuery<T = Record<string, unknown>>(sql: string, params: DbBindParams = []): T[] {
   return getDb().prepare(sql).all(...normalizeParams(params)) as T[];

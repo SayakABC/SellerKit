@@ -7,6 +7,10 @@ directories:
   output: release
 files:
   - dist/**/*
+  # 桥运行时源码文本：不参与 tsc 编译（见 tsconfig.electron.json 注释），必须原样进包
+  # —— plugin-ui-protocol.ts#loadRuntimeSource 的第 1 个候选就是 <appPath>/electron/plugin-ui-runtime.js。
+  # 漏掉它：打包版不注入 sk-plugin:// 桥 → 所有 UI 岛 window.__sk 缺失 → 点导航一片空白（2026-09-24 定位）。
+  - electron/plugin-ui-runtime.js
   - "!node_modules/**/{test,tests,__tests__,spec}/**"
   - "!node_modules/**/*.md"
   - "!node_modules/**/*.ts"

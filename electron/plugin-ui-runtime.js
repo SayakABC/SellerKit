@@ -7,8 +7,12 @@
 //   iframe → host: hello(握手，无 token) / call{id,domain,method,args} / subscribe{subId,pattern} /
 //                  unsubscribe{subId} / publish{eventType,payload} / log{level,args}
 //   host → iframe: boot{token,plugin,env,theme} / call-result{id,ok,value|error} /
-//                  event{eventType,payload,meta} / theme{vars} / abort{reason}
+//                  event{eventType,payload,meta} / theme{vars,mode} / abort{reason}
 // token：boot 携带的一次性随机串；其后所有 iframe → host 消息必须携带；伪造/串台消息宿主侧丢弃。
+// theme：`vars` = 宿主 --wb-* 令牌（内联写到 <html>，优先级高于岛内样式表）；
+//        `mode` = 'light'|'dark'（宿主当前主题，非令牌）→ 回写 <html> 的 color-scheme，
+//        否则岛里写死的 color-scheme:light 会让深色主题下的原生控件（日期选择器/下拉/滚动条/
+//        复选框/输入光标）仍是浅色，表现为「岛内样式跟宿主主题不一致」（2026-09-22 修）。
 // 暴露（UI 岛开发者面，P1 定稿）：window.__sk = { ready, onReady, env, manifest, host(六域 + db/secrets/mail), storage(key 级), bus, log }
 
 (function () {
@@ -65,7 +69,7 @@
         token = d.token;
         plugin = d.plugin || {};
         env = d.env || {};
-        if (d.theme && d.theme.vars) applyTheme(d.theme.vars);
+        if (d.theme) applyTheme(d.theme.vars, d.theme.mode);
         if (readyResolve) {
           readyResolve();
           readyResolve = null;
@@ -92,7 +96,7 @@
         break;
       }
       case TYPE.theme: {
-        if (d.vars) applyTheme(d.vars);
+        applyTheme(d.vars, d.mode);
         break;
       }
       case TYPE.abort: {
@@ -118,14 +122,31 @@
     parentPost(m);
   }
 
-  function applyTheme(vars) {
+  /**
+   * 写入宿主主题：--wb-* 令牌 + color-scheme。
+   * @param {Record<string,string>} [vars] 设计令牌（内联到 <html>，覆盖岛内样式表里的回退值）
+   * @param {'light'|'dark'|undefined} [mode] 宿主主题模式 → <html> 的 color-scheme。
+   *   必须走内联（而非岛内 CSS）：岛里写死的 `color-scheme: light` 若只靠继承无法被覆盖，
+   *   内联在 <html> 上才能连同 `color-scheme: inherit` 的子元素一起翻到深色。
+   *   宿主未给 mode（旧版宿主 / 采集失败）时保持岛上原有声明，不做猜测。
+   */
+  function applyTheme(vars, mode) {
     var style = document.documentElement.style;
-    for (var k in vars) {
-      if (vars[k] === '') continue;
+    if (vars) {
+      for (var k in vars) {
+        if (vars[k] === '') continue;
+        try {
+          style.setProperty(k, vars[k]);
+        } catch (e) {
+          /* 非法值忽略 */
+        }
+      }
+    }
+    if (mode === 'light' || mode === 'dark') {
       try {
-        style.setProperty(k, vars[k]);
+        style.colorScheme = mode;
       } catch (e) {
-        /* 非法值忽略 */
+        /* 引擎不支持时忽略 */
       }
     }
   }

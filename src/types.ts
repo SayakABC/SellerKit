@@ -2,12 +2,12 @@ import type { MarketCatalog, MarketPluginInfo } from './core/plugin/types';
 
 export interface ElectronAPI {
   selectExcel: () => Promise<APIResult<ExcelFileResult>>;
+  /** 选择图片文件（产品库主图 / 商品ID覆盖图；只返回路径，内容由主进程写通道按需读取） */
+  selectImage: () => Promise<APIResult<{ filePath: string }>>;
   importExcelByPath: (filePath: string) => Promise<APIResult<ExcelFileResult | TemplateFileResult>>;
   selectTemplate: () => Promise<APIResult<TemplateFileResult>>;
   saveTemplate: (filePath: string, content: string) => Promise<APIResult<void>>;
   writeClipboard: (text: string) => Promise<APIResult<void>>;
-  loadState: () => Promise<APIResult<AppState>>;
-  saveState: (data: Partial<AppState>) => Promise<APIResult<void>>;
   /** 模块命名空间持久化（§1.4）：读取 `modules.<moduleId>` 下的数据，无数据返回 null */
   getModuleState: (moduleId: string) => Promise<APIResult<unknown>>;
   /** 模块命名空间持久化（§1.4）：写入 `modules.<moduleId>`，模块之间互不污染 */
@@ -30,7 +30,12 @@ export interface ElectronAPI {
   // 订单归类模块（SQLite 指纹库 / 订单 / 主图）
   orderDbEnsure: () => Promise<APIResult<void>>;
   orderImageFind: (fingerprint: string) => Promise<APIResult<OrderImageRecord | null>>;
-  orderImageSave: (payload: { id: number; status: 'done' | 'error'; resultJson?: string; error?: string }) => Promise<APIResult<void>>;
+  orderImageSave: (payload: {
+    id: number;
+    status: 'done' | 'error';
+    resultJson?: string;
+    error?: string;
+  }) => Promise<APIResult<void>>;
   orderInsert: (order: OrderRecord) => Promise<APIResult<{ id: number }>>;
   orderGroupStats: (dimensions: string[]) => Promise<APIResult<GroupStat[]>>;
   /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total }；列表不含 raw_fields */
@@ -42,12 +47,39 @@ export interface ElectronAPI {
     search?: string;
   }) => Promise<APIResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear: () => Promise<APIResult<void>>;
+  /** 把若干订单号归属到某店铺（写 `oi_orders.shop` 原文；AE 导出按店铺、无店铺列，故由人指定） */
+  orderAssignShop: (payload: {
+    orderNos: string[];
+    shopName: string;
+  }) => Promise<APIResult<{ updated: number }>>;
+  /** **统一订单行**（主干 `oi_orders` 的投影；`source` 区分采集/导入）。只读，供算运费/成本/利润/拣货取数 */
+  orderShippingRows: (payload?: {
+    limit?: number;
+    /** 只看某条摄取通道；缺省 = 两条都看 */
+    source?: 'all' | 'import' | 'collect';
+  }) => Promise<APIResult<UnifiedOrderRow[]>>;
   orderDownloadImage: (url: string) => Promise<APIResult<OrderImageRecord>>;
+  /** 拣货投影（只读）：未发货订单行 + 三层回落图 + 款色码/供应商（聚合在渲染层纯函数） */
+  pickingRows: (payload?: {
+    limit?: number;
+    shop?: string;
+    includeShipped?: boolean;
+  }) => Promise<APIResult<PickingRowsResult>>;
+  /** 拣货单导出（主进程 exceljs 生成：带图 + **按厂家分表**）；行由渲染层算好，主进程只画表 */
+  pickingExportExcel: (payload: {
+    rows: PickingExportRow[];
+    defaultName?: string;
+  }) => Promise<APIResult<ExportExcelResult & { rows: number }>>;
   orderReadImage: (localPath: string) => Promise<APIResult<ImageDataUrl>>;
   /** 缩略图（主进程等比缩放 + LRU，≤maxEdge px JPEG dataURL） */
-  orderImageThumb: (payload: { localPath: string; maxEdge?: number }) => Promise<APIResult<{ dataUrl: string }>>;
+  orderImageThumb: (payload: {
+    localPath: string;
+    maxEdge?: number;
+  }) => Promise<APIResult<{ dataUrl: string }>>;
   /** 批量缩略图（渲染层同帧多图合并一次往返）：返回顺序与 items 一致，单项无效为 null */
-  orderImageThumbBatch: (items: { localPath: string; maxEdge?: number }[]) => Promise<APIResult<{ dataUrls: (string | null)[] }>>;
+  orderImageThumbBatch: (
+    items: { localPath: string; maxEdge?: number }[]
+  ) => Promise<APIResult<{ dataUrls: (string | null)[] }>>;
   /** 识别引擎 API Key：safeStorage 加密落盘（渲染层不落明文） */
   orderApiKeySet: (apiKey: string) => Promise<APIResult<{ stored: boolean }>>;
   orderApiKeyGet: () => Promise<APIResult<{ apiKey: string }>>;
@@ -55,9 +87,15 @@ export interface ElectronAPI {
   orderCleanupOrphanImages: () => Promise<APIResult<{ deleted: number; freedBytes: number }>>;
   // 产品库导入「图片」列：读取用户指定的本地图片（任意路径，仅图片扩展名，≤10MB）
   orderReadLocalImage: (localPath: string) => Promise<APIResult<ImageDataUrl>>;
-  orderExportExcel: (buffer: ArrayBuffer, defaultName?: string) => Promise<APIResult<{ filePath: string }>>;
+  orderExportExcel: (
+    buffer: ArrayBuffer,
+    defaultName?: string
+  ) => Promise<APIResult<{ filePath: string }>>;
   // ---- 待识别队列（订单归类：导入行整批落库 oi_queue，失败/缺图重启不丢、可增量重试）----
-  orderQueueEnqueue: (payload: { batchNo: string; rows: OrderQueueEnqueueRow[] }) => Promise<APIResult<{ count: number }>>;
+  orderQueueEnqueue: (payload: {
+    batchNo: string;
+    rows: OrderQueueEnqueueRow[];
+  }) => Promise<APIResult<{ count: number }>>;
   orderQueueStats: (payload: { batchNo: string }) => Promise<APIResult<OrderQueueStats>>;
   /** 队列行分页：失败清单用 { status:'error' }，缺图清单用 { missingOnly:true }；列表不含 raw_fields，返回 { rows, total } */
   orderQueueList: (payload: {
@@ -70,45 +108,135 @@ export interface ElectronAPI {
   }) => Promise<APIResult<{ rows: OrderQueueRow[]; total: number }>>;
   /** 单行队列行（含 raw_fields）：补图等按需取，避免列表全量携带大字段 */
   orderQueueGet: (id: number) => Promise<APIResult<OrderQueueRow>>;
-  orderQueueNextPending: (payload: { batchNo: string; afterId: number; limit: number }) => Promise<APIResult<OrderQueueRow[]>>;
-  orderQueueSetResult: (payload: { id: number; status: 'done' | 'error' | 'missing'; error?: string }) => Promise<APIResult<void>>;
-  orderQueuePatch: (payload: { id: number; url: string; rawFields: Record<string, string> }) => Promise<APIResult<void>>;
+  orderQueueNextPending: (payload: {
+    batchNo: string;
+    afterId: number;
+    limit: number;
+  }) => Promise<APIResult<OrderQueueRow[]>>;
+  orderQueueSetResult: (payload: {
+    id: number;
+    status: 'done' | 'error' | 'missing';
+    error?: string;
+  }) => Promise<APIResult<void>>;
+  orderQueuePatch: (payload: {
+    id: number;
+    url: string;
+    rawFields: Record<string, string>;
+  }) => Promise<APIResult<void>>;
   orderQueueRetryErrors: (payload: { batchNo: string }) => Promise<APIResult<{ count: number }>>;
   orderQueuePurgeDone: (payload: { batchNo: string }) => Promise<APIResult<{ count: number }>>;
-  orderQueueLastActive: () => Promise<APIResult<{ batchNo: string; stats: OrderQueueStats } | null>>;
+  orderQueueLastActive: () => Promise<
+    APIResult<{ batchNo: string; stats: OrderQueueStats } | null>
+  >;
   // 款编码/款色（产品库主数据）
-  orderStyleResolve: (payload: { imageId: number; fingerprint: string; category: string; features: string[]; color: string; styleName?: string }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
+  orderStyleResolve: (payload: {
+    imageId: number;
+    fingerprint: string;
+    category: string;
+    features: string[];
+    color: string;
+    styleName?: string;
+  }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
   orderStyleList: () => Promise<APIResult<StyleRecord[]>>;
   orderStyleDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
-  orderStyleAssign: (payload: { orderId: number; styleId: number; color: string; fingerprint?: string }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
+  orderStyleAssign: (payload: {
+    orderId: number;
+    styleId: number;
+    color: string;
+    fingerprint?: string;
+  }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
   // 修改款式展示名（款编码级）
-  orderStyleRename: (payload: { code: string; name: string }) => Promise<APIResult<{ code: string; name: string }>>;
+  orderStyleRename: (payload: {
+    code: string;
+    name: string;
+  }) => Promise<APIResult<{ code: string; name: string }>>;
   // 产品库 Excel 批量导入（指纹由渲染层生成）
-  orderStyleImport: (payload: { styles: StyleImportItem[] }) => Promise<APIResult<StyleImportResult>>;
-  orderUpdate: (payload: OrderUpdateInput) => Promise<APIResult<{ styleCode?: string; styleColorCode?: string }>>;
-  orderUpdateStatus: (payload: OrderUpdateStatusInput) => Promise<APIResult<{ status: OrderStatus }>>;
+  orderStyleImport: (payload: {
+    styles: StyleImportItem[];
+  }) => Promise<APIResult<StyleImportResult>>;
+  orderUpdate: (
+    payload: OrderUpdateInput
+  ) => Promise<APIResult<{ styleCode?: string; styleColorCode?: string }>>;
+  orderUpdateStatus: (
+    payload: OrderUpdateStatusInput
+  ) => Promise<APIResult<{ status: OrderStatus }>>;
   orderDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: number }>>;
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected: (input: number[] | { all: true }) => Promise<APIResult<{ updated: number }>>;
   // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
   aeDbEnsure: () => Promise<APIResult<void>>;
-  aeOrderList: (payload?: { offset?: number; limit?: number; search?: string }) => Promise<APIResult<{ rows: AeOrderListItem[]; total: number }>>;
+  aeOrderList: (payload?: {
+    offset?: number;
+    limit?: number;
+    search?: string;
+  }) => Promise<APIResult<{ rows: AeOrderListItem[]; total: number }>>;
   aeSummary: () => Promise<APIResult<AeSummary>>;
   aeReceiverStatus: () => Promise<APIResult<AeReceiverStatus>>;
   // M1 利润追踪扩展：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
-  aeProfitStats: (payload?: { granularity?: 'day' | 'month'; rangeDays?: number }) => Promise<APIResult<AeProfitOverview>>;
-  aeCostMapImport: (payload: { items: AeCostMapImportItem[] }) => Promise<APIResult<{ replaced: number }>>;
+  aeProfitStats: (payload?: {
+    granularity?: 'day' | 'month';
+    rangeDays?: number;
+  }) => Promise<APIResult<AeProfitOverview>>;
+  aeCostMapImport: (payload: {
+    items: AeCostMapImportItem[];
+  }) => Promise<APIResult<{ replaced: number }>>;
   aeCostMapList: () => Promise<APIResult<AeCostMapItem[]>>;
+  /** ---- 结算明细（AE 后台导出的订单明细；解析在渲染层，主进程只落库）---- */
+  settleImport: (payload: { rows: unknown[] }) => Promise<
+    APIResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
+  >;
+  settleOrders: (payload: { orderNos: string[] }) => Promise<
+    APIResult<{
+      rows: {
+        orderNo: string;
+        settleStatus: string;
+        pendingReason: string;
+        dealCents: number;
+        netIncomeCents: number;
+        splitCents: number;
+        feeSumCents: number;
+        itemLines: number;
+        /** 商品行件数明细（`lines` = 该 (订单,商品) 的商品行数；>1 = 同商品多 SKU，qty 不可逐行复用） */
+        items: { itemId: string; lines: number; qty: number }[];
+        /** `order` = 订单级行（整单口径，含买家付的运费）；`items` = 无订单级行时退化为商品行求和 */
+        from: 'order' | 'items';
+      }[];
+    }>
+  >;
+  settleStats: () => Promise<
+    APIResult<{
+      lines: number;
+      orders: number;
+      itemLines: number;
+      orderLines: number;
+      pendingOrders: number;
+      settledOrders: number;
+      lastImportedAt: string;
+    }>
+  >;
   aeRateList: () => Promise<APIResult<AeRateItem[]>>;
-  aeRateUpsert: (payload: { fromCurrency: string; rateToCny: number }) => Promise<APIResult<{ ok: boolean }>>;
-  purchaseCostSnapshot: () => Promise<APIResult<{ items: PurchaseCostSnapshotItem[]; count: number }>>;
+  aeRateUpsert: (payload: {
+    fromCurrency: string;
+    rateToCny: number;
+  }) => Promise<APIResult<{ ok: boolean }>>;
+  purchaseCostSnapshot: () => Promise<
+    APIResult<{ items: PurchaseCostSnapshotItem[]; count: number }>
+  >;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure: () => Promise<APIResult<void>>;
   purchaseSupplierList: () => Promise<APIResult<Supplier[]>>;
-  purchaseSupplierCreate: (payload: { name: string; phone?: string; note?: string }) => Promise<APIResult<{ id: number }>>;
-  purchaseSupplierUpdate: (payload: { id: number; phone?: string; note?: string }) => Promise<APIResult<void>>;
+  purchaseSupplierCreate: (payload: {
+    name: string;
+    phone?: string;
+    note?: string;
+  }) => Promise<APIResult<{ id: number }>>;
+  purchaseSupplierUpdate: (payload: {
+    id: number;
+    phone?: string;
+    note?: string;
+  }) => Promise<APIResult<void>>;
   purchaseSupplierDelete: (payload: { id: number }) => Promise<APIResult<void>>;
   purchaseOrderList: () => Promise<APIResult<PurchaseOrder[]>>;
   purchaseOrderGet: (payload: { id: number }) => Promise<APIResult<PurchaseOrder>>;
@@ -131,7 +259,11 @@ export interface ElectronAPI {
   }) => Promise<APIResult<void>>;
   purchaseOrderSubmit: (payload: { id: number }) => Promise<APIResult<void>>;
   purchaseOrderDelete: (payload: { id: number }) => Promise<APIResult<void>>;
-  purchasePaymentList: (payload?: { supplierId?: number; from?: string; to?: string }) => Promise<APIResult<Payment[]>>;
+  purchasePaymentList: (payload?: {
+    supplierId?: number;
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<Payment[]>>;
   purchasePaymentAdd: (payload: {
     supplierId: number;
     payDate: string;
@@ -141,18 +273,42 @@ export interface ElectronAPI {
     note?: string;
   }) => Promise<APIResult<{ id: number }>>;
   purchasePaymentDelete: (payload: { id: number }) => Promise<APIResult<void>>;
-  purchaseReconciliation: (payload?: { from?: string; to?: string }) => Promise<APIResult<ReconciliationRow[]>>;
+  purchaseReconciliation: (payload?: {
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<ReconciliationRow[]>>;
   purchaseOutstanding: () => Promise<APIResult<OutstandingRow[]>>;
-  purchaseIgnoreAdd: (payload: { styleCode: string; color?: string; reason?: string }) => Promise<APIResult<void>>;
-  purchaseIgnoreRemove: (payload: { styleCode: string; color?: string }) => Promise<APIResult<void>>;
+  purchaseIgnoreAdd: (payload: {
+    styleCode: string;
+    color?: string;
+    reason?: string;
+  }) => Promise<APIResult<void>>;
+  purchaseIgnoreRemove: (payload: {
+    styleCode: string;
+    color?: string;
+  }) => Promise<APIResult<void>>;
   purchaseIgnoreList: () => Promise<APIResult<IgnoreRow[]>>;
-  purchasePriceHistory: (payload: { supplierId?: number; styleCode: string; color?: string }) => Promise<APIResult<{ priceCents: number }>>;
+  purchasePriceHistory: (payload: {
+    supplierId?: number;
+    styleCode: string;
+    color?: string;
+  }) => Promise<APIResult<{ priceCents: number }>>;
   /** 店铺对账汇总：全部已提交拿货单按来源订单拆分到店铺 */
-  purchaseShopAllocation: (payload?: { from?: string; to?: string }) => Promise<APIResult<ShopAllocationRow[]>>;
+  purchaseShopAllocation: (payload?: {
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<ShopAllocationRow[]>>;
   /** 指定店铺的对账明细行 */
-  purchaseShopAllocationDetail: (payload: { shop: string; from?: string; to?: string }) => Promise<APIResult<ShopAllocationDetailRow[]>>;
+  purchaseShopAllocationDetail: (payload: {
+    shop: string;
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
-  purchaseExportExcel: (payload: { items: PurchaseItem[]; defaultName?: string }) => Promise<APIResult<{ filePath: string }>>;
+  purchaseExportExcel: (payload: {
+    items: PurchaseItem[];
+    defaultName?: string;
+  }) => Promise<APIResult<{ filePath: string }>>;
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
   /** 幂等建表（视图首次激活时调用） */
   shopAccountDbEnsure: () => Promise<APIResult<void>>;
@@ -170,7 +326,7 @@ export interface ElectronAPI {
   shopAccountSecurity: () => Promise<APIResult<{ secureStorage: boolean }>>;
   /** 新增/更新店铺套（secrets 缺省=保持、空串=清空、非空=覆盖；密码在主进程加密后落库） */
   shopAccountUpsert: (
-    payload: ShopAccountUpsertInput,
+    payload: ShopAccountUpsertInput
   ) => Promise<APIResult<{ id: number; secureStorage: boolean }>>;
   shopAccountDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
   /** 按需解密单个敏感字段（复制/查看，避免整条详情往返） */
@@ -187,7 +343,7 @@ export interface ElectronAPI {
    *   - platforms：{ mode: 'set' | 'append' | 'remove', values: string[] }
    */
   shopAccountBatchUpdate: (
-    payload: ShopAccountBatchUpdateInput,
+    payload: ShopAccountBatchUpdateInput
   ) => Promise<APIResult<ShopAccountBatchUpdateResult>>;
   // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法；无密码类凭据）----
   /** 幂等建表（企业管理 Tab 首次激活时调用） */
@@ -206,16 +362,157 @@ export interface ElectronAPI {
   /** 删除企业（级联删除其合规资料） */
   companyDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
   /** 新增/更新合规资料（type 由主进程白名单校验） */
-  companyProfileUpsert: (
-    payload: CompanyProfileUpsertInput,
-  ) => Promise<APIResult<{ id: number }>>;
+  companyProfileUpsert: (payload: CompanyProfileUpsertInput) => Promise<APIResult<{ id: number }>>;
   /** 删除合规资料 */
   companyProfileDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  // ---- 产品库（产品主数据：编码 / 名称 / 厂家 / 类目；编码为跨域关联锚点，与 oi_styles.code 同口径）----
+  /** 幂等建表（视图首次激活时调用） */
+  productDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
+  /** 产品列表（关键字 / 状态 / 厂家过滤 + 分页；按编码升序） */
+  productList: (payload?: {
+    search?: string;
+    status?: ProductStatus | '';
+    supplierId?: number;
+    offset?: number;
+    limit?: number;
+  }) => Promise<APIResult<{ rows: ProductListItem[]; total: number }>>;
+  /** 单条详情（不存在返回 null） */
+  productGet: (payload: { id: number }) => Promise<APIResult<ProductListItem | null>>;
+  /** 新增/更新（全量提交；编码唯一，冲突时主进程抛错，不静默改名） */
+  productUpsert: (
+    payload: ProductUpsertInput
+  ) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 删除（物理删除；已进入业务链路的产品应改为 status='archived'） */
+  productDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /** 汇总（总数 / 按状态 / 厂家分布 / 未关联厂家数；supplierOptions 为**全量**厂家，供下拉） */
+  productSummary: () => Promise<APIResult<ProductSummary>>;
+  /** Excel 批量导入（单事务）；mode='insertOnly' 时编码已存在的行记为失败而不覆盖 */
+  productImport: (payload: {
+    items: ProductImportRowInput[];
+    mode?: 'upsert' | 'insertOnly';
+  }) => Promise<APIResult<ProductImportOutcome>>;
+  /** 保存渲染层生成的 xlsx（弹保存框）；buffer 无效时主进程返回 success=false */
+  productExport: (payload: {
+    buffer: ArrayBuffer;
+    defaultName?: string;
+  }) => Promise<APIResult<{ filePath: string }>>;
+  // ---- 店铺商品ID → 产品映射（P3；pl_shop_sku）----
+  // 与 sk_name_map 的分工：那张表归**人写的文本**（店名/款名），这张表归**平台商品ID**（稳定标识）。
+  /** 映射列表（关键字 / 状态 / 店铺过滤 + 分页；按更新时间倒序） */
+  productSkuList: (payload?: {
+    search?: string;
+    status?: SkuMapStatus | '';
+    shopId?: number;
+    offset?: number;
+    limit?: number;
+  }) => Promise<APIResult<{ rows: ShopSkuRow[]; total: number }>>;
+  /** 映射汇总（总数 / 按状态 / 按平台 / 按店铺；**不扫订单**） */
+  productSkuSummary: () => Promise<APIResult<SkuMapSummary>>;
+  /** 待关联队列（实时聚合 oi_orders 的商品ID，减去已有生效映射；非缓存表） */
+  productSkuQueue: (payload?: {
+    limit?: number;
+    maxRows?: number;
+  }) => Promise<APIResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>>;
+  /** 批量关联 / 改绑（单事务；行级失败逐行报回，不做整批回滚）
+   *  `reassigned` = 顺带回填的**存量订单行数**（映射写入后重跑确定性归款） */
+  productSkuMap: (payload: {
+    rows: SkuMapInputPayload[];
+  }) => Promise<
+    APIResult<{
+      created: number;
+      updated: number;
+      reassigned: number;
+      failed: { itemId: string; message: string }[];
+    }>
+  >;
+  /** 标失效（商品ID 会变；**不物理删除**，否则关联率莫名回落且查不出原因） */
+  productSkuInvalidate: (payload: { id: number }) => Promise<APIResult<{ changed: boolean }>>;
+  // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
+  productVariantList: (payload: { productIds: number[] }) => Promise<APIResult<{ rows: VariantRow[] }>>;
+  productVariantUpsert: (payload: VariantUpsertInput) => Promise<APIResult<{ id: number; created: boolean }>>;
+  productVariantDelete: (payload: { id: number }) => Promise<APIResult<{ removed: number }>>;
+  productBatchUpdate: (
+    payload: ProductBatchUpdateInput,
+  ) => Promise<APIResult<{ updated: number }>>;
+  // ---- 产品图片（pl_images / pl_item_images；srcPath 须来自用户对话框所选文件）----
+  productImageAttach: (payload: {
+    productId: number;
+    srcPath: string;
+  }) => Promise<APIResult<{ imageId: number; localPath: string; reused: boolean }>>;
+  productImageDetach: (payload: { productId: number }) => Promise<APIResult<{ changed: boolean }>>;
+  productItemImageSet: (payload: {
+    itemId: string;
+    srcPath: string;
+  }) => Promise<APIResult<{ imageId: number; localPath: string; reused: boolean; itemId: string }>>;
+  productItemImageClear: (payload: { itemId: string }) => Promise<APIResult<{ removed: number }>>;
+  productItemImagePool: (payload: {
+    itemIds: string[];
+  }) => Promise<APIResult<{ pool: Record<string, ItemImagePoolEntry> }>>;
+  // ---- 店铺商品清单（pl_shop_sku 扩展视图，支持一对多关联）----
+  /** 导入商品清单（按 item_id 去重） */
+  shopProductImport: (payload: {
+    items: { itemId: string; shopId: number; imageUrl: string }[];
+  }) => Promise<APIResult<{ imported: number; updated: number }>>;
+  /** 商品清单列表（按 item_id 去重，分页 + 搜索） */
+  shopProductList: (payload?: {
+    offset?: number;
+    limit?: number;
+    search?: string;
+  }) => Promise<APIResult<{ rows: ShopProductItem[]; total: number }>>;
+  /** 删除商品（按 item_id 删除所有关联记录） */
+  shopProductDelete: (payload: { itemId: string }) => Promise<APIResult<{ removed: number }>>;
+  /** 查询某商品的关联关系 */
+  shopProductRelations: (payload: { itemId: string }) => Promise<APIResult<ShopProductRelation[]>>;
+  /** 添加关联关系 */
+  shopProductRelationAdd: (payload: {
+    itemId: string;
+    productId: number;
+  }) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 删除关联关系 */
+  shopProductRelationDelete: (payload: { id: number }) => Promise<APIResult<{ removed: number }>>;
+  // ---- 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）----
+  // 补上缺失的"店铺"实体层：历史文本（订单 / 采购 / 利润三处）**不改写**，靠名称归一映射旁挂关联。
+  /** 幂等建表（视图首次激活时调用） */
+  shopDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
+  /** 店铺列表（关键字 / 平台 / 状态过滤 + 分页；按平台 → 名称升序） */
+  shopList: (payload?: {
+    search?: string;
+    platform?: string;
+    status?: ShopStatus | '';
+    offset?: number;
+    limit?: number;
+    /** 只看某个账号套装名下的店铺（0/缺省 = 不过滤）—— 店铺套编辑抽屉用 */
+    shopSetId?: number;
+  }) => Promise<APIResult<{ rows: ShopListItem[]; total: number }>>;
+  /** 单条详情（不存在返回 null） */
+  shopGet: (payload: { id: number }) => Promise<APIResult<ShopListItem | null>>;
+  /** 新增/更新（全量提交；同平台同名冲突时主进程抛错，不静默合并） */
+  shopUpsert: (payload: ShopUpsertInput) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 汇总（店铺数 / 按平台 / 按状态 + 三处历史文本的归一进度） */
+  shopSummary: () => Promise<APIResult<ShopSummary>>;
+  /** 未归一的历史店铺名（实时聚合三处文本，非缓存表） */
+  shopUnmapped: () => Promise<APIResult<UnmappedShopRow[]>>;
+  /** 归一指派 / 标记忽略（ignored=true 时不要求 refId） */
+  shopMap: (payload: {
+    raw: string;
+    refId?: number;
+    ignored?: boolean;
+    kind?: NameMapKind;
+    note?: string;
+  }) => Promise<APIResult<{ key: string; refId: number; ignored: boolean }>>;
+  /** 撤销归一（回到未归一名单） */
+  shopUnmap: (payload: {
+    raw: string;
+    kind?: NameMapKind;
+  }) => Promise<APIResult<{ removed: number }>>;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
   pluginsScan: () => Promise<APIResult<PluginScanResult>>;
   /** 读取外置插件入口 JS 源码（主进程做路径穿越防护 + 大小限制） */
-  pluginsReadEntry: (payload: { id: string; entry: string }) => Promise<APIResult<{ code: string }>>;
+  pluginsReadEntry: (payload: {
+    id: string;
+    entry: string;
+  }) => Promise<APIResult<{ code: string }>>;
   /** 卸载（删除）外置插件目录 */
   pluginsUninstall: (payload: { id: string }) => Promise<APIResult<void>>;
   /** 在系统文件管理器中打开插件目录 */
@@ -224,9 +521,10 @@ export interface ElectronAPI {
   /** 拉取市场 catalog（净化后的合法条目列表） */
   pluginMarketCatalog: (payload: { url: string }) => Promise<APIResult<MarketCatalog>>;
   /** 安装/更新市场插件：下载 zip → sha256 → 解压校验 → 落盘 <userData>/plugins/<id>/；force=true 允许覆盖同版本 */
-  pluginMarketInstall: (
-    payload: { item: MarketPluginInfo; force?: boolean },
-  ) => Promise<APIResult<{ id: string; version: string }>>;
+  pluginMarketInstall: (payload: {
+    item: MarketPluginInfo;
+    force?: boolean;
+  }) => Promise<APIResult<{ id: string; version: string }>>;
   // ---- 软件更新（GitHub Releases 自动更新）----
   /** 触发检查更新：{ mode:'dev' }（开发模式不检查）/ { mode:'release' }；结果经 updater-event 事件异步送达 */
   checkForUpdates: () => Promise<APIResult<{ mode: 'dev' | 'release'; currentVersion: string }>>;
@@ -260,7 +558,7 @@ export interface ElectronAPI {
   mailSyncState: () => Promise<APIResult<{ active: number[]; queued: number[] }>>;
   /** 邮件列表（纯本地查询，不触网） */
   mailMessagesList: (
-    payload?: MailMessageListFilter,
+    payload?: MailMessageListFilter
   ) => Promise<APIResult<{ items: MailMessageItem[]; total: number }>>;
   /** 邮件详情（含正文与附件元信息） */
   mailMessageGet: (payload: { id: number }) => Promise<APIResult<MailMessageDetail | null>>;
@@ -304,11 +602,47 @@ export interface ElectronAPI {
   /** 重建全文索引（M3-2） */
   mailFtsRebuild: () => Promise<APIResult<{ total: number; indexed: number }>>;
   /** 手动清理窗口外的过期邮件 */
-  mailPurge: (payload?: { accountId?: number; days?: number }) => Promise<APIResult<{ deleted: number }>>;
+  mailPurge: (payload?: {
+    accountId?: number;
+    days?: number;
+  }) => Promise<APIResult<{ deleted: number }>>;
   /** 收件箱汇总 */
   mailStats: () => Promise<APIResult<MailStats>>;
   /** 支持的邮箱服务商预设（只读展示，含授权码获取指引） */
   mailProviderList: () => Promise<APIResult<MailProviderPresetView[]>>;
+  /** ---- 运价表快照（宿主中立层；一次导入 = 一条，按内容去重）---- */
+  shipRateSnapshotSave: (payload: {
+    table: unknown;
+    sourceFile?: string;
+    sheetName?: string;
+    /** yyyy-mm-dd；缺省 = 导入当日 */
+    effectiveFrom?: string;
+  }) => Promise<APIResult<{ id: number; created: boolean; effectiveFrom: string }>>;
+  shipRateSnapshotList: (payload?: { limit?: number }) => Promise<
+    APIResult<{
+      rows: {
+        id: number;
+        effectiveFrom: string;
+        sourceFile: string;
+        sheetName: string;
+        countries: number;
+        cards: number;
+        importedAt: string;
+      }[];
+    }>
+  >;
+  /** 算账用：含整张表的快照集合（按生效日倒序） */
+  shipRateSnapshotCalc: (payload?: { limit?: number }) => Promise<
+    APIResult<{
+      rows: {
+        id: number;
+        effectiveFrom: string;
+        sourceFile: string;
+        sheetName: string;
+        table: unknown;
+      }[];
+    }>
+  >;
   /** 订阅同步事件（主进程→渲染层单向推送）；返回退订函数 */
   onMailSyncEvent: (cb: (event: MailSyncEvent) => void) => () => void;
 }
@@ -393,7 +727,7 @@ export interface TemplateConfig {
   name: string;
   filePath: string;
   content: string;
-  isBuiltIn?: boolean;  // true=文件内置模板，false=用户自定义修改
+  isBuiltIn?: boolean; // true=文件内置模板，false=用户自定义修改
 }
 
 /** 字段处理规则 — 对已有字段进行计算或转换，生成新的衍生字段 */
@@ -476,7 +810,8 @@ export interface OrderQueueStats {
 /** 订单明细（SQLite oi_orders 表） */
 export interface OrderRecord {
   id?: number;
-  imageId: number;
+  /** 归属图片；**null = 无图订单**（订单报表免图导入，S2-b） */
+  imageId: number | null;
   orderNo: string;
   shop: string;
   size: string;
@@ -618,16 +953,6 @@ export interface BackupSummary {
   hasConfig: boolean;
 }
 
-export interface AppState {
-  lastExcelPath: string;
-  lastTemplatePath: string;
-  records: RecordItem[];
-  templateConfigs: TemplateConfig[];
-  activeTemplateId: string;
-  processingRules: ProcessingRule[];
-  visibleColumns: string[];
-}
-
 // ---- 拿货对账（stock-in）----
 
 /** 厂商 */
@@ -711,12 +1036,7 @@ export type ShopAccountStatus = 'active' | 'paused' | 'banned' | 'closed';
  * mailAuthPwd = IMAP 授权码（集中邮件收件箱专用，与 emailPwd 登录密码是两套凭据）
  */
 export type ShopAccountSecretKey =
-  | 'shopPwd'
-  | 'emailPwd'
-  | 'alipayPwd'
-  | 'ziniaoPwd'
-  | 'erpPwd'
-  | 'mailAuthPwd';
+  'shopPwd' | 'emailPwd' | 'alipayPwd' | 'ziniaoPwd' | 'erpPwd' | 'mailAuthPwd';
 
 /**
  * 账号编辑器里直接维护的敏感字段（不含 mailAuthPwd）。
@@ -903,6 +1223,432 @@ export interface CompanyProfileUpsertInput {
   note?: string;
   /** 类型专属扩展字段（整体覆盖） */
   extra?: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// 产品库（产品主数据，挂宿主中立层 —— ADR-002 C3；编码为跨域关联锚点）
+// ---------------------------------------------------------------------------
+
+/** 产品状态：在售 / 停用（停用仅标记，不物理删除 —— 编码一经使用永不复用） */
+export type ProductStatus = 'active' | 'archived';
+
+/** 产品列表行（厂家名由 supplier_id 派生，非本表字段 —— 避免同一语义两个写入者） */
+export interface ProductListItem {
+  id: number;
+  /** 内部编码：与 oi_styles.code / purchase_items.style_code / ae_cost_map.style_code 同口径 */
+  code: string;
+  name: string;
+  /** 关联厂家 suppliers(id)；0 = 未关联 */
+  supplierId: number;
+  supplierName: string;
+  category: string;
+  status: string;
+  note: string;
+  /** 主图 pl_images(id)；0 = 未设置（窄接口 imageAttach/detach 维护，不进全量提交的 upsert） */
+  imageId: number;
+  /** 主图缓存路径（'' = 无图；经 order-image-thumb 取缩略图展示） */
+  imagePath: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** SKU 行（pl_variants：一个款下多个 SKU，每 SKU 一个克重） */
+export interface VariantRow {
+  id: number;
+  productId: number;
+  /** SKU 编码（可空；非空时全局唯一） */
+  code: string;
+  name: string;
+  /** 颜色（服装 SKU；老数据可能为空 —— 老行只有自由文本 name） */
+  color: string;
+  /** 尺码（与 color 成对填写，成对时 name = "颜色 尺码" 自动生成） */
+  size: string;
+  /** 克重（克，整数；0 = 未填） */
+  weightG: number;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** SKU 写入入参（全量提交；id 缺省/0 = 新增） */
+export interface VariantUpsertInput {
+  id?: number;
+  productId: number;
+  code?: string;
+  /** color+size 都填时自动覆盖为 "颜色 尺码"；老数据只传 name 仍兼容 */
+  name?: string;
+  color?: string;
+  size?: string;
+  weightG?: number;
+  status?: ProductStatus;
+}
+
+/** 产品批量编辑入参（**部分 patch**：undefined 的字段不修改；supplierId 0 = 清空关联） */
+export interface ProductBatchUpdateInput {
+  ids: number[];
+  supplierId?: number;
+  category?: string;
+  status?: ProductStatus;
+  note?: string;
+}
+
+/**
+ * **统一订单行**（两条摄取通道共用的形状，C1 合并的落点）：
+ *   · `order-shipping-rows`（Excel 报表导入 → `oi_orders` 投影）
+ *   · `order-collected-rows`（浏览器采集 → `ae_orders` 投影）
+ *
+ * **只放主线（算钱 + 拣货）真正读的字段**（用户 2026-09-30 定的原则：精简优先、非必要先删、必要再加）：
+ * 已删掉货值/买家运费/店铺优惠/平台补贴/币种/业务模式/付款·收货时点/发货时点等 9 个**零读者**字段 ——
+ * 它们并没有丢：原始整行仍在 `rawFields`（导入侧）与 `raw_json`（采集侧）里保真，**要加回来随时可重新提取**。
+ * 金额一律 **CNY 分**；`null` = 源里没有这一项（**不是 0**，0 会让"缺收入"看起来像"收入为零"）。
+ */
+export interface UnifiedOrderRow {
+  id: number;
+  orderNo: string;
+  /** 摄取通道（主干 `source`）：`import` = 报表导入 · `collect` = 浏览器采集 */
+  source: 'import' | 'collect';
+  shop: string;
+  orderTime: string;
+  /** 识别链 `oi_images.style_color_id → oi_style_colors → oi_styles` 的结果（采集侧取 `style_code`）；未识别为空串 */
+  styleCode: string;
+  styleColor: string;
+  /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
+  color: string;
+  size: string;
+  /** 商品ID（导入侧 `商品 ID` 列；采集侧 `product_id` —— 实测多为空） */
+  itemId: string;
+  /** 供应商（经 `pl_products.supplier_id → suppliers`）；未识别款/未填厂家时 id=0、名为空 */
+  supplierId: number;
+  supplierName: string;
+  /** 件数**真值**：仅当源直接给出数量时才有（采集行数量；导入侧由渲染层解析"商品信息"块） */
+  qty?: number;
+  /** 收入（CNY 分）：导入侧 = 订单金额；采集侧 = (商品金额 + 买家付运费 − 退款) × 汇率 */
+  amountCents: number | null;
+  /** 预计增值税（导入侧有；采集帧不含 → null） */
+  vatCents: number | null;
+  /** DDP 关税（导入侧有；采集帧不含 → null） */
+  ddpCents: number | null;
+  /** 「平台是否代征代缴」原文；空串 = 不知道（≠ 非代征）。采集帧不含该列 → 恒空串 */
+  taxPlatform: string;
+  /** 订单状态原文（交易完成 / 订单关闭 / 等待买家收货 …）—— 分桶与"未发货"判定都读它 */
+  bizStatus: string;
+  /** 原始整行（导入侧保真：件数解析、商品ID 提取都从这里；采集侧为空对象） */
+  rawFields: Record<string, string>;
+}
+
+/** 拣货投影行（宿主 `picking-rows` 返回；纯层 `src/lib/picking.ts` 直接消费它） */
+export interface PickingRowProjection {
+  id: number;
+  orderNo: string;
+  shop: string;
+  orderTime: string;
+  /** 识别链结果；未识别为空串 */
+  styleCode: string;
+  styleColor: string;
+  /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
+  color: string;
+  size: string;
+  itemId: string;
+  /** 供应商；未识别款/未填厂家时 id=0、名为空 */
+  supplierId: number;
+  supplierName: string;
+  /** 三层回落后的图（本地路径，经 `order-image-thumb(-batch)` 换 dataUrl）；'' = 没图 */
+  imagePath: string;
+  /** 机械事实：已发货（`ship_time` 非空或 `status='shipped'`） */
+  shipped: boolean;
+  /** 平台状态原文（**关闭/取消的判定在渲染层**，用 `orderCost.bucketOfStatus`） */
+  bizStatus: string;
+  /** 件数由渲染层从 raw_fields 解析（与订单利润页同一份实现） */
+  rawFields: Record<string, string>;
+}
+
+/** 拣货投影的返回：行 + 该次筛选的机械事实（界面按它说清"这批是怎么筛出来的"） */
+export interface PickingRowsResult {
+  rows: PickingRowProjection[];
+  meta: {
+    /** 返回的行数 */
+    rows: number;
+    /** 实际用的上限 */
+    limit: number;
+  };
+}
+
+/**
+ * 「拣货单导出」的一行（渲染层算好 → 主进程画表）。
+ *
+ * ⚠️ 凡是业务口径（件数 / 进价 / 金额 / 缺口文案）都在渲染层算完后**原样带过来**，
+ * 主进程不重算 —— 这样"屏幕上的数"与"导出的数"结构上不可能不一致。
+ * `image` 也一样：**图由渲染层编码**（真实订单图大半是 WebP，只有 Chromium 能解；详见 `lib/pickingExport`）。
+ */
+export interface PickingExportRow {
+  /** 供应商名；'' = 未指定厂家（会单独成一张表） */
+  supplierName: string;
+  styleCode: string;
+  color: string;
+  size: string;
+  pieces: number;
+  orders: number;
+  /** 进价（元/件）；`null` = 无进价（导出表里留空，**不写 0**） */
+  unitPrice: number | null;
+  /** 预估金额（元）；`null` = 无进价 */
+  amount: number | null;
+  /** 缺口文案（'' = 齐） */
+  gaps: string;
+  /** 已编码成 JPEG 的图（`null` = 这行没图） */
+  image: PickingExportImage | null;
+}
+
+/** 已编码的图（渲染层 canvas 产出：JPEG + 尺寸；主进程直接嵌进 xlsx） */
+export interface PickingExportImage {
+  /** **不含** `data:image/jpeg;base64,` 前缀的纯 base64 */
+  base64: string;
+  width: number;
+  height: number;
+}
+
+/** 一张图的引用（展示走 localPath → order-image-thumb 取缩略图） */
+export interface ProductImageRef {
+  imageId: number;
+  localPath: string;
+}
+
+/** 一个商品ID的候选图（**有序回落**：override → order[] → product） */
+export interface ItemImagePoolEntry {
+  /** 手动覆盖图（pl_item_images，人的显式决定，最高优先） */
+  override: ProductImageRef | null;
+  /** 订单识别图（可能多张，最新的在前） */
+  order: ProductImageRef[];
+  /** 款主图（该商品ID 的 confirmed 映射 → pl_products.image_id） */
+  product: ProductImageRef | null;
+}
+
+/** 产品写入入参（**全量提交**语义：缺省即空，不做局部 patch —— 与 shop-account-upsert 一致） */
+export interface ProductUpsertInput {
+  /** 缺省 = 新增 */
+  id?: number;
+  code: string;
+  name?: string;
+  supplierId?: number;
+  category?: string;
+  status?: ProductStatus;
+  note?: string;
+}
+
+/** Excel 批量导入的一行（字段已在渲染层解析校验；主进程只做兜底与落库） */
+export interface ProductImportRowInput {
+  rowNo: number;
+  code: string;
+  name: string;
+  supplierId: number;
+  category: string;
+  status: string;
+  note: string;
+}
+
+/** 批量导入结果（`failed` 为库层才拦得住的失败行，如 insertOnly 模式下编码已存在） */
+export interface ProductImportOutcome {
+  created: number;
+  updated: number;
+  failed: { rowNo: number; code: string; message: string }[];
+}
+
+/** 产品汇总（列表顶部 chips / 覆盖率提示） */
+export interface ProductSummary {
+  total: number;
+  byStatus: { status: string; count: number }[];
+  supplierOptions: { id: number; name: string; productCount: number }[];
+  /** 未关联厂家的产品数 */
+  withoutSupplier: number;
+}
+
+// ---------------------------------------------------------------------------
+// 店铺商品ID → 产品映射（P3；pl_shop_sku）
+//
+// 与 sk_name_map 的分工（别混淆）：那张表的键是**人写的文本**（店名/款名），靠精确匹配 + 人工指派；
+// 这张表的键是**平台商品ID**，本身就是稳定标识，未命中就进待关联队列由人确认。
+// 一期 spec 恒 '*'（变体表到 P5 才建），故队列按 (店铺, 商品ID) 聚合。
+// ---------------------------------------------------------------------------
+
+/** 映射状态：确认 / 待确认 / 已失效（商品ID 变了——标失效而不物理删除，否则关联率回落查不出原因） */
+export type SkuMapStatus = 'confirmed' | 'pending' | 'invalid';
+
+export interface ShopSkuRow {
+  id: number;
+  platform: string;
+  shopId: number;
+  /** 由 shop_id 派生（软关联 sk_shops；店被删则留空） */
+  shopName: string;
+  itemId: string;
+  spec: string;
+  productId: number;
+  /** 由 product_id 派生 */
+  productCode: string;
+  productName: string;
+  variantId: number;
+  qtyPerItem: number;
+  status: string;
+  source: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// 店铺商品清单（pl_shop_sku 扩展视图，支持一对多关联）
+// ---------------------------------------------------------------------------
+
+/** 商品清单行（按 item_id 去重） */
+export interface ShopProductItem {
+  itemId: string;
+  shopId: number;
+  shopName: string;
+  imageUrl: string;
+  importedAt: number;
+  relationCount: number; // 关联的产品数
+}
+
+/** 商品关联关系行 */
+export interface ShopProductRelation {
+  id: number;
+  itemId: string;
+  productId: number;
+  productCode: string;
+  productName: string;
+  createdAt: string;
+}
+
+/** 一条待写入的映射（批量关联 / 改绑共用） */
+export interface SkuMapInputPayload {
+  platform: string;
+  shopId: number;
+  itemId: string;
+  /** **颜色**（D4 起承载颜色语义；缺省 `'*'` = 未指定色）。
+   *  颜色是商品ID 的属性 —— 配在这里，之后该商品的所有订单自动带色，不必每单看图。 */
+  spec?: string;
+  productId: number;
+  status?: SkuMapStatus;
+  note?: string;
+}
+
+export interface SkuMapSummary {
+  total: number;
+  byStatus: { status: string; count: number }[];
+  byPlatform: { platform: string; count: number }[];
+  byShop: { shopId: number; shopName: string; platform: string; count: number }[];
+}
+
+/** 待关联队列的一行（`status='shopUnresolved'` 时**不允许**写映射：不拿空平台硬塞） */
+export interface SkuQueueRow {
+  shopKey: string;
+  shopRaw: string;
+  itemId: string;
+  /** 展示用商品标题（不参与匹配） */
+  title: string;
+  orderCount: number;
+  shopId: number;
+  shopName: string;
+  platform: string;
+  /** 同名**唯一**精确命中给出的建议（永不自动落库，需人工一键采纳） */
+  autoShopId: number;
+  autoShopName: string;
+  autoShopPlatform: string;
+  status: 'unmapped' | 'shopUnresolved';
+}
+
+export interface SkuQueueStats {
+  groups: number;
+  shown: number;
+  unmapped: number;
+  shopUnresolved: number;
+  /** 已有生效映射、已退出队列的组数 */
+  mapped: number;
+  withItemId: number;
+  /** 没有商品ID的订单行数（必须报出，否则是无声丢行） */
+  withoutItemId: number;
+  truncated: boolean;
+  /** 涉及但尚未归一的店铺名（去重；界面靠它提示"先去登记哪些店"） */
+  unresolvedShops: string[];
+}
+
+// ---------------------------------------------------------------------------
+// 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）
+//
+// 病根（该计划 D1/D2）：店铺实体不存在，店名以自由文本各存三处且互相拷贝 ——
+//   oi_orders.shop / purchase_sources.shop / ae_orders.shop_name
+// 本层补实体层，历史文本一律不改写（G2）；关联靠 sk_name_map 的归一映射。
+// ⚠️ 三处文本**都没有平台字段** → `platform` 无法从历史数据推导，只能在登记店铺时由人指定。
+// ---------------------------------------------------------------------------
+
+/** 店铺状态：在营 / 停用（停用仅标记，不物理删除 —— 历史订单仍指向它） */
+export type ShopStatus = 'active' | 'archived';
+
+/** 归一映射的实体类型（S1 只用 shop；其余为 supplier / style / product 预留） */
+export type NameMapKind = 'shop' | 'supplier' | 'style' | 'product';
+
+export interface ShopListItem {
+  id: number;
+  platform: string;
+  name: string;
+  /** 归一键（去空白 + 剥不可见字符后的形态，UNIQUE 与自动命中都用它） */
+  nameKey: string;
+  /** 平台店铺ID（**归一后**的值；'' = 未填）—— 店铺实体的稳定业务键，改名不影响 */
+  platformShopId: string;
+  site: string;
+  /** 所属账号套装 sk_shop_sets(id)；0 = 未关联（软关联） */
+  shopSetId: number;
+  status: string;
+  openedAt: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+  /** 已归一到本店的历史文本条数 */
+  aliasCount: number;
+}
+
+/** 新增/更新店铺入参（**全量提交**语义：缺省即空） */
+export interface ShopUpsertInput {
+  /** 0 / 缺省 = 新增 */
+  id: number;
+  platform: string;
+  name: string;
+  /** 平台店铺ID（可空；非空时参与唯一性 —— 同平台内不得重复） */
+  platformShopId: string;
+  site: string;
+  shopSetId: number;
+  status: string;
+  openedAt: string;
+  note: string;
+}
+
+/** 未归一的历史店铺名（一次实时聚合的结果） */
+export interface UnmappedShopRow {
+  /** 归一键 —— `shopMap` / `shopUnmap` 的入参 */
+  key: string;
+  raw: string;
+  occurrences: number;
+  /** 出现过的来源（order / purchase / ae） */
+  sources: string[];
+  /** 若恰好能按精确名唯一命中一家店铺则给出（**不自动写映射**；歧义时恒为 0） */
+  autoShopId: number;
+  autoShopName: string;
+  autoShopPlatform: string;
+}
+
+/** 店铺汇总（店铺侧 + 历史文本侧的归一进度） */
+export interface ShopSummary {
+  total: number;
+  byPlatform: { platform: string; count: number }[];
+  byStatus: { status: string; count: number }[];
+  names: {
+    total: number;
+    mapped: number;
+    unmapped: number;
+    ignored: number;
+    /** 未归一里能按精确名唯一命中的条数（"一键采纳"能消掉多少） */
+    autoMatched: number;
+    /** 映射已指向店铺、但该名称在文本里已不存在（过期映射，可清理） */
+    stale: number;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,13 +2037,18 @@ export interface AeReceiverStatus {
 
 // ---- 速卖通利润追踪 M1：利润引擎 / 成本衔接 / 汇率（与 electron/ae-engine.ts、ae-db.ts 同构）----
 
-/** 拿货成本快照项（purchase-cost-snapshot 只读导出） */
+/** 拿货成本快照项（purchase-cost-snapshot 只读导出；P4a 起按 (款, 拿货日期) 分组，一款可多项） */
 export interface PurchaseCostSnapshotItem {
   styleCode: string;
   styleName: string;
   sampleCount: number;
   /** 加权均价（分） */
   weightedPriceCents: number;
+  /**
+   * 本项的拿货日期（yyyy-mm-dd）。
+   * ⚠️ P4a 语义变更：原为「该款最近一次拿货日期」（一款一项），现为「**本项**的拿货日期」
+   * （一款可多项，一项 = 一个成本生效区间）；导库时作为 `ae_cost_map.effective_from`。
+   */
   lastBizDate: string;
 }
 
@@ -1310,8 +2061,11 @@ export interface AeCostMapImportItem {
   lastBizDate: string;
 }
 
-/** ae_cost_map 行（成本管理面板） */
+/** ae_cost_map 行（成本管理面板）。P4a 起同一款可多行：一行 = 一个生效区间。 */
 export interface AeCostMapItem extends AeCostMapImportItem {
+  /** 生效日（yyyy-mm-dd）；无区间信息的存量行 = `0000-01-01` */
+  effectiveFrom: string;
+  /** 该行来源：purchase = 对账快照导入，manual = 界面手工录入 */
   source: string;
   updatedAt: string;
 }

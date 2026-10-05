@@ -46,7 +46,7 @@ const src = computed(() => {
 });
 
 const statusText = computed(() =>
-  runtime.value ? '正在连接岛设置面板…' : '未发现该 UI 岛的运行时（请确认已安装并启用）',
+  runtime.value ? '正在连接岛设置面板…' : '未发现该 UI 岛的运行时（请确认已安装并启用）'
 );
 
 function attach(): void {
@@ -71,7 +71,10 @@ onMounted(() => {
   attach();
   // 主题令牌跟随：宿主 data-theme 切换（含 system 自动）→ 重采 --wb-* 推送岛内
   themeObserver = new MutationObserver(() => bridge?.pushTheme());
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
   offMailSync = onMailSyncEvent((payload) => {
     void props.manager.bus.emit('mail-sync-event', payload);
   });
@@ -94,14 +97,14 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   background: var(--wb-surface, #ffffff);
-  color: var(--wb-text, #1c1c1e);
+  color: var(--wb-text, #1f2328);
 }
 .island-settings-bar {
   flex-shrink: 0;
   padding: 8px 12px;
   font-size: 12px;
-  color: var(--wb-text-muted, #8e8e93);
-  border-bottom: 1px solid var(--wb-border, #e5e5e3);
+  color: var(--wb-text-muted, #666d79);
+  border-bottom: 1px solid var(--wb-border, #e8eaed);
 }
 .island-settings-frame {
   flex: 1;

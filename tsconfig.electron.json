@@ -12,5 +12,9 @@
     "moduleResolution": "node",
     "allowJs": true
   },
+  // 只编译 .ts：plugin-ui-runtime.js 是**桥运行时源码文本**（由 sk-plugin:// 协议读文件后注入 UI 包 HTML，
+  // 不走 import/require），必须原样分发——若用 allowJs 把它纳入编译，tsc 会重写/压缩全文（实测 12KB → 14KB、
+  // 注释全丢），对一个"逐字节喂给浏览器执行"的文件是不能接受的。它的分发改由 electron-builder.yml
+  // 的 files 显式收录原始文件（打包后命中 plugin-ui-protocol.ts 的第 1 个候选路径）。
   "include": ["electron/**/*.ts"]
 }

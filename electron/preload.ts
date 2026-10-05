@@ -16,17 +16,61 @@ const sanitizePurchaseItems = (items: any) => {
       size: typeof it?.size === 'string' ? it.size.slice(0, 50) : '',
       qty: typeof it?.qty === 'number' ? Math.max(0, Math.round(it.qty)) : 0,
       priceCents: typeof it?.priceCents === 'number' ? Math.max(0, Math.round(it.priceCents)) : 0,
-      suggestionQty: typeof it?.suggestionQty === 'number' ? Math.max(0, Math.round(it.suggestionQty)) : 0,
+      suggestionQty:
+        typeof it?.suggestionQty === 'number' ? Math.max(0, Math.round(it.suggestionQty)) : 0,
     }))
     .slice(0, 500);
 };
 
+/**
+ * 拣货单导出行消毒：只透传**渲染层已经算好**的业务值（件数 / 进价 / 金额 / 缺口文案 / 已编码的图），
+ * 主进程不重算任何口径（见 `picking-handlers.ts` 的文件头）。
+ *
+ * ⚠️ `unitPrice` / `amount` 的 `null` **必须原样保留**：它是"没进价"，折成 0 会让导出的表
+ * 把"没查到价"写成"这件免费" —— 对账时是查不出来的错。
+ * ⚠️ `image` 的 base64 有长度上限（`BASE64_MAX`）：形状不对就整个丢掉（当"这行没图"），
+ * 不做截断 —— 截断出来的 base64 是**坏图**，比没图更难排查。
+ */
+const BASE64_MAX = 400_000;
+const sanitizePickingExportRows = (rows: any) => {
+  if (!Array.isArray(rows)) return [];
+  const money = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
+  const image = (v: any) => {
+    if (!v || typeof v !== 'object') return null;
+    const base64 = typeof v.base64 === 'string' ? v.base64 : '';
+    if (!base64 || base64.length > BASE64_MAX) return null;
+    const w = typeof v.width === 'number' ? Math.round(v.width) : 0;
+    const h = typeof v.height === 'number' ? Math.round(v.height) : 0;
+    return w > 0 && h > 0 ? { base64, width: w, height: h } : null;
+  };
+  return rows
+    .slice(0, 500)
+    .map((r: any) => ({
+      supplierName: typeof r?.supplierName === 'string' ? r.supplierName.slice(0, 100) : '',
+      styleCode: typeof r?.styleCode === 'string' ? r.styleCode.slice(0, 60) : '',
+      color: typeof r?.color === 'string' ? r.color.slice(0, 60) : '',
+      size: typeof r?.size === 'string' ? r.size.slice(0, 20) : '',
+      pieces: typeof r?.pieces === 'number' ? Math.max(0, Math.round(r.pieces)) : 0,
+      orders: typeof r?.orders === 'number' ? Math.max(0, Math.round(r.orders)) : 0,
+      unitPrice: money(r?.unitPrice),
+      amount: money(r?.amount),
+      gaps: typeof r?.gaps === 'string' ? r.gaps.slice(0, 200) : '',
+      image: image(r?.image),
+    }))
+    .filter((r: any) => r.styleCode || r.color || r.size);
+};
+
 /** 待识别队列入队行消毒：每行仅透传字符串原始字段（数量/长度受控），防任意对象注入主进程 */
 const sanitizeQueueRows = (
-  rows: any,
+  rows: any
 ): Array<{ rawFields: Record<string, string>; url: string; orderNo: string; info: string }> => {
   if (!Array.isArray(rows)) return [];
-  const out: Array<{ rawFields: Record<string, string>; url: string; orderNo: string; info: string }> = [];
+  const out: Array<{
+    rawFields: Record<string, string>;
+    url: string;
+    orderNo: string;
+    info: string;
+  }> = [];
   for (const r of rows.slice(0, 50000)) {
     if (!isPlainObject(r)) continue;
     const rawFields: Record<string, string> = {};
@@ -111,7 +155,10 @@ const sanitizeShopAccountInput = (payload: any) => {
         .filter((v: string) => !!v)
     : undefined;
   return {
-    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    id:
+      typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0
+        ? payload.id
+        : 0,
     email: s(payload?.email, 200),
     phone: s(payload?.phone, 40),
     company: s(payload?.company, 120),
@@ -144,9 +191,9 @@ const sanitizeShopAccountBatchInput = (payload: any) => {
     ? Array.from(
         new Set(
           payload.ids.filter(
-            (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0,
-          ),
-        ),
+            (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0
+          )
+        )
       ).slice(0, 5000)
     : [];
   const patchRaw = isPlainObject(payload?.patch) ? payload.patch : {};
@@ -168,13 +215,23 @@ const sanitizeShopAccountBatchInput = (payload: any) => {
     patch.erpAccount = s(patchRaw.erpAccount, 120);
   }
   // 关联企业：下拉选择（仅覆盖语义）。0 = 取消关联；> 0 = 该企业 id（非整数/负数一律丢弃）
-  if (typeof patchRaw.companyId === 'number' && Number.isInteger(patchRaw.companyId) && patchRaw.companyId >= 0) {
+  if (
+    typeof patchRaw.companyId === 'number' &&
+    Number.isInteger(patchRaw.companyId) &&
+    patchRaw.companyId >= 0
+  ) {
     patch.companyId = Math.min(patchRaw.companyId, 2147483647);
   }
-  if (isPlainObject(patchRaw.tags) && (patchRaw.tags.mode === 'set' || patchRaw.tags.mode === 'append')) {
+  if (
+    isPlainObject(patchRaw.tags) &&
+    (patchRaw.tags.mode === 'set' || patchRaw.tags.mode === 'append')
+  ) {
     patch.tags = { mode: patchRaw.tags.mode, value: s(patchRaw.tags.value, 200) };
   }
-  if (isPlainObject(patchRaw.note) && (patchRaw.note.mode === 'set' || patchRaw.note.mode === 'append')) {
+  if (
+    isPlainObject(patchRaw.note) &&
+    (patchRaw.note.mode === 'set' || patchRaw.note.mode === 'append')
+  ) {
     patch.note = { mode: patchRaw.note.mode, value: s(patchRaw.note.value, 2000) };
   }
   if (
@@ -201,7 +258,10 @@ const sanitizeShopAccountBatchInput = (payload: any) => {
 const sanitizeCompanyInput = (payload: any) => {
   const s = (v: any, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
   return {
-    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    id:
+      typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0
+        ? payload.id
+        : 0,
     name: s(payload?.name, 200),
     unifiedCode: s(payload?.unifiedCode, 60),
     country: s(payload?.country, 40),
@@ -236,9 +296,14 @@ const sanitizeCompanyProfileInput = (payload: any) => {
     extra = out;
   }
   return {
-    id: typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0 ? payload.id : 0,
+    id:
+      typeof payload?.id === 'number' && Number.isInteger(payload.id) && payload.id > 0
+        ? payload.id
+        : 0,
     companyId:
-      typeof payload?.companyId === 'number' && Number.isInteger(payload.companyId) && payload.companyId > 0
+      typeof payload?.companyId === 'number' &&
+      Number.isInteger(payload.companyId) &&
+      payload.companyId > 0
         ? payload.companyId
         : 0,
     type: s(payload?.type, 20),
@@ -248,7 +313,9 @@ const sanitizeCompanyProfileInput = (payload: any) => {
     contactPhone: s(payload?.contactPhone, 40),
     contactEmail: s(payload?.contactEmail, 200),
     address: s(payload?.address, 300),
-    ...(typeof payload?.effectiveAt === 'string' ? { effectiveAt: s(payload.effectiveAt, 10) } : {}),
+    ...(typeof payload?.effectiveAt === 'string'
+      ? { effectiveAt: s(payload.effectiveAt, 10) }
+      : {}),
     ...(typeof payload?.expireAt === 'string' ? { expireAt: s(payload.expireAt, 10) } : {}),
     status: s(payload?.status, 20),
     note: s(payload?.note, 2000),
@@ -274,13 +341,12 @@ const sanitizeMarketItem = (raw: any) => {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   selectExcel: () => ipcRenderer.invoke('select-excel'),
+  selectImage: () => ipcRenderer.invoke('select-image'),
   importExcelByPath: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
   selectTemplate: () => ipcRenderer.invoke('select-template'),
   saveTemplate: (filePath: string, content: string) =>
     ipcRenderer.invoke('save-template', filePath, content),
   writeClipboard: (text: string) => ipcRenderer.invoke('write-clipboard', text),
-  loadState: () => ipcRenderer.invoke('get-store'),
-  saveState: (data: Record<string, any>) => ipcRenderer.invoke('set-store', data),
   // 模块命名空间持久化（Phase 1）
   getModuleState: (moduleId: string) => ipcRenderer.invoke('get-module-state', moduleId),
   setModuleState: (moduleId: string, data: any) =>
@@ -327,37 +393,92 @@ contextBridge.exposeInMainWorld('electronAPI', {
       logo: typeof payload?.logo === 'string' ? payload.logo : '',
     }),
   orderGroupStats: (dimensions: string[]) =>
-    ipcRenderer.invoke('order-group-stats', { dimensions: Array.isArray(dimensions) ? dimensions : [] }),
+    ipcRenderer.invoke('order-group-stats', {
+      dimensions: Array.isArray(dimensions) ? dimensions : [],
+    }),
   orderList: (payload: any) =>
     ipcRenderer.invoke('order-list', {
       offset: typeof payload?.offset === 'number' ? Math.max(Math.round(payload.offset), 0) : 0,
-      limit: typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 1), 2000) : 500,
-      corrected: payload?.corrected === true || payload?.corrected === false ? !!payload.corrected : undefined,
+      limit:
+        typeof payload?.limit === 'number'
+          ? Math.min(Math.max(Math.round(payload.limit), 1), 2000)
+          : 500,
+      corrected:
+        payload?.corrected === true || payload?.corrected === false
+          ? !!payload.corrected
+          : undefined,
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : undefined,
     }),
   orderClear: () => ipcRenderer.invoke('order-clear'),
+  // 运费原始行（oi_orders 最小投影 id/order_no/raw_fields，只读；供按订单算运费的宿主 op 提取）
+  orderAssignShop: (payload: any) =>
+    ipcRenderer.invoke('order-assign-shop', {
+      orderNos: Array.isArray(payload?.orderNos)
+        ? payload.orderNos.slice(0, 2000).map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
+        : [],
+      shopName: typeof payload?.shopName === 'string' ? payload.shopName.slice(0, 200) : '',
+    }),
+  orderShippingRows: (payload: any) =>
+    ipcRenderer.invoke('order-shipping-rows', {
+      limit:
+        typeof payload?.limit === 'number'
+          ? Math.min(Math.max(Math.round(payload.limit), 1), 2000)
+          : 500,
+      source: typeof payload?.source === 'string' ? payload.source : 'all',
+    }),
   orderDownloadImage: (url: string) =>
     ipcRenderer.invoke('order-download-image', { url: String(url ?? '') }),
+  // 拣货投影（只读）：未发货订单行 + 三层回落图 + 款色码/供应商
+  pickingRows: (payload: any) =>
+    ipcRenderer.invoke('picking-rows', {
+      limit:
+        typeof payload?.limit === 'number'
+          ? Math.min(Math.max(Math.round(payload.limit), 1), 5000)
+          : 2000,
+      shop: typeof payload?.shop === 'string' ? payload.shop.slice(0, 200) : '',
+      includeShipped: payload?.includeShipped === true,
+    }),
+  // 拣货单导出（主进程 exceljs 生成：带图、按厂家分表）；行已由渲染层算好，主进程只画表
+  pickingExportExcel: (payload: any) =>
+    ipcRenderer.invoke('picking-export-excel', {
+      rows: sanitizePickingExportRows(payload?.rows),
+      defaultName:
+        typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
+    }),
   orderReadImage: (localPath: string) =>
     ipcRenderer.invoke('order-read-image', { localPath: String(localPath ?? '') }),
   // 缩略图（主进程等比缩放 + LRU）：payload { localPath, maxEdge? } → { dataUrl }
   orderImageThumb: (payload: any) =>
     ipcRenderer.invoke('order-image-thumb', {
       localPath: String(payload?.localPath ?? ''),
-      maxEdge: typeof payload?.maxEdge === 'number' ? Math.min(Math.max(Math.round(payload.maxEdge), 16), 256) : 160,
+      maxEdge:
+        typeof payload?.maxEdge === 'number'
+          ? Math.min(Math.max(Math.round(payload.maxEdge), 16), 256)
+          : 160,
     }),
-  // 批量缩略图（渲染层同帧多图合批一次往返）：payload { items: [{ localPath, maxEdge }] } → { dataUrls: (string|null)[] }
-  orderImageThumbBatch: (payload: any) =>
-    ipcRenderer.invoke('order-image-thumb-batch', {
-      items: Array.isArray(payload?.items)
+  // 批量缩略图（渲染层同帧多图合批一次往返）→ { dataUrls: (string|null)[] }
+  // ⚠️ 载荷形状以 `src/types.ts` 的声明为准 = **裸数组**（`orderImageThumbBatch(items)`）。
+  //    本函数早先只认 `{ items }`：内置调用点（产品页主图列 / 映射与关联的商品ID图 /
+  //    编辑抽屉主图预览 / 拣货单商品图）全部按声明传裸数组 → `payload.items` 恒为 undefined
+  //    → 发出去的是 `{ items: [] }` → 主进程返回空数组 → **界面全是空占位且不报错**（静默失败）。
+  //    两种形状都收（裸数组优先，`{ items }` 兼容岛侧老调用方），但**声明与实现必须一致**，
+  //    回归由 `npm run ipc:shape:smoke` 守着（它拿真 preload + 真主进程 handler 端到端跑）。
+  orderImageThumbBatch: (payload: any) => {
+    const list = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.items)
         ? payload.items
-            .slice(0, 40)
-            .map((it: any) => ({
-              localPath: String(it?.localPath ?? '').slice(0, 4096),
-              maxEdge: typeof it?.maxEdge === 'number' ? Math.min(Math.max(Math.round(it.maxEdge), 16), 256) : 160,
-            }))
-        : [],
-    }),
+        : [];
+    return ipcRenderer.invoke('order-image-thumb-batch', {
+      items: list.slice(0, 40).map((it: any) => ({
+        localPath: String(it?.localPath ?? '').slice(0, 4096),
+        maxEdge:
+          typeof it?.maxEdge === 'number'
+            ? Math.min(Math.max(Math.round(it.maxEdge), 16), 256)
+            : 160,
+      })),
+    });
+  },
   // 识别引擎 API Key：主进程 safeStorage 加密落盘（渲染层不落明文存储）
   orderApiKeySet: (apiKey: string) =>
     ipcRenderer.invoke('order-api-key-set', { apiKey: String(apiKey ?? '').slice(0, 1024) }),
@@ -366,7 +487,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   orderCleanupOrphanImages: () => ipcRenderer.invoke('order-cleanup-orphan-images'),
   // 产品库导入「图片」列：读取用户指定的本地图片（任意路径，仅图片扩展名，≤10MB）
   orderReadLocalImage: (localPath: string) =>
-    ipcRenderer.invoke('order-read-local-image', { localPath: String(localPath ?? '').slice(0, 4096) }),
+    ipcRenderer.invoke('order-read-local-image', {
+      localPath: String(localPath ?? '').slice(0, 4096),
+    }),
   orderExportExcel: (buffer: ArrayBuffer, defaultName?: string) =>
     ipcRenderer.invoke('order-export-excel', { buffer, defaultName }),
   // 待识别队列（订单归类：导入行整批落库，失败/缺图重启不丢、可增量重试）
@@ -381,15 +504,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('order-queue-list', {
       batchNo: String(payload?.batchNo ?? ''),
       offset: typeof payload?.offset === 'number' ? Math.max(Math.round(payload.offset), 0) : 0,
-      limit: typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 0), 2000) : 0,
+      limit:
+        typeof payload?.limit === 'number'
+          ? Math.min(Math.max(Math.round(payload.limit), 0), 2000)
+          : 0,
       status:
-        typeof payload?.status === 'string' && ['pending', 'error', 'missing', 'done', 'all'].includes(payload.status)
+        typeof payload?.status === 'string' &&
+        ['pending', 'error', 'missing', 'done', 'all'].includes(payload.status)
           ? payload.status
           : undefined,
       missingOnly: payload?.missingOnly === true,
     }),
   orderQueueGet: (id: any) =>
-    ipcRenderer.invoke('order-queue-get', { id: typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : 0 }),
+    ipcRenderer.invoke('order-queue-get', {
+      id: typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : 0,
+    }),
   orderQueueNextPending: (payload: any) =>
     ipcRenderer.invoke('order-queue-next-pending', {
       batchNo: String(payload?.batchNo ?? ''),
@@ -493,7 +622,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('order-mark-corrected', {
       all: isPlainObject(input) && input.all === true,
       ids: Array.isArray(input)
-        ? input.filter((n: any) => typeof n === 'number' && Number.isInteger(n) && n > 0).slice(0, 10000)
+        ? input
+            .filter((n: any) => typeof n === 'number' && Number.isInteger(n) && n > 0)
+            .slice(0, 10000)
         : [],
     }),
   // --- 速卖通利润追踪（M0：入站走 localhost 接收端，本区仅查询类 IPC）---
@@ -501,7 +632,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aeOrderList: (payload: any) =>
     ipcRenderer.invoke('ae-order-list', {
       offset: typeof payload?.offset === 'number' ? Math.max(Math.round(payload.offset), 0) : 0,
-      limit: typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 1), 2000) : 200,
+      limit:
+        typeof payload?.limit === 'number'
+          ? Math.min(Math.max(Math.round(payload.limit), 1), 2000)
+          : 200,
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : '',
     }),
   aeSummary: () => ipcRenderer.invoke('ae-summary'),
@@ -509,17 +643,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aeProfitStats: (payload: any) =>
     ipcRenderer.invoke('ae-profit-stats', {
       granularity: payload?.granularity === 'day' ? 'day' : 'month',
-      rangeDays: typeof payload?.rangeDays === 'number' ? Math.min(Math.max(Math.round(payload.rangeDays), 1), 3650) : 90,
+      rangeDays:
+        typeof payload?.rangeDays === 'number'
+          ? Math.min(Math.max(Math.round(payload.rangeDays), 1), 3650)
+          : 90,
     }),
   aeCostMapImport: (payload: any) =>
     ipcRenderer.invoke('ae-cost-map-import', {
       items: Array.isArray(payload?.items) ? payload.items.slice(0, 20000) : [],
     }),
   aeCostMapList: () => ipcRenderer.invoke('ae-cost-map-list'),
+  // ---- 结算明细（AE 后台「订单明细」导出；解析在渲染层 src/lib/settleImport.ts，主进程只归一+存）----
+  settleImport: (payload: any) =>
+    ipcRenderer.invoke('settle-import', {
+      rows: Array.isArray(payload?.rows) ? payload.rows.slice(0, 20000) : [],
+    }),
+  settleOrders: (payload: any) =>
+    ipcRenderer.invoke('settle-orders', {
+      orderNos: Array.isArray(payload?.orderNos)
+        ? payload.orderNos
+            .slice(0, 2000)
+            .map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
+        : [],
+    }),
+  settleStats: () => ipcRenderer.invoke('settle-stats'),
   aeRateList: () => ipcRenderer.invoke('ae-rate-list'),
   aeRateUpsert: (payload: any) =>
     ipcRenderer.invoke('ae-rate-upsert', {
-      fromCurrency: String(payload?.fromCurrency ?? '').slice(0, 8).toUpperCase(),
+      fromCurrency: String(payload?.fromCurrency ?? '')
+        .slice(0, 8)
+        .toUpperCase(),
       rateToCny: Number(payload?.rateToCny),
     }),
   purchaseCostSnapshot: () => ipcRenderer.invoke('purchase-cost-snapshot'),
@@ -599,7 +752,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       supplierId: typeof payload?.supplierId === 'number' ? payload.supplierId : 0,
       payDate: typeof payload?.payDate === 'string' ? payload.payDate.slice(0, 10) : '',
       type: payload?.type === 'refund' ? 'refund' : 'payment',
-      amountCents: typeof payload?.amountCents === 'number' ? Math.max(0, Math.round(payload.amountCents)) : 0,
+      amountCents:
+        typeof payload?.amountCents === 'number' ? Math.max(0, Math.round(payload.amountCents)) : 0,
       method: typeof payload?.method === 'string' ? payload.method.slice(0, 20) : '',
       note: typeof payload?.note === 'string' ? payload.note.slice(0, 200) : '',
     }),
@@ -647,7 +801,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   purchaseExportExcel: (payload: any) =>
     ipcRenderer.invoke('purchase-export-excel', {
       items: sanitizePurchaseItems(payload?.items),
-      defaultName: typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
+      defaultName:
+        typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
     }),
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位的店群账号维护；密码经主进程 safeStorage 加密落库，渲染层不存明文）----
   shopAccountDbEnsure: () => ipcRenderer.invoke('shop-account-db-ensure'),
@@ -700,6 +855,204 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('company-profile-delete', {
       id: typeof payload?.id === 'number' ? payload.id : 0,
     }),
+  // ---- 产品库（产品主数据：编码 / 名称 / 厂家 / 类目；编码与 oi_styles.code 同口径，为跨域关联锚点）----
+  productDbEnsure: () => ipcRenderer.invoke('product-db-ensure'),
+  productList: (payload: any) =>
+    ipcRenderer.invoke('product-list', {
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+      supplierId: typeof payload?.supplierId === 'number' ? payload.supplierId : 0,
+      withoutSupplier: payload?.withoutSupplier === true,
+      onlyMissingWeight: payload?.onlyMissingWeight === true,
+      offset: typeof payload?.offset === 'number' ? payload.offset : 0,
+      limit: typeof payload?.limit === 'number' ? payload.limit : 50,
+    }),
+  productGet: (payload: any) =>
+    ipcRenderer.invoke('product-get', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  productUpsert: (payload: any) =>
+    ipcRenderer.invoke('product-upsert', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+      code: typeof payload?.code === 'string' ? payload.code.slice(0, 64) : '',
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 200) : '',
+      supplierId: typeof payload?.supplierId === 'number' ? payload.supplierId : 0,
+      category: typeof payload?.category === 'string' ? payload.category.slice(0, 60) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 2000) : '',
+    }),
+  productDelete: (payload: any) =>
+    ipcRenderer.invoke('product-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  productSummary: () => ipcRenderer.invoke('product-summary'),
+  // ---- Excel 批量导入 / 导出（解析在渲染层，本层只做形状消毒）----
+  productImport: (payload: any) =>
+    ipcRenderer.invoke('product-import', {
+      items: Array.isArray(payload?.items)
+        ? payload.items.slice(0, 20000).map((r: any) => ({
+            rowNo:
+              typeof r?.rowNo === 'number' && Number.isFinite(r.rowNo) ? Math.floor(r.rowNo) : 0,
+            code: typeof r?.code === 'string' ? r.code.slice(0, 64) : '',
+            name: typeof r?.name === 'string' ? r.name.slice(0, 200) : '',
+            supplierId: typeof r?.supplierId === 'number' ? r.supplierId : 0,
+            category: typeof r?.category === 'string' ? r.category.slice(0, 60) : '',
+            status: typeof r?.status === 'string' ? r.status.slice(0, 20) : 'active',
+            note: typeof r?.note === 'string' ? r.note.slice(0, 2000) : '',
+          }))
+        : [],
+      mode: payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert',
+    }),
+  // buffer 有意**不做类型兜底**：无效就原样传过去，由主进程判 `instanceof ArrayBuffer`
+  // 并返回 `{success:false, error}`。在这里塞一个空 buffer 会让"传错了"变成"导出了个空文件"。
+  productExport: (payload: any) =>
+    ipcRenderer.invoke('product-export', {
+      buffer: payload?.buffer,
+      defaultName:
+        typeof payload?.defaultName === 'string' && payload.defaultName
+          ? payload.defaultName.slice(0, 128)
+          : '产品库.xlsx',
+    }),
+  // ---- 店铺商品ID → 产品映射（P3；pl_shop_sku）----
+  // 通道本身**不分读写域**：分域曾经体现在 `DB_OPS` 的白名单里（岛只能调到自己声明过的 op）。
+  // ⚠️ 那道闸随产品库岛下架一起删了（2026-10-01）：内建渲染层跑在同进程信任域，不需要它；
+  //    将来再开岛时按 ADR-002 C4 重建"只读子域 + owner 写子域"。
+  productSkuList: (payload: any) =>
+    ipcRenderer.invoke('product-sku-list', {
+      offset: typeof payload?.offset === 'number' ? payload.offset : 0,
+      limit: typeof payload?.limit === 'number' ? payload.limit : 50,
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+      shopId: typeof payload?.shopId === 'number' ? payload.shopId : 0,
+    }),
+  productSkuSummary: () => ipcRenderer.invoke('product-sku-summary'),
+  productSkuQueue: (payload: any) =>
+    ipcRenderer.invoke('product-sku-queue', {
+      limit: typeof payload?.limit === 'number' ? payload.limit : undefined,
+      maxRows: typeof payload?.maxRows === 'number' ? payload.maxRows : undefined,
+    }),
+  productSkuMap: (payload: any) =>
+    ipcRenderer.invoke('product-sku-map', {
+      rows: Array.isArray(payload?.rows)
+        ? payload.rows.slice(0, 20000).map((r: any) => ({
+            platform: typeof r?.platform === 'string' ? r.platform.slice(0, 40) : '',
+            shopId: typeof r?.shopId === 'number' ? r.shopId : 0,
+            itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
+            spec: typeof r?.spec === 'string' ? r.spec.slice(0, 40) : '',
+            productId: typeof r?.productId === 'number' ? r.productId : 0,
+            status: typeof r?.status === 'string' ? r.status.slice(0, 20) : 'confirmed',
+            note: typeof r?.note === 'string' ? r.note.slice(0, 2000) : '',
+          }))
+        : [],
+    }),
+  productSkuInvalidate: (payload: any) =>
+    ipcRenderer.invoke('product-sku-invalidate', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
+  productVariantList: (payload: any) =>
+    ipcRenderer.invoke('product-variant-list', {
+      productIds: Array.isArray(payload?.productIds)
+        ? payload.productIds.slice(0, 5000).map((x: any) => (typeof x === 'number' ? x : 0))
+        : [],
+    }),
+  productVariantUpsert: (payload: any) =>
+    ipcRenderer.invoke('product-variant-upsert', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+      productId: typeof payload?.productId === 'number' ? payload.productId : 0,
+      code: typeof payload?.code === 'string' ? payload.code.slice(0, 64) : '',
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 200) : '',
+      color: typeof payload?.color === 'string' ? payload.color.slice(0, 40) : '',
+      size: typeof payload?.size === 'string' ? payload.size.slice(0, 40) : '',
+      weightG: Math.round(Number(payload?.weightG)) || 0,
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : 'active',
+    }),
+  productVariantDelete: (payload: any) =>
+    ipcRenderer.invoke('product-variant-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  // 批量编辑：**只回传用户填了的字段**（undefined 字段直接不带 —— 带了空串就会清掉原值），
+  // supplierId: 0 = 清空厂家关联（0 是合法目标值，不能当"没填"）
+  productBatchUpdate: (payload: any) => {
+    const out: Record<string, unknown> = {
+      ids: Array.isArray(payload?.ids)
+        ? payload.ids
+            .map((x: any) => (typeof x === 'number' && Number.isInteger(x) && x > 0 ? x : 0))
+            .filter((x: number) => x > 0)
+            .slice(0, 1000)
+        : [],
+    };
+    if (payload?.supplierId !== undefined) out.supplierId = Number(payload.supplierId) || 0;
+    if (payload?.category !== undefined) out.category = String(payload.category).slice(0, 60);
+    if (payload?.status !== undefined) out.status = String(payload.status).slice(0, 20);
+    if (payload?.note !== undefined) out.note = String(payload.note).slice(0, 2000);
+    return ipcRenderer.invoke('product-batch-update', out);
+  },
+  // ---- 产品图片（pl_images / pl_item_images；srcPath 须来自用户对话框所选文件）----
+  productImageAttach: (payload: any) =>
+    ipcRenderer.invoke('product-image-attach', {
+      productId: typeof payload?.productId === 'number' ? payload.productId : 0,
+      srcPath: typeof payload?.srcPath === 'string' ? payload.srcPath : '',
+    }),
+  productImageDetach: (payload: any) =>
+    ipcRenderer.invoke('product-image-detach', {
+      productId: typeof payload?.productId === 'number' ? payload.productId : 0,
+    }),
+  productItemImageSet: (payload: any) =>
+    ipcRenderer.invoke('product-item-image-set', {
+      itemId: typeof payload?.itemId === 'string' ? payload.itemId.slice(0, 64) : '',
+      srcPath: typeof payload?.srcPath === 'string' ? payload.srcPath : '',
+    }),
+  productItemImageClear: (payload: any) =>
+    ipcRenderer.invoke('product-item-image-clear', {
+      itemId: typeof payload?.itemId === 'string' ? payload.itemId.slice(0, 64) : '',
+    }),
+  productItemImagePool: (payload: any) =>
+    ipcRenderer.invoke('product-item-image-pool', {
+      itemIds: Array.isArray(payload?.itemIds)
+        ? payload.itemIds.slice(0, 1000).map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
+        : [],
+    }),
+  // ---- 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）----
+  // 补上"店铺"这个缺失的实体层：历史文本（订单 / 采购 / 利润三处）不改写，靠名称归一映射旁挂关联。
+  shopDbEnsure: () => ipcRenderer.invoke('shop-db-ensure'),
+  shopList: (payload: any) =>
+    ipcRenderer.invoke('shop-list', {
+      offset: Number(payload?.offset) || 0,
+      limit: Number(payload?.limit) || 50,
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
+      platform: typeof payload?.platform === 'string' ? payload.platform.slice(0, 40) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+      shopSetId: Number(payload?.shopSetId) || 0,
+    }),
+  shopGet: (payload: any) => ipcRenderer.invoke('shop-get', { id: Number(payload?.id) || 0 }),
+  shopUpsert: (payload: any) =>
+    ipcRenderer.invoke('shop-upsert', {
+      id: Number(payload?.id) || 0,
+      platform: typeof payload?.platform === 'string' ? payload.platform.slice(0, 40) : '',
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 200) : '',
+      platformShopId: typeof payload?.platformShopId === 'string' ? payload.platformShopId.slice(0, 100) : '',
+      site: typeof payload?.site === 'string' ? payload.site.slice(0, 40) : '',
+      shopSetId: Number(payload?.shopSetId) || 0,
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : 'active',
+      openedAt: typeof payload?.openedAt === 'string' ? payload.openedAt.slice(0, 40) : '',
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 2000) : '',
+    }),
+  shopSummary: () => ipcRenderer.invoke('shop-summary'),
+  shopUnmapped: () => ipcRenderer.invoke('shop-unmapped'),
+  shopMap: (payload: any) =>
+    ipcRenderer.invoke('shop-map', {
+      raw: typeof payload?.raw === 'string' ? payload.raw.slice(0, 200) : '',
+      refId: Number(payload?.refId) || 0,
+      ignored: payload?.ignored === true,
+      kind: typeof payload?.kind === 'string' ? payload.kind.slice(0, 20) : 'shop',
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 2000) : '',
+    }),
+  shopUnmap: (payload: any) =>
+    ipcRenderer.invoke('shop-unmap', {
+      raw: typeof payload?.raw === 'string' ? payload.raw.slice(0, 200) : '',
+      kind: typeof payload?.kind === 'string' ? payload.kind.slice(0, 20) : 'shop',
+    }),
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   pluginsScan: () => ipcRenderer.invoke('plugins-scan'),
   pluginsReadEntry: (payload: any) =>
@@ -715,9 +1068,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---- 插件市场（Market：catalog 拉取 + zip 安装；主进程二次净化）----
   pluginMarketCatalog: (payload: any) =>
     ipcRenderer.invoke('plugins-market-catalog', {
-      url: typeof payload?.url === 'string' && /^https?:\/\//i.test(payload.url)
-        ? payload.url.slice(0, 2048)
-        : '',
+      url:
+        typeof payload?.url === 'string' && /^https?:\/\//i.test(payload.url)
+          ? payload.url.slice(0, 2048)
+          : '',
     }),
   pluginMarketInstall: (payload: any) =>
     ipcRenderer.invoke('plugins-market-install', {
@@ -752,7 +1106,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       // 多文件夹（M3-3）：空数组 = 保持「单文件夹 folder」语义
       folders: Array.isArray(payload?.folders)
         ? payload.folders
-            .map((f: any) => String(f || '').trim().slice(0, 200))
+            .map((f: any) =>
+              String(f || '')
+                .trim()
+                .slice(0, 200)
+            )
             .filter(Boolean)
             .slice(0, 30)
         : [],
@@ -760,7 +1118,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       syncDays: Math.min(365, Math.max(1, Number(payload?.syncDays) || 30)),
       maxBodyBytes: Math.min(
         2 * 1024 * 1024,
-        Math.max(8 * 1024, Number(payload?.maxBodyBytes) || 204800),
+        Math.max(8 * 1024, Number(payload?.maxBodyBytes) || 204800)
       ),
       // 授权码：仅当显式传入时才带上（省略 = 保持原值）
       secrets:
@@ -773,7 +1131,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mailAccountTest: (payload: any) =>
     ipcRenderer.invoke('mail-account-test', {
       email: typeof payload?.email === 'string' ? payload.email.slice(0, 200) : '',
-      authPassword: typeof payload?.authPassword === 'string' ? payload.authPassword.slice(0, 500) : '',
+      authPassword:
+        typeof payload?.authPassword === 'string' ? payload.authPassword.slice(0, 500) : '',
       providerId: typeof payload?.providerId === 'string' ? payload.providerId.slice(0, 40) : '',
       host: typeof payload?.host === 'string' ? payload.host.slice(0, 200) : '',
       port: Number(payload?.port) || 993,
@@ -787,7 +1146,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mailMessagesList: (payload?: any) =>
     ipcRenderer.invoke('mail-messages-list', {
       accountIds: Array.isArray(payload?.accountIds)
-        ? payload.accountIds.map((n: any) => Number(n) || 0).filter((n: number) => n > 0).slice(0, 200)
+        ? payload.accountIds
+            .map((n: any) => Number(n) || 0)
+            .filter((n: number) => n > 0)
+            .slice(0, 200)
         : [],
       keyword: typeof payload?.keyword === 'string' ? payload.keyword.slice(0, 100) : '',
       unreadOnly: payload?.unreadOnly === true,
@@ -795,7 +1157,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       // 多文件夹筛选（M3-3）
       folders: Array.isArray(payload?.folders)
         ? payload.folders
-            .map((f: any) => String(f || '').trim().slice(0, 200))
+            .map((f: any) =>
+              String(f || '')
+                .trim()
+                .slice(0, 200)
+            )
             .filter(Boolean)
             .slice(0, 30)
         : [],
@@ -854,7 +1220,61 @@ contextBridge.exposeInMainWorld('electronAPI', {
       days: Math.min(365, Math.max(1, Number(payload?.days) || 30)),
     }),
   mailStats: () => ipcRenderer.invoke('mail-stats'),
+  // ---- 店铺商品清单（pl_shop_sku 扩展视图，支持一对多关联）----
+  shopProductImport: (payload: any) =>
+    ipcRenderer.invoke('shop-product-import', {
+      items: Array.isArray(payload?.items)
+        ? payload.items.slice(0, 20000).map((r: any) => ({
+            itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
+            shopId: typeof r?.shopId === 'number' ? r.shopId : 0,
+            shopName: typeof r?.shopName === 'string' ? r.shopName.slice(0, 200) : '',
+            imageUrl: typeof r?.imageUrl === 'string' ? r.imageUrl.slice(0, 2000) : '',
+          }))
+        : [],
+    }),
+  shopProductList: (payload: any) =>
+    ipcRenderer.invoke('shop-product-list', {
+      offset: typeof payload?.offset === 'number' ? payload.offset : 0,
+      limit: typeof payload?.limit === 'number' ? payload.limit : 50,
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
+    }),
+  shopProductDelete: (payload: any) =>
+    ipcRenderer.invoke('shop-product-delete', {
+      itemId: typeof payload?.itemId === 'string' ? payload.itemId.slice(0, 64) : '',
+    }),
+  shopProductRelations: (payload: any) =>
+    ipcRenderer.invoke('shop-product-relations', {
+      itemId: typeof payload?.itemId === 'string' ? payload.itemId.slice(0, 64) : '',
+    }),
+  shopProductRelationAdd: (payload: any) =>
+    ipcRenderer.invoke('shop-product-relation-add', {
+      itemId: typeof payload?.itemId === 'string' ? payload.itemId.slice(0, 64) : '',
+      productId: typeof payload?.productId === 'number' ? payload.productId : 0,
+      shopId: typeof payload?.shopId === 'number' ? payload.shopId : 0,
+    }),
+  shopProductRelationDelete: (payload: any) =>
+    ipcRenderer.invoke('shop-product-relation-delete', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
   mailProviderList: () => ipcRenderer.invoke('mail-provider-list'),
+  // ---- 运价表快照（宿主中立层；ADR-002 C3：运价表是主数据，不能只留在岛私有 storage）----
+  // 一次导入 = 一条快照（按内容去重），算账时按订单日期取"当时生效的那份" → 历史预测可复算。
+  shipRateSnapshotSave: (payload: any) =>
+    ipcRenderer.invoke('ship-rate-snapshot-save', {
+      table: payload?.table ?? null,
+      sourceFile: typeof payload?.sourceFile === 'string' ? payload.sourceFile.slice(0, 500) : '',
+      sheetName: typeof payload?.sheetName === 'string' ? payload.sheetName.slice(0, 200) : '',
+      effectiveFrom:
+        typeof payload?.effectiveFrom === 'string' ? payload.effectiveFrom.slice(0, 10) : '',
+    }),
+  shipRateSnapshotList: (payload: any) =>
+    ipcRenderer.invoke('ship-rate-snapshot-list', {
+      limit: typeof payload?.limit === 'number' ? payload.limit : 50,
+    }),
+  shipRateSnapshotCalc: (payload: any) =>
+    ipcRenderer.invoke('ship-rate-snapshot-calc', {
+      limit: typeof payload?.limit === 'number' ? payload.limit : 50,
+    }),
   // 订阅邮件同步事件（主进程→渲染层单向）；返回退订函数
   onMailSyncEvent: (cb: (payload: any) => void) => {
     const listener = (_event: any, payload: any) => {

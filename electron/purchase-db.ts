@@ -13,6 +13,18 @@ import {
   dbRun,
   dbTransaction,
 } from './db';
+import { productSchemaReady } from './product-db';
+
+/**
+ * 款式展示名的派生片段（ADR-002 D1：款名权威在 `pl_products`，按 `code` 关联）。
+ * 采购域只是**消费方**，不拥有款式主数据 —— 缺产品表时降级为空名，而不是让整个
+ * 拿货/对账查询抛「no such table」（那会把「产品域还没建」报成「采购域坏了」）。
+ */
+function styleNameJoin(): { join: string; name: string } {
+  return productSchemaReady()
+    ? { join: 'LEFT JOIN pl_products p ON p.code = s.code', name: 'p.name' }
+    : { join: '', name: `''` };
+}
 
 // ---- 类型（与渲染层 src/types.ts 对应，结构保持一致） ----
 
@@ -403,13 +415,15 @@ function autoSourceRows(items: PurchaseItem[]): PurchaseSourceRow[] {
     );
     const taken = Number(takenRow?.t ?? 0);
     // 需求订单行（按导入顺序 FIFO）
+    const n = styleNameJoin();
     const rows = dbQuery<Record<string, unknown>>(
-      `SELECT o.id AS oid, o.shop, s.code AS style_code, s.name AS style_name,
+      `SELECT o.id AS oid, o.shop, s.code AS style_code, ${n.name} AS style_name,
               sc.color AS style_color, o.size
        FROM oi_orders o
        JOIN oi_images i ON o.image_id = i.id
        JOIN oi_style_colors sc ON i.style_color_id = sc.id
        JOIN oi_styles s ON sc.style_id = s.id
+       ${n.join}
        WHERE s.code = ? AND sc.color = ? AND o.size = ?
        ORDER BY o.id`,
       [code, color, size],
@@ -707,13 +721,15 @@ export function reconciliation(from?: string, to?: string): ReconciliationRow[] 
  * 实时反映：新订单 / 删除订单 / 拿货单增删改 / 标记无需补货。
  */
 export function outstanding(): OutstandingRow[] {
+  const n = styleNameJoin();
   const demands = dbQuery<Record<string, unknown>>(
-    `SELECT s.code AS style_code, s.name AS style_name, sc.color AS style_color, o.size AS size,
+    `SELECT s.code AS style_code, ${n.name} AS style_name, sc.color AS style_color, o.size AS size,
             COUNT(*) AS demand
      FROM oi_orders o
      JOIN oi_images i ON o.image_id = i.id
      JOIN oi_style_colors sc ON i.style_color_id = sc.id
      JOIN oi_styles s ON sc.style_id = s.id
+     ${n.join}
      GROUP BY sc.id, o.size`,
   );
   const takenRows = dbQuery<Record<string, unknown>>(
@@ -901,32 +917,41 @@ export function shopAllocationDetail(shop: string, from?: string, to?: string): 
 
 // ---- 成本快照（M1 利润追踪 D3：只读导出，供 ae-profit 导入 ae_cost_map，不向渲染层透传本模块） ----
 
-/** 快照项：款编码 → 加权均价（分/件，按已提交拿货单明细数量加权） */
+/** 快照项：款编码 × 拿货日期 → 加权均价（分/件，按已提交拿货单明细数量加权） */
 export interface CostSnapshotItem {
   styleCode: string;
   styleName: string;
-  /** 参与统计的拿货件数 */
+  /** 参与统计的拿货件数（该款该日） */
   sampleCount: number;
   /** 加权单价（分） = Σ(qty×price_cents) / Σqty，取整 */
   weightedPriceCents: number;
-  /** 该款最近一次拿货日期（yyyy-mm-dd，无则空串） */
+  /**
+   * 该行的拿货日期（yyyy-mm-dd，无则空串）。
+   *
+   * ⚠️ 语义在 P4a 变了：改造前是「该款**最近一次**拿货日期」（`MAX(biz_date)`，一款一行），
+   * 现在是「**本行**的拿货日期」（一款可多行，一行 = 一个成本生效区间）。
+   * 消费方（`ae-profit` 成本衔接）把它当作 `ae_cost_map.effective_from` 落库，故必须是本行日期。
+   */
   lastBizDate: string;
 }
 
 /**
- * 成本快照（D3 单向快照）：从全部「已提交」拿货单明细按款编码聚合，
- * 输出款编码 → 加权均价（分）。成本衔接只允许这个只读出口（ae-profit 侧导入），
- * 不暴露本模块任何写能力；口径 = 历史拿货加权均价（M1 简化，不计颜色/尺码差异）。
+ * 成本快照（D3 单向快照）：从「已提交」拿货单明细按 **款编码 × 拿货日期** 聚合，
+ * 输出款编码 → 多行加权均价（分）。成本衔接只允许这个只读出口（ae-profit 侧导入），
+ * 不暴露本模块任何写能力；口径 = 按次拿货加权均价（M1 简化，不计颜色/尺码差异）。
+ *
+ * ⚠️ P4a 之前是 `GROUP BY pi.style_code` + `MAX(biz_date)`：一款只导出一行、且生效日取最新，
+ * 于是「同一款跨两次进货」在成本表里仍只有一条区间 —— 利润引擎即便按区间取数也复算不出历史毛利。
+ * 故此处必须与 `ae_cost_map` 的多行结构同步改造（同 `po.biz_date` 的多张单一并加权为一行）。
  */
 export function costSnapshot(): CostSnapshotItem[] {
   const rows = dbQuery<Record<string, unknown>>(
-    `SELECT pi.style_code, pi.style_name, SUM(pi.qty) AS qty, SUM(pi.amount_cents) AS amount_cents,
-            MAX(po.biz_date) AS last_biz_date
+    `SELECT pi.style_code, pi.style_name, po.biz_date AS biz_date, SUM(pi.qty) AS qty, SUM(pi.amount_cents) AS amount_cents
      FROM purchase_items pi
      JOIN purchase_orders po ON pi.purchase_id = po.id
      WHERE po.status = 'submitted' AND pi.qty > 0 AND pi.amount_cents > 0
-     GROUP BY pi.style_code
-     ORDER BY pi.style_code`,
+     GROUP BY pi.style_code, po.biz_date
+     ORDER BY pi.style_code, po.biz_date`,
   );
   return rows
     .map((r) => {
@@ -938,7 +963,7 @@ export function costSnapshot(): CostSnapshotItem[] {
         styleName: String(r.style_name ?? ''),
         sampleCount: qty,
         weightedPriceCents: Math.round(amount / qty),
-        lastBizDate: String(r.last_biz_date ?? ''),
+        lastBizDate: String(r.biz_date ?? ''),
       };
     })
     .filter((x): x is CostSnapshotItem => x !== null);

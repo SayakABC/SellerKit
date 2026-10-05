@@ -7,6 +7,29 @@ export {};
 
 const purchaseDb = require('./purchase-db');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
+// 拿货落账 → 成本自动同步（跨域编排收在宿主这一层；见 `purchase-cost-sync.ts` 的文件头）
+const { syncPurchaseCosts } = require('./purchase-cost-sync') as typeof import('./purchase-cost-sync');
+
+/**
+ * 拿货**写操作统一收口**：落账后自动把拿货成本同步进算钱（`ae_cost_map`）。
+ *
+ * 为什么自动：成本的唯一来源是拿货对账，而它过去只由利润页上的一个手动按钮搬运 ——
+ * 实测用户库 `purchase_orders` 有 3 张、`ae_cost_map` 是 **0 行**（货拿了、利润里没成本，数字凭空变好看）。
+ *
+ * 同步失败**不影响落账本身**（拿货单已经写成功，抛出去会让用户以为单据没落）；
+ * 失败只打日志，且**界面看得见**：首页缺口卡会显示「缺成本 N 行」。
+ */
+function withCostSync<T extends { success: boolean }>(result: T): T {
+  if (result?.success) {
+    try {
+      syncPurchaseCosts();
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error('[cost-sync] 拿货成本同步失败（不影响本次落账）：', err?.message || err);
+    }
+  }
+  return result;
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -95,7 +118,7 @@ register('purchase-order-create', async (payload) => {
     items,
     sources,
   });
-  return { success: true, data: { id } };
+  return withCostSync({ success: true, data: { id } });
 });
 
 /** 明细行清洗：尺码透传，其余字段长度/数值约束 */
@@ -143,7 +166,7 @@ register('purchase-order-update', async (payload) => {
     totalCents: payload.totalCents !== undefined ? num(payload.totalCents) : undefined,
     items,
   });
-  return { success: true };
+  return withCostSync({ success: true });
 });
 
 register('purchase-order-submit', async (payload) => {
@@ -152,7 +175,7 @@ register('purchase-order-submit', async (payload) => {
   }
   purchaseDb.ensurePurchaseSchema();
   purchaseDb.submitPurchaseOrder(payload.id);
-  return { success: true };
+  return withCostSync({ success: true });
 });
 
 register('purchase-order-delete', async (payload) => {
@@ -161,7 +184,7 @@ register('purchase-order-delete', async (payload) => {
   }
   purchaseDb.ensurePurchaseSchema();
   purchaseDb.deletePurchaseOrder(payload.id);
-  return { success: true };
+  return withCostSync({ success: true });
 });
 
 // ---- 付款 ----
@@ -190,7 +213,7 @@ register('purchase-payment-add', async (payload) => {
     method: str(payload.method, 20),
     note: str(payload.note, 200),
   });
-  return { success: true, data: { id } };
+  return withCostSync({ success: true, data: { id } });
 });
 
 register('purchase-payment-delete', async (payload) => {
@@ -199,7 +222,7 @@ register('purchase-payment-delete', async (payload) => {
   }
   purchaseDb.ensurePurchaseSchema();
   purchaseDb.deletePayment(payload.id);
-  return { success: true };
+  return withCostSync({ success: true });
 });
 
 // ---- 对账 / 待拿货 / 单价记忆 ----
@@ -271,34 +294,11 @@ register('purchase-price-history', async (payload) => {
 // ---- 拿货单导出（Excel 嵌入款色图；主进程生成：图片在本地缓存，xlsx 社区版不支持写图）----
 const { dialog: electronDialog, BrowserWindow, app } = require('electron');
 const orderDb = require('./order-db');
-const fs = require('fs');
 const path = require('path');
 
-/** 读 PNG/JPEG 文件头取原始宽高；无法解析返回 null */
-function imageSizeOf(filePath: string): { w: number; h: number } | null {
-  try {
-    const fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(64);
-    fs.readSync(fd, buf, 0, buf.length, 0);
-    fs.closeSync(fd);
-    // PNG：8 字节签名 + 4 长度 + 4 "IHDR" 后为宽高（大端）
-    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
-      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
-    }
-    // JPEG：遍历前 64 字节找 SOFn 标记
-    if (buf[0] === 0xff && buf[1] === 0xd8) {
-      for (let i = 2; i < 60; i++) {
-        const mk = buf[i + 1];
-        if (buf[i] === 0xff && mk >= 0xc0 && mk <= 0xc3 && mk !== 0xc4) {
-          return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };
-        }
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+// 嵌图：与「拣货单带图导出」共用一份实现（`xlsx-image.ts`）——
+// 原先本文件自己读文件头 + 自己调 `wb.addImage({filename})`，两处都踩过坑（见该文件头）。
+const { embedCellImage } = require('./xlsx-image') as typeof import('./xlsx-image');
 
 register('purchase-export-excel', async (payload) => {
   if (!isPlainObject(payload) || !Array.isArray(payload.items)) {
@@ -358,19 +358,16 @@ register('purchase-export-excel', async (payload) => {
     if (price !== null) row.getCell(8).numFmt = '0.00';
     if (amount !== null) row.getCell(9).numFmt = '0.00';
     if (!it.styleCode || !it.color) return;
-    // 按 款编码+款色 查本地代表图并嵌入 A 列
+    // 按 款编码+款色 查本地代表图并嵌进 A 列。
+    // ⚠️ 嵌图必须走 `xlsx-image.embedCellImage`：v4.4.0 下 `wb.addImage({filename})` 只给文件名时
+    // 会写成 `xl/media/image1.undefined` + `<Default ContentType="image/undefined"/>`（**包结构不合法**，
+    // Excel 会提示修复并丢掉图）。该文件头记了两个实测坑 + 修法。
     const imgPath = orderDb.findStyleColorImagePath(it.styleCode, it.color);
-    if (!imgPath || !fs.existsSync(imgPath)) return;
-    const raw = imageSizeOf(imgPath);
-    const dh = raw && raw.w > 0 ? Math.min(160, Math.max(24, Math.round((IMG_W * raw.h) / raw.w))) : 70;
-    try {
-      const imgId = wb.addImage({ filename: imgPath });
-      // 锚定 A 列该行（oneCellAnchor），删除/插入行时图片随锚定行移动；colOff 水平居中
-      ws.addImage(imgId, { tl: { col: 0, colOff, row: r - 1 }, ext: { width: IMG_W, height: dh } });
-      row.height = Math.max(22, Math.ceil(dh * 0.75) + 2); // 行高撑起以容纳图片（1px≈0.75pt）
-    } catch {
-      /* 单张图损坏不阻断导出 */
-    }
+    const h = embedCellImage(wb, ws, r, imgPath ? { filePath: imgPath } : null, {
+      width: IMG_W,
+      colOff,
+    });
+    if (h !== null) row.height = h;
   });
 
   const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];

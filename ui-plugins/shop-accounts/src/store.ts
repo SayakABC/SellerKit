@@ -219,6 +219,39 @@ export const PLATFORM_OPTIONS: string[] = [
 ];
 
 /**
+ * `sk_shops.platform` 的取值词表（店铺登记 / 店铺套编辑抽屉「名下店铺」共用的平台代码口径）。
+ *
+ * ⚠️ 与上面的 PLATFORM_OPTIONS（店铺套自报的平台**展示名**）是**两套词表**：
+ * 前者是业务实体字段（sk_shops 建表以来的存量值就是这套小写代码），
+ * 后者是套装的自由文本标签。两者只能靠 `shopPlatformCodeFromLabel` 启发式对接，
+ * 对不上的返回 '' 由人选 —— 不猜（与店铺归一的"不猜歧义"同一纪律）。
+ */
+export interface ShopPlatformOption {
+  value: string;
+  label: string;
+}
+export const SHOP_PLATFORM_OPTIONS: ShopPlatformOption[] = [
+  { value: 'ae', label: '速卖通（ae）' },
+  { value: 'amazon', label: 'Amazon' },
+  { value: 'shopee', label: 'Shopee' },
+  { value: 'temu', label: 'Temu' },
+  { value: 'lazada', label: 'Lazada' },
+  { value: 'other', label: '其它' },
+];
+
+/** 店铺套的平台展示名 → sk_shops 平台代码；映射不上返回 ''（必须由人显式选择） */
+export function shopPlatformCodeFromLabel(label: string): string {
+  const l = String(label ?? '').trim().toLowerCase();
+  if (!l) return '';
+  if (l === '速卖通' || l === 'ae' || l === 'aliexpress') return 'ae';
+  if (l === 'amazon' || l === '亚马逊') return 'amazon';
+  if (l === 'shopee' || l === '虾皮') return 'shopee';
+  if (l === 'temu') return 'temu';
+  if (l === 'lazada') return 'lazada';
+  return '';
+}
+
+/**
  * 关联企业下拉选项（来自「企业管理」页签的企业列表，仅取下拉所需字段）。
  */
 export interface CompanyOption {
@@ -398,9 +431,9 @@ function collectGroupKeys(nodes: GroupNode[], out: string[] = []): string[] {
   return out;
 }
 
-/** 主视图顶部页签：账号库 / 邮件收件箱 */
+/** 主视图顶部页签：账号库 / 邮件收件箱 / 企业管理 / 店铺登记 */
 // 注：原 'settings' 页签已迁至宿主设置中心（manifest.settings 贡献 → 宿主 SettingsModal），不再作为岛内页签
-export type ShopAccountsMainTab = 'accounts' | 'mail' | 'companies';
+export type ShopAccountsMainTab = 'accounts' | 'mail' | 'companies' | 'shops';
 
 /** 分组视图偏好（持久化到 modules.shop-accounts，与业务数据隔离） */
 export interface ShopAccountsPrefs {
@@ -532,7 +565,8 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
       if (
         data.mainTab === 'accounts' ||
         data.mainTab === 'mail' ||
-        data.mainTab === 'companies'
+        data.mainTab === 'companies' ||
+        data.mainTab === 'shops'
       ) {
         mainTab.value = data.mainTab;
       }

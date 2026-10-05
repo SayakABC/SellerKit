@@ -9,7 +9,7 @@
        内联优先级高于本文件的 :root，因此这里是"兜底"而非"覆盖"）；
     2. 补齐宿主 src/styles/index.css 的 @layer components 全局控件主题化
        （输入框 / 下拉 / 日期控件 / .wb-input / 滚动条）；
-   约定（对齐 UI 岛模板 sk-ui-starter）：岛内消费 --wb-* 一律带回退值，
+   约定（对齐 UI 岛模板 scripts/ui-plugin-template）：岛内消费 --wb-* 一律带回退值，
    避免主题令牌尚未注入（首帧）或注入失败时整页配色/边框失效。
    ============================================================ */
 :root {
@@ -76,11 +76,13 @@ body {
     color: var(--wb-text);
   }
 
+  /* 必须 inherit，不可写死 light：宿主把当前主题（含 color-scheme）以**内联样式**写到 <html>，
+     元素级声明会盖过该内联值 → 深色主题下日期面板/滚动条/下拉弹层仍是浅色（文字已黑、原生件发白） */
   input[type='date'],
   input[type='datetime-local'],
   input[type='month'],
   input[type='time'] {
-    color-scheme: light;
+    color-scheme: inherit;
   }
 
   input::placeholder,

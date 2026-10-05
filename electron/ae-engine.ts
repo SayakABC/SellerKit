@@ -4,7 +4,9 @@
 // 口径（v1，与 docs/features/PROFIT_TRACKER.md §4 一致并落为 CNY 基准）：
 //   - 收入（订单原币）= 商品金额 + 买家付运费 − 退款/纠纷调整（refund/dispute 费用科目按收入扣减）
 //   - 商品成本（CNY）= Σ(行数 × 款单价分/100)，行经 ae_order_lines.style_code ↔ ae_cost_map 命中；
-//     行无 style_code 或未命中 → 该行成本缺失（coverage 反映，不阻塞利润展示）
+//     **P4a 起按生效区间取数**：以订单业务日期取 `effective_from <= 订单日` 的最近一条（同生效日 manual 优先），
+//     故同一款跨多次进货、历史订单毛利可按当时成本复算；无区间命中时回落最早一条；
+//     行无 style_code 或该款无任何成本行 → 该行成本缺失（coverage 反映，不阻塞利润展示）
 //   - 毛利 = 净收入 − 商品成本（全部折 CNY：外币 × ae_rates.rate_to_cny）
 //   - 订单级费用（CNY）= 其余 fee 科目合计；运营利润 = 毛利 − 订单级费用
 //   - 分层均以 CNY 呈现（成本 CNY、结算外币按汇率折算）；分币种原币视图仍在 ae-summary
@@ -13,6 +15,7 @@
 export {};
 
 import { dbQuery } from './db';
+import { AE_DEDUCTION_CATEGORIES, lineIncomeShares } from './aeMoney';
 
 /** 利润统计基准币：所有外币经 ae_rates 折算到 CNY；CNY 订单恒 1:1（不查表） */
 const BASE_CURRENCY = 'CNY';
@@ -104,6 +107,8 @@ interface LineRow {
   title: string;
   productId: string;
   qty: number;
+  /** 行商品金额（原币）；行收入按它占比分摊（缺失/为 0 才回落 qty） */
+  goodsAmount: number;
 }
 interface FeeRow {
   aeOrderId: number;
@@ -117,9 +122,6 @@ function num(v: unknown): number {
 function str(v: unknown): string {
   return v === undefined || v === null ? '' : String(v);
 }
-
-/** 退款/纠纷类科目 = 收入扣减（其余费用进费用侧） */
-const DEDUCTION_CATEGORIES = new Set(['refund', 'dispute', 'refund_amount']);
 
 function fmtCny(v: number): number {
   return Math.round(v * 100) / 100;
@@ -156,13 +158,14 @@ export function getProfitOverview(opts?: { granularity?: 'day' | 'month'; rangeD
   })) as OrderRow[];
 
   const lines = dbQuery<Record<string, unknown>>(
-    `SELECT ae_order_id, style_code, title, product_id, qty FROM ae_order_lines`,
+    `SELECT ae_order_id, style_code, title, product_id, qty, goods_amount FROM ae_order_lines`,
   ).map((r) => ({
     aeOrderId: num(r.ae_order_id),
     styleCode: str(r.style_code),
     title: str(r.title),
     productId: str(r.product_id),
     qty: num(r.qty),
+    goodsAmount: num(r.goods_amount),
   })) as LineRow[];
 
   const fees = dbQuery<Record<string, unknown>>(`SELECT ae_order_id, category, amount FROM ae_fees`).map((r) => ({
@@ -171,16 +174,42 @@ export function getProfitOverview(opts?: { granularity?: 'day' | 'month'; rangeD
     amount: num(r.amount),
   })) as FeeRow[];
 
-  const costMap = new Map<string, number>(); // style_code(大写) → 分
-  const costName = new Map<string, string>();
-  for (const r of dbQuery<Record<string, unknown>>(`SELECT style_code, style_name, unit_price_cents FROM ae_cost_map`)) {
+  // 成本区间表（P4a / D5）：style_code(大写) → 按生效日升序的区间，每区间一条。
+  // 同一 (款, 生效日) 允许 purchase 与 manual 并存，此处按「manual 优先」收敛为一条 —— 用户手工改过的价
+  // 不会被下一次拿货对账导入盖掉（排序让 manual 先到，同生效日的后续行直接丢弃）。
+  const costRows = new Map<string, { from: string; cents: number; name: string }[]>();
+  for (const r of dbQuery<Record<string, unknown>>(
+    `SELECT style_code, style_name, unit_price_cents, effective_from, source FROM ae_cost_map
+     ORDER BY style_code, effective_from, CASE source WHEN 'manual' THEN 0 ELSE 1 END`,
+  )) {
     const code = str(r.style_code).toUpperCase();
     const cents = num(r.unit_price_cents);
-    if (code && cents > 0) {
-      costMap.set(code, cents);
-      if (!costName.has(code)) costName.set(code, str(r.style_name));
-    }
+    if (!code || cents <= 0) continue;
+    // 生效日直接取库值：列 NOT NULL DEFAULT '0000-01-01'，迁移存量行也写该哨兵值；
+    // 万一为空串，字符串序最低 → 等价于"最早"，仍是最保守的取值，无需在此再引一份常量。
+    const from = str(r.effective_from);
+    const arr = costRows.get(code) ?? [];
+    const tail = arr[arr.length - 1];
+    if (tail && tail.from === from) continue; // 同生效日已取到优先级更高的一条
+    arr.push({ from, cents, name: str(r.style_name) });
+    costRows.set(code, arr);
   }
+
+  /**
+   * 按订单业务日期取成本：`effective_from <= 订单日` 的最近一条（区间语义，历史毛利可复算）。
+   * 无任何区间命中（订单日早于该款最早进货日）时**回落最早一条** —— 宁愿用「当时已知的最早成本」，
+   * 也不把它判成缺成本行，避免改造后历史订单毛利凭空少一块。
+   */
+  const costAt = (code: string, bizDate: string): { cents: number; name: string } | undefined => {
+    const arr = costRows.get(code);
+    if (!arr || arr.length === 0) return undefined;
+    let hit: { from: string; cents: number; name: string } | undefined;
+    for (const p of arr) {
+      if (p.from <= bizDate) hit = p;
+      else break; // arr 按 from 升序（字符串序，yyyy-mm-dd 可比）
+    }
+    return hit ?? arr[0];
+  };
 
   // 按订单聚合
   const feeByOrder = new Map<number, FeeRow[]>();
@@ -222,37 +251,44 @@ export function getProfitOverview(opts?: { granularity?: 'day' | 'month'; rangeD
     let deduction = 0;
     let otherFee = 0;
     for (const f of orderFees) {
-      if (DEDUCTION_CATEGORIES.has(f.category)) deduction += f.amount;
+      // 科目口径单源在 `aeMoney.AE_DEDUCTION_CATEGORIES`（与 `ae-db.collectedOrderRows` 同一份）
+      if (AE_DEDUCTION_CATEGORIES.has(f.category)) deduction += f.amount;
       else otherFee += f.amount;
     }
     const incomeCcy = o.goodsAmount + o.shippingIncome - deduction;
     const incomeCny = incomeCcy * rate;
-    // 行收入分摊比例：按行 qty 占订单总 qty（订单级收入无行明细时按比例近似，M1 口径）
-    const totalQty = Math.max(1, orderLines.reduce((s, x) => s + x.qty, 0));
+    // 行收入分摊：**按行金额占比**（行金额缺失才回落 qty）—— 单源在 `aeMoney.lineIncomeShares`，
+    // 与统一投影 `ae-db.collectedOrderRows` 共用同一份实现（各写一份＝同一批订单两个数）。
+    const shares = lineIncomeShares(
+      orderLines.map((x) => ({ qty: x.qty, goodsAmount: x.goodsAmount })),
+      incomeCcy,
+    );
+    // 成本按「订单业务日期」匹配生效区间；order_time 非法/缺失时传空串 → 取该款最早区间（最保守）
+    const bizDate = /^\d{4}-\d{2}-\d{2}$/.test(o.orderTime.slice(0, 10)) ? o.orderTime.slice(0, 10) : '';
     let costCny = 0;
-    for (const l of orderLines) {
+    orderLines.forEach((l, li) => {
       lineCount += 1;
       const code = l.styleCode.trim().toUpperCase();
       if (code) codeLines += 1;
-      const cents = code ? costMap.get(code) : undefined;
-      const shareCny = ((l.qty / totalQty) * incomeCcy) * rate;
-      if (cents !== undefined) {
+      const hit = code ? costAt(code, bizDate) : undefined;
+      const shareCny = (shares[li] ?? 0) * rate;
+      if (hit) {
         matchedLines += 1;
-        const lineCost = (cents / 100) * l.qty;
+        const lineCost = (hit.cents / 100) * l.qty;
         costCny += lineCost;
-        const agg = styleAgg.get(code) ?? { code, name: costName.get(code) || l.title || code, qty: 0, incomeCny: 0, costCny: 0 };
+        const agg = styleAgg.get(code) ?? { code, name: hit.name || l.title || code, qty: 0, incomeCny: 0, costCny: 0 };
         agg.qty += l.qty;
         agg.incomeCny += shareCny;
         agg.costCny += lineCost;
         styleAgg.set(code, agg);
       } else if (code) {
         // 有编码未命中成本 → 进 TOP 观察（成本缺失，毛利不完整）——按无成本行记收入侧聚合
-        const agg = styleAgg.get(code) ?? { code, name: costName.get(code) || l.title || code, qty: 0, incomeCny: 0, costCny: 0 };
+        const agg = styleAgg.get(code) ?? { code, name: l.title || code, qty: 0, incomeCny: 0, costCny: 0 };
         agg.qty += l.qty;
         agg.incomeCny += shareCny;
         styleAgg.set(code, agg);
       }
-    }
+    });
     const feeCny = otherFee * rate;
     const gross = incomeCny - costCny;
     const operating = gross - feeCny;
@@ -266,7 +302,7 @@ export function getProfitOverview(opts?: { granularity?: 'day' | 'month'; rangeD
 
     // 费用构成（折 CNY）
     for (const f of orderFees) {
-      if (DEDUCTION_CATEGORIES.has(f.category)) continue;
+      if (AE_DEDUCTION_CATEGORIES.has(f.category)) continue;
       const agg = feeBreakAgg.get(f.category) ?? { totalCny: 0, orders: 0 };
       agg.totalCny += f.amount * rate;
       agg.orders += 1;

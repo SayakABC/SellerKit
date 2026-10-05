@@ -52,6 +52,28 @@
 
 因此批量修改的企业字段**只有覆盖语义、没有追加语义**（企业是外键，追加无意义）；抽屉内复选框未勾选或未选企业时该项不会进入 `patch`。DB 侧 `batchUpdateShopAccounts` 对 `patch.companyId` 做 `coerceCompanyId` 归一，并在同一条 UPDATE 内一并写 `company_id` + `company`，避免二者不一致。
 
+## 两个 db 域的 `list` 返回形状不同（1.5.1 踩过）
+
+| 域 | `list` 返回 | 消费方式 |
+|---|---|---|
+| `shop-accounts` | **裸数组** `ShopAccountItem[]` | `result.data \|\| []`（`store.ts` 的 `refresh()`） |
+| `shop`（店铺登记） | `{ rows, total }` | `result.data?.rows ?? []` |
+
+⚠️ 1.5.0 的「店铺登记」页把两域形状搞混（按 `{rows}` 取 `shop-accounts.list` 的裸数组），
+「账号套装」下拉恒为空——**桥、权限、数据全正常**（真机取证 `shop-accounts.list` 能返回全部 14 条），
+纯视图层取值 bug，且被「失败不影响主流程」的静默兜底（`?? []`）完全掩盖。新调用点先确认域的返回形状。
+
+## 店铺实体的两套平台词表 + 全量提交陷阱（1.5.2 踩过）
+
+- **平台词表两套，别混**：店铺套（`sk_shop_sets`）的「关联平台」是**自由文本展示名**（`store.ts` 的 `PLATFORM_OPTIONS`，如 `速卖通`）；
+  `sk_shops.platform` 是**小写代码**（`ae` / `amazon` / …，`store.ts` 的 `SHOP_PLATFORM_OPTIONS`）。
+  两者只靠 `shopPlatformCodeFromLabel()` 启发式对接，映射不上返回空串由人选（不猜）。
+- **`shopUpsert` 是全量提交**：只传 `{ id, name }` 会把平台/标识/状态/备注**静默清空**。
+  「名下店铺」的解绑必须整行回传、只把 `shopSetId` 置 0；店铺登记编辑表单必须回填 `platformShopId`——
+  1.5.2 之前登记页编辑一次就会把已登记的标识静默抹掉。
+- **名下店铺区块**（编辑抽屉）：数据落 `sk_shops`、`shop_set_id` 软关联本套装（`shop` 域 `list` 的
+  `shopSetId` 过滤，0 = 不过滤而非"只看未关联"）；新增套装时无套装 id，先保存才能登记。
+
 ## 开发
 
 本包为 **Vite + Vue 3 + Pinia 工程**（与 `ui-plugins/ae-profit` 同一套路），`dist/` 是构建产物，**不要手改**：

@@ -1,6 +1,6 @@
 {
   "name": "shop-accounts",
-  "version": "1.4.3",
+  "version": "1.5.2",
   "private": true,
   "type": "module",
   "description": "店铺账号管家 UI 岛（Vue 3 + Pinia，产物为纯静态 dist，经宿主 db/mail 能力域访问业务数据）",

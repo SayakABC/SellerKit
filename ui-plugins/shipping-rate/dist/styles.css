@@ -1,0 +1,245 @@
+/* dist/styles.css
+   主题令牌由宿主注入（--wb-*，见 src/core/plugin/uiBridgeHost.ts 的 WB_THEME_TOKENS）；
+   这里的兜底值只为"脱离宿主静态打开 dist/"时也能看出结构，取值与 src/styles/index.css 的 :root 一致。
+
+   ⚠️ color-scheme 只在 :root 上写（首帧兜底），元素级一律不写 ——
+   宿主是把当前主题以**内联样式**写到 iframe 的 <html> 上的，元素级写死 light 会盖过它，
+   表现为"深色主题下日期面板/下拉弹层/滚动条仍发白"，且文字与面板都正常，极难归因。
+   同理不要用 [data-theme='dark'] 选择器：宿主不同步该属性到 iframe，那是死代码。
+
+   ⚠️ :root 必须带 color-scheme: light dark（而不是 light）：深色下原生控件（滚动条、下拉）
+   才会跟着变。宿主的内联值会覆盖它，这里只是兜底。 */
+
+:root {
+  color-scheme: light dark;
+
+  --wb-bg: #f6f7f9;
+  --wb-surface: #ffffff;
+  --wb-surface-2: #f2f4f7;
+  --wb-border: #e3e6ea;
+  --wb-text: #1f2329;
+  --wb-text-muted: #8a9099;
+  --wb-primary: #2f6bff;
+  --wb-primary-hover: #1f59ec;
+  --wb-primary-soft: rgba(47, 107, 255, 0.12);
+  --wb-primary-contrast: #ffffff;
+  --wb-danger: #e5484d;
+  --wb-danger-soft: rgba(229, 72, 77, 0.12);
+  --wb-success: #17a34a;
+  --wb-success-soft: rgba(23, 163, 74, 0.12);
+  --wb-warning: #d98b0a;
+  --wb-warning-soft: rgba(217, 139, 10, 0.14);
+  --wb-accent: #7a5af8;
+  --wb-accent-soft: rgba(122, 90, 248, 0.12);
+  --wb-hover: #f2f4f7;
+  --wb-overlay: rgba(0, 0, 0, 0.32);
+  --wb-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  --wb-radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ---------------- 顶栏 ---------------- */
+
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px; border-bottom: 1px solid var(--wb-border); background: var(--wb-surface);
+}
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab {
+  padding: 5px 12px; border: 1px solid transparent; border-radius: var(--wb-radius);
+  background: transparent; color: var(--wb-text-muted); cursor: pointer; font-size: 13px;
+}
+.tab:hover { background: var(--wb-hover); color: var(--wb-text); }
+.tab.is-active { background: var(--wb-primary-soft); color: var(--wb-primary); }
+.topbar-right { margin-left: auto; }
+.conn {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--wb-surface-2); color: var(--wb-text-muted);
+}
+.conn.is-on { background: var(--wb-primary-soft); color: var(--wb-primary); }
+.conn.is-off { background: var(--wb-danger-soft); color: var(--wb-danger); }
+
+/* ---------------- 布局 ---------------- */
+
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* draw() 每次新建 .view-holder：旧容器连同其监听器被 replaceChildren 一起回收 */
+.view-holder { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+.page {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px;
+  overflow: auto;
+}
+
+.panel {
+  background: var(--wb-surface); border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius); padding: 12px;
+}
+.panel-title {
+  font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
+.result-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.results,
+.rates-body { flex: 1; min-height: 0; overflow: auto; margin: -4px; padding: 4px; }
+
+/* ---------------- 工具栏 ---------------- */
+
+.toolbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field-label { font-size: 11px; color: var(--wb-text-muted); }
+/* 输入框 + 单位（"g"）必须**同一行**。
+   若把单位直接放进 .field（column 流），它会独占第三行 →
+   该 field 比同伴高 21px，`.toolbar` 的 align-items: flex-end 便把所有同伴整体上提，
+   表现为"标签错位、按钮跑到另一行且底边不齐"（窄窗口下尤其明显）。 */
+.field-inline { display: flex; align-items: center; gap: 4px; }
+.grow { flex: 1 1 auto; min-width: 120px; }
+.w-92 { width: 92px; }
+.bar { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.hint { margin-top: 8px; }
+
+.input {
+  height: 28px; padding: 0 8px; border: 1px solid var(--wb-border); border-radius: 6px;
+  background: var(--wb-surface); color: var(--wb-text); font-size: 13px; min-width: 0;
+  color-scheme: inherit;
+}
+.input:focus { outline: none; border-color: var(--wb-primary); }
+select.input { height: 28px; }
+
+.seg {
+  display: inline-flex; border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius); overflow: hidden;
+}
+/* padding 4px（而非 5px）让 .seg 与 .input/.btn 同为 28px 高 —— 同行控件底边才齐 */
+.seg-btn {
+  padding: 4px 10px; border: 0; border-right: 1px solid var(--wb-border);
+  background: var(--wb-surface); color: var(--wb-text-muted);
+  cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.seg-btn:last-child { border-right: 0; }
+.seg-btn:hover { background: var(--wb-hover); color: var(--wb-text); }
+.seg-btn.is-active { background: var(--wb-primary-soft); color: var(--wb-primary); font-weight: 600; }
+
+.btn {
+  height: 28px; padding: 0 12px; border: 1px solid var(--wb-border);
+  border-radius: 6px; background: var(--wb-surface); color: var(--wb-text);
+  cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.btn:hover { background: var(--wb-hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary {
+  background: var(--wb-primary); border-color: var(--wb-primary);
+  color: var(--wb-primary-contrast);
+}
+.btn-primary:hover { background: var(--wb-primary-hover); }
+.btn-danger { background: var(--wb-danger); border-color: var(--wb-danger); color: #fff; }
+
+.icon-btn {
+  padding: 2px 8px; border: 1px solid var(--wb-border); border-radius: 999px;
+  background: transparent; color: var(--wb-text-muted); cursor: pointer; font-size: 11px;
+}
+.icon-btn:hover { background: var(--wb-hover); color: var(--wb-text); }
+
+/* ---------------- 摘要 / 标签 ---------------- */
+
+.summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 0 0 8px; border-bottom: 1px solid var(--wb-border); margin-bottom: 8px;
+}
+.chip {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px;
+  background: var(--wb-surface-2); color: var(--wb-text-muted);
+}
+.chip b { color: var(--wb-text); }
+.chip.is-ok { background: var(--wb-success-soft); color: var(--wb-success); }
+.chip.is-ok b { color: var(--wb-success); }
+.chip.is-bad { background: var(--wb-warning-soft); color: var(--wb-warning); }
+.chip.is-bad b { color: var(--wb-warning); }
+.tag {
+  margin-left: 6px; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: var(--wb-accent-soft); color: var(--wb-accent);
+}
+
+/* 整屏级说明条（运费查询页「当前工作表不是人民币报价」）。
+   用 warning 令牌而非 danger：这不是故障，是本版的能力边界 —— 报成"错误"会让用户去查克重。
+   正文用 --wb-text、只把左侧色条与首句着色：整块都用 --wb-warning 在暗色主题下对比度偏低。 */
+.notice {
+  display: block; padding: 8px 10px; margin-bottom: 8px;
+  border: 1px solid var(--wb-border); border-left: 3px solid var(--wb-warning);
+  border-radius: var(--wb-radius);
+  background: var(--wb-warning-soft); color: var(--wb-text);
+  font-size: 12.5px; line-height: 1.6;
+}
+.notice b { color: var(--wb-warning); }
+
+/* ---------------- 表格 ---------------- */
+
+.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.grid th, .grid td {
+  padding: 6px 8px; border-bottom: 1px solid var(--wb-border); text-align: left; vertical-align: top;
+}
+.grid thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--wb-surface); color: var(--wb-text-muted);
+  font-weight: 600; font-size: 12px; white-space: nowrap;
+}
+.grid tbody tr:hover { background: var(--wb-hover); }
+.grid.compact th, .grid.compact td { padding: 4px 8px; font-size: 12px; }
+.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.strong { font-weight: 600; }
+/* 短文本列（国家名 / Code / 类别 / 档位）禁止折行。
+   中文没有词边界，列被压窄时会**逐字折行**（"普货小包" → 4 行，行高从 34px 涨到 140px）。
+   加 nowrap 后这些列的 min-content 变大，于是 .results / .rates-body 出现横向滚动条
+   —— 宁可横向滚动，也不要逐字折行。长文本列（模式 / 费用构成）保持可折行，避免表过宽。 */
+.nowrap { white-space: nowrap; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.muted { color: var(--wb-text-muted); }
+.small { font-size: 12px; }
+.act { text-align: right; }
+.row-fail td { background: var(--wb-surface-2); }
+.row-head { cursor: pointer; }
+.row-head.is-open { background: var(--wb-primary-soft); }
+.caret { width: 18px; color: var(--wb-text-muted); }
+.sub td { background: var(--wb-surface-2); color: var(--wb-text-muted); }
+.sub:last-child td { border-bottom: 2px solid var(--wb-border); }
+
+/* ---------------- 键值 / 空态 / 告警 ---------------- */
+
+.kv {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px;
+  margin-bottom: 10px; font-size: 12.5px;
+}
+.kv-k { color: var(--wb-text-muted); white-space: nowrap; }
+.kv-v { min-width: 0; overflow-wrap: anywhere; }
+
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 28px 12px; text-align: center;
+}
+.empty-title { font-weight: 600; }
+
+.warn-list { margin: 0; padding-left: 18px; color: var(--wb-warning); font-size: 12px; }
+.warn-list li { margin: 2px 0; }
+
+.hidden { display: none; }
+
+/* 页内 toast（仅脱离宿主静态预览时可见；连着宿主时走宿主 toast） */
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  padding: 8px 14px; border-radius: var(--wb-radius);
+  background: var(--wb-surface); border: 1px solid var(--wb-border);
+  box-shadow: var(--wb-shadow); font-size: 12.5px; z-index: 10;
+}
+.toast.is-success { color: var(--wb-success); border-color: var(--wb-success-soft); }
+.toast.is-error { color: var(--wb-danger); border-color: var(--wb-danger-soft); }
+.toast.is-info { color: var(--wb-text); }

@@ -5,10 +5,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import {
   PLATFORM_OPTIONS,
   SECRET_FIELDS,
+  SHOP_PLATFORM_OPTIONS,
   STATUS_META,
   openedDaysOf,
+  shopPlatformCodeFromLabel,
   useShopAccountsStore,
 } from '../store';
+import { shopList, shopUpsert } from '@/core/services/ipc';
+import { toast } from '@/core/services/toast';
 import IconGlyph from './IconGlyph.vue';
 import type {
   ShopAccountSecretField,
@@ -16,6 +20,18 @@ import type {
   ShopAccountStatus,
   ShopAccountUpsertInput,
 } from '@/types';
+
+/** 名下店铺行（shop 域 list 返回行的本组件所需子集；解绑时整行回传用） */
+interface SetShopRow {
+  id: number;
+  platform: string;
+  name: string;
+  platformShopId: string;
+  site: string;
+  status: string;
+  openedAt: string;
+  note: string;
+}
 
 const store = useShopAccountsStore();
 
@@ -70,8 +86,7 @@ const visible = reactive<Record<ShopAccountSecretField, boolean>>({
 });
 
 const isEdit = computed(() => !!store.editorDetail);
-const emailValid = computed(() => form.email.includes('@') && !!form.email.trim());
-/** 开店时间的辅助说明：已填则回显开店天数，未填说明用途 */
+const emailValid = computed(() => form.email.includes('@') && !!form.email.trim());/** 开店时间的辅助说明：已填则回显开店天数，未填说明用途 */
 const openedAtHint = computed(() => {
   const days = openedDaysOf(form.openedAt);
   if (days === null) return '留空则不统计；列表会展示开店至今的天数';
@@ -96,6 +111,107 @@ function isConfigured(field: ShopAccountSecretField): boolean {
 
 /** 当前关联的企业是否仍在企业管理列表中；不在则下拉渲染「已删除」占位项（异步列表未到时也会短暂命中） */
 const companyExists = computed(() => store.companies.some((c) => c.id === form.companyId));
+
+/* ── 名下店铺（方案 B：UI 在店铺套、数据落 sk_shops）────────────────────────
+ * sk_shops.shop_set_id 软关联到本店铺套（shop 域 list 支持 shopSetId 过滤，无需新 op）。
+ * 只在**编辑**（已有套装 id）时可用；新增时套装还不存在，先保存再登记。
+ * 平台默认值 = 套装平台展示名的映射；映射不上留空，由人选（不猜歧义）。
+ */
+const setShops = ref<SetShopRow[]>([]);
+const setShopsLoading = ref(false);
+const setShopsError = ref('');
+const addingShop = ref(false);
+const detachingShopId = ref(0);
+const shopForm = reactive({ platform: '', name: '', platformShopId: '' });
+
+/** 新增套装时 sk_shops 里没有可挂的实体；编辑时套装 id 即关联键 */
+const canManageShops = computed(() => isEdit.value && Number(store.editorDetail?.id ?? 0) > 0);
+
+async function loadSetShops(): Promise<void> {
+  const setId = Number(store.editorDetail?.id ?? 0);
+  if (!setId) {
+    setShops.value = [];
+    return;
+  }
+  setShopsLoading.value = true;
+  setShopsError.value = '';
+  try {
+    const res = await shopList({ shopSetId: setId, limit: 500 });
+    if (!res.success) throw new Error(res.error || '读取名下店铺失败');
+    // ⚠️ shop 域的 list 返回 { rows, total }（shop-accounts 域才是裸数组），见 1.5.1 修复注释
+    setShops.value = (res.data?.rows ?? []) as SetShopRow[];
+  } catch (e) {
+    setShopsError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    setShopsLoading.value = false;
+  }
+}
+
+/** 平台默认值取套装的第一个平台展示名的映射；对不上返回 ''（下拉停在占位项，由人选） */
+const defaultShopPlatform = computed(() => shopPlatformCodeFromLabel(platforms.value[0] ?? ''));
+
+async function submitAddShop(): Promise<void> {
+  const setId = Number(store.editorDetail?.id ?? 0);
+  if (!setId || addingShop.value) return;
+  if (!shopForm.name.trim()) {
+    toast.error('店铺名称不能为空');
+    return;
+  }
+  if (!shopForm.platform) {
+    toast.error('请选择平台（店铺实体的平台字段历史文本里没有，必须手动指定）');
+    return;
+  }
+  addingShop.value = true;
+  try {
+    const res = await shopUpsert({
+      id: 0,
+      platform: shopForm.platform,
+      name: shopForm.name,
+      platformShopId: shopForm.platformShopId,
+      site: '',
+      shopSetId: setId,
+      status: 'active',
+      openedAt: '',
+      note: '',
+    });
+    if (!res.success) throw new Error(res.error || '登记失败');
+    toast.success('已登记名下店铺');
+    shopForm.name = '';
+    shopForm.platformShopId = '';
+    await loadSetShops();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    addingShop.value = false;
+  }
+}
+
+/** 解除店铺与本套装的关联。⚠️ shopUpsert 是**全量提交**：必须整行回传，只把 shopSetId 置 0 ——
+ * 漏传任何字段都会把它静默清空（比报错更难查）。 */
+async function detachShop(row: SetShopRow): Promise<void> {
+  if (detachingShopId.value) return;
+  detachingShopId.value = row.id;
+  try {
+    const res = await shopUpsert({
+      id: row.id,
+      platform: row.platform,
+      name: row.name,
+      platformShopId: row.platformShopId,
+      site: row.site,
+      shopSetId: 0,
+      status: row.status,
+      openedAt: row.openedAt,
+      note: row.note,
+    });
+    if (!res.success) throw new Error(res.error || '解绑失败');
+    toast.success(`已解除「${row.name}」与本店铺套的关联（店铺本体仍保留）`);
+    await loadSetShops();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    detachingShopId.value = 0;
+  }
+}
 
 function hydrate(): void {
   const detail = store.editorDetail;
@@ -122,6 +238,13 @@ function hydrate(): void {
     initialSecrets[f.key] = value;
     visible[f.key] = false;
   }
+  // 名下店铺：编辑时按套装 id 拉取；新增时清空（套装还不存在，保存后才能登记）
+  shopForm.platform = isEdit.value ? shopPlatformCodeFromLabel(platforms.value[0] ?? '') : '';
+  shopForm.name = '';
+  shopForm.platformShopId = '';
+  setShops.value = [];
+  setShopsError.value = '';
+  if (canManageShops.value) void loadSetShops();
 }
 
 watch(
@@ -365,6 +488,79 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
         </section>
 
         <section class="form-section">
+          <div class="section-head">
+            <h3 class="section-title">名下店铺</h3>
+            <span class="section-tip">
+              <IconGlyph name="key" :size="12" />
+              这套账号实际经营的店铺，立即保存（不等下方「保存」按钮）
+            </span>
+          </div>
+
+          <p v-if="!canManageShops" class="field-hint shop-empty">
+            先保存店铺套，才能在此登记名下店铺。也可以保存后在「店铺登记」页维护。
+          </p>
+          <template v-else>
+            <div v-if="setShopsError" class="shop-error">
+              <span>{{ setShopsError }}</span>
+              <button class="btn-ghost btn-mini" type="button" @click="loadSetShops">重试</button>
+            </div>
+
+            <ul v-if="setShops.length" class="shop-list">
+              <li v-for="s in setShops" :key="s.id" class="shop-item">
+                <span class="shop-name">{{ s.name }}</span>
+                <span v-if="s.platformShopId" class="shop-sid" :title="`平台店铺ID：${s.platformShopId}`">
+                  ID {{ s.platformShopId }}
+                </span>
+                <span class="shop-status" :class="{ archived: s.status !== 'active' }">
+                  {{ s.status === 'active' ? '在营' : '停用' }}
+                </span>
+                <button
+                  class="btn-ghost btn-mini shop-detach"
+                  type="button"
+                  :disabled="detachingShopId === s.id"
+                  :title="`解除关联（店铺本体仍保留，可改挂其它套装）`"
+                  @click="detachShop(s)"
+                >
+                  {{ detachingShopId === s.id ? '解绑中…' : '解绑' }}
+                </button>
+              </li>
+            </ul>
+            <p v-else-if="!setShopsLoading" class="field-hint shop-empty">
+              这套账号还没有登记名下店铺。可在这里登记，或到「店铺登记」页把历史订单里的店名归一成店铺实体后再关联。
+            </p>
+
+            <div class="shop-add">
+              <select v-model="shopForm.platform" class="wb-input shop-platform" title="店铺实体的平台（必须指定）">
+                <option value="">平台…</option>
+                <option v-for="p in SHOP_PLATFORM_OPTIONS" :key="p.value" :value="p.value">{{ p.label }}</option>
+              </select>
+              <input
+                v-model="shopForm.name"
+                class="wb-input shop-input"
+                type="text"
+                maxlength="200"
+                placeholder="店铺名称 *"
+                @keydown.enter.prevent="submitAddShop"
+              />
+              <input
+                v-model="shopForm.platformShopId"
+                class="wb-input shop-input"
+                type="text"
+                maxlength="100"
+                placeholder="店铺标识（可选）"
+                @keydown.enter.prevent="submitAddShop"
+              />
+              <button class="btn-primary shop-add-btn" type="button" :disabled="addingShop" @click="submitAddShop">
+                {{ addingShop ? '登记中…' : '登记' }}
+              </button>
+            </div>
+            <p class="field-hint">
+              标识 = 平台店铺ID（稳定业务键，改名不断链）；同一平台内名称与标识都不可重复。平台已按店铺套默认选中，可在下拉里改。
+            </p>
+          </template>
+        </section>
+
+        <section class="form-section">
           <h3 class="section-title">账号信息</h3>
           <div class="form-row">
             <label class="form-label">关联支付宝</label>
@@ -562,12 +758,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
   padding: 0 10px;
 }
 /* 日期控件：底色/文字/日历图标跟随宿主主题（UA 默认在深色主题下会渲染浅色面板 + 深色图标，几乎看不清）
-   全局 @layer components 已统一处理，这里仅显式纠正 color-scheme，避免被上层样式覆盖 */
+   必须 inherit——宿主把主题 color-scheme 以**内联样式**写到 <html>，元素级写死 light 会盖过它；
+   原作者想靠 :global([data-theme='dark']) 纠正，但宿主只注入内联令牌、**不同步 data-theme 属性**，
+   该选择器在 iframe 内永不命中（死代码，已删） */
 .date-input {
-  color-scheme: light;
-}
-:global([data-theme='dark']) .date-input {
-  color-scheme: dark;
+  color-scheme: inherit;
 }
 .form-row > textarea {
   min-height: 72px;
@@ -769,5 +964,99 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
 .btn-ghost:hover {
   border-color: var(--wb-primary);
   color: var(--wb-primary);
+}
+/* ── 名下店铺区块 ── */
+.shop-empty {
+  margin: 2px 0 8px;
+}
+.shop-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--wb-danger);
+  border-radius: var(--wb-radius);
+  color: var(--wb-danger);
+  font-size: 12px;
+}
+.shop-list {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.shop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--wb-border);
+  font-size: 12.5px;
+}
+.shop-item:last-child {
+  border-bottom: none;
+}
+.shop-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--wb-text);
+}
+.shop-sid {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--wb-surface-2);
+  color: var(--wb-text-muted);
+  font-size: 11px;
+}
+.shop-status {
+  flex-shrink: 0;
+  color: var(--wb-success);
+  font-size: 11px;
+}
+.shop-status.archived {
+  color: var(--wb-text-muted);
+}
+.shop-detach {
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+.shop-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+}
+.shop-platform {
+  flex-shrink: 0;
+  width: 130px;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.shop-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.shop-add-btn {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 14px;
+  font-size: 12px;
 }
 </style>

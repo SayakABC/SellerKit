@@ -7,7 +7,7 @@
 // 返回体统一收敛为宿主 IPC 服务的 { success, data, error } 形状，
 // 与 src/core/services/ipc.ts 的 ApiResult<T> 语义一致（源码按此判定分支）。
 
-import { dbCall, mailCall, onBus, copyText as bridgeCopy } from './bridge.js';
+import { dbCall, db, mailCall, onBus, copyText as bridgeCopy } from './bridge.js';
 import { pushToast } from './toast.js';
 
 /** 把桥调用（成功返回值 / 失败抛错）收敛为 ApiResult */
@@ -216,6 +216,45 @@ export function companyProfileUpsert(payload) {
 
 export function companyProfileDelete(id) {
   return wrap(() => dbCall('companyProfileDelete', { id: Number(id) || 0 }));
+}
+
+/* ------------------------------ 店铺登记（shop 域 / S1） ------------------------------ */
+// 补上缺失的"店铺"实体层：`sk_shops`（平台 × 店铺名）+ `sk_name_map`（历史店铺名 → 店铺）。
+// 历史文本（订单 / 采购 / 利润三处）**一律不改写**，靠映射旁挂关联（DOMAIN_INTEGRATION_PLAN G2）。
+//
+// ⚠️ 域是**字面量第一实参**：守卫按 `shp('op')` 这一形态解析"哪些 op 属于 shop 域"
+//（见 bridge.js 的 db 注释）。改成传变量会让「调用 ⊆ 声明」与「声明的 op 都被调用」双双静默失效。
+export const shp = (op, payload) => db('shop', op, payload);
+
+export function shopDbEnsure() {
+  return wrap(() => shp('ensure'));
+}
+
+export function shopList(payload) {
+  return wrap(() => shp('list', payload));
+}
+
+export function shopSummary() {
+  return wrap(() => shp('summary'));
+}
+
+/** 未归一的历史店铺名（宿主实时聚合三处文本，不是缓存表） */
+export function shopUnmapped() {
+  return wrap(() => shp('unmapped'));
+}
+
+export function shopUpsert(payload) {
+  return wrap(() => shp('upsert', payload));
+}
+
+/** 归一指派 / 标记忽略（ignored=true 时不要求 refId） */
+export function shopMap(payload) {
+  return wrap(() => shp('map', payload));
+}
+
+/** 撤销归一（回到未归一名单） */
+export function shopUnmap(payload) {
+  return wrap(() => shp('unmap', payload));
 }
 
 /* ------------------------------ 通用宿主服务 ------------------------------ */

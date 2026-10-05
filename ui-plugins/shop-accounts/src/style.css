@@ -6,7 +6,7 @@
     2. 补齐宿主 src/styles/index.css 的 @layer components 全局控件主题化
        （输入框 / 下拉 / 日期控件 / .wb-input / 滚动条），
        使复用自内建插件的组件（AccountEditor 等）在岛内观感与宿主一致。
-   约定（对齐 UI 岛模板 sk-ui-starter）：岛内消费 --wb-* 一律带回退值，
+   约定（对齐 UI 岛模板 scripts/ui-plugin-template）：岛内消费 --wb-* 一律带回退值，
    避免主题令牌尚未注入（首帧）或注入失败时整页配色/边框失效。
    ============================================================ */
 :root {

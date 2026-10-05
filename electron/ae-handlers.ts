@@ -8,6 +8,9 @@
 //   ae-profit-stats     M1 利润引擎总览（趋势 / TOP / 费用构成 / 覆盖率）
 //   ae-cost-map-*       M1 成本快照（D3：全量替换 / 列表）
 //   ae-rate-*           M1 汇率维护（列表 / upsert）
+//   settle-import       结算明细落库（AE 后台「订单明细」导出 → 解析在渲染层，本层只归一+存）
+//   settle-orders       按订单号取结算汇总（利润页"精准轨"用）
+//   settle-stats        结算明细概览（导入结果/诊断展示）
 // 入参在 preload 层已做形状消毒，本层再做一次业务口径校验（双防线）。
 
 export {};
@@ -18,6 +21,9 @@ import {
   getAeSummary,
   costMapReplace,
   costMapList,
+  upsertSettleLines,
+  settleOrders,
+  settleStats,
   rateList,
   rateUpsert,
 } from './ae-db';
@@ -88,3 +94,23 @@ handle('ae-rate-upsert', (payload: any) => {
   rateUpsert(ccy, rate);
   return { ok: true };
 });
+
+// ---- 「结算明细」（AE 后台导出的订单明细；解析在渲染层 *src/lib/settleImport.ts*）----
+
+/** 单次导入上限（一个导出通常 ≤ 2000 行） */
+const MAX_SETTLE_ROWS = 20000;
+
+handle('settle-import', (payload: any) => {
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  if (rows.length > MAX_SETTLE_ROWS) {
+    throw new Error(`settle-import: 单次最多 ${MAX_SETTLE_ROWS} 行（收到 ${rows.length}）`);
+  }
+  return upsertSettleLines(rows);
+});
+
+handle('settle-orders', (payload: any) => {
+  const orderNos = Array.isArray(payload?.orderNos) ? payload.orderNos : [];
+  return { rows: settleOrders(orderNos) };
+});
+
+handle('settle-stats', () => settleStats());

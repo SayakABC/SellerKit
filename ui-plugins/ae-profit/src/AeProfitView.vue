@@ -1,28 +1,18 @@
 <script setup lang="ts">
 // ui-plugins/ae-profit/src/AeProfitView.vue
-// 「利润追踪」主视图（M1）：Tab 外壳 = 利润统计(M1 统计页 v1) / 订单明细(M0) / 成本与汇率(M1 数据基础)。
-// 接收端状态常驻头部；刷新按钮驱动 refreshKey 让各面板重载；统计面板可请求跳转到成本/汇率子页。
+// 「订单采集」接收入口（原「利润追踪」）：**只保留采集接收端的状态与接入方式**。
+//
+// 2026-09-30（C9 收编）：「利润统计 / 订单明细 / 成本与汇率」已并入宿主**「算钱」**页
+// （趋势/明细/成本表/汇率维护都在那里，读同一份主干数据）。这里不再重复一次 ——
+// 「同一件事只有一个入口」是这套信息架构的铁律，重复入口会让两个页面的数字看起来像两套。
+// 本岛独特的价值只剩这条链：浏览器扩展 / curl 把订单推到这个接收端，数据进 `oi_orders` 主干。
 
 import { computed, onMounted, ref } from 'vue';
 import { aeDbEnsure, aeReceiverStatus } from '@/core/services/ipc';
 import { writeClipboard } from '@/core/services/clipboard';
 import { toast } from '@/core/services/toast';
-import ProfitStatsPanel from './components/ProfitStatsPanel.vue';
-import OrderListPanel from './components/OrderListPanel.vue';
-import CostRatesPanel from './components/CostRatesPanel.vue';
 import type { AeReceiverStatus } from '@/types';
 
-type TabId = 'stats' | 'orders' | 'cost';
-
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'stats', label: '利润统计' },
-  { id: 'orders', label: '订单明细' },
-  { id: 'cost', label: '成本与汇率' },
-];
-
-const activeTab = ref<TabId>('stats');
-const subFocus = ref<'cost' | 'rates' | null>(null);
-const refreshKey = ref(0);
 const status = ref<AeReceiverStatus | null>(null);
 const refreshing = ref(false);
 
@@ -48,25 +38,8 @@ async function refresh(): Promise<void> {
       return;
     }
     await loadStatus();
-    refreshKey.value += 1; // 各面板 watch 后自行重载
   } finally {
     refreshing.value = false;
-  }
-}
-
-/** 统计面板「去成本/去汇率」跳转：切到成本 Tab 并定位子页 */
-function onOpenPanel(anchor: 'cost' | 'rates'): void {
-  subFocus.value = anchor;
-  activeTab.value = 'cost';
-}
-
-/** 手动切 Tab：成本 Tab 默认落到「成本衔接」子页；离开成本 Tab 时清空锚点，避免下次停留汇率页 */
-function switchTab(id: TabId): void {
-  activeTab.value = id;
-  if (id !== 'cost') {
-    subFocus.value = null;
-  } else if (subFocus.value == null) {
-    subFocus.value = 'cost';
   }
 }
 
@@ -110,9 +83,8 @@ onMounted(() => {
   <div class="ae-shell">
     <div class="ae-head">
       <div class="ae-title">
-        <h2>利润追踪</h2>
-        <span class="badge-m1">M1 · 利润统计</span>
-        <span class="badge-dim">明细 / 成本 / 汇率</span>
+        <h2>订单采集</h2>
+        <span class="badge">接收端</span>
       </div>
       <div class="ae-actions">
         <button class="ghost-btn" @click="copyCurlSample">复制 curl 样例</button>
@@ -128,37 +100,24 @@ onMounted(() => {
         接收端在线 · 端口 {{ status?.port }} · 最近入库 {{ status?.lastIngestAt ? fmtTime(status.lastIngestAt) : '—' }}
       </span>
       <span v-else>
-        接收端未运行。启动后：Chrome 扩展（SellerKitExtensions）在卖家后台点「采集本页订单」，或本页「复制 curl 样例」手动推送，数据即显示于此。
+        接收端未运行。启动后：Chrome 扩展（SellerKitExtensions）在卖家后台点「采集本页订单」，或本页「复制 curl 样例」手动推送。
       </span>
     </div>
 
-    <div class="tab-bar">
-      <button
-        v-for="t in TABS"
-        :key="t.id"
-        class="tab-item"
-        :class="activeTab === t.id ? 'is-active' : ''"
-        @click="switchTab(t.id)"
-      >
-        {{ t.label }}
-      </button>
-    </div>
+    <p v-if="status?.lastError" class="err-line">最近一次错误：{{ status.lastError }}</p>
 
-    <div v-show="activeTab === 'stats'" class="tab-pane">
-      <ProfitStatsPanel :refresh-key="refreshKey" @open="onOpenPanel" />
-    </div>
-    <div v-show="activeTab === 'orders'" class="tab-pane">
-      <OrderListPanel :refresh-key="refreshKey" />
-    </div>
-    <div v-show="activeTab === 'cost'" class="tab-pane">
-      <CostRatesPanel :refresh-key="refreshKey" :sub-focus="subFocus" />
+    <div class="tip-card">
+      <p class="tip-title">数据和利润看哪里</p>
+      <p class="tip-body">
+        推来的订单会落进订单主干（与 Excel 导入的订单同一张表，只是「来源」不同），
+        直接在侧栏 <b>「算钱」</b> 页看利润、明细、趋势，以及成本表与汇率维护；
+        <b>「拣货」</b> 页看待发货要拣什么。这里只负责把数据收进来。
+      </p>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 视图根：占满宿主 main（AppShell 对视图根 class=h-full），
-   头/状态/Tab 固定，唯一滚动区为 .tab-pane —— 不再依赖外层裁剪 */
 .ae-shell {
   display: flex;
   flex-direction: column;
@@ -189,23 +148,17 @@ onMounted(() => {
   font-weight: 600;
   white-space: nowrap;
 }
-.badge-m1 {
+.badge {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--wb-primary-soft, rgba(99, 102, 241, 0.12));
-  color: var(--wb-primary, #6366f1);
-}
-.badge-dim {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--wb-surface-2);
-  color: var(--wb-text-muted);
+  background: var(--wb-primary-soft);
+  color: var(--wb-primary);
 }
 .ae-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
 }
 .ghost-btn,
 .primary-btn {
@@ -258,38 +211,26 @@ onMounted(() => {
 .status-line.is-offline .dot {
   background: var(--wb-warning);
 }
-.tab-bar {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--wb-border);
+.err-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--wb-danger);
 }
-.tab-item {
-  padding: 8px 14px;
+.tip-card {
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius);
+  background: var(--wb-surface);
+  padding: 12px 14px;
+}
+.tip-title {
+  margin: 0 0 6px;
   font-size: 13px;
+  font-weight: 600;
+}
+.tip-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.8;
   color: var(--wb-text-muted);
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-}
-.tab-item:hover {
-  color: var(--wb-text);
-  background: var(--wb-hover);
-  border-radius: 6px 6px 0 0;
-}
-.tab-item.is-active {
-  color: var(--wb-primary);
-  border-bottom-color: var(--wb-primary);
-  font-weight: 500;
-}
-/* Tab 内容唯一滚动区：占满头部以下剩余高度，超高内部滚动，不再被外层裁剪 */
-.tab-pane {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-.ae-actions {
-  flex-shrink: 0;
 }
 </style>

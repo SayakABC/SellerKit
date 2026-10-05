@@ -26,6 +26,7 @@ import MailAccessDrawer from './components/MailAccessDrawer.vue';
 import MailInboxView from './components/MailInboxView.vue';
 import SecretCell from './components/SecretCell.vue';
 import CompanyManageView from './components/CompanyManageView.vue';
+import ShopRegistryView from './components/ShopRegistryView.vue';
 import { openHostSettingsPanel } from './bridge.js';
 import { toast } from '@/core/services/toast';
 import { useMailStore } from './mailStore';
@@ -256,6 +257,15 @@ onBeforeUnmount(() => {
         <span>企业管理</span>
       </button>
       <button
+        class="tab"
+        :class="{ active: store.mainTab === 'shops' }"
+        type="button"
+        @click="store.mainTab = 'shops'"
+      >
+        <IconGlyph name="table" :size="14" />
+        <span>店铺登记</span>
+      </button>
+      <button
         class="tab tab-goto-settings"
         type="button"
         title="在宿主设置中心打开账号管家设置"
@@ -270,6 +280,8 @@ onBeforeUnmount(() => {
     <MailInboxView v-if="store.mainTab === 'mail'" />
 
     <CompanyManageView v-else-if="store.mainTab === 'companies'" />
+
+    <ShopRegistryView v-else-if="store.mainTab === 'shops'" />
 
     <template v-if="store.mainTab === 'accounts'">
     <div class="toolbar">

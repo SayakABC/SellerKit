@@ -90,6 +90,21 @@ export async function dbCall(op, payload) {
   return s.host.db.call('shop-accounts', op, payload === undefined ? null : payload);
 }
 
+/**
+ * 绑到**指定域**的业务库调用 —— 本岛要访问第二个域（`shop`，店铺实体 S1）时用。
+ *
+ * ⚠️ 签名刻意写成 `db('domain', op, payload)`（域是**字面量第一实参**）：仓库的岛能力守卫
+ * （`tests/pluginTriage.spec.ts` 的 `apiBindings`）按 `= (…) => db('domain', …)` 这一形态
+ * 解析"哪次调用属于哪个域"。若改成 `dbCall(op, payload, domain)` 之类把域挪到非首参、或由调用方
+ * 传变量，两个方向的断言（调用 ⊆ 声明 / 声明的 op 都被调用）会一起**静默失效**，
+ * 而报告里看起来仍然是全绿。
+ */
+export async function db(domain, op, payload) {
+  const s = sk();
+  if (!s) throw new Error('未连接到宿主：请在 SellerKit 插件市场安装后从侧栏打开');
+  return s.host.db.call(String(domain), op, payload === undefined ? null : payload);
+}
+
 /** 邮件能力调用（白名单 op） */
 export async function mailCall(op, payload) {
   const s = sk();

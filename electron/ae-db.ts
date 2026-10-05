@@ -16,7 +16,27 @@
 
 export {};
 
-import { initDb, dbMigrate, dbGet, dbRun, dbQuery, dbTransaction } from './db';
+import {
+  initDb,
+  dbMigrate,
+  dbGet,
+  dbRun,
+  dbQuery,
+  dbTransaction,
+  migrate,
+  type MigrationStep,
+} from './db';
+import {
+  AE_DEDUCTION_CATEGORIES,
+  lineIncomeShares,
+  orderIncomeCcy,
+  parseSkuProps,
+  toCentsCny,
+} from './aeMoney';
+import { upsertCollectedOrder } from './order-db';
+
+/** 利润基准币：外币经 `ae_rates` 折算到它；本币恒 1:1（与 `ae-engine` 同一份常量语义） */
+const BASE_CURRENCY = 'CNY';
 
 // ---- 类型（与渲染层 src/types.ts 对应结构保持一致；两端各自声明，避免主进程 import 渲染层） ----
 
@@ -135,6 +155,31 @@ export interface AeSummary {
 
 // ---- 表结构（窄列 + 科目子表；旧库残留的 platform_fee 等列不再读写，无害保留） ----
 
+/**
+ * 成本行在「无生效日信息」时的基准日。
+ * 取一个早于任何真实业务日期的哨兵值：迁移存量行时用它，保证迁移瞬间**所有历史订单仍命中同一行**
+ * （毛利结果不变）。若改用 last_biz_date，早于该日的订单会落空 → 毛利出现回归。见 P4a / D5。
+ */
+const COST_LEGACY_FROM = '0000-01-01';
+
+/**
+ * 成本表 DDL（P4a / D5 改造后）：从「每 style_code 一行、覆盖式」改为
+ * 「多行 + 生效区间」。主键含 `source`，使**同 (style_code, effective_from) 上
+ * manual 与 purchase 可并存**，由读取侧（利润引擎）按「manual 优先」择一 ——
+ * 这样手工改价不会被下一次拿货对账导入覆盖（D5 的触发事实）。
+ */
+const COST_MAP_DDL = `CREATE TABLE IF NOT EXISTS ae_cost_map (
+    style_code TEXT NOT NULL,
+    effective_from TEXT NOT NULL DEFAULT '${COST_LEGACY_FROM}',
+    source TEXT NOT NULL DEFAULT 'purchase',
+    style_name TEXT NOT NULL DEFAULT '',
+    unit_price_cents INTEGER NOT NULL DEFAULT 0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    last_biz_date TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (style_code, effective_from, source)
+  )`;
+
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS ae_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +205,8 @@ const SCHEMA = [
     sku_props TEXT NOT NULL DEFAULT '',
     qty INTEGER NOT NULL DEFAULT 1,
     unit_price REAL NOT NULL DEFAULT 0,
-    goods_amount REAL NOT NULL DEFAULT 0
+    goods_amount REAL NOT NULL DEFAULT 0,
+    style_code TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE TABLE IF NOT EXISTS ae_fees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,28 +223,384 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_ae_fees_ae_order_id ON ae_fees(ae_order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_ae_fees_category ON ae_fees(category)`,
   // ---- M1：成本衔接（D3 快照）与汇率（成本 CNY 计价需外币→CNY） ----
-  `CREATE TABLE IF NOT EXISTS ae_cost_map (
-    style_code TEXT PRIMARY KEY,
-    style_name TEXT NOT NULL DEFAULT '',
-    unit_price_cents INTEGER NOT NULL DEFAULT 0,
-    sample_count INTEGER NOT NULL DEFAULT 0,
-    last_biz_date TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT 'purchase',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  )`,
+  COST_MAP_DDL,
+  `CREATE INDEX IF NOT EXISTS idx_ae_cost_map_code_from ON ae_cost_map(style_code, effective_from)`,
   `CREATE TABLE IF NOT EXISTS ae_rates (
     from_currency TEXT PRIMARY KEY,
     rate_to_cny REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // ---- 「结算明细」导入（2026-09-29）----
+  // 来源：AE 后台导出的「订单明细」Excel（真实样本 2 表 / 200 单 / 412 行）。与扩展推送的 ae_orders 是**两条源**：
+  // 扩展推的是浏览器采集的订单帧，本表是平台导出的**结算切片**，靠 `order_no` 与订单域对齐。
+  //
+  // 粒度：一张表装两个切片，靠 `line_type` + `item_id` 区分 —— **商品级行**（`item_id` 非空，一行=一个商品）
+  // 与**订单级行**（`item_id` 空）。实测口径：订单级行的 `成交金额` 是**整单**（含买家付的运费那部分），
+  // 商品行的只是**商品部分**（样例 87.15 vs 114.52；全表合计 7833.61 vs 29407.01）→
+  // **两类行不能相加**，订单口径一律取订单级行（见 `settleOrders`）。
+  //
+  // 费用按 JSON 存（科目 → 分）：科目会增减（实测已八项 + 各自"退回"），科目化后加科目**零 ALTER**
+  // —— 与 `ae_fees` 同一思路。
+  `CREATE TABLE IF NOT EXISTS ae_settle_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_no TEXT NOT NULL,
+    item_id TEXT NOT NULL DEFAULT '',
+    sku_id TEXT NOT NULL DEFAULT '',
+    line_type TEXT NOT NULL DEFAULT 'item',
+    qty INTEGER NOT NULL DEFAULT 1,
+    currency TEXT NOT NULL DEFAULT '',
+    settle_status TEXT NOT NULL DEFAULT '',
+    pending_reason TEXT NOT NULL DEFAULT '',
+    expected_payout_at TEXT NOT NULL DEFAULT '',
+    pay_time TEXT NOT NULL DEFAULT '',
+    ship_time TEXT NOT NULL DEFAULT '',
+    receive_time TEXT NOT NULL DEFAULT '',
+    biz_mode TEXT NOT NULL DEFAULT '',
+    deal_cents INTEGER NOT NULL DEFAULT 0,
+    pending_amount_cents INTEGER NOT NULL DEFAULT 0,
+    payout_cents INTEGER NOT NULL DEFAULT 0,
+    net_income_cents INTEGER NOT NULL DEFAULT 0,
+    split_cents INTEGER NOT NULL DEFAULT 0,
+    refund_in_cents INTEGER NOT NULL DEFAULT 0,
+    refund_after_cents INTEGER NOT NULL DEFAULT 0,
+    fee_cents TEXT NOT NULL DEFAULT '{}',
+    fee_refund_cents TEXT NOT NULL DEFAULT '{}',
+    imported_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(order_no, item_id, sku_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ae_settle_order ON ae_settle_lines(order_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_ae_settle_status ON ae_settle_lines(settle_status)`,
 ];
 
-/** 幂等初始化：建表 + 索引 + 存量库增量列 + 默认汇率种子（应用启动 / 首次使用自动调用） */
+/** 幂等初始化：迁移 + 建表/索引 + 默认汇率种子（应用启动 / 首次使用自动调用） */
 export function ensureAeSchema(): void {
   initDb();
+  // house convention：**自定义迁移先跑，再 dbMigrate(SCHEMA)** ——
+  // 存量库的 ae_cost_map 是旧主键形状（`CREATE TABLE IF NOT EXISTS` 对它无动作）必须先重建；
+  // 重建会连带换掉挂在旧表上的索引，故索引交给末尾的 dbMigrate 建。
+  migrate('ae.main', aeMigrationSteps());
   dbMigrate(SCHEMA);
-  migrateOrderLinesStyleCode();
   seedDefaultRates();
+}
+
+/** `ae_*` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`） */
+function aeMigrationSteps(): MigrationStep[] {
+  return [
+    { version: 1, name: 'ae_cost_map 改「多行 + 生效区间」复合主键', up: migrateCostMapIntervals },
+    { version: 2, name: 'ae_order_lines 补 style_code', up: migrateOrderLinesStyleCode },
+  ];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// 「结算明细」（ae_settle_lines）：AE 后台导出的订单明细 → 幂等落库 + 按订单聚合
+// ═══════════════════════════════════════════════════════════════════════════════════
+//
+// 解析在渲染层（`src/lib/settleImport.ts`，含两条等式校验），本层只负责**归一 + 落库 + 聚合**。
+// 归一策略与 `upsertSkuMappings` 一致：能存的照存，**行级错误逐行记 failed**，不整批回滚。
+
+/** 结算明细行（渲染层解析后送来；形状与 `src/lib/settleImport.ts` 的 `SettleLine` 对应，两端各自声明） */
+export interface AeSettleLineInput {
+  orderNo: string;
+  itemId?: string;
+  skuId?: string;
+  qty?: number;
+  currency?: string;
+  settleStatus?: string;
+  pendingReason?: string;
+  expectedPayoutAt?: string;
+  payTime?: string;
+  shipTime?: string;
+  receiveTime?: string;
+  bizMode?: string;
+  dealCents?: number;
+  pendingAmountCents?: number;
+  payoutCents?: number;
+  netIncomeCents?: number;
+  splitCents?: number;
+  refundInCents?: number;
+  refundAfterCents?: number;
+  feeCents?: Record<string, number>;
+  feeRefundCents?: Record<string, number>;
+}
+
+export interface AeSettleOrderRow {
+  orderNo: string;
+  settleStatus: string;
+  pendingReason: string;
+  dealCents: number;
+  netIncomeCents: number;
+  splitCents: number;
+  /** 费用合计（八类之和，分） */
+  feeSumCents: number;
+  /** 该单的商品行数 */
+  itemLines: number;
+  /**
+   * 商品行**件数明细**（只含 `item_id <> ''` 的行）：`lines` = 该 (订单,商品) 的商品行数。
+   * 消费侧（订单利润页）只在 `lines === 1` 时把 `qty` 当成"这一件的件数"用 —— 多行 = 同一商品的
+   * 不同 SKU，把合计给到每一行会翻倍（见 `src/lib/orderCost.ts` 的件数优先级）。
+   */
+  items: { itemId: string; lines: number; qty: number }[];
+  /** 汇总取自哪类行：`order` = 订单级行（权威，含买家付的运费那部分）；`items` = 无订单级行时退化为商品行求和 */
+  from: 'order' | 'items';
+}
+
+function settleText(v: unknown, max: number): string {
+  return typeof v === 'string' ? v.trim().slice(0, max) : '';
+}
+
+function settleInt(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
+function settleFeeJson(v: unknown): string {
+  if (!v || typeof v !== 'object') return '{}';
+  const out: Record<string, number> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    const n = Number(val);
+    if (Number.isFinite(n) && n !== 0) out[settleText(k, 40)] = Math.trunc(n);
+  }
+  return JSON.stringify(out);
+}
+
+function parseFeeJson(text: unknown): Record<string, number> {
+  try {
+    const v = JSON.parse(String(text ?? '{}'));
+    return v && typeof v === 'object' ? (v as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 落库（幂等）：键 = `(order_no, item_id, sku_id)`；已存在则整行更新。
+ * 行级错误逐行记 `failed`（**不整批回滚**）——与 `upsertSkuMappings` / `importProducts` 同策略。
+ */
+export function upsertSettleLines(rows: AeSettleLineInput[]): {
+  created: number;
+  updated: number;
+  failed: { orderNo: string; message: string }[];
+} {
+  ensureAeSchema();
+  const list = Array.isArray(rows) ? rows : [];
+  const out = { created: 0, updated: 0, failed: [] as { orderNo: string; message: string }[] };
+
+  dbTransaction(() => {
+    for (const r of list) {
+      const orderNo = settleText(r?.orderNo, 64);
+      try {
+        if (!orderNo) throw new Error('订单号为空');
+        const itemId = settleText(r?.itemId, 64);
+        const skuId = settleText(r?.skuId, 64);
+        // 行类型**由 item_id 是否为空决定**（不信任入参自报的 lineType，避免"标错类型 → 聚合重复计入"）
+        const lineType = itemId ? 'item' : 'order';
+        const values = [
+          orderNo,
+          itemId,
+          skuId,
+          lineType,
+          Math.max(1, settleInt(r?.qty) || 1),
+          settleText(r?.currency, 12),
+          settleText(r?.settleStatus, 40),
+          settleText(r?.pendingReason, 60),
+          settleText(r?.expectedPayoutAt, 40),
+          settleText(r?.payTime, 40),
+          settleText(r?.shipTime, 40),
+          settleText(r?.receiveTime, 40),
+          settleText(r?.bizMode, 12),
+          settleInt(r?.dealCents),
+          settleInt(r?.pendingAmountCents),
+          settleInt(r?.payoutCents),
+          settleInt(r?.netIncomeCents),
+          settleInt(r?.splitCents),
+          settleInt(r?.refundInCents),
+          settleInt(r?.refundAfterCents),
+          settleFeeJson(r?.feeCents),
+          settleFeeJson(r?.feeRefundCents),
+        ];
+        const existed = dbGet<{ id: number }>(
+          `SELECT id FROM ae_settle_lines WHERE order_no = ? AND item_id = ? AND sku_id = ?`,
+          [orderNo, itemId, skuId],
+        );
+        dbRun(
+          `INSERT INTO ae_settle_lines
+             (order_no, item_id, sku_id, line_type, qty, currency, settle_status, pending_reason,
+              expected_payout_at, pay_time, ship_time, receive_time, biz_mode, deal_cents,
+              pending_amount_cents, payout_cents, net_income_cents, split_cents,
+              refund_in_cents, refund_after_cents, fee_cents, fee_refund_cents)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(order_no, item_id, sku_id) DO UPDATE SET
+             line_type = excluded.line_type, qty = excluded.qty, currency = excluded.currency,
+             settle_status = excluded.settle_status, pending_reason = excluded.pending_reason,
+             expected_payout_at = excluded.expected_payout_at, pay_time = excluded.pay_time,
+             ship_time = excluded.ship_time, receive_time = excluded.receive_time,
+             biz_mode = excluded.biz_mode, deal_cents = excluded.deal_cents,
+             pending_amount_cents = excluded.pending_amount_cents, payout_cents = excluded.payout_cents,
+             net_income_cents = excluded.net_income_cents, split_cents = excluded.split_cents,
+             refund_in_cents = excluded.refund_in_cents, refund_after_cents = excluded.refund_after_cents,
+             fee_cents = excluded.fee_cents, fee_refund_cents = excluded.fee_refund_cents,
+             imported_at = datetime('now','localtime')`,
+          values,
+        );
+        if (existed) out.updated++;
+        else out.created++;
+      } catch (e) {
+        out.failed.push({
+          orderNo: orderNo || '(空)',
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  });
+
+  return out;
+}
+
+/**
+ * 按订单聚合（供利润页的**精准轨**）：
+ *   · **优先取订单级行**（`item_id` 为空）—— 它的 `成交金额`/`净收入` 是**整单**口径（含买家付的运费那部分），
+ *     实测与商品行合计相差数倍（87.15 vs 114.52；全表 7833.61 vs 29407.01）→ **两类行绝不可相加**；
+ *   · 没有订单级行时才退化为商品行求和，并把 `from` 标成 `items`（让调用方知道口径不同）。
+ * 顺带给出**商品行件数明细**（`items`）：件数是拣货口径的真值，但它按 (订单,商品) 聚合 ——
+ * 同商品多 SKU 时合计对每一行都不可复用，故**把行数一并交出去**，由消费侧决定敢不敢用。
+ * @param orderNos 订单号列表（上限 2000，超出截断）
+ */
+export function settleOrders(orderNos: string[]): AeSettleOrderRow[] {
+  ensureAeSchema();
+  const nos = [...new Set((Array.isArray(orderNos) ? orderNos : []).map((x) => settleText(x, 64)))]
+    .filter(Boolean)
+    .slice(0, 2000);
+  if (!nos.length) return [];
+
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT order_no, item_id, settle_status, pending_reason, deal_cents, net_income_cents,
+            split_cents, qty, fee_cents
+     FROM ae_settle_lines WHERE order_no IN (${nos.map(() => '?').join(',')})`,
+    nos,
+  );
+  const byOrder = new Map<string, AeSettleOrderRow>();
+  for (const r of rows) {
+    const orderNo = String(r.order_no ?? '');
+    const itemId = String(r.item_id ?? '');
+    const feeSum = Object.values(parseFeeJson(r.fee_cents)).reduce((a, b) => a + settleInt(b), 0);
+    const cur = byOrder.get(orderNo) ?? {
+      orderNo,
+      settleStatus: '',
+      pendingReason: '',
+      dealCents: 0,
+      netIncomeCents: 0,
+      splitCents: 0,
+      feeSumCents: 0,
+      itemLines: 0,
+      items: [] as { itemId: string; lines: number; qty: number }[],
+      from: 'items' as const,
+    };
+    if (itemId) {
+      cur.itemLines++;
+      const qty = settleInt(r.qty);
+      const it = cur.items.find((x) => x.itemId === itemId);
+      if (it) {
+        it.lines++;
+        it.qty += qty;
+      } else {
+        cur.items.push({ itemId, lines: 1, qty });
+      }
+    } else {
+      // 订单级行：整单口径，覆盖式取（权威）
+      cur.settleStatus = String(r.settle_status ?? '');
+      cur.pendingReason = String(r.pending_reason ?? '');
+      cur.dealCents = settleInt(r.deal_cents);
+      cur.netIncomeCents = settleInt(r.net_income_cents);
+      cur.splitCents = settleInt(r.split_cents);
+      cur.feeSumCents = feeSum;
+      cur.from = 'order';
+    }
+    if (cur.from === 'items') {
+      // 没有订单级行（或还没扫到）：退化求和
+      cur.dealCents += settleInt(r.deal_cents);
+      cur.netIncomeCents += settleInt(r.net_income_cents);
+      cur.splitCents += settleInt(r.split_cents);
+      cur.feeSumCents += feeSum;
+      if (!cur.settleStatus) {
+        cur.settleStatus = String(r.settle_status ?? '');
+        cur.pendingReason = String(r.pending_reason ?? '');
+      }
+    }
+    byOrder.set(orderNo, cur);
+  }
+  return [...byOrder.values()];
+}
+
+/** 结算明细概览（导入结果/诊断展示） */
+export function settleStats(): {
+  lines: number;
+  orders: number;
+  itemLines: number;
+  orderLines: number;
+  pendingOrders: number;
+  settledOrders: number;
+  lastImportedAt: string;
+} {
+  ensureAeSchema();
+  const total = num2(dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM ae_settle_lines`)?.c);
+  const itemLines = num2(
+    dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM ae_settle_lines WHERE item_id <> ''`)?.c,
+  );
+  const orderLines = num2(
+    dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM ae_settle_lines WHERE item_id = ''`)?.c,
+  );
+  const orders = num2(
+    dbGet<{ c: number }>(`SELECT COUNT(DISTINCT order_no) AS c FROM ae_settle_lines`)?.c,
+  );
+  const settledOrders = num2(
+    dbGet<{ c: number }>(
+      `SELECT COUNT(DISTINCT order_no) AS c FROM ae_settle_lines WHERE settle_status LIKE '%已结算%'`,
+    )?.c,
+  );
+  const last = dbGet<{ t: string }>(
+    `SELECT MAX(imported_at) AS t FROM ae_settle_lines`,
+  );
+  return {
+    lines: total,
+    orders,
+    itemLines,
+    orderLines,
+    pendingOrders: Math.max(0, orders - settledOrders),
+    settledOrders,
+    lastImportedAt: String(last?.t ?? ''),
+  };
+}
+
+function num2(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
+/**
+ * 旧库增量（P4a / D5）：ae_cost_map 旧形状为 `style_code TEXT PRIMARY KEY`（一款一行），
+ * 新形状为 `(style_code, effective_from, source)` 复合主键（一款多行、带生效区间）。
+ * SQLite 不支持改主键 → 走「rename → create → copy → drop」，整体在事务内，失败自动回滚。
+ *
+ * 存量行补 `effective_from = COST_LEGACY_FROM`（不是 `last_biz_date`）—— 理由见该常量注释：
+ * 补成 last_biz_date 会让早于该日的订单取不到成本，属于回归。
+ *
+ * 幂等判定：`effective_from` 列是否存在。新库（表不存在）直接跳过。
+ */
+function migrateCostMapIntervals(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(ae_cost_map)`);
+  if (cols.length === 0 || cols.some((c) => c.name === 'effective_from')) return;
+  dbTransaction(() => {
+    dbRun(`DROP TABLE IF EXISTS ae_cost_map_legacy_struct`);
+    dbRun(`ALTER TABLE ae_cost_map RENAME TO ae_cost_map_legacy_struct`);
+    dbRun(COST_MAP_DDL);
+    dbRun(
+      `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date, updated_at)
+       SELECT style_code, ?, source, style_name, unit_price_cents, sample_count, last_biz_date, updated_at
+       FROM ae_cost_map_legacy_struct`,
+      [COST_LEGACY_FROM],
+    );
+    dbRun(`DROP TABLE ae_cost_map_legacy_struct`);
+  });
 }
 
 /**
@@ -207,7 +609,8 @@ export function ensureAeSchema(): void {
  */
 function migrateOrderLinesStyleCode(): void {
   const cols = dbQuery<{ name: string }>(`PRAGMA table_info(ae_order_lines)`);
-  if (cols.some((c) => c.name === 'style_code')) return;
+  // 表还不存在 = 新库（迁移先于 dbMigrate 跑）→ 跳过（该列已写进 SCHEMA 的建表语句）
+  if (cols.length === 0 || cols.some((c) => c.name === 'style_code')) return;
   dbRun(`ALTER TABLE ae_order_lines ADD COLUMN style_code TEXT NOT NULL DEFAULT ''`);
 }
 
@@ -356,57 +759,53 @@ export function sanitizeIngestOrder(input: unknown): { order: AeIngestOrder | nu
 /** 批量幂等 upsert：存在 order_id 则更新（含 SKU 行/费用科目整批替换），否则插入。整体走事务。 */
 export function upsertOrderBatch(orders: AeIngestOrder[]): AeUpsertResult {
   if (!orders.length) return { inserted: 0, updated: 0, skipped: 0 };
-  return dbTransaction(() => {
-    let inserted = 0;
-    let updated = 0;
-    for (const o of orders) {
-      const rawJson = JSON.stringify(o).slice(0, MAX_RAW_JSON);
-      const existing = dbGet<{ id: number }>('SELECT id FROM ae_orders WHERE order_id = ?', [o.orderId]);
-      if (existing) {
-        dbRun(
-          `UPDATE ae_orders SET shop_name=?, site=?, order_time=?, status=?, currency=?, goods_amount=?, shipping_income=?, raw_json=?, source=?, updated_at=datetime('now','localtime') WHERE id=?`,
-          [o.shopName ?? '', o.site ?? '', o.orderTime ?? '', o.status ?? '', o.currency ?? 'USD',
-           o.goodsAmount ?? 0, o.shippingIncome ?? 0, rawJson, o.source ?? 'extension', existing.id],
-        );
-        dbRun('DELETE FROM ae_order_lines WHERE ae_order_id = ?', [existing.id]);
-        dbRun('DELETE FROM ae_fees WHERE ae_order_id = ?', [existing.id]);
-        replaceLines(existing.id, o.lines ?? []);
-        replaceFees(existing.id, o.fees ?? []);
-        updated += 1;
-      } else {
-        const info = dbRun(
-          `INSERT INTO ae_orders (order_id, shop_name, site, order_time, status, currency, goods_amount, shipping_income, raw_json, source) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-          [o.orderId, o.shopName ?? '', o.site ?? '', o.orderTime ?? '', o.status ?? '', o.currency ?? 'USD',
-           o.goodsAmount ?? 0, o.shippingIncome ?? 0, rawJson, o.source ?? 'extension'],
-        );
-        replaceLines(info.lastInsertRowid, o.lines ?? []);
-        replaceFees(info.lastInsertRowid, o.fees ?? []);
-        inserted += 1;
-      }
+  ensureAeSchema(); // 直接调用本函数的场景（冒烟/脚本）也要保证汇率表在（默认汇率只种缺的）
+  // 汇率（采集帧是原币；主干一律 CNY 分）
+  const rates = new Map<string, number>();
+  for (const r of dbQuery<Record<string, unknown>>(`SELECT from_currency, rate_to_cny FROM ae_rates`)) {
+    const ccy = String(r.from_currency ?? '');
+    const v = num(r.rate_to_cny);
+    if (ccy && v > 0) rates.set(ccy, v);
+  }
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const o of orders) {
+    try {
+      const currency = String(o.currency ?? '') || 'USD';
+      const rate = currency === BASE_CURRENCY ? 1 : (rates.get(currency) ?? 0);
+      // 整单收入 = （商品金额 + 买家付运费）× 汇率 —— **不扣退款**：
+      // 退款/费用的真值源是「结算明细」（`ae_settle_lines`），采集帧的费用科目实测为空，
+      // 在订单侧再扣一次会得到两套净额口径（同一批货两个数）。
+      const amountCents = rate
+        ? toCentsCny(orderIncomeCcy({ goodsAmount: o.goodsAmount, shippingIncome: o.shippingIncome }), rate)
+        : null;
+      const lines = (Array.isArray(o.lines) ? o.lines : []).map((l) => {
+        const props = parseSkuProps((l as Record<string, unknown>)?.skuProps);
+        return {
+          itemId: String((l as Record<string, unknown>)?.productId ?? '').slice(0, 64),
+          qty: Math.max(1, Math.round(Number((l as Record<string, unknown>)?.qty) || 1)),
+          color: props.color.slice(0, 64),
+          size: props.size.slice(0, 64),
+        };
+      });
+      const res = upsertCollectedOrder({
+        orderNo: String(o.orderId ?? ''),
+        orderTime: String(o.orderTime ?? ''),
+        bizStatus: String(o.status ?? ''),
+        shop: String(o.shopName ?? ''),
+        amountCents,
+        // 保真：整帧原文放进 raw_fields（**加前缀**，免得与报表列名族相撞）
+        rawFields: { 采集帧: JSON.stringify(o).slice(0, 20000) },
+        lines,
+      });
+      if (res.replaced) updated += 1;
+      else inserted += 1;
+    } catch {
+      skipped += 1;
     }
-    return { inserted, updated, skipped: 0 };
-  });
-}
-
-function replaceLines(orderDbId: number, lines: AeIngestLine[]): void {
-  for (const l of lines) {
-    dbRun(
-      `INSERT INTO ae_order_lines (ae_order_id, product_id, sku_id, title, sku_props, style_code, qty, unit_price, goods_amount) VALUES (?,?,?,?,?,?,?,?,?)`,
-      [orderDbId, l.productId ?? '', l.skuId ?? '', l.title ?? '', l.skuProps ?? '', l.styleCode ?? '', l.qty ?? 1, l.unitPrice ?? 0, l.goodsAmount ?? 0],
-    );
   }
-}
-
-function replaceFees(orderDbId: number, fees: AeIngestFee[]): void {
-  for (const f of fees) {
-    const category = clipStr(f.category, MAX_STR.category);
-    const amount = normMoney(f.amount);
-    if (!category || amount === null) continue;
-    dbRun(
-      `INSERT INTO ae_fees (ae_order_id, category, amount, currency) VALUES (?,?,?,?)`,
-      [orderDbId, category, amount, clipStr(f.currency, MAX_STR.currency).toUpperCase() || 'USD'],
-    );
-  }
+  return { inserted, updated, skipped };
 }
 
 // ---- 查询 ----
@@ -521,14 +920,17 @@ export function getAeSummary(): AeSummary {
 
 // ---- M1：成本衔接（ae_cost_map 快照）与汇率（ae_rates） ----
 
-/** 成本表行（供渲染层成本管理面板展示） */
+/** 成本表行（供渲染层成本管理面板展示）。P4a 起同一款可多行：一行 = 一个生效区间。 */
 export interface AeCostMapItem {
   styleCode: string;
+  /** 生效日（yyyy-mm-dd）；无区间信息的存量行 = COST_LEGACY_FROM */
+  effectiveFrom: string;
   styleName: string;
   /** 单价（分/CNY 元） */
   unitPriceCents: number;
   sampleCount: number;
   lastBizDate: string;
+  /** 该行来源：purchase = 对账快照导入，manual = 界面手工录入 */
   source: string;
   updatedAt: string;
 }
@@ -541,24 +943,83 @@ export interface AeRateItem {
   updatedAt: string;
 }
 
-/** 全量替换成本快照（D3 单向导入：purchase-cost-snapshot → 本表），事务内先清后插。 */
-export function costMapReplace(items: { styleCode: string; styleName: string; unitPriceCents: number; sampleCount: number; lastBizDate: string }[]): { replaced: number } {
-  dbTransaction(() => {
-    dbRun(`DELETE FROM ae_cost_map`);
-    for (const it of items) {
-      dbRun(
-        `INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents, sample_count, last_biz_date, source) VALUES (?,?,?,?,?, 'purchase')`,
-        [clipStr(it.styleCode, MAX_STR.styleCode), clipStr(it.styleName, 200), Math.max(0, Math.round(it.unitPriceCents)), Math.max(0, Math.round(it.sampleCount)), clipStr(it.lastBizDate, 40)],
-      );
-    }
-  });
-  return { replaced: items.length };
+/** 成本来源（单点写入的两个写入方，见 D5；同 (style_code, effective_from) 上读取侧 manual 优先） */
+export type AeCostSource = 'purchase' | 'manual';
+
+/** 成本行写入入参（两个写入方共用：purchase = 对账快照导入，manual = 界面手工录入） */
+export interface AeCostRowInput {
+  styleCode: string;
+  styleName: string;
+  unitPriceCents: number;
+  sampleCount: number;
+  /** 生效日（yyyy-mm-dd）。缺省由调用方决定：对账导入用 `lastBizDate`，手工录入必填 */
+  effectiveFrom?: string;
+  lastBizDate: string;
 }
 
-/** 成本表全量（前端展示 / 成本覆盖率提示用） */
+/** 单行规整 + upsert（同 (style_code, effective_from, source) 覆盖写）。调用方须自备事务。 */
+function upsertCostRow(it: AeCostRowInput, source: AeCostSource): void {
+  const styleCode = clipStr(it.styleCode, MAX_STR.styleCode);
+  if (!styleCode) return;
+  const from = clipStr(it.effectiveFrom, 40) || clipStr(it.lastBizDate, 40) || COST_LEGACY_FROM;
+  dbRun(
+    `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date, updated_at)
+     VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))
+     ON CONFLICT(style_code, effective_from, source) DO UPDATE SET
+       style_name=excluded.style_name, unit_price_cents=excluded.unit_price_cents,
+       sample_count=excluded.sample_count, last_biz_date=excluded.last_biz_date,
+       updated_at=excluded.updated_at`,
+    [
+      styleCode,
+      from,
+      source,
+      clipStr(it.styleName, 200),
+      Math.max(0, Math.round(it.unitPriceCents)),
+      Math.max(0, Math.round(it.sampleCount)),
+      clipStr(it.lastBizDate, 40),
+    ],
+  );
+}
+
+/**
+ * 导入采购来源成本行（D3 单向导入：purchase-cost-snapshot → 本表）。
+ *
+ * P4a 起语义收窄：**只清 `source='purchase'` 的行**，`source='manual'` 的手工成本永不被对账导入覆盖。
+ * 改造前是 `DELETE FROM ae_cost_map` 全表清空 —— 那会让用户手工录的成本在下次导入时整表消失（D5）。
+ *
+ * 生效日取 `lastBizDate`：P4a 同时把快照源头 `costSnapshot()` 改为按 (款, 拿货日期) 分组，
+ * 故每行的 `lastBizDate` 就是该区间的起始日，一款跨多次进货会有多行 → 历史订单可复算。
+ */
+export function costMapReplace(items: AeCostRowInput[]): { replaced: number } {
+  const rows = items.filter((it) => clipStr(it.styleCode, MAX_STR.styleCode));
+  dbTransaction(() => {
+    dbRun(`DELETE FROM ae_cost_map WHERE source = 'purchase'`);
+    for (const it of rows) upsertCostRow(it, 'purchase');
+  });
+  return { replaced: rows.length };
+}
+
+/**
+ * 手工维护成本行（D5：`source='manual'`）。
+ *
+ * 与采购聚合**共用一个权威表**、靠 source 区分，而不是另建一套成本表（ADR-002 Q2）。
+ * 同 `(style_code, effective_from)` 上 manual 行在读取侧优先于 purchase 行 —— 用户改过的价不会被导入盖掉。
+ *
+ * 说明：P4a 只落数据层（成本维护界面属 P4）。在 P4 经 IPC/host op 接入前，本函数供冒烟与后续界面使用。
+ */
+export function costMapUpsertManual(items: AeCostRowInput[]): { upserted: number } {
+  const rows = items.filter((it) => clipStr(it.styleCode, MAX_STR.styleCode));
+  dbTransaction(() => {
+    for (const it of rows) upsertCostRow(it, 'manual');
+  });
+  return { upserted: rows.length };
+}
+
+/** 成本表全量（前端展示 / 成本覆盖率提示用）。P4a 起一款可多行，按 (款, 生效日) 升序。 */
 export function costMapList(): AeCostMapItem[] {
-  return dbQuery<Record<string, unknown>>(`SELECT style_code, style_name, unit_price_cents, sample_count, last_biz_date, source, updated_at FROM ae_cost_map ORDER BY style_code`).map((r) => ({
+  return dbQuery<Record<string, unknown>>(`SELECT style_code, effective_from, style_name, unit_price_cents, sample_count, last_biz_date, source, updated_at FROM ae_cost_map ORDER BY style_code, effective_from`).map((r) => ({
     styleCode: String(r.style_code ?? ''),
+    effectiveFrom: String(r.effective_from ?? COST_LEGACY_FROM),
     styleName: String(r.style_name ?? ''),
     unitPriceCents: num(r.unit_price_cents),
     sampleCount: num(r.sample_count),

@@ -184,7 +184,7 @@ text-white  →  text-[var(--wb-primary-contrast)]
 **C-04：`extensions/ae-profit/` 是迁移残留（1,532 行）**
 
 - `modules.config.ts` 中明确注释：*"利润追踪（ae-profit）已迁移为市场 UI 岛（`ui-plugins/ae-profit`），不再随宿主分发；必须保持其不进入默认包，否则内建记录会占用同名 id，导致市场安装的 UI 岛无法注册。"*
-- 实际情况：`extensions/ae-profit/`（`manifest.kind = "view"`，v0.2.0，含 `src/meta.ts` + 3 个 Vue 组件）**目录仍然存在**，且出现在 `git status` 的已修改列表中。
+- 实际情况：`extensions/ae-profit/`（`manifest.kind = "view"`，v0.2.0，含 `meta.ts` + 3 个 Vue 组件）**目录仍然存在**，且出现在 `git status` 的已修改列表中。
 - 同时 `ui-plugins/ae-profit/`（`kind: "ui"`，v1.0.1）已就位。
 - **风险**：`vite.config.ts` 的 `MODULE_ROOTS` 双根探测按 id 优先匹配 `src/modules/<id>`，其次 `extensions/<id>/src`。当前 ae-profit 未登记进任何 profile，所以**暂时不会被构建收录**——但只要有人误加进 profile，就会立刻命中"同名 id 占用"陷阱，且是静默的运行时问题。
 - **另一重影响**：`extensions/ae-profit/src/components/OrderListPanel.vue` 等文件被计入 `tsconfig.json` 的 include（`extensions/**/*.{ts,vue}`），**参与渲染层类型检查**，即 1,532 行已废弃代码仍在消耗每次类型检查的时间。
@@ -194,7 +194,7 @@ text-white  →  text-[var(--wb-primary-contrast)]
 
 | 类别 | 判定标志 | 实例 | 是否被构建收录 |
 |---|---|---|---|
-| ① 视图插件包 | 有 `src/meta.ts`，`kind: view` | `excel-copy` `order-insight` `shop-accounts` | ✅ registry 收录 |
+| ① 视图插件包 | 有 `meta.ts`，`kind: view` | `excel-copy` `order-insight` `shop-accounts` | ✅ registry 收录 |
 | ② UI 岛迁移残留 | `kind: view` 但已移出预设 | `ae-profit` | ❌（意外安全） |
 | ③ 外置插件脚手架/示例 | `manifest.entry: ./index.js`，**无 `kind`、无 `src/`** | `_template` `sk-hello` | ❌（设计如此） |
 
@@ -393,7 +393,7 @@ $ node scripts/select-build.js --list
 
 这是本次审查中**唯一被实测复现的功能性缺陷**，且属"静默产出错误交付物"类型——比报错更危险。讽刺之处在于 `AGENTS.md` 红线 15 专门保护了"`MODULE_IDS` 优先级不被改"，却没有人发现驱动它的选择器从未适配 `extensions/` 双根。
 
-**修复**：`scanModules()` 改为同时扫描两个根（复用 `vite.config.ts` 的判定标志：目录下存在 `src/meta.ts` 即视为视图插件包），并跳过 `_template` / 无 `meta.ts` 的目录。
+**修复**：`scanModules()` 改为同时扫描两个根（复用 `vite.config.ts` 的判定标志：目录下存在 `meta.ts` 即视为视图插件包），并跳过 `_template` / 无 `meta.ts` 的目录。
 
 ```js
 const MODULE_ROOTS = [
@@ -727,7 +727,7 @@ docs/
 | §1.2 | 目录树补全 `core/plugin/`（13 个文件）、`core/ai/`、`core/layout/`、`lib/` 文件清单、`ui-plugins/` |
 | §1.4 | 命名空间补全为 5 个：`app-shell` / `excel-copy` / `order-insight` / `shop-accounts` / `plugins` |
 | §1.9（**新增**） | `extensions/` 与 `ui-plugins/` 判定规则表（6 个维度对比）+ 第三类脚手架说明 |
-| §3 | **新增红线 23**：禁止混淆 `extensions/` 与 `ui-plugins/` 语义（UI 岛 id 不入 profile；不依赖无 `src/meta.ts` 的目录被收录） |
+| §3 | **新增红线 23**：禁止混淆 `extensions/` 与 `ui-plugins/` 语义（UI 岛 id 不入 profile；不依赖无 `meta.ts` 的目录被收录） |
 | §6 | 修正 TS 版本注释；新增「质量门禁现状」警示——未安装 ESLint、无自动化测试，`eslint-disable` 当前无效 |
 
 ### 5.4 文档内容修正（事实性错误与矛盾）
@@ -757,7 +757,7 @@ docs/
 | `docs/architecture/PLUGIN_DEVELOPMENT.md:6` | → `docs/architecture/PLUGIN_ARCHITECTURE.md` |
 | `docs/architecture/PLUGIN_ARCHITECTURE.md:5` | → `docs/baseline/REFACTOR_PLAN.md` + `docs/architecture/PROJECT_OVERVIEW.md` ⚠️ 后半段同被 R4-1 删除，该行已改写 |
 | `AGENTS.md:133` | → `docs/architecture/PLUGIN_ARCHITECTURE.md` |
-| `ui-plugins/sk-ui-starter/README.md` + `src/main.js` | → `docs/architecture/PLUGIN_DEVELOPMENT.md` |
+| ~~`ui-plugins/sk-ui-starter/…`~~ | → ~~`docs/architecture/PLUGIN_DEVELOPMENT.md`~~ ⚠️ **2026-09-24 已删除该样例岛**（重复于 `scripts/ui-plugin-template`，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §7-4）；同类引用由下一行的模板承接 |
 | `scripts/ui-plugin-template/README.md` + `src/main.js` | → `docs/architecture/PLUGIN_DEVELOPMENT.md` |
 | `electron/plugin-ui-protocol.ts:2` | → `docs/architecture/PLUGIN_ARCHITECTURE.md` |
 | `electron/ae-receiver.ts:2` | → `docs/features/PROFIT_TRACKER.md` |

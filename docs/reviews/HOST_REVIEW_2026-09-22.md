@@ -206,7 +206,7 @@ git tag -a v1.1.0 -m "新增 UI 岛体系；全部业务模块下记为市场岛
 
 | 岛 | `package.json` | `src/` | `dist/` 是什么 | 提交什么才对 |
 |---|---|---|---|---|
-| `ae-profit` / `shop-accounts` / `sk-ui-starter` | 有 | 有 | **构建产物**（Vite 现场构建） | `src/`（`dist/` 忽略正确） |
+| `ae-profit` / `shop-accounts` / `sk-ui-starter`（**后者 2026-09-24 已删除**，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §7-4） | 有 | 有 | **构建产物**（Vite 现场构建） | `src/`（`dist/` 忽略正确） |
 | `excel-copy` / `order-insight` | **无** | **无** | **手写 ESM 源码本身** | `dist/`（忽略即丢源码） |
 
 后两者的 `manifest.entry` 都指向 `./dist/index.html` —— 而 `.gitignore` 把它们整目录排除了。

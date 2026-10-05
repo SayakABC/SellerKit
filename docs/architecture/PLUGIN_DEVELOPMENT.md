@@ -12,9 +12,9 @@
 
 SellerKit 运行时插件分为两类，**本文只讲「外置插件」（可进市场分发）**：
 
-| 类别 | 存放 | 信任级别 | 能力 |
-|------|------|----------|------|
-| 随宿主分发视图插件 | `extensions/<id>/` 随安装包编译 | L0（宿主同权） | 完整 Vue 视图/数据/设置 |
+| 类别                   | 存放                                  | 信任级别              | 能力                                    |
+| ---------------------- | ------------------------------------- | --------------------- | --------------------------------------- |
+| 随宿主分发视图插件     | `extensions/<id>/` 随安装包编译       | L0（宿主同权）        | 完整 Vue 视图/数据/设置                 |
 | **外置插件（本指南）** | `<userData>/plugins/<id>/` 运行时安装 | **L2（Worker 沙箱）** | 后台贡献型：命令进 ⌘K + 事件 + 受限能力 |
 
 外置插件的关键约束（红线）：
@@ -65,22 +65,22 @@ extensions/<kebab-id>/        # 源码目录（脚手架生成）
   "engines": { "sellerkit": "^1.0.0" },
   "activationEvents": ["onStartup"],
   "entry": "./index.js",
-  "capabilities": []   // ← 模板默认空：只声明用得到的能力，见 §6
+  "capabilities": [] // ← 模板默认空：只声明用得到的能力，见 §6
 }
 ```
 
 > ⚠️ `capabilities` 的合法能力域 id **仅 `storage / http / clipboard / dialog / db / secrets / mail` 七项**；`ui` / `env` 等**不可声明**（写入即安装校验失败，见 §6）。后三项（业务库 / 安全存储 / 邮件）只开放宿主登记好的**白名单操作**，见 §6。
 
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `name` | 是 | 全局唯一 kebab-case id，**必须等于目录名/安装目录名** |
-| `displayName` | 是 | 设置页/市场展示名 |
-| `version` | 是 | semver `x.y.z`；每次市场发版递增 |
-| `description` / `author` | 否 | 市场条目展示信息 |
-| `engines.sellerkit` | 是 | 声明兼容的宿主版本（如 `^1.0.0`）。⚠ **当前只校验"是非空字符串"，不做任何范围比对** —— 写 `>=99.0.0` 也照样装得上、跑得起来。它是给市场条目与读者看的口径声明，**不是运行时闸门**（实现见 `src/core/plugin/externalManifest.ts`） |
-| `activationEvents` | 是 | 见 §4；留空 = 不自动激活，需在「设置 → 插件」手动启用 |
-| `entry` | 否 | 相对入口，仅 `./` 开头、禁 `..`；默认 `./index.js` |
-| `capabilities` | 否 | 能力声明；缺省仅放行自身命名空间存储与 `ui`/`env`，其余拒绝，见 §6 |
+| 字段                     | 必填 | 说明                                                                                                                                                                                                                              |
+| ------------------------ | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                   | 是   | 全局唯一 kebab-case id，**必须等于目录名/安装目录名**                                                                                                                                                                             |
+| `displayName`            | 是   | 设置页/市场展示名                                                                                                                                                                                                                 |
+| `version`                | 是   | semver `x.y.z`；每次市场发版递增                                                                                                                                                                                                  |
+| `description` / `author` | 否   | 市场条目展示信息                                                                                                                                                                                                                  |
+| `engines.sellerkit`      | 是   | 声明兼容的宿主版本（如 `^1.0.0`）。⚠ **当前只校验"是非空字符串"，不做任何范围比对** —— 写 `>=99.0.0` 也照样装得上、跑得起来。它是给市场条目与读者看的口径声明，**不是运行时闸门**（实现见 `src/core/plugin/externalManifest.ts`） |
+| `activationEvents`       | 是   | 见 §4；留空 = 不自动激活，需在「设置 → 插件」手动启用                                                                                                                                                                             |
+| `entry`                  | 否   | 相对入口，仅 `./` 开头、禁 `..`；默认 `./index.js`                                                                                                                                                                                |
+| `capabilities`           | 否   | 能力声明；缺省仅放行自身命名空间存储与 `ui`/`env`，其余拒绝，见 §6                                                                                                                                                                |
 
 ---
 
@@ -88,10 +88,10 @@ extensions/<kebab-id>/        # 源码目录（脚手架生成）
 
 懒激活声明，命中才调用 `activate(ctx)`；命中前仅登记静态贡献：
 
-| 取值 | 触发时机 |
-|------|----------|
-| `["onStartup"]` | 宿主启动即激活（模板默认） |
-| `[]` | 不自动激活，用户在「设置 → 插件」手动启用 |
+| 取值                   | 触发时机                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| `["onStartup"]`        | 宿主启动即激活（模板默认）                                                                                |
+| `[]`                   | 不自动激活，用户在「设置 → 插件」手动启用                                                                 |
 | `["onCommand:xxx"]` 等 | ⚠️ **未实现**：校验时非 `onStartup` 项被过滤舍弃（等同 `[]`，不会自动激活、需手动启用），保留仅为形态预留 |
 
 ---
@@ -114,25 +114,25 @@ export default {
       ctx.contributions.registerCommand({
         id: 'hello',
         title: 'my-tool: 打招呼',
-        order: 1,                       // ⌘K 分组内升序，缺省 0
+        order: 1, // ⌘K 分组内升序，缺省 0
         run: async () => {
           const n = (await ctx.storage.load('visits')) ?? 0;
           await ctx.storage.save('visits', Number(n) + 1);
           ctx.host.ui.notify({ kind: 'success', text: `第 ${Number(n) + 1} 次调用` });
         },
-      }),
+      })
     );
 
     // 事件订阅：type 以 * 结尾为通配订阅（回调签名 (payload, meta)，meta.eventType 为实际事件名）
     disposers.push(
       ctx.bus.on('plugin:*', (payload, meta) => {
         log.info('plugin:* →', meta && meta.eventType, payload);
-      }),
+      })
     );
   },
 
   async deactivate(ctx) {
-    while (disposers.length) disposers.pop()();  // 统一注销命令/订阅
+    while (disposers.length) disposers.pop()(); // 统一注销命令/订阅
     ctx.log.info('my-tool deactivate');
   },
 };
@@ -140,25 +140,25 @@ export default {
 
 ### ctx 对象（activate/deactivate 注入）
 
-| 成员 | 说明 |
-|------|------|
-| `ctx.manifest` | 本插件 manifest |
-| `ctx.trustLevel` | 信任级别（外置恒为 2） |
-| `ctx.contributions` | 动态贡献注册器：`registerCommand(spec)` → 返回注销函数；注册的命令在 deactivate 时自动清理 |
-| `ctx.host` | 宿主能力面（受 capabilities 门控），见 §6 |
-| `ctx.storage` | 插件专属命名空间存储：`load(key)` / `save(key, value)` / `clear()`，底层落 `modules.<pluginId>`（raw host 直通，**无需声明 `storage`**） |
-| `ctx.bus` | 事件总线：`on(type, handler)` 订阅（支持 `*` 尾部通配）、`emit(type, payload)` 发布 |
-| `ctx.log` | 带 `[plugin:<id>]` 前缀的日志器：`debug/info/warn/error` |
-| `ctx.abort` | `AbortSignal`；插件被停用/卸载时中止（释放长任务/定时器） |
+| 成员                | 说明                                                                                                                                     |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.manifest`      | 本插件 manifest                                                                                                                          |
+| `ctx.trustLevel`    | 信任级别（外置恒为 2）                                                                                                                   |
+| `ctx.contributions` | 动态贡献注册器：`registerCommand(spec)` → 返回注销函数；注册的命令在 deactivate 时自动清理                                               |
+| `ctx.host`          | 宿主能力面（受 capabilities 门控），见 §6                                                                                                |
+| `ctx.storage`       | 插件专属命名空间存储：`load(key)` / `save(key, value)` / `clear()`，底层落 `modules.<pluginId>`（raw host 直通，**无需声明 `storage`**） |
+| `ctx.bus`           | 事件总线：`on(type, handler)` 订阅（支持 `*` 尾部通配）、`emit(type, payload)` 发布                                                      |
+| `ctx.log`           | 带 `[plugin:<id>]` 前缀的日志器：`debug/info/warn/error`                                                                                 |
+| `ctx.abort`         | `AbortSignal`；插件被停用/卸载时中止（释放长任务/定时器）                                                                                |
 
 ### 命令规范（CommandContribSpec）
 
-| 字段 | 说明 |
-|------|------|
-| `id` | 插件内本地 id，全局唯一由宿主拼 `<plugin>.<id>` |
-| `title` | ⌘K 面板显示文本 |
-| `order` | 分组内显示顺序（升序，缺省 0） |
-| `run` | 执行函数（async 亦可） |
+| 字段    | 说明                                            |
+| ------- | ----------------------------------------------- |
+| `id`    | 插件内本地 id，全局唯一由宿主拼 `<plugin>.<id>` |
+| `title` | ⌘K 面板显示文本                                 |
+| `order` | 分组内显示顺序（升序，缺省 0）                  |
+| `run`   | 执行函数（async 亦可）                          |
 
 命令注册后出现在 ⌘K 面板的**「外置插件命令」分组**。
 
@@ -179,32 +179,34 @@ export default {
 ]
 ```
 
-| 能力 id | 对应 `ctx.host.*` | 声明规则 |
-|---------|-------------------|----------|
-| `storage` | `host.storage` 跨命名空间读写 | 自身命名空间 `modules.<pluginId>` 声明后恒放行、无需列入 `namespaces`；访问**其他**命名空间须列入 `namespaces`（L2 的 `ctx.storage` 走 raw host 直通，连声明都不需要） |
-| `clipboard` | `host.clipboard.writeText` | `actions` 省略 = 该域全部放行。**若声明 `actions`，动作名必须写 `write`（不是 `writeText`）** —— 权限门按 `clipboard.write` 判定（见 `gatedHost.ts`），写成 `writeText` 会报「动作越权：clipboard.write 不在声明白名单」；稳妥写法 `["write", "writeText"]` |
-| `http` | `host.http.get/post` | `allow`（URL 前缀，支持尾部 `*`）**省略 = 禁止任何请求** |
-| `dialog` | `host.dialog.openFile` | 同上，`actions` 省略 = 全放行 |
-| `db` | `host.db.call(domain, op, payload)` | **`domains` 必填**（业务域白名单，如 `shop-accounts`）+ `actions`（操作名白名单）；**不放行任意 SQL**，只允许宿主 `DB_OPS` 登记的业务操作 |
-| `secrets` | `host.secrets.status()` | 仅暴露"宿主安全存储是否可用"；密文由主进程保管，**读写经 `db` 的宿主业务操作完成**（如 `shop-accounts:reveal`），插件不接触密文与引用。⚠ 该能力**只有一个动作、且不带域**（`gatedHost` 传 `{ capability:'secrets', action:'status' }`），因此 `domains` 对它**不起任何作用**（`security.ts` 仅在请求带 `domain` 时才做域校验）。不要为它写 `domains` |
-| `mail` | `host.mail.call(op, payload)` | `domains: ["mail"]` + `actions`（操作名白名单）；只读 IMAP 语义，账号凭据由宿主维护，**不经过插件** |
+| 能力 id     | 对应 `ctx.host.*`                   | 声明规则                                                                                                                                                                                                                                                                                                                                             |
+| ----------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`   | `host.storage` 跨命名空间读写       | 自身命名空间 `modules.<pluginId>` 声明后恒放行、无需列入 `namespaces`；访问**其他**命名空间须列入 `namespaces`（L2 的 `ctx.storage` 走 raw host 直通，连声明都不需要）                                                                                                                                                                               |
+| `clipboard` | `host.clipboard.writeText`          | `actions` 省略 = 该域全部放行。**若声明 `actions`，动作名必须写 `write`（不是 `writeText`）** —— 权限门按 `clipboard.write` 判定（见 `gatedHost.ts`），写成 `writeText` 会报「动作越权：clipboard.write 不在声明白名单」；稳妥写法 `["write", "writeText"]`                                                                                          |
+| `http`      | `host.http.get/post`                | `allow`（URL 前缀，支持尾部 `*`）**省略 = 禁止任何请求**                                                                                                                                                                                                                                                                                             |
+| `dialog`    | `host.dialog.openFile`              | 同上，`actions` 省略 = 全放行                                                                                                                                                                                                                                                                                                                        |
+| `db`        | `host.db.call(domain, op, payload)` | **`domains` 必填**（业务域白名单，如 `shop-accounts`）+ `actions`（操作名白名单）；**不放行任意 SQL**，只允许宿主 `DB_OPS` 登记的业务操作                                                                                                                                                                                                            |
+| `secrets`   | `host.secrets.status()`             | 仅暴露"宿主安全存储是否可用"；密文由主进程保管，**读写经 `db` 的宿主业务操作完成**（如 `shop-accounts:reveal`），插件不接触密文与引用。⚠ 该能力**只有一个动作、且不带域**（`gatedHost` 传 `{ capability:'secrets', action:'status' }`），因此 `domains` 对它**不起任何作用**（`security.ts` 仅在请求带 `domain` 时才做域校验）。不要为它写 `domains` |
+| `mail`      | `host.mail.call(op, payload)`       | `domains: ["mail"]` + `actions`（操作名白名单）；只读 IMAP 语义，账号凭据由宿主维护，**不经过插件**                                                                                                                                                                                                                                                  |
 
 ⚠️ `ui` / `env` 两个面**默认放行、不设门**（透传），且**不在能力域白名单内**——`capabilities` 的合法 id 为 `storage / http / clipboard / dialog / db / secrets / mail` **七项**（与 §2 的 manifest 字段说明一致），把 `ui` / `env` 写进声明会在安装校验时被拒（`capabilities.id 非法`）。
 
 ### ctx.host 能力面一览
 
 ```js
-ctx.host.storage.load(ns);  ctx.host.storage.save(ns, v);  ctx.host.storage.clear(ns); // 需声明 storage（跨命名空间）
-ctx.host.clipboard.writeText(text);                         // 需声明 clipboard
-ctx.host.http.get(url, { timeout, params, headers });       // 需声明 http + allow 前缀
+ctx.host.storage.load(ns);
+ctx.host.storage.save(ns, v);
+ctx.host.storage.clear(ns); // 需声明 storage（跨命名空间）
+ctx.host.clipboard.writeText(text); // 需声明 clipboard
+ctx.host.http.get(url, { timeout, params, headers }); // 需声明 http + allow 前缀
 ctx.host.http.post(url, body, opts);
 ctx.host.dialog.openFile({ kind: 'excel' | 'template' | 'directory' }); // 需声明 dialog
-ctx.host.db.call('shop-accounts', 'list', { search: 'a' });  // 需声明 db + domains + actions
-ctx.host.secrets.status();                                    // 需声明 secrets（无域粒度，不要写 domains）
-ctx.host.mail.call('messagesList', { keyword: 'invoice' });   // 需声明 mail + domains + actions
-ctx.host.ui.notify({ kind: 'success'|'error'|'info', text });           // 默认放行
+ctx.host.db.call('shop-accounts', 'list', { search: 'a' }); // 需声明 db + domains + actions
+ctx.host.secrets.status(); // 需声明 secrets（无域粒度，不要写 domains）
+ctx.host.mail.call('messagesList', { keyword: 'invoice' }); // 需声明 mail + domains + actions
+ctx.host.ui.notify({ kind: 'success' | 'error' | 'info', text }); // 默认放行
 ctx.host.ui.openSettings(category, tab);
-ctx.host.env.isMac / ctx.host.env.platform / ctx.host.env.version;      // 只读，默认放行
+ctx.host.env.isMac / ctx.host.env.platform / ctx.host.env.version; // 只读，默认放行
 ```
 
 ---
@@ -238,7 +240,7 @@ npm run plugins:create my-tool -- --install
 
 ## 8. 发布到插件市场
 
-市场形态：`catalog.json`（含条目元数据 + 下载地址 + sha256）与 `sk-hello-0.1.0.zip` 这类 zip 包，平铺在 GitHub 仓库 `main` 分支根目录，经 `raw.githubusercontent.com` 静态分发。
+市场形态：`catalog.json`（含条目元数据 + 下载地址 + sha256）与 `ae-profit-1.0.1.zip` / `shop-accounts-1.0.0.zip` 这类 zip 包，平铺在 GitHub 仓库 `main` 分支根目录，经 `raw.githubusercontent.com` 静态分发。
 
 ### 8.1 打发布包并合并 catalog
 
@@ -314,31 +316,37 @@ https://raw.githubusercontent.com/SayakABC/SellerKitPlugin/main/catalog.json
 
 ## 11. 常见问题（FAQ）
 
-| 现象 | 原因与处理 |
-|------|-----------|
-| 安装成功但激活失败（状态 `error`） | 入口语法错误 / 非自包含（有 import）/ 触发了未声明能力。看 `ctx.log`（dev 终端）与错误详情 |
-| 调用 `ctx.host.*` 抛 `PluginPermissionError` | 未在 `capabilities` 声明对应能力（http 还需 `allow` 前缀）→ 补声明后重装/重启 |
-| 安装报「下载插件包失败: HTTP 404」 | `downloadUrl` 或 `--base` 配错 / zip 未推送 |
-| 安装报 sha256 不匹配 | zip 与 catalog 的 sha256 不一致（改了文件没重跑发布脚本）→ 重跑 `publish-plugin.js` |
-| 入口文件过大被拒 | 入口 ≤2MB；多文件逻辑需合并进单文件（沙箱不支持多模块 import） |
-| 修改代码后市场仍是旧行为 | 本地目录是缓存/已安装副本；请升版本后重新发布，并在应用内更新 |
-| UI 提示「已安装」但想要强制覆盖 | 同版本内容变更建议直接升版本（干净可追溯） |
-| UI 岛页面空白 / 资源 404 | `vite.config.mjs` 的 `base` 不是 `'./'`；或 `dist` 未重建但 manifest `entry` 指向旧产物 → 重跑 `npm run build` 再发布 |
-| UI 岛 `storage` 调用抛权限错误 | UI 岛全部 storage 调用（含自身命名空间 `sk.storage`）都走权限门：须在 `capabilities` 声明 `storage`（自身命名空间无需列入 `namespaces`）→ 补声明后升版本重发 |
+| 现象                                                                                         | 原因与处理                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 安装成功但激活失败（状态 `error`）                                                           | 入口语法错误 / 非自包含（有 import）/ 触发了未声明能力。看 `ctx.log`（dev 终端）与错误详情                                                                                                                                         |
+| 调用 `ctx.host.*` 抛 `PluginPermissionError`                                                 | 未在 `capabilities` 声明对应能力（http 还需 `allow` 前缀）→ 补声明后重装/重启                                                                                                                                                      |
+| 安装报「下载插件包失败: HTTP 404」                                                           | `downloadUrl` 或 `--base` 配错 / zip 未推送                                                                                                                                                                                        |
+| 安装报 sha256 不匹配                                                                         | zip 与 catalog 的 sha256 不一致（改了文件没重跑发布脚本）→ 重跑 `publish-plugin.js`                                                                                                                                                |
+| `publish-plugin.js` 退出码 1：**「拒绝发布：… 已存在，但打包内容与本次不同」**                | **守卫在按预期工作**：同版本号换了内容，装了的机器永远拿不到（更新判据只有版本号）→ 升 `manifest.json` 的 `version` 重跑；确需原地覆盖加 `--force`                                                                                   |
+| 入口文件过大被拒                                                                             | 入口 ≤2MB；多文件逻辑需合并进单文件（沙箱不支持多模块 import）                                                                                                                                                                     |
+| 修改代码后市场仍是旧行为                                                                     | 本地目录是缓存/已安装副本；请升版本后重新发布，并在应用内更新                                                                                                                                                                      |
+| UI 提示「已安装」但想要强制覆盖                                                              | 同版本内容变更建议直接升版本（干净可追溯）                                                                                                                                                                                         |
+| UI 岛页面空白 / 资源 404                                                                     | `vite.config.mjs` 的 `base` 不是 `'./'`；或 `dist` 未重建但 manifest `entry` 指向旧产物 → 重跑 `npm run build` 再发布                                                                                                              |
+| UI 岛 `storage` 调用抛权限错误                                                               | UI 岛全部 storage 调用（含自身命名空间 `sk.storage`）都走权限门：须在 `capabilities` 声明 `storage`（自身命名空间无需列入 `namespaces`）→ 补声明后升版本重发                                                                       |
+| UI 岛在深色主题下**只有原生件发白**（日期面板 / 下拉弹层 / 滚动条 / 复选框），文字面板都正常 | 岛内**元素级**写死了 `color-scheme: light`。宿主只把主题写到 `<html>` 的**内联**样式上，元素自己的声明优先 → 改 `color-scheme: inherit`。注意 `:root { color-scheme: light }` 作首帧兜底是**允许**的（内联必盖过它），元素级才致命 |
+| 岛内 `[data-theme='dark'] ... { }` 写了但从不生效                                            | 宿主**不同步 `data-theme` 属性**到 iframe（只注入内联令牌与 `color-scheme`）→ 这类选择器是死代码，删掉，改用 `inherit` 或 `--wb-*` 令牌                                                                                            |
 
 ---
 
 ## 12. UI 形态插件（UI 岛）开发与发布
 
+> **接入 / 改动 / 排障请对照 `docs/architecture/UI_ISLAND_INTAKE_CHECKLIST.md`**（8 步 SOP + 五类检查清单 +
+> 故障速查表 + 一键冒烟 `npm run plugins:island:smoke`）。本节只讲"怎么做"，清单讲"怎么确认做到了"。
+
 前面章节默认面向 **L2 后台插件**（单文件 ESM + Worker 沙箱，命令进 ⌘K，无界面）。若插件需要**自有界面**，用 **UI 岛（UI 形态包）**：静态站点经 `sk-plugin://` 只读协议在宿主 iframe（独立 JS realm）运行，通过宿主注入的 `window.__sk` 桥调用宿主能力。
 
-| | L2 后台插件 | UI 岛（UI 形态包） |
-|---|---|---|
-| manifest | `entry: "./index.js"` | `entry: "./dist/index.html"`，**`kind: "ui"`** |
-| 运行 | Worker 沙箱（无 DOM） | iframe 独立 JS realm（有 DOM/CSS） |
-| 桥面 | `ctx.*`（activate 注入） | `window.__sk`（onReady 后可用） |
-| 界面 | 无 | 自绘页面（自由用 Vue/React/原生） |
-| 启停 | 激活/停用 | 侧栏入口即时出现/隐藏；卸载删除目录 |
+|          | L2 后台插件              | UI 岛（UI 形态包）                             |
+| -------- | ------------------------ | ---------------------------------------------- |
+| manifest | `entry: "./index.js"`    | `entry: "./dist/index.html"`，**`kind: "ui"`** |
+| 运行     | Worker 沙箱（无 DOM）    | iframe 独立 JS realm（有 DOM/CSS）             |
+| 桥面     | `ctx.*`（activate 注入） | `window.__sk`（onReady 后可用）                |
+| 界面     | 无                       | 自绘页面（自由用 Vue/React/原生）              |
+| 启停     | 激活/停用                | 侧栏入口即时出现/隐藏；卸载删除目录            |
 
 ### 12.1 脚手架（create-ui-plugin 模板）
 
@@ -363,16 +371,23 @@ node scripts/plugin-create.js --ui <kebab-id> --install   # 仅复制 manifest.j
 ### 12.3 发布到市场
 
 ```bash
-node scripts/publish-plugin.js --dir ui-plugins/<kebab-id> --base <URL前缀> [-o market-out] [--build]
+node scripts/publish-plugin.js --dir ui-plugins/<kebab-id> --base <URL前缀> [-o market-out] [--build] [--force]
 ```
 
 - 发布工具按 `kind: "ui"` 走 UI 语义：entry 须指向 **HTML 产物** 且文件存在；缺失时给 `--build` 会先执行 `npm run build`（先构建后打包），否则报错引导；
 - 打包范围只含 `manifest.json + dist/**`（自动剔除 `node_modules/.git/src/package.json` 等工程文件）；
 - catalog 条目写入 `kind: "ui"`，宿主市场列表安装前即可见「UI 岛」徽标。
+- **同版本重发布守卫**（2026-09-29）：写盘前按「打包内容摘要」（zip 内每个条目的路径+字节）与已存在的同版本 zip 比对 ——
+  内容一致 → 幂等放行；**内容不同 → exit 1 拒绝**（zip / catalog 不动），要覆盖须显式 `--force`。
+  理由：**版本号是宿主与市场唯一的更新判据**（`plugins-market-handlers.ts` 的 `compareVersions(...) >= 0 && !force` 直接拒装，
+  `PluginCenter.vue` 的 `updateable = cmp < 0` 连"更新"按钮都不给）→ 同版本换内容等于「发了等于没发」。
+  判据不能用 zip 自身 sha256：JSZip 默认给条目打当前时间戳，同内容两次打包字节就不同（已实测）；
+  顺带把条目时间戳固定成 `ZIP_ENTRY_DATE`，同内容现在产出同字节同 sha256。回归见 `tests/publishGuard.spec.ts`。
 
 ### 12.4 UI 岛桥面速查（`window.__sk`，双端实现见 `electron/plugin-ui-runtime.js` ↔ `src/core/plugin/uiBridgeHost.ts`）
 
 - `sk.onReady(cb)`：宿主握手后回调（**无参**）；元信息经 boot 后的 getter 读取——`sk.manifest`（`{ id, displayName, version }`）/ `sk.env`（`{ isMac, platform }`）；`sk.ready` 是 Promise，可用 `await sk.ready` 或 `onReady`，**不可当函数调用**；
+- **主题**：宿主在 boot 与每次主题切换时把 `--wb-*` 令牌 **+ `color-scheme`**（据 `theme.mode`）写到 iframe `<html>` 的**内联**样式上。岛内因此：① 配色只需 `var(--wb-x, <回退>)`，不必自己嗅探主题；② **不得在元素级写死 `color-scheme`**（`inherit` 才跟随），也**不要靠 `[data-theme=...]` 选择器**自我纠正——宿主不同步该属性；
 - `sk.storage.load(key)` / `save(key, value)` / `clear()`：**自身命名空间** key 级存储（直接读/写原始值，无 `{ value }` 包裹）；跨命名空间走 `sk.host.storage.load(ns)` / `save(ns, value)` / `clear(ns)`。⚠️ UI 岛 storage 调用全部过权限门：**`capabilities` 必须先声明 `storage`**（自身命名空间无需列入 `namespaces`）；
 - `sk.host.ui.notify({ kind, text })`：宿主 toast（`text` 必填；`kind: 'success' | 'error' | 'info'`，非法/缺省按 info）；`sk.log.debug/info/warn/error(...)`：宿主日志（dev 终端带 `[ui-island:<id>]` 前缀）；
 - `sk.bus.emit(type, payload)` / `sk.bus.on(pattern, cb)`：发布 / 通配订阅（`*` 尾部前缀匹配，建议按 `plugin:<id>:*` 前缀约定）；回调 `cb(payload, meta)`，`meta` 为 `{ sourcePlugin, origin }`，**不含 eventType**（实际事件名由命中的订阅 pattern 判定；与 L2 `ctx.bus` 的 `meta.eventType` 不同）；`on` 返回退订函数；
@@ -380,6 +395,17 @@ node scripts/publish-plugin.js --dir ui-plugins/<kebab-id> --base <URL前缀> [-
 - `sk.host.db.call(domain, op, payload)` / `sk.host.mail.call(op, payload)` / `sk.host.secrets.status()`：业务库 / 邮件 / 安全存储三域（须声明 `db`/`mail`/`secrets`；其中 **`db` 与 `mail` 还必须给 `domains`**，`secrets` 无域粒度）；岛内一律 `payload` 对象传参，**参数形状与宿主 IPC 一致**（如 `mail` 的 `{ messageId, attachmentId }`）；
 - ⚠️ **不存在** `sk.ui` 顶层成员、`sk.storage.get/set`、`clipboard.readText`（桥面只有 `writeText`）——旧模板/demo 用法请勿照抄；
 - 桥握手 token 校验失败的消息会被静默丢弃；页面 **禁止直连 `window.electronAPI`/裸 IPC**。
+
+### 12.5 接入自检（改完必跑）
+
+```bash
+cd ui-plugins/<id> && npm run build          # dist/ 被 gitignore，改完必须重建
+node scripts/plugin-create.js --ui <id> --install   # 重装到 <userData>/plugins/<id>/（含版本递增）
+npm run plugins:island:smoke                # 逐个点岛 + 断言桥握手（首个岛之外也要能用）
+```
+
+岛内**不要把会话状态寄存在父窗口侧**：每次进入都是**新会话**（切岛/重载都会重建桥，宿主侧 `dispose` 会
+`abort` 在途调用）。判定标准与故障速查见 `docs/architecture/UI_ISLAND_INTAKE_CHECKLIST.md` §2/§3。
 
 ---
 

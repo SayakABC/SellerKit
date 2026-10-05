@@ -13,6 +13,2386 @@
 
 ## [Unreleased]
 
+### Added · 「今天」升级为**发货台**：六步收进一页多页签，点步骤不再跳页（2026-10-05）
+
+**用户诉求（原话）**：「将每日发货流程中的每一步都挪到宿主中，可以在一个页面中的多个tab中，
+避免点击后跳转到其他页面，丝滑操作」—— 拍板两项：**落在「今天」**（导航不增项）+ **六步全内建**。
+
+**改了什么**（`src/modules/today/**` 为主，**零迁移、零新 IPC、零能力域、岛不发版**）：
+
+- 「今天」页变成**页签容器**：`总览 | 1 导入订单 | 2 归类核对 | 3 生成拣货单 | 4 算钱 | 5 拿货 | 6 结算对账`。
+  页签上带这一步"还有多少活"的徽标（`2 行` / `1 未识别` / `1 SKU` / `缺 4`），
+  当前该做的那一步在页签上有主色标记 —— 不用点进去就知道下一步在哪。
+- **点步骤 = 切页签，不再跳模块**。流程卡、三张卡、导入回执里的"下一步"全部改走 `go(tabId)`；
+  只有「货与成本」（主数据维护，不属于这条流程的某一步）仍是真跳转。
+- **懒挂载 + 保活**：`defineAsyncComponent` ⇒ 第一次点某页签才加载它的代码；
+  `<KeepAlive>` ⇒ 切走不销毁，切回来界面原样（表单、已生成的清单都还在）。
+- **`token` 把保活的代价还回去**：任何让数据变了的动作（导入/生成/提交）后 `bump()` ⇒
+  `token` +1 ⇒ 各面板 `watch` 后重取。没有它，保活会让用户切回拣货页签时看到"导入之前"那份清单。
+- 各步视图**复用整页视图**（`PickingView` / `OrderCostView` 加 `embedded` prop：只藏标题两行，
+  保留动作按钮），**不复制精简版** —— 同一件事两处摆迟早两套口径（岛内「拣货」页签撤回的前例）。
+- ~~拿货 / 结算对账 / 归类核对三个页签先给**诚实占位**~~ → **已全部内建**（见下方「六步全部内建」小节）。
+  数据层其实已全在宿主（`purchase*` / `orderQueue*`），缺的只是界面。
+- `SHIPPING_TAB_NAMES` 作为页签名的**唯一来源**（`flowCtx.ts`）：页签名是**新的一类入口名**，
+  `tests/uxEntryNames.spec.ts`（悬空入口名守卫）新增这个来源，文案里写「去「归类核对」页签」
+  必须能对上真东西（**进 `known`，不是进 `ALLOWED_NON_ENTRY` 豁免**）。
+
+**顺带修掉的 2 个真问题**：
+
+1. **内嵌时把整个页头藏掉 ⇒ 动作按钮一起消失**（拣货页的"生成待拣清单 / 导出带图 xlsx"、
+   算钱页的"刷新 / 更多 / 未归属"都在 `header.wb-head` 里）⇒ 页签打开就是空态且没法操作。
+   改成只藏标题（`wb-head__main`），动作区保留并左对齐当工具栏。**这是变异测试顺带抓到的**
+   （见下条）。
+2. **一条假守卫**：`today:ui` 里"导入后拣货单自动重算"原本按 `pickingRows` 的**调用总数**断言 ——
+   但这个 IPC 有**两个调用方**（容器 `reload()` 用 `{limit:2000}` 要汇总数、拣货面板用
+   `{shop, includeShipped}` 生成清单），容器的调用把总数喂饱了 ⇒ 变异（拿掉 `:refresh-token`）
+   照样全绿。改成**按入参区分调用方**（拣货面板的入参没有 `limit`）后，变异立刻变红。
+
+**验证**：`today:ui` **48 → 57 项**（新增：七页签齐全 / 默认落总览 / **懒加载**（没点过的面板不在 DOM）/
+**切页签不派发 `switch-module`**（"不跳页"的判据）/ **保活 = 同一个 DOM 实例** /
+空态导入一步直达并切到导入页签 / **导入后已生成的拣货单自动重算**）。
+**5 组变异**逐组确认变红后复原（① 切页签退回 `switchModule` ② 去掉 `KeepAlive` ③ 断掉 `token` 传递
+④ 改成全量挂载 ⑤ 删掉一个页签），`grep -rn MUTANT src/ scripts/ tests/ electron/` 无残留。
+**深/浅主题 + 三个页签的真截图**看过（内嵌面板无双层页头、工具栏靠左、无内容被裁）。
+门禁全 0：`tsc` / `vue-tsc` / `verify` / `verify:docs` / `vitest` **633** / `build` /
+6 个界面冒烟（含 `picking:ui` / `order-profit:ui` 独立打开不受影响）/ 11 个 DB+形状冒烟 /
+`picking:xlsx:smoke` / `purchase:xlsx:smoke` / `plugins:island:smoke`。
+详见 `docs/notes/2026-10-05-shipping-console-tabs.md`。
+
+### Added · **六步全部内建**：归类核对 / 拿货 / 结算对账 三页签从「订单归类」岛收编（2026-10-05 晚）
+
+**用户诉求（原话）**：「把归类核对和拿货对账都移到宿主中，归到今天菜单中，可以决断一下哪些是
+在流程中有用的，去掉那些没用的功能」。
+
+**新文件**（数据层全用宿主现成 IPC，**零新 IPC / 零迁移 / 零能力域 / 岛不发版**）：
+`tabs/PurchasePanel.vue` + `tabs/PurchaseOrderEditor.vue`（第 5 步拿货：缺口勾选→草稿单 / 拿货单 /
+明细编辑抽屉带实时重算与「取最近价」/ 忽略清单）、`tabs/ReconPanel.vue`（第 6 步结算对账：按厂家
+四金额 + 付款记录增删 / 按店铺分摊 + 明细 / 时间窗五档）、`tabs/ClassifyPanel.vue`（第 2 步归类核对：
+逐行核对 + 归属款下拉 / 批量识别未归类 / 单行与全部确认）、域薄封装 `purchase.ts` / `classify.ts`
+（类型化 + 失败抛错 + 分/元与时间窗纯函数；**业务算法仍只在主进程**）；确认弹层从 `goods`
+**上提为 `src/core/components/ConfirmDialog.vue`**（第二处消费者出现 ⇒ 按约定上提，不复制）。
+
+**裁量（砍掉的岛功能）**：识别队列中间层（宿主导入直落订单表）· 行内改款式展示名（主数据归
+「货与成本 › 产品」）· 识别库 / 透视 / 明细 / 设置四个非每日动作页（设置已在宿主「设置 → 识别」）·
+对账页的「导出 Excel」（要新开 IPC 才能导对账汇总，屏幕看得见 ⇒ 不造按钮）· 对账页的厂家增删改
+（主数据归「货与成本 › 供应商」）。**保留**付款的「退款」类型（真实业务：厂家退次品）。
+
+**验证**：`today:ui` **57 → 124 项**全绿；**10 组变异**逐组确认变红后复原（漏指纹 / 摘掉无 Key 拦截 /
+缩略图不滤空路径 / 付款不预选厂家 / 切窗不重取 / 摘掉空金额拦截 / 去掉 `!styleCode` / 去掉 `localPath` /
+默认款靠位置），`grep -rn MUTANT` 无残留。两个夹具/断言教训：**假桥载荷形状以 `src/types.ts`
+声明为准**（`orderImageThumbBatch` 渲染层传裸数组，归一成 `{items}` 是 preload 的事 —— 写错 ⇒
+缩略图全空占位且不报错）；**验 `A && B` 过滤条件夹具要"各缺一样"**（第一版把"已归类"写成无图 ⇒
+`!styleCode` 这个条件根本没被验到；且无图行在读图前就抛错 ⇒ 必须用**队列大小**这条后置可观测点验它）。
+`vitest` **633** 全过（悬空名守卫抓到 2 个新引号名并按真实入口修：`设置 → 识别`、`全部`）；
+门禁全 0（两侧 tsc / `verify` / `verify:docs` / build / 6 个 UI 冒烟 / 13 条 electron DB 冒烟）；
+深浅主题真截图看过（`.workbuddy/artifacts/t-classify.png` / `t-recon.png` / `t-recon-dark.png`）；
+顺手修掉 5 处 markdown 星号漏进用户可见文案。
+
+### Removed · 「订单归类」UI 岛整体下架：六步全内建之后，连带删掉 37 op 的能力域（2026-10-05 晚）
+
+**背景**：上一条把第 2/5/6 步（归类核对 / 拿货 / 结算对账）从岛收编进宿主「今天」发货台。
+**六个步骤一旦全部内建，岛剩下的就只有「识别库 / 透视 / 明细」三个非每日动作的页** ——
+用户据此拍板**整体下架**（放弃了"拆 `purchase` 只读子域 + 岛发版"那条过渡路线）。
+
+**三处版本坐标一起清**（只删仓库源码 = 线上市场仍装得到、本机已装的还会跑）：
+
+- **仓库**：`ui-plugins/order-insight/`。与上一例 `product-library` 不同的两点 ——
+  该目录**是被 git 跟踪的**（19 个文件）⇒ 用 `git rm -rf`；其中 **8 个 `dist/` 文件带未提交改动**，
+  `git rm` 因此报 `local modifications`，**必须 `-f`**。用 `-f` 的前提是留档 tar 打自**当前磁盘状态**。
+  留档：`.workbuddy/retired/order-insight-2026-10-05/`（`repo-order-insight.tar.gz` **21 条** = 19 岛文件
+  + 1 个冒烟脚本 + 1 个单测；另存 6 个历史 zip 与本机已装目录副本）。
+- **市场**：删 `market-out/catalog.json` 里的 `order-insight 1.5.0` 条目并删 zip、commit（`4482d57`）、
+  **push 完成**（`279ee07..4482d57 main -> main`）。线上复核：目录**只剩 4 条**
+  （`shop-accounts` / `ae-profit` / `excel-copy` / `shipping-rate`）、`order-insight-1.5.0.zip` **HTTP 404**。
+  ⚠️ 中途 `push` 多次失败（`Failed to connect to github.com:443` / `Operation too slow`），
+  **网络恢复后重试即成功** —— 卡住时**别去改产物或 `--force`**，本地 `ahead 1` 就是唯一状态。
+- **本机**：`~/Library/Application Support/seller-kit/plugins/order-insight/` 同步移除（18 个文件，
+  副本已进留档目录）；装完需**重启宿主**才生效。现役岛 **4 个**。
+
+**宿主侧**：
+
+- `src/core/plugin/host.ts`：删 `'order-insight'` 能力域整块 **37 个 op**（当时仓库内最大的域：
+  视觉指纹 / 订单明细读写 / 图片下载·读图·缩略图（单条与合批）/ 孤立图清理 / Excel 解析与导出 /
+  视觉识别 `analyze` / 处理队列 `oi_queue` ×10 / 款式库 `oi_styles` ×6 / 订单维护 ×5），就地留**墓碑**
+  （写明"数据层与 IPC 通道不动"）。⚠️ 判据同上一例：内建页**结构上够不到** `DB_OPS`；
+  `npm run verify` 显示 **IPC 契约零改动** —— 这是"删的确实是权限面、不是通道"的可复核证据。
+- ⚠️ **能力域 ≠ 存储命名空间**：`modules.order-insight`（引擎配置 + 列映射）是**已落盘的用户数据键**，
+  由「设置 › 识别」写入、`today/classify.ts` 读取 ⇒ **名字刻意不改**（改名会让用户配好的 API Key 与
+  列映射静默消失）。两处都补了注释说明"名字 ≠ 模块还在"。
+- `tests/pluginTriage.spec.ts`：删该岛 **7 条**逆向守卫（等价守卫已在 `today:ui` 冒烟与 `purchase.ts` 的
+  TS 类型里，后者是编译期、比扫字符串更强），`GRANDFATHERED` 去掉 `'order-insight': 37`；
+  该组**自证**锚点 `expect(domains).toContain('order-insight')` 改钉 `'shop-accounts'`
+  （锚点历史：`product` → `order-insight` → `shop-accounts`）。
+- 其余清理：`tests/{pluginManifest,pluginSettingsIsland,uiBridgeHost,aggregator,colorSwatch,uxEntryNames}.spec.ts`、
+  `scripts/{check-doc-links,shipping-rate-ui-smoke}.mjs`、`package.json`（删 `order-insight:settings:ui`）、
+  `.gitignore`、`modules.config.json`、`externalManifest.ts` / `sanitizeExcel.ts` 的注释。
+
+**守卫抓到一个真 bug（不是守卫过期）**：删完跑全量单测，`tests/uxEntryNames.spec.ts` 报
+`文案让用户去一个不存在的入口 … src/core/settings/RecognitionSettings.vue:「订单归类」` ——
+设置页**仍在把用户指向已下架的岛**。修法是**改产品文案**指向内建页（`「今天」的「归类核对」页签`），
+**不是加豁免**。同一条守卫的**自证锚点**（`toContain('订单归类')`）正好落在被删的岛上，
+改钉 `店铺账号管家` —— 两者处置相反：文案改产品、锚点改测试。
+
+**文档**：`verify:docs` 一次报 **12 条**悬空引用，按"句子还成立 / 本就是历史记录"分流 ——
+前者**改写**（`DAILY_SHIPPING_FLOW_PLAN.md` ×3、`2026-10-05-shipping-console-tabs.md`、
+`2026-10-04-preload-payload-shape.md`、`DOMAIN_INTEGRATION_PLAN.md`、`PLUGIN_TRIAGE_PLAN.md`、baseline ~10 行），
+后者进 `DELIBERATELY_MISSING` **并写明理由**（+4 条，49 → 53）。
+
+**验证**：`tsc -p tsconfig.electron.json` / `vue-tsc --noEmit` / `npm run verify` / `npm run verify:docs` /
+`vitest`（**36 files · 615 tests**）全绿；六步内建的 124 项 `today:ui` 与其余 5 个 UI 冒烟、
+13 条 electron DB 冒烟 ALL PASS。**本轮只改宿主，没有别的岛需要发版。**
+
+**结论笔记**：[`docs/notes/2026-10-01-ui-island-retirement.md`](docs/notes/2026-10-01-ui-island-retirement.md)
+**§6**（第二次实例：git 跟踪/未跟踪两种命运、`git rm -f` 与留档的关系、守卫抓到真 bug 的处置分叉、
+文档悬空引用分流、以及"市场最容易留半截"）。
+
+### Removed · 清掉下架遗留的孤儿代码：`aggregator` / `templateEngine` 两模块 + 两条单测（2026-10-05 深夜）
+
+**为什么现在做**：上一条把岛下架了，但**渲染层里给岛用的纯函数没人回收**。
+判据不是"看名字像不像没人用"，而是**可达性**：从渲染层入口（`src/main.ts` + `enabledModules` 各自的
+`meta`/`index`）出发对 115 个 `src/` 文件做 import 图遍历，列出**入口到不了**的文件 —— 得 4 个。
+
+**结果**：真孤儿 2 个（删），另 2 个**不是孤儿、不动**：
+
+| 文件 | 判定 | 依据 |
+|---|---|---|
+| `aggregator.ts`（`src/lib/` 下）+ 其单测 | ✅ **删**（313 行） | 透视聚合引擎，原两个调用方 `PivotPanel.vue` 与岛的透视页**都已下线** ⇒ 只剩自己的单测引用它（30 个用例） |
+| `templateEngine.ts`（`src/lib/` 下）+ 其单测 | ✅ **删**（37 行） | 唯一消费者是 excel-copy；它 2026-09-24 下记为岛后**岛自带同语义副本**（`ui-plugins/excel-copy/dist/util.js`），宿主这份已无人调用（16 个用例）。删除早经 `PLUGIN_TRIAGE_PLAN` §C 预授权 |
+| `src/core/plugin/sandboxRuntime.ts` | ❌ **不动** | **扫描器假阳性**：以 `import runtimeSource from './sandboxRuntime.ts?raw'` 注入，**带查询串的 import 我的解析器接不住**；另有 `scripts/sandbox-smoke.mjs` 按路径读它 |
+| `src/core/layout/SplitPane.vue` | ⏸ **保留待定** | 确无引用，但它是**基线期的通用布局原语**、不是下架产物；且 4 处文档快照（`REFACTOR_PLAN` / `CODE_REVIEW_REPORT`）正在说"它已落地"，删了要连带改那几句。**与本轮无关，单独再定** |
+
+**留档**：`.workbuddy/retired/orphan-code-2026-10-05/`（4 个文件的当前磁盘态；`git rm -f` 是因为
+`aggregator` 那条单测**带未提交改动** —— 与岛下架同一纪律：**用 `-f` 的前提是留档打自当前磁盘**）。
+
+**文档同步**：`AGENTS.md` 两处（§4.4「底层公共工具」清单去掉 `templateEngine`；
+§6.3 那条"类型标必填、运行时却有兜底"的**例子**随模块一起删、纪律保留）·
+`PLUGIN_TRIAGE_PLAN` §C 标 ✅ 收口（并写明 `fieldProcessor` **保留** —— excel-copy 的 `applyRules`
+仍在宿主 `db` 域复用它，别顺手一起删）· `REMEDIATION_PLAN` 的覆盖计划与验收条目就地标注作废 ·
+`ui-plugins/excel-copy/dist/util.js` 的注释（原来写着"与宿主 `src/lib/templateEngine.ts#renderTemplate`
+语义一致"，**宿主那份没了** ⇒ 改述为"本副本是当前唯一实现"）· `check-doc-links.mjs` 的示例路径换现存文件。
+
+⚠️ **副作用（可接受、不发布）**：`excel-copy` 岛的 `dist/util.js` 只改了注释，因此仓库产物与市场上
+已发布的 `1.0.0` zip 在**注释层面**不再逐字节相同。功能零改动 ⇒ **不升版本、不重发**；但下次真要
+发布该岛时，`publish-plugin.js` 会因"同版本换内容"而拒绝，**那时按规矩升版本、别 `--force`**。
+
+**验证**：`tsc` / `vue-tsc` / `npm run verify` / `npm run verify:docs` 全 0；
+`vitest` **34 files · 569 tests**（原 36 · 615 —— 减的正是这 2 个文件 / 46 个用例，数字对得上）。
+
+
+
+**为什么**：S3 把 exceljs「`addImage({filename})` 忘给 `extension`」那条真 bug 的修法抽进了
+`electron/xlsx-image.ts`，并让 `purchase-handlers.ts` 改用它 —— 但**只测了那个共享函数**
+（`picking:xlsx:smoke`），`purchase-export-excel` 这个**调用点**此前**零覆盖**
+（`scripts/` 下没有任何脚本 require 过 `purchase-handlers`）。
+"共享实现被覆盖 ≠ 调用点被覆盖"：行映射、金额口径、查图条件、落盘/取消分支，只有调用点能验。
+
+**做法**（新增 `scripts/purchase-xlsx-smoke.cjs` + npm script `purchase:xlsx:smoke`，26 项）：
+在**真 Electron**（require 链含 better-sqlite3，Electron ABI）里用 `Module._load` 替身把 `electron`
+换成"只改 `ipcMain` / `dialog` / `BrowserWindow` / `app` 四件"的代理，于是能**截获真 handler**、
+用假对话框喂路径、其余全真；只把 `order-db.findStyleColorImagePath` 换成可控映射（改同一 exports 对象的属性即可生效）。
+
+**断言**：入参护栏（非对象 / `items` 非数组 → `invalid payload`；洗完没行 → `没有可导出的行`）·
+**取消保存 → 输出目录里一个 `.xlsx` 都不多出来**（不是"写了再删"、也不是写到某个默认路径）·
+`defaultName` 的 `\ / : * ? " < > |` 全换 `_` · 表名「拿货单」+ 9 列表头 ·
+**单价 = `priceCents/100`、金额 = 数量 × 单价** · **`priceCents===0` → 单价/金额留空**（不是 0.00）·
+**`qty===0` → 实拿数量/金额留空**（0 件 ≠ 尚未填数）· 款色为空的行照常导出（只是不查图）·
+只填款名的行不丢 · **媒体扩展名跟着内容**（PNG 内容名 `.jpg` → `imageN.png`；base64 源恒 jpeg，
+所以是 png 就证明走的是**文件源**分支）· 无 `imageN.undefined` · `[Content_Types].xml` 有 `image/png`
+无 `undefined` · 有 drawing 部件 · 有图行设了行高 · **`items` 超 500 截前 500**（剪的是入参）。
+
+**验证**：**7 组变异**逐组确认变红后复原（其中一组第一次**没打中守卫点** —— 变异打在
+`sniffImageFormat` 的 `throw` 上，被外层 `try/catch` 吞掉了、冒烟照绿；改打在真守卫点后才红，
+这条本身也是"变异补丁要打在真正的守卫点"的实例）；`grep -rn MUTANT` 无残留。
+全量门禁：`tsc` / `vue-tsc` / `verify` / `verify:docs` / `vitest` 633 / `build` /
+11 个 DB+形状冒烟 / `picking:xlsx:smoke` 15 / `purchase:xlsx:smoke` 26 / 6 个 UI 冒烟 /
+`plugins:island:smoke` 5/5 全 0；新增文件 eslint 0 error。
+
+### Added · S3 拣货单升级：进价 / 预估金额 + 按厂家分组 + 带图 xlsx（2026-10-05）
+
+**背景**：用户六步发货流程的第 3 步（「产品图片+颜色尺码数量**发厂家**拣货」）此前只能靠肉眼看图。
+本阶段把这一页变成**可以直接发出去的拣货单**，并把「进价」钉在与「算钱」页**同一份实现**上 ——
+两页各自取价会出现"同一条订单两张页上成本不一样"的悬案。
+
+**变更（零迁移 / 一条新 IPC 通道 / 零能力域 / 岛不发版）**
+
+| 事 | 落点 |
+| --- | --- |
+| 进价 / 预估金额 | `src/lib/picking.ts` 复用 `orderCost.pickUnitCost`（**款级**成本区间，按**该行的下单日期**取当时生效的那条）+ 同一份 `round2`（`orderCost.ts` 里改为 export） |
+| 逐行取价 | `Σ(件数 × 单价)`，**不是** `件数合计 × 某一价` —— 同一 SKU 的订单可跨成本生效区间 |
+| 缺价语义 | `unitPrice / amount === null` = "没查到价"；金额里**不含**这些件数，另累 `noPricePieces` 单独报出（写 0 会让"估算偏低"和"真的很便宜"长得一模一样） |
+| 按厂家分组 | `PickingSummary.suppliers`（`groupBySupplier`）：有厂家的在前、件数降序、**未指定整组排最后**；分组内引用**同一个 `PickingGroup` 对象**，不复制 |
+| 带图 xlsx | 新增 `electron/picking-xlsx.ts`（生成层，**不 import 任何 `*-db`**）+ 新通道 `picking-export-excel` + `src/lib/pickingExport.ts`（渲染层 canvas 编码图） |
+| 图怎么进来的 | **渲染层编码成 JPEG 再传主进程**（见下方 bug ②），主进程只画表、不重算任何业务口径 |
+| 界面 | 新增「进价 / 预估金额」两列 + 按厂家分段的 `tbody`；表格套 `.wb-table-wrap`（`.wb-panel{overflow:hidden}` 会**静默裁掉**右半截）；全无价时写 `—（N 件全部无进价）` 而不是 `¥0.00` |
+
+**修 bug ①（影响面**不止**拣货单）：exceljs `addImage({ filename })` 不给 `extension` ⇒ 包结构不合法**
+
+- 现象：`xl/media/image1.undefined`、`[Content_Types].xml` 里是 `<Default ContentType="image/undefined"/>`
+  （连 `Extension` 属性都空掉）⇒ OPC 要求每个 part 都有内容类型 ⇒ Excel 提示"需要修复"并**丢图**。
+- **在"导出成功"的返回值里看不出来**（导出照样返回 filePath）。
+- 修：新增 `electron/xlsx-image.ts`，按**文件内容**（不是文件名 —— 存量图里有"内容是 PNG、名字是 `.jpg`"的）
+  推扩展名并显式传给 `addImage`；`purchase-handlers.ts` 原先自己抄了一份 `imageSizeOf` + 同样的
+  `addImage({filename})`，**改为共用同一实现** ⇒ 既有的**拿货单导出**一并修好。
+
+**修 bug ②：Electron `nativeImage` 解不了 WebP**
+
+- 实测 `createFromPath` / `createFromBuffer` 对 4 张真实订单图全部 `isEmpty()`；而**真实订单图 8/9 张
+  内容是 WebP**（还有"内容是 webp、名字是 `.jpg`"的）⇒ 主进程既转不了码也拿不到宽高，
+  嵌 webp 在旧版 Office/WPS 里显示不出来，与"发厂家"的用途直接冲突。
+- 修：改由**渲染层**（Chromium 有 WebP 解码）canvas 统一转 JPEG（先铺白底，JPEG 无透明通道）再传；
+  顺带省掉"主进程按渲染层给的路径读任意文件"。
+
+**修 bug ③（跨脚本假绿隐患）：冒烟"失败"却以退出码 0 结束**
+
+- `if (failed > 0) { console.log(...); process.exit(1); }` 之后再跟 `console.log('全部通过'); process.exit(0);`
+  ⇒ 真 Electron 下**两次 log 都打印、退出码是 0**（同一个 `process.exit(1)` 在顶层同步代码里是正常终止的；
+  `process.exitCode = 1` 在 Electron 下**不退出** —— 事件循环不空，实测挂住）。
+- 修：纪律 + 落地 —— **同一段流程里只调一次 `process.exit`**，写成 `process.exit(failed > 0 ? 1 : 0)`；
+  `scripts/picking-xlsx-smoke.cjs` 已改，并用**变异版确认 `exit=1`**。
+- ⚠️ 存量风险（**本阶段未改**）：`scripts/*.cjs` 的一批 DB 冒烟（`picking-db` / `order-db` / `ae-cost` /
+  `style-authority` / `schema-migration` / `shop-db` / `ship-rate-db` …）多是同款写法，退出码在
+  node 模式下确认真实透传，但**同款"后来又 exit(0)"的写法没逐个清**。
+
+**顺手改掉一处"表达失真"**（截图复核发现的）：一件价都查不到时段标题与顶部指标写 `预估 ¥0.00`
+—— 0 元会被读成"这批货不值钱"，事实是"还不知道多少钱" ⇒ 改为 `—` +「N 件全部无进价」，
+且只有**部分**缺价才叫"不含"。
+
+**验证**：`tests/picking.spec.ts` **+11 条 = 32 项**；`scripts/picking-xlsx-smoke.cjs` **新增 15 项**
+（含"媒体扩展名跟着内容推"、"`[Content_Types].xml` 有 `image/jpeg`"、"无进价读回来是 `null`"、
+"一个厂家一张 sheet"、"各表的数来自各自的行"、WebP/PNG/认不出三种文件源）；
+`scripts/picking-ui-smoke.mjs` **41 → 44 项**（新增"全无价不写 ¥0.00"两条 + 段标题一条，假桥的
+`orderImageThumbBatch` 改为返回**真 JPEG** —— 原来返回假 dataUrl 会让每张图被静默跳过，这条链永远测不到）；
+**10 组变异**逐组确认变红后复原（`grep -rn MUTANT` 无残留），其中一组打的是**界面接线**
+（`generate()` 不再传成本区间）—— 这类错单测看不见、只有界面冒烟抓得到；
+`npx vitest run` 633 / `tsc` / `vue-tsc` / `verify` / `verify:docs` / 9 个 DB 冒烟 / 5 个其它 UI 冒烟 /
+`ipc:shape:smoke` 13 / `plugins:island:smoke` 5/5 全过。
+详见 `docs/notes/2026-10-05-picking-export-with-images.md`。
+
+### Added · 商品ID 映射带上颜色（S4）＋ 修掉两个「只有老库才暴露」的 bug（2026-10-05）
+
+**背景**：用户点名的三个问题里，①「颜色只能靠图片肉眼区分」与 ②「商品ID 和厂家产品的关系怎么处理」
+其实是**同一件事** —— 让**商品ID 成为颜色的权威源**（拍板项 G4：映射升到「款 + 色」级）。
+配一次，该商品之后的所有订单自动带出款编码与颜色，人工从「每单看图」降到「每商品配一次」。
+
+**变更（零迁移、零新 IPC 通道、零能力域、岛不发版）**
+
+| 事 | 落点 |
+| --- | --- |
+| 颜色**存哪** | `pl_shop_sku.spec`（`'*'` = 未指定）。**不新增列、不动 `pl_variants`** —— 它的粒度是 款×色×码，而映射只需要「款 + 色」，选哪行变体是任意的 |
+| 变体关联 | 写库时按 `(product_id, 色)` 反查一个变体填 `variant_id`（0 = 该色还没录变体）；**不让用户把颜色选两遍** |
+| 匹配语义 | `resolveOrderSku` 去掉写死的 `spec = '*'`，改 `ORDER BY (spec='*' OR spec='') ASC, id ASC`（**带色行优先**） |
+| 归款颜色 | `autoAssignByMap` 改为 **映射配的色 → 订单原文色 → `未分类`** |
+| 拣货投影 | `pickingRows` 的 `color` 改为 **款色 → 订单原文**（详见下方 bug ②） |
+| **回填** | 新增 `reassignOrdersByItemIds()`；`product-sku-map` 写成功后**自动回填存量未归款订单**，回执里报「已自动关联 N 行存量订单」 |
+| UI | `ProductPicker` 增加**颜色下拉**（选项 = `COLOR_SWATCH` 的键，与 `oi_style_colors.color` 同口径）；改绑时预填原色，不预填会把配好的色冲掉 |
+
+**修 bug ①（P0）：`oi_styles` 的建表语句、三处 INSERT、迁移三方矛盾 ⇒ 老库上任何"新建款"必崩**
+
+- 现象：真实库上配映射后归款直接抛 `SqliteError: table oi_styles has no column named name`
+  （同理，AI 识别建款也必抛；**症状是"识别/归款静默失败、款表永远为空"**）。
+- 根因：建表 `order-db.ts` 带 `name TEXT NOT NULL`、三处 `INSERT INTO oi_styles (code, name, fingerprint)` 都写它，
+  而 v3 迁移 `migrateOrderSpine` 又对老库 `ALTER TABLE oi_styles DROP COLUMN name`。
+  文件头注释写的"列保留、写入空串哨兵"与迁移**相反**，是过时残留。
+- **为什么一直没人发现**：冒烟建的是**新库**（建表带 `name` ⇒ INSERT 成功）⇒ **冒烟恒绿、线上必崩**。
+- 修法：统一到"**无该列**"（迁移的意图）—— 建表去掉 `name`、三处 INSERT 去掉 `name`、
+  迁移里的「历史名交接」与 `DROP COLUMN` 都**先探列再动**。改完 `picking:smoke` 在新库（已无 `name`）上仍全绿，
+  **这一步同时证明"夹具形状终于等于线上形状"**。
+
+**修 bug ②：拣货单读的是「订单原文色」而不是「映射/识别结论」**
+
+- `pickingRows` 一直返回 `color = oi_orders.color`（订单原文，实测恒空 / 39% 是 `Picture color` 占位），
+  而映射带出的颜色在 `styleColor` 列 —— **配好的颜色在拣货单上被丢掉**，症状是"我明明配了色，拣货单还是没色"。
+- 修法：`color` 改为**款色 → 订单原文**的回落，并在类型注释里写明"谁是权威"。
+
+**验证（逐条看退出码，全 0）**
+
+- `tsc` / `vue-tsc` / `verify` / `verify:docs`；`vitest` 37 文件 **622 例**。
+- `npm run picking:smoke` **14 → 19 项**：新增 5 条全钉在颜色链上（映射带色落地 / **带色行优先于 `*` 行** /
+  **写入后回填存量订单** / **回填不覆盖已有结论** / 缺省 `spec` 行为不变）。
+  **3 组变异**（匹配排序 / 归款取色 / 投影回落）逐组确认对应断言变红后复原，`grep -rn MUTANT` 无残留。
+- `product:smoke` 44 / `style:smoke` 22 / `order:smoke` / `schema:smoke` / `product:sku:smoke` /
+  `goods:ui` 52 / `picking:ui` / `today:ui` / `ipc:shape:smoke` 13 全过。
+- **克隆真实库端到端**（`cp -cR` + electron，不动原件）：配 1 条映射 → **回填 2 行** →
+  `款=STYLE-002 色=黑色 码=L / 5XL`，`variant_id` 自动关联到「虎头袄 · 黑色」变体。
+
+**用户待办**：① **重启宿主**（S1 是外部写库，内存态不刷新）；② 在「货与成本 › 映射与关联」
+按 `2026-10-05-mapping-carries-color.md` 的对照方式配 **8 个商品ID**（顺手选颜色）。
+
+### Added · 「今天」页发货主线流程卡（S2）＋ S1 数据补齐（2026-10-05）
+
+**背景**：六步流程（导订单 → 归类 → 拣货 → 拿货 → 发货 → 结算 → 对账）里，**宿主能直达的只有前四步**，
+而界面上这四步是**三张并列的卡、没有任何顺序关系** —— 用户得自己判断"现在该做哪一步、下一步点哪"。
+（同一个病灶上一轮刚在「导入回执」上修过一遍：**导完不知道去哪、也不知道下一步**。）
+
+**S1 · 数据补齐（用户已拍板，外部写库，非代码变更）**
+
+- 清空历史订单：`oi_orders` 157 → 0、`oi_images` 32 → 0、`oi_queue` 32 → 0、
+  `pl_shop_sku` 3 → 0、`oi_styles` 27 → 0、`oi_style_colors` 38 → 0、`oi_style_fingerprints` 22 → 0。
+  32 张图片**移到**备份目录（未删）。备份：`<userData>/backup_before_order_clear_20261005-131641/`。
+- 存量成本回填：`ae_cost_map` **0 → 7 行**（6 款）—— 补 `syncPurchaseCosts` 上线前拿货单没进成本表的缺口。
+- 产出商品ID配单清单 `/tmp/mango-item-mapping-checklist.md`（**17 个去重商品ID**，含订单行数/尺码/标题）。
+- 未动的主数据：`pl_products` 27 / `pl_variants` 5 / `suppliers` 2。
+
+**S2 · 流程卡（`src/modules/today/TodayView.vue`，零新 IPC、零新表、零发版）**
+
+- 新增 `data-act="flow"` 区块：四步（**导入订单 → 归类核对 → 生成拣货单 → 算钱**），每步给
+  「现在什么情况（带数字）+ **在哪个页面做**（写人话页名，不写模块 id）」；点任一步直达该模块。
+- 状态**只由本页已有数字推导，不引入新取数**：`orders.total` / `gaps.style` / `picking.sku` / `gapTotal`。
+- **串联语义（本轮唯一的设计要点）**：前一步没完成时，后面的步骤一律 `todo` + 写明「等第 N 步」。
+  初版各步独立判断 ⇒ 有未识别款时第 2/3/4 步**同时**高亮（截图上是三块橙边），
+  「当前该做哪一步」这个卡片唯一的职能反而答不出来。现在 `now`+`gap` 合计**恒为 1**。
+- `flowNext` 条：「下一步：<步骤名> —— <它的情况>」+ 一个真按钮（`data-act="flow-next-<key>"`）。
+- `flowTail` 条：后三步（拿货 → 结算 → 对账）如实标注**界面在「订单归类」插件的「拿货对账」页**并给入口。
+  按钮文案是「打开「订单归类」」而非「去「拿货对账」」—— 宿主**跳不进岛的某个页**
+  （`switchModule` 的 `action`/`payload` 是半接线：`AppShell.vue:491` 只写 `window.__switchModuleAction`，
+  **全仓无消费方**），文案不能承诺落在那一页。
+
+**验证**
+
+- `npm run today:ui` 假桥无头冒烟 **ALL PASS（40 → 48 项）**。新增 8 条**全部钉在 `data-act` 上**：
+  四步齐全 · 每步标明"在哪个页面做" · **当前步唯一 + 后续步骤被挡且写明等谁** · 已完成的步打 `done` ·
+  「下一步」跟着当前步走且指向真实模块 · 点它真派发 `switch-module → order-insight` ·
+  后三步如实标注在插件里并给入口。⚠️ 这条**点击会进 `window.__events`**，断言末尾必须清空
+  （后面有按 `[0]` 取 `switch-module` 的断言，不清就是假红）。
+- **变异复核 4 组，逐组确认对应断言变红后复原**（全部用 Edit 改、逐条取退出码，不串管道）：
+  ① `flowNext` 恒回落第 1 步 → 「下一步跟着当前步走」+ 跳转断言红；
+  ② 第 2 步 `state` 恒 `done` → 「当前步高亮」+「下一步跟着当前步走」红；
+  ③ 第 3 步 `where` 由「拣货页」改「拣货」 → 「每步标明在哪做」红（46 PASS + 1 FAIL）；
+  ④ **第 3 步 `state` 改回独立判断** → 新增的「当前步唯一」红（`高亮数=2`，47 PASS + 1 FAIL）。
+  复原后 48 项全绿，`grep -rn MUTANT src/ scripts/ tests/ electron/` 无残留。
+- **两张真截图**（浅色 + 深色）逐帧看过 —— 第 1 步绿边 `done` / 第 2 步橙边 `now` / 第 3·4 步灰字 `todo`，
+  层次清楚。**"当前步不唯一"这个 bug 就是拍图拍出来的**（冒烟当时全绿：原断言只钉了正例、没钉排他）。
+- **顺手修夹具两处不忠实**：① 假桥缺 `pluginsScan` 桩 ⇒ 兜底返回 `{success:true, data:null}`、
+  而 `externalLoader.ts:44` 判 `!r.data` ⇒ **每张截图右下角常驻红 toast**「扫描插件目录失败（IPC 不可用）」；
+  ② 注入脚本注释里的反引号会**提前终止模板字面量**（报错却指向注释行，本轮踩两次）—— 已改成不带反引号的写法。
+- 门禁：`tsc -p tsconfig.electron.json` / `vue-tsc --noEmit` / `npm run verify` / `npm run verify:docs` /
+  `npx vitest run`（37 文件 622 例）**逐条单独取退出码全 0**。
+- 顺带修的守卫：`tests/uxEntryNames.spec.ts` 的 `ALLOWED_NON_ENTRY` 新增「拿货对账」
+  （它是「订单归类」岛**岛内的一级页签名**，宿主不可枚举 ⇒ 只有豁免这一条路；同先例「识别设置」）。
+- 结论笔记：`docs/notes/2026-10-05-daily-flow-card.md`。
+- **未做（待用户另行授权）**：S3 拣货单升级（金额 / 按厂家分组 / 导出带图）、S4 启用 `pl_shop_sku.spec`/`variant_id`、
+  S5 拣货→拿货、S6 拿货→发货、S7 收编拿货对账（G1 未拍板）。
+
+### Added · 每日发货全流程改造方案（差距审查，2026-10-05）
+
+- **新增 `docs/plans/DAILY_SHIPPING_FLOW_PLAN.md`**：把「日导出 → 归类 → 拣货 → 拿货 → 发货 → 结算 → 对账」
+  六步做成差距审查 + 阶段表。**结论：数据能补齐，且比预想容易 —— 缺口不在数据源，在"主数据没维护 + 存量没归一/没回填"。**
+- **§1 全部是真实库只读实测**（`userData/sellerkit.db`），三个颠覆原假设的发现：
+  ① 「商品ID ↔ 厂家产品」**只需配 17 个商品ID**（现有 3 条映射已覆盖 42 行订单的 26 行 = 62%）；
+  ② 颜色**不是缺失**（`oi_orders.color` 157/157 有值），而是**62 行是 `Picture color` / `Image Color` 这类"看图"占位值**（39%），其余中英混杂（`black` 与 `黑色` 并存）→ 缺的是**权威源**；
+  ③ 成本表 `ae_cost_map` **0 行**（拿货单已有 3 张、12 行有价）⇒ 预估金额的口径**被数据定死**为 `purchase_items` 的拿货价，另需一次存量回填。
+- **头号发现（比"界面不直观"更根本）**：157 行未发货订单里 **115 行是老采集数据迁移的"半残行"**
+  （`raw_fields` 只有整帧、无产品ID、无图、未识别款），全部堆进拣货单「未识别款」组 → 157 行聚出 75 组噪声；
+  识别队列 `oi_queue` 32 条**全是 `pending`（识别从未跑过）**。
+- **方案 S1–S7**：S1 数据补齐（配 17 个映射 + 存量成本回填 + 处置 115 行采集帧）→ S2 主线流程卡 →
+  S3 拣货单升级（金额 / 按厂家分组 / 导出带图）→ S4 启用 `pl_shop_sku.spec`/`variant_id`（映射进拣货链、识别降为兜底）
+  → S5 拣货→拿货 → S6 拿货→发货 → S7 对账入口统一。
+- **待拍板 3 项**（G1 拿货对账是否内建化 / G3 颜色枚举 / G4 映射升变体级）；
+  原「进价口径」候选已被实测解决（`ae_cost_map` 空），不占用决策。
+
+### Changed · 导入回执：导完之后「数据去哪了 / 下一步做什么」说清楚（2026-10-05）
+
+**背景**：用户实报「现在的流程还是不够直观，导入订单后，接下来不知道要做什么，并且数据也不知道去哪了」。旧实现只有一行灰字（`识别为「订单报表」（…）→ 已导入 17 行…`）——**判据写得挺全，但缺两样东西**：① 没有目的地（没说进哪张表、去哪个页面能看见）；② 没有动作（三张卡并列，用户得自己判断"导完订单该点哪个"）。
+
+**改了什么**（**零新 IPC 通道、零新表、零能力域变更、岛无需发版**）：
+
+- **`src/core/services/importSheet.ts`**：`AutoImportResult` 新增三个**结构化**字段（界面不再从一句话里猜）：
+  - `title` —— 人话类型名（`订单报表` / **`芒果店长待发货订单`** / `结算明细` / `报价单`）；
+  - `landed` —— **数据去哪了**：`{ label, views }`，只给**人话名**与**用户真点得到的页面名**（不写 `oi_orders` 这类表名 —— 那是开发者视角）；
+  - `next` —— **接下来点哪**：`[{ label, moduleId, primary }]`；订单类按"店铺已归属 / 未归属"给两组不同按钮。
+- **`src/lib/importDetect.ts`**：`ImportDetection` 新增 `variant`（更具体的子类名；`item-info` 标识"认出来了但这类文件不该导"的那支）。
+- **`src/modules/today/TodayView.vue`**：`lastImport: string` → `receipt: AutoImportResult | null`，渲成**回执卡**四段（状态+标题 / 判据明细 / 落点 / 下一步按钮），可一键关闭；订单导入后把「待拣」卡点亮（`is-fresh` 边框 + 一行"刚导入的订单已算进来"）——**只引导视线，不重复入口**（动作仍是卡里原有那个按钮）。
+- **提示变入口**：`message` 里那句"可在「算钱」页一次「归到该店」"原来只是个说法，现在店铺未归属时回执的第二格按钮就是它（原句一字未删，仍在明细里）。
+- **卡片内部顺序 = 结论在前、证据垫底**：落点 + 下一步提到判据**之前**，判据压成最后一条带分隔线的灰字脚注（它是最长的一段，夹在标题和落点之间会把"数据去哪了/下一步点哪"挤下去）。
+- **两个被"真截图"照出来的文案 bug**（光看断言发现不了 —— 断言只看 `data-act` 锚点里的几个词）：
+  ① `kind === null` 分支一律用「**没认出**这个文件是什么…」当 message，而「商品信息」表是**已经认出来了**的那支 ⇒ 标题写「商品信息」表、正文写"没认出"，自相矛盾（现按 `item-info` 分开写）；
+  ② 检测层那条体检记录里带着 markdown 的 `**不用再导入**`，在界面上**星号是按字面渲染的**（已去掉 —— 这些字符串是**用户可见文案**，不是文档）。
+- **顺手堵一个静默缝**：`importExcel` 在**选定文件之后**先撤掉上一条回执 —— 否则识别期间界面挂着上次结论；商品信息表与"认不出"两条 message 都以"没认出这个文件是什么"开头，重复导入时会**被读成这次的结论**（冒烟真踩到了，见下）。
+
+**验证**：
+
+- `npm run today:ui` 假桥无头冒烟 **ALL PASS（30 → 40 项）**。断言升级为**按 `data-act` 逐元素**（不再拿整段 `textContent` 拼串 —— 回执拆成四段后，相邻元素间 `textContent` 不插分隔符，整串比对会假红/假绿）；**新增 10 条 / 改写 2 条**：回执把"是什么"与"凭什么这么判"分开渲染 · **落点行说清在哪三处看得到** · **下一步按钮每个都指向真实模块**（白名单**从 `modules.config.json` 读**，不抄副本；订单回执按"店铺已归属/未归属"的**两组分支各测一次** —— 只测一组会漏掉另一半）· 主操作是「生成待拣清单」· **刚导完订单点亮待拣卡** · 标题点名到「芒果店长待发货订单」· **认不出时不给"下一步"按钮**（反向守卫）· 回执可关掉且真的消失。
+- **两张真截图**（把冒烟脚本的 `--dump-dom` 换成 `--screenshot` 复用假桥）逐帧看过："已导入 / 未写入"两种语气、`landed` 为空时的布局、亮起的「待拣」卡 —— 上面那两个文案 bug 就是这么发现的。
+- **踩到的坑（已固化为断言纪律）**：junk 那条的完成信号原本是 `indexOf('没认出')`，而商品信息表的 message **也含"没认出"**（模板开头）⇒ 上一条还在界面上时就已满足 ⇒ 后续断言全读着旧回执做（"认不出不给按钮"因此判成红）。**两层修**：根因是新一轮导入先撤旧回执，判据改成钉在唯一特征（`import-title`）上。
+- **另一条更要命的坑**：变异复核时用 `npm run build | tail -2 && npm run today:ui` —— **管道把 build 的失败退出码吞了**，冒烟跑的是**旧 `dist/`**，于是"变异后仍然全绿"差点被读成"断言恒绿"。改成逐条单独取退出码后，4 组变异一次打入 **5 条断言全红**，复原后 40 项全绿。
+- 门禁：`tsc` / `vue-tsc` / `npm run verify` / `npm run verify:docs` / `npx vitest run`（37 文件 622 例）全绿；`grep MUTANT` 无残留。
+- 结论笔记：`docs/notes/2026-10-05-import-receipt-next-step.md`。
+
+**没动的**：`detectAndImport` 的 message 文案（除新增字段外一字未改）、`importOrders` 的落库行为、IPC 契约、`oi_orders` 表结构。
+
+### Added · 芒果店长「待发货订单」导入（2026-10-05）
+
+**背景**：用户给出芒果店长导出的**待发货订单**模板（12 列 / 16 行），要求按当前基线接入导入。该模板与速卖通订单报表**长得像但不一样**：它自带「店铺名」与「产品图片链接」两列（AE 是**按店铺导出**、既没有店铺列也没有图列）。
+
+**改了什么**（全部落在宿主「今天」页的**统一导入**链路；**零新 IPC 通道、零新表、零能力域变更、岛无需发版**）：
+
+- **识别**（`src/lib/importDetect.ts`）：新增「芒果店长待发货订单」签名（订单号 + 产品数量 + 产品图片链接）—— 它在通用订单报表签名**之内**、更具体；判据 `why` 点名「芒果店长」并说明自带店铺名与主图列（`why` 是界面上用户核对"导到哪去了"的唯一线索）。
+- **列探测**（`src/lib/orderClassifier.ts`）：新增 `detectImageColumnStrict`（**不回落第一列**）。自动导入拿它去拆多产品行 —— 旧 `detectImageColumn` 认不出图列时会回落第一列，于是**无图列的报表**（速卖通 47 列，第一列是订单号）会被当成"有图片列"，拆出的行图片全空并**逐行误标缺图**。界面让人选列仍用宽松版（给个可改的默认值）。
+- **一行 → 字段**（新增纯层 `src/lib/orderImportRow.ts`）：把「订单号 / 店铺名 / 尺寸 / 下单时间 / 主图 URL」的提取集中成一份可单测的口径。两个要点：① 店铺名落 `oi_orders.shop`（报表无该列才留空，仍由「算钱」页「归到该店」）；② 图片 URL 一律 **trim**（未拆行的单元格带尾随换行，带上去下载必失败）。
+- **带图导入**（`src/core/services/importSheet.ts` 的 `importOrders`）：由「免图导入」改为**带图** —— 按「产品图片链接」逐行 `orderDownloadImage` 建 `oi_images` 再挂到订单行（URL/内容指纹命中即复用，重复导入不重复落盘、不重复落行）；**下载失败不丢行**，回落免图并计数上报。新增 `images` / `imageFailed` / `shops` 三个回报字段，`detectAndImport` 的消息随之说清「主图 N 张 / X 行下载失败 / 店铺已归属：…」。
+- `src/core/services/ipc.ts`：补 `orderDownloadImage` 的**导出包装函数**（此前只有 `ElectronApi` 声明、没有包装 —— 与 `orderImageThumbBatch` / `importExcelByPath` 同款缺口）。
+
+**验证**：新增夹具 `tests/fixtures/mango-pending-orders.xlsx`（用户真实导出，16 行原样，不手搓）与 `tests/mangoPendingImport.spec.ts`（**17 例**：识别判据 / 列探测 / strict 不回落 / 真实 16 行拆成 17 行的逐列对齐 / 件数 / 金额提列 / 一行→字段）。门禁 `tsc` / `vue-tsc` / `npm run verify`（IPC 契约一致，通道未变：185/185/181）/ `npm run verify:docs` / `npx vitest run`（**37 文件 622 例**）全绿；**变异复核 4 组**（strict 回落到第一列 · 芒果签名恒 `false` · 图片 URL 不 trim · 店铺恒空）各自变红后已复原，`grep MUTANT` 无残留。
+
+**没动的**：AI 款式识别队列（仍在「订单归类」岛 —— 那是"识别"不是"导入"）、`oi_orders` 表结构与 IPC 契约、`picking` 待发货投影。
+
+### Fixed · 「产品页的图片没有展示」= 缩略图批通道的载荷形状不一致（2026-10-04）
+
+**背景**：用户报「产品页的图片没有展示」。先按"没数据"排：库里确实缺图（27 个产品 `image_id` 全为 0、`pl_images` 空、`product-images/` 目录不存在），但**同一个缩略图通道在「映射与关联」页本该有图**（订单域有 42 张带图订单、三层回落实测能解析到真实 webp），那里也是空的 ⇒ 问题在通道不在数据。
+
+**根因（用真 preload 取证，不靠读代码）**：`order-image-thumb-batch` 的载荷形状两侧不一致 —— 渲染层（`src/types.ts` 声明 / `src/core/services/ipc.ts` 包装 / 岛桥 `host.ts` / 4 个调用点）一律传**裸数组**，而 `electron/preload.ts` 只读 `payload?.items`。于是发出去的是 `{ items: [] }`，主进程**正常返回**空数组，界面全是空占位且**一条错都不报**（调用方的 `catch` 拦的是异常，拦不住"成功但空"）。实测：裸数组 → 载荷 `{"items":[]}`；`{items:[...]}` → 正常载荷。
+
+**修法**（不动 IPC 契约：零新增通道、零能力域变更、岛无需发版）：
+- `electron/preload.ts` 的 `orderImageThumbBatch` 改为两种形状都收（裸数组优先，`{ items }` 兼容岛侧老调用方）。
+- 同族第二个静默缺口一并堵掉：主进程/preload 都按 `slice(0, 40)` 硬截断，而调用方按"页/单"给路径（产品页一页 50 行、拣货单可能上百）⇒ 超出的行静默空图。改成在渲染层包装函数 `orderImageThumbBatch` 按 40 **拆批**（顺序不打乱、单批失败按 `null` 补位）。
+
+**验证**：新增 `npm run ipc:shape:smoke`（真 preload + 真主进程 handler 对穿，13 项：正面 + 反面（缺失/越权路径必须 null）+ 40 项逐项对号 + 同族三条通道）与 `tests/thumbBatchChunk.spec.ts`（5 例：分批大小 / 长度 / 顺序 / 坏批补位 / 空数组）。门禁 `tsc` / `vue-tsc` / `npm run verify` / `vitest 35 文件 602 例` 全通过；变异复核 2 组（preload 改回"只认 `{items}`" → 冒烟 7 项红；去掉拆批 → 单测 2 项红）各自变红后已复原。
+
+**遗留（未修）**：岛桥 `DB_OPS.order.imageThumbBatch` 返回 `{ dataUrls: [...] }`，而 `ui-plugins/order-insight` 的详情页按 `map[localPath]` 取值 —— 形状同样对不上，那个岛的订单详情缩略图仍不显示；修它要岛侧改 + 发版，本轮只记录（见 `docs/notes/2026-10-04-preload-payload-shape.md`）。
+
+### Fixed · 邮件收件箱正文里的图片一张都显示不出来（2026-10-04）
+
+**背景**：用户报「邮件收件箱里的图片展示不出来」。先否掉了"数据没同步下来"这个方向 —— 列表、附件清单、附件「预览」（走 `data:` URL）全都正常，说明**只有正文里的图坏了**。
+
+**根因取证（两条，都实测过）**：正文原先用 `<iframe sandbox="" :srcdoc="htmlBody">` 渲染，于是同时撞上两堵墙 ——
+
+- **srcdoc 文档继承父文档 CSP**：父文档是 `sk-plugin://` 下的岛页面，CSP 为 `img-src 'self' data:` ⇒ 邮件里的远程图（`https://...`）一律被拦。探针实测日志：`Loading the image ... violates "img-src 'self' data:"`。
+- **`cid:` 引用没有映射键**：内联图写作 `<img src="cid:image001.png@01D9...">`，是 MIME 的 Content-ID，浏览器不认这个 scheme；而 `sk_mail_attachments` **根本没有 content_id 列**，宿主无从把它换成真图片。
+
+**改了什么**：
+
+- **新增 `electron/mail-body-protocol.ts`（`sk-mail://`）**：正文改由**自带 CSP 的独立来源文档**渲染（`sk-mail://body/<messageId>`），内联图指向 `sk-mail://att/<messageId>/<attachmentId>`（磁盘缓存优先，未命中才重拉原文，复用按需限流）。独立来源 ⇒ **不继承岛 CSP**，图片能力与安全边界收敛到这一处。零新增 IPC op、零能力域变更。
+  - 三层安全边界：岛 CSP 只多一条 `frame-src sk-mail:`；正文文档 CSP `default-src 'none'` + `img-src sk-mail: data:` + `script-src 'none'`；iframe `sandbox=""` ⇒ 邮件 HTML 里的 JS 一律不跑。
+  - **远程图默认放行**，正文上方出「已加载 N 张远程图片 / 拦截远程图片」一键切换（放行 = `?remote=1`）。默认值的理由见下方追加段：这个收件箱的正文图 **103/103 封全是远程图**（含 `cid:` 的 0 封、附件表 0 行），默认拦截的净效果就是"打开任何一封都是空白"。计数由岛侧基于 `htmlBody` 判定 —— sandbox 文档无法与岛通话。
+- **`electron/mail-html.ts`（新增纯函数层）**：`normalizeContentId` / `collectCidRefs` / `countRemoteImages` / `needsInlineBackfill` / `rewriteCidRefs`。覆盖 `src`、`background`、CSS `url()` 三种 cid 形态与三种引号写法；映射不上的 cid **保持原样**（显示裂图，不静默清空 `src`）。
+- **`sk_mail_attachments` 补 `content_id` 列**（`ensureMailAttachmentColumns()` 幂等补列，老数据零丢失）。写入侧两条解析路径（同步轮 + 按需补拉）统一带上 `contentId`。
+- **存量邮件惰性回填**：`mail-message-get` 发现「正文含 cid 引用 ∧ 附件行一条 content_id 都没有」时重解析一次（6s 超时兜底，超时按现状显示、回填在后台继续）。增量同步只处理新 UID，老邮件不会自己好 —— 这一步是必须的。
+- **`mail-handlers.ts`**：`mail-message-get` 改为 async（回填触发点），通道与入参形状不变。
+- 岛内 `MailInboxView.vue`：iframe 从 `:srcdoc` 改为 `:src="sk-mail://body/<id>"`，加远程图拦截横条。
+
+**两个差点写错的坑**（都有守卫）：
+
+- `content_id` **不能进** `replaceMailAttachments` 的合并键 —— 该键的作用是"保留原 attachment_id"，content_id 进键会让老行（空值）被判成另一个附件而换 id，`sk_mail_attachment_cache` 索引与已落盘文件整批失效（缓存**不失效**是 M3 定的红线）。改为键不变、命中时只在旧值为空时 UPDATE。
+- 属性正则**不能**用 `\b(src|...)`：`-` 也是词边界，会把 `data-src` 里的 `src` 认成同名属性并改写（懒加载邮件大量用 `data-src`）。用 `(?<![-\w])`。
+
+**验证**：`tsc` / `vue-tsc` / `npm run verify`（IPC 契约一致，未新增通道）/ `npx vitest run`（34 文件 597 例）/ 新增两个**无需凭据**的冒烟 —— `npm run mail:inline:smoke`（15 项：存量库补列、附件 id 稳定性、正文渲染、CSP 两态）与 `npm run mail:body:smoke`（13 项：真 handler + 真 DB + 真磁盘缓存 + 真 sandbox iframe，正文与内联图子资源都取到 200）全通过；变异复核 5 组（lookbehind · URL 反转义分支 · CSS `url()` 分支 · 合并键加 content_id · `UI_CSP` 去掉 `frame-src sk-mail:`）各自变红后已复原。
+
+> 协议冒烟的宿主页 CSP 直接 import `plugin-ui-protocol.ts` 导出的 `UI_CSP` 真值（不抄副本）：否则"`frame-src sk-mail:` 被误删"这种回归会在冒烟里恒绿。另实测：CSP 拦 frame 时 `webRequest.onErrorOccurred` **不报**，故该冒烟里"无网络层错误"那条断言名字如实写，没有冒充 CSP 守卫。
+
+**没动的**：IPC 通道与能力域声明、`sk_mail_*` 其余表结构、列表/搜索的"纯本地查询"红线。
+
+**追加（同日返工三次，用户两次回报"还是没展示出来"后查出的另两层）**：上面这套代码写完、门禁全绿，但**用户机器上什么都没变**，因为
+
+- **③ 岛没重装**：本机 `<userData>/plugins/shop-accounts/` 里还是 **2026-09-27 的产物**（仍是 `srcdoc` 版，`grep sk-mail://body` 零命中）。岛一律从 `<userData>/plugins/` 加载，仓库里的 `dist/` 只是待发布产物 —— 修岛的最小闭环是**改源码 → `vite build` → 拷 manifest+dist 进插件目录 → 重启宿主**，四步缺一不可，且不重装**没有任何提示**。
+- **④ 岛自带 meta CSP 那一层没放行**：CSP 是**取交集**的。宿主响应头的 `UI_CSP` 已加 `frame-src sk-mail:`，但 `ui-plugins/shop-accounts/index.html` 里的 `<meta http-equiv="Content-Security-Policy">` 是 `default-src 'self'` 且**没有 `frame-src`** ⇒ 回落被拒。症状是**正文区整块空白**，界面无提示，Chromium 原文：`Framing 'sk-mail://body/' violates ... "default-src 'self'" ... 'frame-src' was not explicitly set, so 'default-src' is used as a fallback.`（本轮变异复现，一字不改）。已给 meta 补上 `frame-src sk-mail:`。
+
+顺带修掉**默认值**：远程图从"默认拦截"改为**默认放行**（`MailInboxView.vue` 的 `showRemote` 初值 + 不再按邮件重置 —— 它是用户偏好）。原冒烟那条"宿主页带真 `UI_CSP` + iframe 能加载"是**假绿**（只复刻了头 CSP 这一层）。
+
+**追加验证**：`vitest 35 文件 605 例`（新增 `tests/islandMailFrameCsp.spec.ts` 3 例：岛若引 `sk-mail://` 则其 `index.html` 的 meta CSP **必须**放行 `frame-src sk-mail:`，且宿主 `UI_CSP` 也必须有 —— 解析 `content` 属性而非搜子串）；`npm run mail:body:smoke` 扩到 **20 项**（新增：默认态**远程图零请求** / `?remote=1` 真起一个**非 loopback http 服务**并断言取到 200 / 用岛的真实 `index.html` 的 meta CSP 复刻第二层）；变异复核补 2 组（`UI_CSP` 默认态也放行远程图 · 岛 meta 删掉 `frame-src sk-mail:`）各自变红后已复原。
+
+**真机验收（唯一能证明"用户真能看见图"的一步）**：真实 userData 克隆 + `--remote-debugging-port` + CDP 直读 `sk-mail://body/414?remote=1` 文档 ⇒ `{"total":4,"loaded":4}`（`naturalWidth>0`），并顺带证实 `http://` 图**不会**被混合内容拦（84/103 封邮件用 http 图）。
+
+> 状态：岛已升 **1.6.0** 并已**装进本机插件目录**（旧产物备份在 `/tmp/shop-accounts-backup-*`）。**尚未发布到市场**（用户要求先确认再发）；发版时在 `market-out/` 里 commit+push 那一步不能省，链条见 `docs/notes/2026-09-30-island-publish-runbook.md`。另注：`ui-plugins/shop-accounts/src/` 里还有别的在途改动（「名下店铺」区块等），本次 rebuild 把它们一并打进了 1.6.0 产物，发版前需确认是否一起发。
+
+### Fixed · 「算钱」不是缺字段，是右边几列被容器裁掉了 + 同屏合计口径不一致（2026-10-03）
+
+**背景**：用户报「算钱页面信息展示不全，并且很杂乱」。"展示不全"的第一反应是"少了字段"，但取证否掉了这个方向。
+
+**根因取证（先量再改）**：在真实长度的夹具下量 DOM —— `table.scrollWidth = 1211` > `page.clientWidth = 1064`，而外层 `.wb-panel { overflow: hidden }` **静默吃掉溢出**（没有滚动条、不报错）。截图 `/tmp/c3-oc-clipped.png` 里右侧 3 列整块被切掉。⇒ **"展示不全" = 容器裁切，不是数据缺失**。这条决定了修法：不是加字段，是让表能滚。
+
+**改了什么**：
+
+- **新增全局 `.wb-table-wrap`**（`src/styles/index.css`：`overflow: auto` + `max-height`，首列吸附）→ 明细表与统计表都套进去。宽度不够时**出横向滚动条**，而不是静默裁掉。
+- **顺带查出一个真实的口径 bug**（`src/lib/orderCost.ts`）：`costTotal` / `shippingTotal` / `platformFeeTotal` **含关闭单**，而并列显示的 `revenueTotal` / `grossTotal` **不含** —— 四个合计写在同一条指标带上，口径却不同，用户拿它们相减算毛利会得到错的数。统一为「只含非关闭单」，接口注释同步。补单测守卫（变异 → `expected 52 to be close to 26`）。
+- **去杂乱：4 条顶栏 → 2 条**（`OrderCostView.vue`）：合并为**概览卡**（指标条 + 体检行）+ **筛选条**。指标条由 4 格扩到 6 格，补上原先只在明细里能看到的**成本合计**与**毛利率**。
+- **明细表 16 → 14 列**：
+  - 「订单」= 单号 + 店铺（两行一列，不再各占一列）；
+  - 「毛利」并入**预测 / 精准** tag（原先是独立一列「轨」）；
+  - 「来源」压成紧凑文本；「成本」→ **「产品成本」**（与"平台费/运费"区分口径）；
+  - **新增「平台费」列** —— 原先平台费只出现在提示里，明细看不到。
+- **「汇总」+「时间趋势」合并为一个面板**：用分段控件（`.wb-seg`）切换，`v-show` 保留两表，不再上下堆两块表格。
+- **`.wb-seg` 提为全局**（原为「货与成本」模块内私有），控件来源保持唯一；`SkuMappingView.vue` 改用全局类。
+
+**冒烟同步与加固**（`scripts/order-profit-ui-smoke.mjs`，**81 PASS**）：
+
+- 新增**根因反向守卫**：断言 `.wb-table-wrap` 存在 + 该容器 `scrollWidth > clientWidth` 时**真的可滚动** + **最后一列可达**（实测 `wrap=true overflowX=auto 表宽=819 容器宽=498 溢出=true 末列可达=true`）。这条把"表够宽时也该滚"钉住 —— 只断言"有 wrap 元素"会恒绿。
+- 新增「平台费」列守卫、合并面板守卫（`面板数=1` + 点「趋势」切换）、指标条逐元素（`data-act`）断言。
+- **变异复核 4 组**（用例全绿 ≠ 守卫有效）：① 去掉滚动包裹层 → `末列可达=false`；② 平台费列恒显 0.00 → 列守卫红；③ 分段切换打断 → 红；④ `costTotal` 退回含关闭单 → `expected 52 to be close to 26`。四条均已复原。
+
+**没动的**：IPC 通道、能力域、数据库表结构（`npm run verify` 显示 185/185/181，与改动前一致）。
+
+### Changed · 「算钱」交互简化：提示变入口、缺口行收敛、去生造词（2026-10-03）
+
+**背景**：与「货与成本」同一套方法（先取证再改）。首屏把**问题**和**解决问题的路**分在了两处 —— 页头一个 `<span>` 说"未归属 N 单"（看着像待办、点了没反应），而真正的动作藏在「更多」里，用户看见问题却找不到入口；「缺哪一环」无论 0 都渲染 8 个 `缺X 0`，数据齐全时要逐个读完才知道"都齐了"。逐条改掉：
+
+**改了什么**：
+
+- **提示变入口**（`OrderCostView.vue`）：
+  - 页头「未归属 N 单」由 `<span>` 改**可点按钮**（`data-act="unassigned-hint"`，文案补「· 去归属」）→ 点击自动展开「费率与归属」并**聚焦店铺下拉**（`openMore('shop')`）。
+  - 「平台费未扣」同样改为可点按钮（`data-act="fee-missing"`，文案补「· 去配费率」）→ 展开并**聚焦平台费率输入**（`openMore('rate')`）。原先用户看到"平台费未扣"也不知道去哪儿配。
+  - 新增 `.wb-btn--warn`（`src/styles/index.css`，与 `.wb-tag.is-warn` 同一角色），供这类"这是待办"的按钮用。
+- **「缺口」行收敛**（`OrderCostView.vue`）：新增 `activeGaps`（只留 `count > 0`）。全齐时只渲染一句 **「没有缺项」**（`data-act="gaps-none"`）；有缺时**只列非零项**（`warn` 色，逐项 `data-act="gap-<key>"`）。原来 8 个 `缺X 0` 是"数据齐全的正确表达 = 8 个零"。
+  - ⚠️ **顺带修掉一个自己引入的作用域矛盾**：「没有缺项」是**对整行**的断言，而 `platformFeeMissing` 也是这一行里的一项 ⇒ 条件收紧为 `v-else-if="!summary.platformFeeMissing"`。否则未配费率时会同时显示「没有缺项」与「平台费未扣 · 去配费率」，读起来是"什么都不缺、但这个缺着"。
+- **去生造词 / 行话**：
+  - 「算齐 N」→ **「各环齐全 N」**（"算齐"是生造词，且与「缺哪一环」配不成对）。
+  - 明细表列头「轨」→ **「毛利依据」**（"轨"是代码注释里的说法"留给将来接结算数据的那一轨"，用户看到列里写着「预测」完全不知道这列在说什么），并给 `<th>` 补 `title` 说明预测/精准两种口径。
+  - 「缺运价卡」→ **「缺运价表」**（全页其余处含 tooltip 都叫"运价表"，只此一处叫"卡"）。
+- **去掉开发者视角的括号 / 冗余说明**：
+  - 「只补"订单自己没说"的行（采集帧没有代征代缴列）」→ **「只作用于订单自己没写税的行」**（去掉实现细节）。
+  - 「（合并计费口径待定）」→ **「（多件合并计费尚未支持）」**（说清是"没做"而非"待定"）。
+  - 删时间趋势区那句「汇总口径与上表同一份（关闭单不计）」—— 与面板标题「时间趋势（只含非关闭单）」重复。
+- **指标条补锚点**（`OrderCostView.vue`）：四格加 `data-act="metric-rows|metric-complete|metric-revenue|metric-gross"`，为冒烟提供稳定判据（今后改标签文案不再把断言整条带红）。
+- **「归到该店」补明作用域**（`data-act="assign-scope"`）：「会改写**当前列表里全部 N 个订单号**的店铺（不只是未归属的那几单）」。⚠️ **只把行为说清楚，没改行为** —— "是否该只处理未归属单"属产品决策，留给用户定。
+
+**冒烟同步与加固**（`scripts/order-profit-ui-smoke.mjs`）：
+
+- 指标条断言由「`.oc-topbar` 整段 `textContent`」升级为**按 `data-act` 逐元素断言**。
+- 「缺口」行判据改为：全齐 → **无任何 `gap-*` chip**；未配费率时**不出现**「没有缺项」；配好费率后**才出现**「没有缺项」（有缺 → 逐项按锚点出现）。
+- **补一条此前零覆盖的用户路径**：点页头「未归属」→ 「费率与归属」展开 **且店铺下拉获得焦点** → 之后才继续该分支原有断言。
+- **变异复核 4 组**（项目纪律：用例全绿 ≠ 守卫有效）：① `activeGaps` 退回"全量"→ 三条缺口断言同时变红（`none=false chips=8`）；② `openMore` 去掉聚焦 → `FAILED at [shop] - timeout`；③ 列头改回「轨」→ 列头断言变红；④ 「没有缺项」条件退回 `v-else` → 变红（`none=true fee-missing=true`，正是那个矛盾态）。四条均已复原。
+
+**没动的**：数据层、能力域、IPC 通道、算账口径（`src/lib/orderCost.ts`）。
+
+### Changed · 「货与成本」交互简化：去重复入口、去假动作、统一术语（2026-10-01）
+
+**背景**：模块收回内建后控件密度偏高 —— 产品页签在表格之上叠了 **5 个指标 + 4 个页签 + 9 个常驻控件**（共 18 个可交互元素，工具栏靠 `flex-wrap` 折行）。盘点后发现有**四类**具体问题，逐一改掉；每一条都先定位到文件与行，不凭感觉"简化"。
+
+**改了什么**：
+
+- **假动作**（`GoodsView.vue`）：指标条左段「产品 N」「SKU M」原先**两格都是按钮、都绑 `goProducts('all')`** —— 看着能点，点下去只是"回到全部"。改为**只读事实格**（`<span>`，锚点 `data-act="metric-products"` / `metric-sku`）。右段三格（缺克重 / 未关联供应商 / 已映射商品ID）确实是待办入口，保留可点并补 `data-act` 锚点。
+- **重复入口**（`ProductListView.vue`）：工具栏常驻控件 **9 → 6**。
+  - 删「下载模板」—— 导入弹层里本来就有（`ProductImportDialog.vue` 的"没有现成表格？下载导入模板"），且那句文案更贴场景。
+  - 删「只看缺克重」「只看未关联厂家」两个常驻开关 —— 它们与指标条是**同一状态的两张面孔**，且互斥关系（服务端三个筛选互斥）在界面上**完全看不出来**：点一个会静默关掉另一个。
+- **新增「活跃筛选」chip 行**（`ProductListView.vue`，`v-if="filtered"`）：**空闲时整行不存在**（不占垂直空间、不增加"要看的东西"）；每个生效条件一个可一键撤掉的 chip（搜索 / 状态 / 供应商 / 缺克重 / 未关联），另有「清空全部」。筛选入口因此统一到顶部指标条一处。
+- **术语统一**：同一概念原先**两套词**（`厂家` 23 处 / `供应商` 18 处，连 `SupplierView.vue` 一个文件里两种都有）。用户可见面一律改为**供应商**：指标条、产品表列头、下拉「全部供应商」、供应商页、导入弹层说明、批量编辑与详情抽屉标签。
+  - ⚠️ **连带改 `PRODUCT_EXPORT_HEADERS` 第 3 列**（`src/lib/productImport.ts`）：导出/模板的表头是用户可见产物，不改就变成"界面写供应商、导出的表写厂家"。**不影响老文件** —— `COLUMN_FAMILIES.supplier` 别名族同时收录「厂家名称 / 厂家 / 供应商名称 / 供应商 / supplier」，用户按旧表头导出的文件仍能原样导回。
+- **页头说明随页签走**（`GoodsView.vue` 的 `TAB_DESC`）：原先那句固定枚举（"款式 · SKU · 克重 · 厂家 · 商品ID 映射"）**切了页签就不成立**，而切页签时正是最需要一句解释的时刻。改为一句人话 + "什么时候该来这"，用页头**本来就有**的说明位，不新增控件。
+
+**冒烟同步与加固**（`scripts/goods-ui-smoke.mjs`）：
+
+- 指标条断言由"整段 `textContent` 拼串"升级为**按 `data-act` 逐元素断言**（因为改了文案 `厂家 → 供应商`，整串比对会一起失配 —— 这是"用测试迁就实现"的反面）。
+- **补一条此前零覆盖的用户路径**：点指标条「缺克重」→ 产品表**筛到 1 款** → 出现活跃筛选 chip → 点 chip 的 × → **回到 2 款且整行消失**。
+- 新增断言：工具栏**不再**有「下载模板」与两个常驻开关；假桥 `productList` 真的实现 `onlyMissingWeight` / `withoutSupplier` 参数（否则新断言是空转）。
+- **变异复核 3 条**（项目纪律：用例全绿 ≠ 守卫有效）：① 把事实格改回按钮 → 「产品 / SKU 是只读事实格」变红；② 把 chip 的 × 错分派到别的条件 → 筛选路径超时变红；③ 把导出表头改回「厂家」→ 单测变红。三条均已复原。
+- 单测 **577 → 578**：新增「导出表头第 3 列是「供应商」」**钉字面量**（原来那条是常量跟自己比，表头被整体改错时恒绿）。
+
+**没动的**：布局骨架（`.wb-page/.wb-head/.wb-metabar`）、数据层、能力域、IPC 通道、页签名。
+
+### Removed · 「产品库」UI 岛整体下架：功能收回内建，连带删掉 5 个已无消费者的能力域（2026-10-01）
+
+**背景**：上一轮已把产品库的功能迁进内建「货与成本」（4 个页签）。既然内建页与宿主**同进程**、
+不经 `window.__sk` 桥，那个岛就只剩"同一套功能维护两处"的代价；而它那 5 个 `DB_OPS` 能力域
+（`product` / `product-admin` / `product-image` / `product-supplier` / `shop-products`，共 **32 个 op**）
+**一个消费者都没有** —— 是纯权限面（沿用 `picking` 域 2026-09-30 删除的先例：死物可删）。
+
+**做了什么**：
+
+- **三处版本坐标一起清**（只删仓库源码 = 线上市场仍装得到、本机已装的还会跑）：
+  - **仓库**：`ui-plugins/product-library/`。注意该目录**未被 git 跟踪**（`git ls-files` 为 0），
+    直接 `rm` 不可回滚，故先打 tar 备份校验、再 `mv` 进被 .gitignore 的 `.workbuddy/retired/` 留档，最后删。
+  - **市场**：删 `market-out/catalog.json` 里的 `product-library 1.5.0` 条目并 **commit + push**
+    （`d37367a..279ee07`）。线上复核：目录 HTTP 200 且**只剩 5 条**、`product-library-1.5.0.zip` **HTTP 404**。
+  - **本机**：`~/Library/Application Support/seller-kit/plugins/product-library/` 同步移除（装完需**重启宿主**才生效）。
+- `src/core/plugin/host.ts`：删 5 个能力域共 **32 个 op**（299 行），就地留 16 行**墓碑**（同 `picking` 的样式），
+  写明"数据层与 IPC 通道不动"。`DB_OPS` 收敛为 **7 个域**。
+  ⚠️ 判据：内建页**结构上够不到** `DB_OPS`（该对象只经 `window.__sk` 桥暴露给 iframe 岛）；
+  `npm run verify` 显示 **IPC 契约零改动**（`preload` / `src/types.ts` / `ipc.ts` 三方未动）。
+- `tests/pluginTriage.spec.ts`：删该岛的 **8 条**守卫用例（留 9 行墓碑指向宿主冒烟）；
+  该组的**自证**那一条从 `expect(domains).toContain('product')` 改钉 `'order-insight'`
+  —— 否则"锚点分类消失"会让整组守卫静默空转。
+- `package.json`：移除 `product:sku:ui` 脚本（该冒烟随岛下线，断言已整组迁进 `scripts/goods-ui-smoke.mjs`）。
+- 文档与本机笔记同步：`docs/features/PRODUCT_LIBRARY.md` 新增 **§0-A**（能力域→新落点对照表 + 6 步可复核下架清单）、
+  `docs/README.md`、`AGENTS.md` §1.4（岛实例 6 → **5**）、`docs/baseline/PROJECT_BASELINE.md`、
+  `docs/plans/{RESTRUCTURE_PLAN,DOMAIN_INTEGRATION_PLAN,UX_POLISH_PLAN}.md`（均就地加 ⚠️ 注明"当时做法"、不改历史结论）、
+  `scripts/check-doc-links.mjs` 补 3 条豁免。
+
+**连带修好三个既有红冒烟**（都是"实现改了、判据没跟上"，**不是**产品回归）：
+
+- `style:smoke`（22/22）：夹具造的是**不可能组合**（新形状 `oi_orders` + 有内容的 `oi_styles.name`），
+  v3 迁移会直接早退 ⇒ "名字交接"这条路径从未被跑到。改为先建**真·老库形状**并把迁移版本退到 v3 的前驱，
+  A2 加断言"遗留列是真的被 `DROP COLUMN`"（并复核过它确实能变红）。
+- `order-profit:ui`（ALL PASS）：期望值仍按"商品ID 级克重"算，改为 **SKU 级 275g**（运费 30.00 / 毛利 125.18 /
+  精准毛利 50.86 / 费率后 110.31）；把**已删通道** `productWeightGet` 的桩改成**绊线**（保留，但断言调用 0 次）。
+- `schema:smoke`：`product.sku` 迁移多了第 3 步（删 `pl_item_weights`），而冒烟硬编码版本 `2`。
+  改为 `PRODUCT_SKU_STEPS` 等常数 + **自证**（常数 ≠ 源码步数时**这条自己先红**并给出可执行提示），不再连坐下游三条。
+
+**顺带修一处假红（判据把布局当契约）**：`scripts/ui-island-smoke.mjs` 的「设置贡献」体检读的是
+`document.querySelectorAll('aside > div')` —— 而设置分类导航在本轮可访问性改造里已由 `div` 改成 `button`
+（见上一条 Changed，"原先键盘不可达"），选择器**静默读到 0 个** ⇒ 报"分类没出来"，
+而同一次探测里「识别」面板**已正常渲染**（`hasEngineForm=true`）。
+改为钉**语义锚点** `[data-act="settings-cat"]` + `data-cat`（= **分类 id**，不是显示名），
+并在 `SettingsModal.vue` 的导航按钮上补这两个属性（**只加属性，不动文本/class**）。
+用变异复核过（把 `data-act` 改名）：**该断言确实变红**，即它不是恒绿。
+
+**验证**：`tsc -p tsconfig.electron.json` / `npm run verify` / `npm run verify:docs` /
+`vitest`（**33 files · 577 tests**）全绿；`plugins:island:smoke`（5 个岛握手 + 工具条文案体检 +「设置贡献」+ 重启恢复）、
+`style:smoke`、`schema:smoke`、`order-profit:ui`、`goods:ui`、`today:ui`、`picking:ui`、`product:smoke`、
+`shop:smoke`、`product:sku:smoke`、`order:smoke`、`ae:smoke`、`ae:settle:smoke`、`ship-rate:smoke`、
+`shipping-rate:ui`、`order-insight:settings:ui`、`plugins:sandbox:smoke` 等 ALL PASS。
+本轮只改宿主，**没有岛需要发版**（下架动作本身已含市场 push）。
+
+**结论笔记**：[`docs/notes/2026-10-01-ui-island-retirement.md`](docs/notes/2026-10-01-ui-island-retirement.md)
+（下架一个 UI 岛的可复核清单 · 「死能力域可删」的判据 · 陈旧选择器=把布局当契约）。
+
+### Changed · 界面重做骨架：从"控件统一"进到"结构统一"（2026-10-01）
+
+**背景**：上一轮把按钮/输入/标签收敛成同一套基座后，界面**仍然被评价为"还是很难看"**。
+复盘发现病根不在控件而在**层次**：画布 `#f6f7f9` 与面板 `#ffffff` 只差约 2%（卡片边界读不出来）、
+全仓**没有任何阴影尺度**、字号全挤在 12–13px、统计数字写成一句流水、空态是一行居中灰字飘在大片空白里。
+
+**做了什么**：
+
+- `src/styles/index.css`：画布反差 2% → 约 5%（`--wb-bg` `#f6f7f9`→`#eff1f5`，深色 `#15171c`→`#0f1115`）；
+  新增**投影尺度** `--wb-elev-1/2/3`（刻意不叫 `--wb-shadow-sm`：存量 `--wb-shadow` 是*颜色*）
+  与 `--wb-border-strong`（表头下沿等"要读得出来"的分隔）。
+- 新增 **5 种结构骨架**（`@layer components`，模块可继续覆盖）：
+  `.wb-page`（页面内边距/栅格）、`.wb-head`（页头：标题 + 描述 + 动作）、
+  `.wb-metabar`/`.wb-metric`（指标条：标签 + 数字）、`.wb-panel`（带投影的白卡）、
+  `.wb-empty`（空态四段：图标/标题/说明/动作）、`.wb-table`（统一表头/行高/悬浮/数字列）。
+- 五个内建页全部套用新骨架，并各自补上**此前缺失的页头标题**（拣货页原先整页没有标题）：
+  `today`（三张卡改为图标 + 大数字 + 提示条）、`goods`（统计条改指标条、两张表进面板）、
+  `picking`（条件条独立成卡、空态改标准骨架）、`quick-note`（输入区/列表进面板）、
+  `order-cost`（三张表各自进面板；分桶/缺口两条状态带与口径条分层）。
+- `ToastHost` 重做：原先 success/error/info 是**整块全饱和底色**（一次弹 4 条 = 屏幕右下角一大片高饱和色块），
+  改为白底卡片 + 左侧 3px 类型色条 + 类型图标。
+- 顺带修一处可见缺陷：`OrderCostView` 明细表空态行的 `colspan` 是 15、而表头是 16 列（空表时右侧短一格）。
+- 新增令牌同步进 `src/core/plugin/uiBridgeHost.ts` 的 `WB_THEME_TOKENS`（`tests/uiIslandThemeTokens.spec.ts` 双向校验）。
+
+**⚠️ 视觉重构的硬约束（已入库 `docs/notes/2026-10-01-ui-visual-hierarchy.md`）**：
+UI 冒烟的断言判据是 `textContent` 子串，而 `textContent` **不给相邻元素插分隔符**
+（实测输出 `产品 2SKU 3缺克重 1…`）；又因 Vue 编译器 `whitespace: 'condense'` 会删掉含换行的空白节点，
+模板里的裸空格经 prettier 重排后可能消失。故本轮**只换 class、只加包裹层，所有文本节点逐字不动**。
+
+**验证**：`vue-tsc` / `vitest`（33 files·597 tests）/ `build` / `verify` / `eslint` 全绿；
+`today:ui`·`picking:ui`·`goods:ui`·`order-profit:ui`·`shipping-rate:ui`·`order-insight:settings:ui`·
+`product:sku:ui`·`plugins:island:smoke` 八个冒烟 ALL PASS；另取浅色/深色两套共 8 张无头截图人工复核。
+本轮只改宿主，**没有岛需要发版**。
+
+### Changed · 界面样式盘点：补一层统一控件基座 + 全仓缺失的焦点态/减弱动效（2026-10-01）
+
+**背景**：盘点`src/` 全部 17 个 `.vue` 后发现，**可见缺陷只有 3 处**，其余是"同一角色被写 5–6 遍" ——
+同一个"次要按钮"在 5 个模块里各有一份局部类（`.td-btn` / `.gd-btn` / `.pk-btn` / `.oc-btn` / `.cr__btn` / `.rs-btn`），
+高度 24/26/28、圆角 6/8/12、字号 12/13 各不相同，所以页面之间"不像一个软件"。
+
+**做了什么**：
+
+- `src/styles/index.css` 新增统一基座（放 `@layer components`，模块可继续覆盖）：
+  `.wb-btn`（+`--primary/--danger/--ghost/--sm`、`:disabled`、`.is-on`/`aria-pressed`）、
+  `.wb-tag`（+`is-on/is-warn`）、`.wb-input--sm`；新增圆角尺度 `--wb-radius-sm/md/lg`
+  （`--wb-radius` 保留并指向 lg，存量调用点无需改动）。
+- 把上述 6 个模块的局部按钮/标签/输入框类**收敛为"只留布局职责"**，样式交给基座；
+  `PluginCenter` 的 `.sk-btn`、`UiIslandView` 的 `.ui-island-btn` 同样收敛。
+- **补齐全仓此前完全缺失的三件事**：全局 `:focus-visible` 焦点环（原先 `src/` 下只有 4 处焦点样式，全在输入框上）、
+  `@media (prefers-reduced-motion: reduce)` 兜底（原先 0 命中）、`body` 的 `background`/`color` 兜底。
+- **修正两处不达 WCAG AA 的文字色**（实算对比度）：`--wb-text-muted` `#8a909a`→`#666d79`（3.2:1→4.8:1）、
+  `--wb-success` `#16a34a`→`#15803d`（3.3:1→5.0:1）；新增语义色 `--wb-on-accent` 替代表头借用 `--wb-primary-contrast`。
+- **输入框主题化改为排除法**：原按 `type` 列举漏了 `number` 与 `password`（正是克重/天数窗/温度/费率与 API Key 用的），
+  深色主题下与相邻 text 输入框底色不同 —— 现新增 type 自动纳入。
+- 可访问性：设置页分类导航 `div`→`button`（原先键盘不可达）、便签删除按钮补 `focus-visible`（原先 hover-only，键盘/触屏看不见却能点到）、
+  toast 补 `role="status" aria-live`、命令面板补 `role="dialog"` + combobox/listbox 语义、产品表行补 hover 与键盘可达。
+- **修复一处真·布局 bug**：`GoodsView` 的 `.gd-body`（`flex: 1` + `display: grid`）未写 `align-content`，
+  隐式行按 `stretch` 撑满容器 ⇒ `<table>` 被拉高并把高度摊到各行，两行数据各被拉到 200+px（无头截图实证）。
+- `index.html`：去掉硬编码 `bg-gray-100`（与 `--wb-bg` 差 2 级色阶），加同步脚本按 `prefers-color-scheme` 预置 `data-theme`
+  —— 消除深色系统用户每次启动的一帧白闪。
+- `RecognitionSettings` 模板中一处字面 Markdown（`**…**`）会原样显示星号，已去掉。
+- `uiBridgeHost.ts` 的 `WB_THEME_TOKENS` 同步新增令牌（`tests/uiIslandThemeTokens.spec.ts` 双向守卫）。
+
+**未做（有意）**：没有把正文提到 16px（桌面高密度工具，13px 是既有事实标准；只把低于可读下限的 11px 提到 12px）；
+没有改 `ui-plugins/` 下任何一个岛（岛有独立样式表与令牌注入链路）。
+
+**结论笔记**：`docs/notes/2026-10-01-ui-style-system-audit.md`（含两条可复用判据：`flex:1` 的 grid 放 `<table>` 必须
+`align-content: start`；无头截图器 = 假桥冒烟脚本把 `--dump-dom` 换成 `--screenshot`）。
+
+**顺带修的假失败**：`tests/uxEntryNames.spec.ts` 读 `src/` 整棵树，全量并发时超默认 5s 超时
+（报 `Test timed out in 5000ms`，不是断言失败）→ 按既有先例加 `{ timeout: 20000 }`。
+
+**验证**：`vue-tsc` / `vitest`（33 files · 597 tests）/ `build` / `verify` / `verify:docs` / eslint 全绿；
+`goods:ui` · `today:ui` · `picking:ui` · `order-profit:ui` · `order-insight:settings:ui` 五个假桥冒烟 ALL PASS；
+另存三张无头截图人工复核（表格行高修复前后、toast 栈、宿主设置弹窗）。
+
+### Fixed · 插件市场恢复可用：6 个 UI 岛重新发布（2026-09-30）
+
+**背景**：UX 审查第二轮指出"重构成果一个都没发布 + 线上市场装不上东西"。本轮把发布链跑通。
+
+**做了什么**：
+
+- 用正确的 `--base https://raw.githubusercontent.com/SayakABC/SellerKitPlugin/main` 重跑 `scripts/publish-plugin.js`，
+  覆盖全部 6 个 UI 岛：
+  - **新增版本**：`order-insight 1.5.0`、`shipping-rate 1.3.0`、`ae-profit 1.1.0`（仓库版本早已升好，此前只差发布）；
+  - **补齐**：`excel-copy 1.0.0`、`product-library 1.5.0`、`shop-accounts 1.5.2`（此前**从未进过市场仓库**，幂等重发布，产物字节不变）。
+- 修正 `catalog.json` 里三类不可用 `downloadUrl`：`<BASE_URL>/…`（非 http → 宿主**静默丢弃**）、`http://127.0.0.1:8000/…`（回环地址，用户必失败）。
+  现在 6 条的 URL **全部是绝对 https 且非回环**，逐条 sha256 已写入目录。
+- **提交并推送到市场仓库** `SayakABC/SellerKitPlugin`：`3831453..d37367a`（此前 HEAD 只跟踪 `ae-profit 1.0.0/1.0.1` 两个 zip，
+  `market-out/` 里的 1.x 产物从未 push —— 这是"市场装不上东西"的直接原因）。
+
+**注意（后续动作）**：
+
+- **发布 ≠ 本机生效**。本机 `~/Library/Application Support/seller-kit/plugins/` 里仍是旧版；要在「插件中心」点更新并**重启宿主**。
+- `market-out/` 是市场仓库的工作树，且被父仓库 `.gitignore` 忽略 —— 它**不在 SellerKit 的 git 里**，改动只靠 push 出去，别指望父仓库保底。
+- `raw.githubusercontent.com` 有 CDN 缓存（约 5 分钟内可能仍返回旧目录）。
+
+### Added · 用户体验审查第二轮（重构后复查）：`docs/reviews/UX_REVIEW_2026-09-30-R2.md`
+
+**为什么还要审一遍**：S1–S3 把宿主侧改了（默认包自洽 + 「今天」首页 + 统一导入 + 薄内建「货与成本」+「算钱」更名），
+第一轮的结论有一半已经作废；而且**第一轮只读了仓库源码**，没有对照过"用户实际会运行到的那两份东西"。
+
+**本轮新做的取证（与第一轮最大的差别）**：
+
+- **跑了**四个宿主页的假桥无头冒烟（`today:ui` / `goods:ui` / `order-profit:ui` / `picking:ui`）—— **全绿**，
+  含"空态按钮真派发 `switch-module`""统一导入真解析真落库""改克重真带全字段提交"等 100+ 条断言。
+- **实测了平台行为**：起一个隐藏 Electron 窗口执行 `window.prompt()`，实测 `threw: prompt() is not supported.`
+  ⇒ 订单归类岛「待拿货缺口 → 忽略」这条功能在真机上**必然报错**（`ui-plugins/order-insight/dist/views/stockin.js:950`）。
+- **对照了用户实际拿到的版本**：`ui-plugins/*/manifest.json` ↔ 本机 `~/Library/Application Support/seller-kit/plugins/*`
+  ↔ 线上 `catalog.json`。结论（本轮最重的一条）：
+  - **重构成果一个都没发布** —— `order-insight` 仓库 1.5.0 / 市场 1.3.0 / 本机 1.3.0；`shipping-rate` 1.3.0 / 1.2.1 / 1.2.1；
+    `ae-profit` 1.1.0 / 1.0.1 / 1.0.2。用户看不到任何重构后的岛界面。
+  - **市场当前装不上东西** —— 线上目录只有 3 条：`shop-accounts` 的 URL 是 `<BASE_URL>/…`（非 http，被
+    `electron/plugins-market-handlers.ts:56` **静默丢弃**）、`order-insight` 指向 `http://127.0.0.1:8000/…`（必然下载失败）、
+    `shipping-rate` / `excel-copy` / `product-library` **完全缺席**。
+  ⇒ `UX_POLISH_PLAN.md` 的 `P1-1 首启引导（一键装齐）`**前置条件不存在**，先修市场才有意义。
+
+**其余新发现**：首页卡③标出"运价表 没有"却**没有任何可点动作**（而宿主已能导报价单）；「算钱」仍把人指向那个装不上的岛；
+订单归类「导入与识别」与「导入设置」**两处都能改同一份列映射**；供应商维护**指路成环**（A→B→A）；
+岛侧 12+ 处弱空态、6 处删除**无确认**、2 处**覆盖式导入无确认**（整表替换运价表/重量表）；默认包仍留「便签」且两模块 `order` 撞号。
+
+**净结果**：第一轮 26 条 → **8 条已解 / 8 条部分 / 10 条仍在**，仍在的**几乎全在岛侧**（岛侧改一次 = 一次发版）。
+
+**文档**：`docs/README.md` 加索引行 + 「要评估体验」推荐路径改指本份 + 计数第 3 次订正（34 → 实测 38）。
+
+**未做（如实标注）**：未起真实宿主 + 真库走完整链路；岛侧结论来自静态通读 + 6 条抽验，未覆盖焦点顺序/滚动性能。
+
+## [Unreleased]
+
+### Fixed · 在「货与成本」补了 SKU 克重，「算钱」却毫无变化（用户实报）
+
+**现象**：在「货与成本」里改 SKU 克重并保存后，产品列表的「缺克重」列显示 **「—」**，「算钱」里也完全没生效。
+**实测（只读探针扒本机库）**：保存**是成功的**（`pl_variants` 5 行全部有克重，`updated_at` 就是刚才），
+`pl_item_weights`（**算钱真正读的那张表**）**0 行**。于是两个问题各自坐实：
+
+1. **「—」是渲染错了**（不是没保存）：那列写的是 `missingOf(p.id) || '—'` —— 0 被渲染成「—」，
+   而「—」在表格里是"没有数据"的通用写法，用户读成"没生效"。⇒ 现在 0 就写 `0`（>0 才转警示色）。
+2. **算钱根本不看 SKU 克重**：算钱的运费只认「商品ID 克重」（`pl_item_weights`，来自**商品信息 Excel**），
+   而用户在「货与成本」补的是**产品库 SKU 克重**（`pl_variants.weight_g`）—— 两张表、两种粒度、两条链，
+   补完算钱自然没反应。⇒ **现在按款色码回落**（见下）。
+
+**修的（宿主加法，不改表、不发版）**：
+
+- `src/lib/orderCost.ts` 新增**单源**判定 `resolveWeightG(row, weights, skuWeights)`：
+  **商品ID 克重优先**（它是这件货的实称）→ 缺了按**款色码**（新导出的 `skuWeightKey`：款编码 trim+大写 / 色 / 码，
+  用 `\u0001` 分隔）回落产品库 SKU 克重 → 两处都没有才算缺。
+  行上新增 `weightSource`（`item` / `sku` / null），界面**如实标出来源**（别让用户以为商品ID 克重本来就有）。
+- 「算钱」页：多取两路（`productList` + `productVariantList`，**零新通道零新 op**）建款色码 → SKU 克重；
+  明细表「克重」列加了悬停说明（"来自商品信息 Excel" / "商品ID 克重没有 → 按款/色/码回落…"）。
+- 「今天」页的缺口卡：**同一份判定**（`resolveWeightG`），并顺手修了它的**计数口径错误** ——
+  原来数的是"唯一商品ID 里缺重量的个数"却标着「**行**」，现在按**行**计，与「算钱」同数（同一批订单不再出现两个缺口数字）。
+- 「货与成本」页的「缺克重」列：0 就写 0。
+
+**验证**：`tests/orderCost.spec.ts` **+4 例**（键归一 / 回落生效并标 `sku` / 两处都有时商品ID 优先 / 对不上款时照旧缺，不静默套别的款）；
+`order-profit:ui` **60 → 64 项**（新增回落接线 + 商品ID 优先 + 「缺」列回到「齐」的逐行断言）；
+`today:ui` **23 → 26 项**（缺克重按行计 + 回落生效 + 无数据时不催人）；
+`goods:ui` **10 → 12 项**（0 不再渲染成「—」）。
+
+> 注：这只是"**读**侧对齐" —— 两处重量的**来源**仍是两条链（订单侧按商品ID / 产品侧按 SKU）。
+> 「导入商品信息时同时填两处」（M4 的另一半）仍未做。
+
+## [Unreleased]
+
+### Changed · C3 完成：删掉 `extensions/` 留档源码包，并收口它占着的四处耦合
+
+**删的**（你执行 `rm -rf extensions/order-insight extensions/excel-copy`）：两个**下记留档**的 Vue 版视图插件包，
+共 33 个文件 —— 它们是"多套实现"的源头之一（算法早已在内建 `src/lib` / 岛 `dist` / 宿主 op 各有落地），
+且一直占着 `tsconfig` / `eslint` 的覆盖范围。空掉的 `extensions/` 目录也一并移除（机制保留，要用再建）。
+
+**收口（我做的，一处不漏）**：
+
+- `tsconfig.json` 三条 `extensions/**` include；`eslint.config.mjs` 的 `extensions/**` files 覆盖（+ 两处注释、覆盖范围说明）。
+  ⇒ lint 警告 **473 → 443**（少掉的全是留档包里的存量 any），0 error。
+- `src/types.ts` 的 **`AppState`** 类型 + 那段"随 C3 删"的注释 —— 它只为留档包存在（旧扁平存储的数据形状，通道早已删）。
+- 措辞改成真话：`AGENTS.md`（§1.2 目录树 / §1.8 / §1.9 判定表 / §4.3 禁改项说明 / §5 SOP / §6.1）与
+  `PROJECT_BASELINE.md`（§2 目录表 + 「已知目录语义冲突」段 / §3 规模表 / §4 下记说明 / §6 设置贡献表）——
+  一律写明「**机制保留、目录当前不存在**」，并保留"将来重建时怎么判定"的留档依据。
+- 文档引用：**18 处「src 下的 meta 入口」那种带前缀写法统一改成裸名 `meta.ts`**（它本是"包内 src 下的 meta 入口"这个**判定标志**的写法，
+  之前靠"后缀匹配"蒙中已删的留档文件；改成裸名后不再当路径解析 —— **比把它塞进豁免表好**：豁免是按 token 全局生效的，
+  塞进去会让守卫对真悬空的 `src/**` 路径也瞎掉）。
+- 7 处**历史记录**（`docs/reviews/**` 与 `CHANGELOG` 里"当时路径"）进 `check-doc-links.mjs` 豁免表，逐条写明是「C3 删除记录」。
+- 顺手做**第五次全量重扫**：基线 §3 的目录规模（`src/` 92 文件 20,538 行 · `electron/` 45/18,539 · `ui-plugins/` 53/16,128 ·
+  `scripts/` 40/10,603 · 合计 **230 / 65,808**）、各岛规模与 Top-10 大文件全部对齐实测。
+
+**验证**：`npx vue-tsc --noEmit`（关键：`AppState` 删掉后全仓无引用）· `tsc -p tsconfig.electron.json` · `npm run lint`（0 error）
+· `vitest` **33 文件 / 597 例** · `npm run verify` 188/184 · `npm run verify:docs` 无悬空引用 · `npm run build` 通过。
+
+## [Unreleased]
+
+### Changed · C8：删掉 `Support/`（一份过期的岛快照）
+
+`Support/` 是仓库根下一个零引用目录，实测内容 = **2026-09-28 的 `shipping-rate` 岛 `dist/` 快照**
+（`Support/seller-kit/plugins/shipping-rate/dist`，12 个文件）—— 与仓库现版逐文件比对有 6 处差异 ⇒ **是更旧的副本，无独有内容**，
+与 `market-out/`（发布产物）职责重叠。删除后 `npm run verify:docs` 无悬空引用（它本就不在任何文档/代码的引用链里）。
+
+> 结论：**它不是"用户数据"也不是"构建输入"**，删掉不丢东西。将来若还要模拟"插件目录长什么样"，直接用
+> `scripts/publish-plugin.js` 产出的 zip 解压，或把 `ui-plugins/<id>/` 拷进一个临时 userData。
+
+## [Unreleased]
+
+### Changed · C9' 前置：历史采集单**回填主干**（`order.main` v4 迁移）
+
+**问题**：C1 之后只有**新采集**的订单写主干（`oi_orders`），而 C1 **之前**采到的单只存在于老采集表
+（`ae_orders` / `ae_order_lines`）—— 界面只读主干，于是那批单**看不见了**（本机实测 **101 单**）。
+所以"删表（C9'）"不能直接做：先得把数据搬进去，否则删表就是真丢数据。
+
+**做的（走"先迁移、暂不删表"，加法）**：`order.main` 迁移链加 **v4 = 历史采集单回填**：
+
+- 读老表（表不存在就整步跳过 —— 新库无事可做），按 `source='collect'` 写入主干；
+  口径**复用实时采集同一组原语**（`electron/aeMoney.ts` 的 `orderIncomeCcy` / `toCentsCny` / `parseSkuProps` +
+  `upsertCollectedOrder`）—— 不另写一遍算式（两份口径必然漂移）。
+- **保真**：原帧整段进 `raw_fields.采集帧`（与实时采集同一个键名）；另加 `__migratedFrom='ae_orders'`
+  **可回滚标记**（撤迁移：按该标记删这批行）。
+- **不迁 `ae_fees`**：费用侧的真值源是结算明细（`ae_settle_lines`），主干模型里也没有费用科目列。
+- **幂等**：`upsertCollectedOrder` 先删后插（按 order_no + source），迁移重入不翻倍；版本记账再兜一层。
+- **老表原样保留**：回填是加法，删表留到你发版之后单独做。
+
+**验证**：`npm run schema:smoke` 新增**场景 [E] 6 项**（回填落位 / 金额按汇率折 CNY 分 / 行级明细与颜色尺码 /
+原帧保真 + 可回滚标记 / 幂等不翻倍 / 老表原样保留），冒烟总数 **21 → 30 项**；
+场景 [C] 的"版本推进到 3"同步改为 **4**（并注明本场景没有 ae_orders → v4 是空操作但仍记账）。
+
+**文档**：`PROJECT_BASELINE.md` §6「schema 演进」（`order.main` = **v4**）+ §7 冒烟清单；`RESTRUCTURE_PLAN.md` C9'。
+
+## [Unreleased]
+
+### Changed · C4 收编：「识别引擎 + API Key」搬进宿主「设置 › 识别」（走"宿主自有设置也能贡献"）
+
+**问题（UX 审查 M7）**：视觉识别引擎与 API Key 是**全局基础设施**，却只存在于「订单归类」这个**可卸载/可停用**的岛里
+—— 一卸载就"设置找不到"；ADR-001 那条"设置留在岛内"的例外本该只管"改完要立刻看预览"的**映射类**。
+
+**机制（关键：`SettingsModal` 一行都没改）**：`AGENTS.md` §1.5 要求"基础分类固定两个，其余一律由贡献生成、不得硬编码"。
+所以 `vite.config.ts` 的 `settingsPanelLoaders` 多了一个来源 —— **宿主自有**的 `src/core/settings/panels.ts`（键 `core`，不是模块 id、不可被停用）：
+
+- 新增宿主「**设置 › 识别**」面板：服务商 / 模型 / 接口地址 / 温度 + API Key（写宿主机密存储，只写不读、不回显）。
+  存储**与岛同一命名空间同一键**（`modules.order-insight.engine` / `orderApiKeySet`）—— 两边互通、不会各写一份；
+  页内写明"列映射 / 本次导入店铺留在岛上"，并说明理由（ADR-001）。
+- 岛侧同批：岛内设置视图（`settings.js`）删掉引擎与密钥两个面板、页签由**「识别设置」改名「导入设置」**（只留列映射 + 本次导入店铺），
+  `api.js` 删掉 `saveEngine` / `setApiKey`（`loadEngine` 保留：识别时仍要读引擎），manifest 动作 57 → 55。
+- 判据写进 `AGENTS.md` §1.5：**"改完要不要立刻看数据变化"决定它在哪，不是"原来在哪"**。
+
+**新增自动化**：`npm run order-insight:settings:ui`（**新脚本**，手写岛原本无任何冒烟）9 项 ——
+岛挂载（7 页签、拣货页签已撤）· 页签名已改 · 列映射从岛配置读出 · **页签里没有引擎/密钥表单了**且指路宿主设置 ·
+点保存真的合并写回（5 列 + 固定店铺，且**不覆盖 `engine` 键**）。
+真机 `plugins:island:smoke` 加**「设置贡献」段**（dispatch `open-settings → recognition`，断言分类可达 + 面板渲染）。
+
+**文档**：`PROJECT_BASELINE.md` §6 新增「设置页分类」清单（AGENTS §1.5 一直指向它却没有 —— 现补齐）+ §7 冒烟清单两条；
+`RESTRUCTURE_PLAN.md` C4/S4；`AGENTS.md` §1.5 表 + §1.2 目录树 + §6 命令。
+
+## [Unreleased]
+
+### Changed · P0 文案与可达性（UX_POLISH_PLAN 的 P0-2 / P0-4 / P0-5）
+
+**P0-2 · 岛工具条去调试化**（UX 审查 Top-10 第 4 条：业务页顶部挂着插件运行时调试台）：
+
+- 「← 返回」改为回**上一次所在的模块**（复用外壳已有的 `backId`；旧写法固定回退"首个非岛模块"，
+  点返回却跳到用户没去过的地方 —— 审查 C1）。没有来源时仍回首个非岛模块兜底。
+- 状态行说人话：`等待桥握手…`（还带"越权调用由宿主权限门拒绝并审计"）→ **「正在连接… / 已连接 / 未能连接」**。
+- **握手失败可见**：8s 内没等到带 token 的回执 → 状态行变「未能连接 —— 点此重试」（点它即重载）。
+  旧实现失败与"正在连"长得一样（一个不变的灰点），用户无从自助（审查 D1）。
+- 「宿主→岛事件」+ 插件 id 收进**默认收起的「诊断」**区；「重新加载」留在外面。
+
+**P0-4 · 插件中心可达性与人话**（Top-10 第 2、10 条）：
+
+- 「账户与设置」菜单加一级 **「插件中心」**直达（业务功能全是插件，安装/更新原来埋在 设置 › 插件 › 市场 三层里）。
+- 安装/更新后派发 `reload-island`：外壳**只在"正是当前打开的那个岛"**时调它的 `reload()`
+  （iframe 文档挂载时就加载好了，不重载则用户看到旧界面并判成"没装成功"）；toast 也就此说实话。
+- 来源徽标 `外置 · 视图` / `外置 · L2` / `扩展包 · L0` / `内建 · L0` → **「从市场安装」/「随应用附带」**，
+  内部术语全部进 tooltip；顺手去掉并列的 `Worker 沙箱` / `iframe 岛` 两个技术小标签。
+- 能力标签 `db` / `storage` … → **「读写业务数据」/「保存本插件设置」/…**（原始能力名进 tooltip）；
+  未声明时改成人话（外部插件：「未声明任何能力（需要数据的功能会被拒绝）」）。
+
+**P0-5 · 文案纪律成文**：`AGENTS.md` 新增 **§1.10「用户可见文案纪律」** —— 禁用族表
+（能力域/表名/op 名 · 进程与协议名 宿主/桥/iframe/CSP/realm/token · 内部分级 L0/L2 · 主键 ID · 悬空功能名）、
+改写方向（能力/来源/状态说人话 + 空态三段式）、**守卫落在哪一层**的取舍（真机冒烟读 `innerText` 优先；
+源码正则只钉结构性事实），以及权限明细那一列**刻意保留技术细目**的例外。
+
+**P0-6 · 守卫改落在真机冒烟**：`npm run plugins:island:smoke` 新增**工具条文案体检** —— 逐岛读宿主
+`.ui-island-bar` 的可见文本，断言无上述禁用词、状态行为「已连接」；因为折叠区天然不在 `innerText` 里，
+"调试入口必须默认收起"这条也被同一条断言顺手守住。（原计划是新写一个源码扫描测试；实测取舍见 §1.10。）
+岛名悬空那条（`「X」` 必须在某个岛的 displayName 里）**未做** —— 需先收窄白名单，否则误报会淹掉真信号。
+
+**P0-3 · 空态给可点的下一步**（三处，都是"功能变了、指路没变"）：
+
+- 「算钱」空态不再让用户"先去「订单归类」导入"（那个岛是市场插件、可能还没装；S2-b 起宿主自己能导订单报表），
+  改为指到宿主自己的入口 + 按钮「去「今天」导入」（派发 `switch-module → today`）。
+- 「今天」首页「还没有订单数据」的主按钮原为**「去打开「订单归类」」**（同样是把人送去装插件），改为宿主自己的
+  **「导入 Excel」**；「订单归类」降级为一行说明（想做 AI 款式/颜色识别才需要它）。
+- 「拣货」空态**分两态**（`generated` 标记）：还没生成过 → 引导点生成；生成过但为空 → **说清为什么空**
+  （`scanned>0`：扫了 N 行、被「已终结 / 超窗」排除，并给放宽办法；`scanned=0`：一行都没扫到 → 指向导入入口 + 按钮）。
+
+**P0-6 · 悬空入口名守卫**：新增 `tests/uxEntryNames.spec.ts` —— 扫宿主文案里"去 / 在 / 到「X」"式引用，
+断言每个引号名都是真实入口（宿主模块名 ∪ 岛 `displayName` ∪ `ALLOWED_NON_ENTRY` 里逐条写明理由的控件名）。
+扫描前**剥注释**、并**自证非空转**（零命中即失败）。两条变异实跑：把名字改回历史的「运费测算」→ 红；
+把扫描模式写坏 → 命中空转自检。
+
+**P0-7 · 过时文档标注**：`docs/guides/USER_GUIDE.md` 顶部加醒目提示 —— 它描述的是「TV模版」一个功能的旧界面，不是当前产品全貌（现在的形态是"今天 / 订单 / 货与成本 / 运费 / 算钱 / 设置"的工作台 + 插件），照它找界面对不上属已知；并指向重写待办（`UX_POLISH_PLAN` §4-UX-P3）。`docs/README.md` 的「终端用户」行此前已带 ⚠️。
+
+**顺带·外壳事件名收敛**：新增 `src/core/services/shell.ts`（`switchModule` / `openSettings` / `reloadIsland`），
+把原先散在 5 处的 `new CustomEvent('switch-module'|'open-settings'|'reload-island')` 字面量收敛成唯一出处 ——
+事件名写错是**静默**失败（没人接 = "点了没反应"），这类字符串协议只该有一份。
+
+**验证**：`order-profit:ui` **60 项** · `today:ui` **23 项**（原 21，新增空态两条）· `picking:ui` **28 项**（原 25，新增两态空态三条）
+· `goods:ui` 通过 · `npm run plugins:island:smoke` 真机 6/6 + 工具条文案体检 · vitest **33 文件 / 597 例**（+`uxEntryNames` 2 例）
+· 两处 tsc、lint 0 error、`verify`、`verify:docs`。
+
+## [Unreleased]
+
+### Changed · C2（S5）：撤销 order-insight 岛的「拣货」页签 —— 拣货只留一个入口
+
+**问题**：拣货有**两个入口** —— 内建侧栏模块 `src/modules/picking`（P4 产物）与 order-insight 岛的「拣货」页签（P5 产物）。
+数据口径本来就只有一份（宿主 `DB_OPS.picking.groups` 里 `await import('@/lib/picking')`，与内建页同一份纯函数），
+但**入口重复**会让用户不知道以哪个为准 —— 违背「入口唯一」铁律。用户已倾向保留宿主模块（`RESTRUCTURE_PLAN` 的 UX-G3）。
+
+**删除清单**（岛侧 + 宿主侧 + 守卫，一处不留）：
+
+- 岛：`ui-plugins/order-insight/dist/views/picking.js`、`main.js` 的注册、`api.js` 的 `picking` 助手、
+  `manifest.json` 的 `picking` 域与 `groups` 动作（域 3 → 2、动作 57 → 56）。
+- 宿主：`src/core/plugin/host.ts` 的 **`DB_OPS.picking` 整块**。理由：它唯一的消费者是那个页签，
+  删掉后就是**零消费者的能力域**（死物）—— 拣货是主干内建功能，内建页走 `ipc.pickingRows` + `@/lib/picking`，
+  不需要岛侧通道。将来真有岛要消费，照 `docs/notes/2026-09-30-island-read-capability-pattern.md` 再开回来（~20 行）。
+- 守卫/冒烟：`tests/orderInsightPicking.spec.ts`（11 例）、`scripts/order-insight-picking-ui-smoke.mjs`、`npm run order-insight:picking:ui`。
+
+**版本说明（重要）**：order-insight 的 **1.4.0 / 1.5.0 都从未发布**（`market-out/` 里最新 zip 是 1.3.0，本机装的是 1.3.0），
+所以这次是"**发布前撤回**"，不构成"已发布又收回"。`manifest.version` 保持 **1.5.0**，只把描述里那两句拣货说明改成撤回说明。
+⚠️ **若你已在别处（GitHub 市场 / 自建服务器）发过 1.4.0 或 1.5.0，请改发 1.5.1** —— 否则"同版本换内容"会让已装机器判定为无需更新。
+
+**验证**：`vitest` **33 文件 / 606 例 → 32 / 595**；`pluginTriage`（双向守卫）与 `pluginManifest` 通过；
+`npm run plugins:island:smoke`（逐岛点开 + 握手 + 重启恢复）通过 —— 岛少一个页签后仍能正常挂载切换。
+
+**文档**：`PROJECT_BASELINE.md` §3 岛规模、§4 岛清单与能力、§7 冒烟清单、§10 测试清单与用例数；
+`AGENTS.md` §6 的命令清单（顺带补上漏记的 `goods:ui` 与新脚本）；`RESTRUCTURE_PLAN.md` M3/C2 行；
+`PICKING_PLAN.md` P5 行与 §3.3；`UX_POLISH_PLAN.md` P0-3 与验证套路；两条 `docs/notes/` 的取证同步订正。
+
+## [Unreleased]
+
+### Changed · M6（S4）：运价表**回迁宿主**，`shipping-rate` 岛不再存表也不再回传
+
+**问题（ADR-002 C3 已知债）**：运价表真源在**可卸载的岛私有 storage** —— 宿主 op `quote` /
+`quoteOrders` / `quoteProducts` 每次靠岛把**整张表**传进来（`host.ts` 原注释："运价表仍由岛传入"）。
+后果：那是"真源在岛"；岛一卸载或两份不等，同一批订单在「运费」岛与「算钱」页会出两个数。
+而且"只留当前一份"让历史订单的运费随报价单更新而变、不可复算。
+
+**宿主侧**：
+
+- `DB_OPS['shipping-rate']` 的 `quote` / `quoteOrders` / `quoteProducts` **移除 `table` 参数**，改为统一走
+  新增的 `requireRateTable()` —— 从宿主快照表 `sr_rate_snapshots` 取"当前那份"（生效日倒序第一条）；
+  没有快照时报一句人能看懂的话（"还没有运价表：先在「无忧物流运费」导入一次报价单"），**不静默用空表算**。
+- 新增两个 op：`rateCurrent`（岛侧显示用的只读副本，含来源文件/工作表/生效日）与
+  `rateAdopt`（**一次性迁移**口，把旧表交给宿主快照，按内容 sha256 去重）。域内 op 6 → 8（N5 ≤10）。
+
+**岛侧（需发版，1.2.1 → 1.3.0）**：
+
+- `store.js`：`collect()` 不再落 `table` / `source`；新增 `syncTableFromHost()` ——
+  首启取宿主当前表，**若宿主还没有而岛内存有旧表则迁移一次**（`rateAdopt`）并把本地副本显式写 `null` 抹掉；
+  导入/换表后改为"宿主已留档 → 岛取回当前那份渲染"。
+- `api.js`：`quote(grams, opts)` / `quoteOrders(opts)` / `quoteProducts(country, opts)` **去掉 table 形参**。
+- 「清空运价表」**下线**：运价表现在是按生效日留档的历史快照（「算钱」按订单日期取"当时那份"复算），
+  一次抹掉所有快照的语义不再成立；错表重导正确的那张即可。
+- 「运价来源」面板改显示宿主给回的**生效日**（原先显示本地导入时间）。
+
+**读回退留一个版本期**：渲染层「算钱」页第 4 路仍保留"无快照 → 读岛命名空间"的回落，
+只覆盖"老库且还没打开过运费岛"这一种情况（该岛首启会迁移），到期后与岛内存量键一起删。
+
+**验证（新增自动化）**：`npm run shipping-rate:ui`（**新脚本**，`scripts/shipping-rate-ui-smoke.mjs`）——
+假桥无头冒烟跑**两个来回**共 19 项断言：① 冷启动无表 → 空态、不发生迁移、不去计价；
+② 岛内有旧表 → `rateAdopt` 带着整张表与来源、随后抹掉本地副本、取回并渲染、**计价 payload 里没有 `table`**、
+按订单/按产品试算同样不带表。另 `npm run ship-rate:smoke`（DB 层）复跑通过。
+
+**文档**：`PROJECT_BASELINE.md` §3 岛规模、§4 岛清单（1.3.0 + 能力）、§6 命名空间（岛内不再有运价表）；
+`RESTRUCTURE_PLAN.md` M6 行；`BUSINESS_GAP_ANALYSIS` F0-3 标注已做；`ui-plugins/shipping-rate/README.md`（§2 配置键 + 首屏说明）。
+
+## [Unreleased]
+
+### Changed · C9 收编：「成本与汇率」并入宿主「算钱」，`ae-profit` 岛缩为采集接收端
+
+**问题**：同一个数在两处各有一个入口 —— 岛有「利润统计 / 订单明细 / 成本与汇率」，宿主「算钱」页有预测/精准两轨 + 明细 + 趋势。
+数据（`oi_orders` 主干）在 C1 之后已经是**同一份**，界面却是两套 —— 违背「入口唯一」。
+
+**宿主侧（新增，零发版）**：「算钱」页末尾加**数据基础：成本与汇率**区（`CostRatesSection.vue`）：
+
+- 款级成本表**只读浏览**（款编码 / 款名 / 单价 / 样本数 / 生效日 / 来源 / 更新时间；同一款多段区间按 `款|生效日|来源` 分行）；
+  来源是拿货对账 —— **落账即自动同步**（S3 的 `purchase-cost-sync`），所以这里刻意**不给**"手点导入"按钮（给了就会出现两份成本）；
+- 币种汇率**可改可加**（`ae_rates` upsert）—— 外币订单整单靠它折算，缺汇率 → 该单不进利润合计（不是按 0 算）；
+- **默认收起**：有"缺成本"的行出现时自动摊开（它正是此刻要补的东西），消失后不自动收起（不打扰正在改汇率的用户）。
+- 顺手修掉一处悬空文案：空运价表提示的「运费测算」→ 真实入口名「无忧物流运费」（UX 审查 C4，全仓已零命中）。
+
+**岛侧（需发版）**：`ae-profit` 删掉三个页签与对应三个面板组件（`ProfitStatsPanel` / `OrderListPanel` / `CostRatesPanel`）
+与 `format.ts`，只留**接收端状态 + 接入方式**（在线状态 / 端口 / 最近入库 / 最近错误 / curl 样例），
+并加一段"数据与利润看哪里"的指引（指向「算钱」「拣货」）。
+
+- `manifest.json` **1.0.2 → 1.1.0**、`displayName` 改为**「订单采集（UI 岛）」**（它不再追踪利润，名字得说实话）；
+  `storage` 与 `purchase` 域退场，`db.actions` 收敛为 `ensure` / `receiverStatus`（`tests/pluginTriage.spec.ts` 双向守卫：
+  声明了不调用、调用了没声明都红）；`storage` 命名空间 `ae-profit` 随之退场（旧数据留在 `config.json`，无人读写）。
+- 岛源码 `src/` **9 文件 1,776 行 → 5 文件 466 行**。
+
+**为什么先做宿主侧**：岛一旦先瘦身而宿主还没接手，用户就**没有地方**维护汇率了 —— 加法先落地、减法再发版。
+
+**未做（等你发版后）**：删 `ae_orders` / `ae_order_lines` / `ae_fees`（C9'，前置就是这次收编；本机有 101 条历史采集单，
+删除前会先跟你确认要迁移还是清掉）。
+
+**验证**：`order-profit:ui` 假桥无头冒烟 **52 → 58 项**（新增：默认收起 / 缺成本时自动展开 / 成本表列出的值 /
+改汇率真的发出 upsert / 新增币种码归一大写）；`vitest` 606 例绿；两处 tsc、lint（0 error）、`verify`、`verify:docs` 全绿。
+
+## [Unreleased]
+
+### Changed · S6（宿主侧）：旧扁平存储契约退场 + 调试脚本清理
+
+**C6 — `get-store` / `set-store` 四处退场**（渲染层早已无调用方，契约却还挂在 `preload.ts` /
+`src/types.ts` / `src/core/services/ipc.ts` / `electron/main.ts` 四处）：
+IPC 契约 **190/186 → 188/184**、`main` 注册 **15 → 13**（`verify` 会指出漏处，删净后自洽）。
+`reset-store` **保留**（`SettingsModal.vue` 的「恢复出厂设置」在用）。
+⚠️ 旧形状类型 `AppState` 暂留并加注 —— 留档包 `extensions/excel-copy/src/store.ts` 还引用它，随 **C3**（删留档包）一起删。
+
+**C7 — 一次性调试脚本清理**：删 `debug-name.js`、`scripts/debug-order-db.js`（硬编码本机路径、零引用）。
+
+**仍待你执行**（工具侧策略拦不可逆删除，须你亲手跑）：
+- **C3**：`rm -rf extensions/order-insight extensions/excel-copy` → 随后我删 `tsconfig.json` 的 3 行 include + `eslint.config.mjs` 的 `extensions/**` 覆盖 + `AppState` 类型；
+- **C8**：`rm -rf Support/`。
+
+**文档**：`PROJECT_BASELINE.md` §5 契约表（188/188/184、分布 `main 13`、演进轨迹末条）与 §10 门禁行同步；`docs/plans/RESTRUCTURE_PLAN.md` C3/C6/C7 与 §6 的 S6 进度同步。
+
+## [Unreleased]
+
+### Added · 付费授权方案（`docs/plans/PAID_LICENSE_PLAN.md`，仅出方案，未写功能代码）
+
+**背景**：用户提出"要在本项目增加付费才能使用"。先出方案与选型，未改任何业务代码。
+
+**决策**（2026-09-30 用户拍板四项）：收费客体 = **Pro 档功能**（不锁整个 App、不按岛收费）；计费 = **月 + 年双档订阅**；后端 = **零自建**（托管授权 API + 托管收银）；到期行为 = **降级为免费版**（Pro 能力不可调用，基础功能与数据照常）。
+
+**方案要点** —— 三条工程事实决定了取舍：
+
+1. 岛 = 预构建静态站点 + 本地明文文件（安装即解压落盘、宿主用只读特权协议原样喂给 iframe）⇒ **付费墙不可能靠"藏代码"**；
+2. 判定必须落**主进程**，岛只能"问"不能自判 —— 与本项目「宿主 = 平台、岛 = 插件」同构，对齐 JetBrains Marketplace 的官方做法；
+3. ASAR 是拼接归档非加密、asar integrity 双 fuse **默认关闭**、且 CVE-2025-55305（V8 heap snapshot 不在保护内）/ CVE-2024-46992（Windows 绕过）⇒ **客户端永远可被 patch**，目标是"抬高成本 + 让破解无收益"。
+
+**三个执法闸门**（零新协议、**零新 db 域、不新增 op** ⇒ 不受 ADR-002 N5 的 op 预算约束）：
+
+- ① 安装门 = `electron/plugins-market-handlers.ts` 的 `plugins-market-install`（可改签名一次性下载 URL）；
+- ② 激活门 = `src/core/plugin/managerActivate.ts` / `pluginManager.ts`（岛与 L2 插件同轨）；
+- ③ 调用门 = `src/core/plugin/host.ts` 的 `DB_OPS` 给 op 加 `requires` 声明 + `src/core/plugin/security.ts` 的 `decidePermission` —— 该判定是**纯函数**、entitlement 快照由调用方注入，可继续单测；与 ADR-002 的 C4 `domains` 判定**正交**，不动后者。
+
+**顺带发现（安全隐患）**：`src/core/network/token.ts` 把会话态写在 localStorage（渲染层 DevTools 可读可改）。方案明确**授权态不得沿用该路线** —— 必须落主进程 + `safeStorage` / electron-store 加密，渲染层只拿只读快照。
+
+**文档**：新增 `docs/plans/PAID_LICENSE_PLAN.md`（方案 + P0–P3 改动清单 + 门禁 + 风险合规 + 5 项待拍板）、新增结论笔记 `docs/notes/2026-09-30-paid-license-enforcement.md`；并登记 `docs/README.md` 文档地图与「要做付费授权」阅读路径、`docs/notes/README.md` 索引、本文件。
+
+**顺带订正文档漂移**：`docs/README.md` 与 `docs/baseline/PROJECT_BASELINE.md` §9 的 `docs/**` 计数原写 **27**，实测本轮改动前已为 **32**（本轮后 **34**）—— 计数未随文档增删同步。
+
+## [Unreleased]
+
+### Added · 跨 AI 工具协作契约（共享层 / 结论层 + 反向索引守卫）
+
+**问题**：`AGENTS.md` 与 `docs/**` 随 git 共享，但各 AI 工具（WorkBuddy / Qoder / Hermes…）的会话记忆
+各自留在本机私有目录 —— 换工具开工就丢掉门禁清单与踩过的坑；且**没有任何工具会自动回写共享层**。
+
+**做的三件事**：
+
+1. `AGENTS.md` 新增 **§0 跨工具协作契约**（放在文件最前 —— 该文件超长，注入给模型时常被截断，写在末尾等于没写）：
+   共享层只有 `AGENTS.md` / `docs/**` / `CHANGELOG.md`，结论层是 `docs/notes/`，工具私有目录只是草稿；
+   规定**收工两个动作**（`CHANGELOG.md` 记"做了什么"、`docs/notes/` 记"以后要记住什么"）与并发提醒。
+2. 新建 **`docs/notes/`**（入库结论层）+ 首条笔记 `docs/notes/2026-09-30-cross-tool-context-sharing.md`：
+   记录共享层 / 私有层拓扑、`AGENTS.local.md` 软链桥（Qoder 原生读它，等于能读到 WorkBuddy 的笔记）、
+   以及"读侧通、写侧全断"这个核心缺口。
+3. `scripts/check-doc-links.mjs` 增 **④ 反向守卫**：`docs/notes/*.md` 必须命名为 `YYYY-MM-DD-<slug>.md`
+   且在 `AGENTS.md` / `CHANGELOG.md` / `docs/README.md` / `docs/notes/README.md` 之一被索引（未登记即 exit 1），
+   并**自证非空转**（0 条笔记时打印"未验证任何内容"，而不是静默通过）。顺带把 `.workbuddy` / `.codebuddy` /
+   `.qoder` 加入 `NON_REPO_HEADS`（与 `node_modules` 同理：按设计不在仓库内，否则新克隆的机器上引用它们的文档一律悬空）。
+
+**顺带订正**：`PROJECT_BASELINE.md` 的 `docs/**` 计数 21 → **27**（实际值）；`docs/README.md` 文档地图补登
+`notes/README.md` 与"换一个 AI 工具继续干活"阅读路径。
+
+**⚠️ 顺带观测（并发写）**：本次作业期间（2026-09-30 10:22–10:23）`docs/README.md` 被外部进程写空后回退到
+HEAD（v1.1.0）版本，未提交的索引更新（`CONTRIBUTING.md`、两份 ADR、`DOMAIN_INTEGRATION_PLAN` /
+`PICKING_PLAN` / `SHIPPING_RATE_ISLAND_PLAN` / `UI_ISLAND_INTAKE_CHECKLIST` / `PRODUCT_LIBRARY` /
+`UX_REVIEW_2026-09-30` / `UX_POLISH_PLAN` 等行）随之丢失。**同一工作区勿让两个 AI 工具同时写**（见 §0 末段）。
+
+## [Unreleased]
+
+### Changed · 清理：删掉确实无用的本地文件 + 修一条过期的冒烟断言
+
+- 删除（均零引用）：`docs/features/__pp_probe.md`、`ui-plugins/product-library/__pp_probe.md`（0 字节探针残留）、
+  `ui-plugins/product-library/vite.config.mjs.timestamp-*.mjs`（12 个，`.gitignore` 自认的 vite 临时文件）、
+  桹目录与各子目录的 `.DS_Store`、空目录 `.hermes/skills/`、本会话自己写的 `tmp-probe-*.mjs` / `tmp-orders.xlsx`。
+- 修正两处文档陈述：`docs/README.md` 里"含临时探针"的计数句；`PROJECT_BASELINE.md` 称
+  `extensions/ae-profit/` 仍为"迁移残留"—— 该目录已于 `ad7471d` 删除。
+- **修 `product:sku:ui`**：该冒烟断言"页签恰好 3 个"而岛 1.5.0 起是 **4 个**（新增「商品清单」）→
+  整条冒烟在第一步就超时，看起来像"岛坏了"。现改为**不写死数量**：断言必需的四个页签都在 + 默认页签是「产品库」（冒烟 36 项全绿）。
+
+## [Unreleased]
+
+### Added · C9 第一步：「算钱」补上**时间趋势**（岛那两条视图从此真正冗余）
+
+**为什么先做这个**：岛的「利润统计」有而内建页没有的**唯一**内容是**时间趋势** —— 不补上，岛就无法退役
+（C9 + C9' 删 `ae_orders` 三表都卡在这一条）。
+
+- 纯层 `trendOf(rows, 'month' | 'day')`：按 `orderTime` 归档，口径与汇总**完全一致**（**只统计非关闭单**）；
+  日期认不出的行单独进 `(无日期)` 桶**并排最后**（不丢行、也不硬塞进某个时间点）。
+- 页面：「时间趋势（只含非关闭单）」表，月/日切换；**预测毛利**与**精准毛利**分列（与上方统计表同一份口径）。
+- ⚠️ 趋势表用独立 class（`oc-table--trend`）：与统计表共用 `oc-table--stats` 会让"统计区几行"这类既有断言
+  **同时命中两张表**（实测把冒烟打红，已拆开）。
+
+**验证**：`tests/orderCost.spec.ts` **69 例**（新增 4 例：按月归档只含非关闭单 · 按日 + `(无日期)` 排最后 · 精准轨单独计入 · 空输入）·
+`npm run order-profit:ui` **52 项**（新增：趋势桶 = 2026-09 且收入/毛利与汇总一致 · 切「按日」桶变日期）·
+606 例单测 · lint 0 error · verify 190/186 · verify:docs · 两侧 tsc · build 全绿。
+
+## [Unreleased]
+
+### Added · S2-b：**订单报表免图导入**（订单不再必须走岛）
+
+**为什么是它**：`image_id` 是 `oi_orders` 的必填外键，而**订单报表根本没有主图列** ——
+过去订单一律要经「订单归类」岛（带图 + 识别队列）才能进来，于是"想算钱得先装插件 + 有图"。
+本轮把"无图订单"这条路打开：
+
+- **全链放开可空**：`imageId` 在 handler / `OrderRecord` / 渲染层类型都允许 `null`；`autoAssignByMap` 对无图订单直接跳过
+  （归款的落点是"把**图片**挂到款色上"，无图无从挂）。
+- ⚠️ **幂等判重必须改 `IS ?`**：`WHERE image_id = NULL` 永远不成立 → 重导同一份报表会**不断插重复行**（幂等当场失效）。
+  这条已写进 `order:smoke`（"免图订单重导不重复插"）。
+- **统一导入入口接上真实落库**：`detectAndImport` 识别到订单报表后**直接导入主干**（不再叫用户去岛上导）——
+  多产品行用**与岛同一份**纯函数 `orderRowSplitter` 拆行，其余 30 余列原样进 `raw_fields`（金额提列仍在主进程 `orderMoney`）。
+- **店铺**：AE 导出按店铺、报表里没有店铺列 → 落空店铺，由「算钱」页的「归到该店」**一次**归好
+  （页面已有「未归属 N 单」提示，不静默；导入结论里也写明这下一步）。
+- 空态文案同步：订单来源②不再指向岛（四类文件都可以在顶栏「导入 Excel」导入）。
+
+**验证**：`npm run order:smoke` **22 项**（新增：免图订单能落库且金额/状态照常提列 · **重导不重复插**）·
+`npm run today:ui` **21 项**（新增：订单报表 → 多产品拆两行 · `imageId=null` · 订单号/时点进 payload · 结论带判据与下一步）·
+602 例单测 · lint 0 error · verify 190/186 · verify:docs · 两侧 tsc · build 全绿。
+
+## [Unreleased]
+
+### Added · S3 界面侧：内建「货与成本」页（薄内建）+ 首页缺口卡**就地补齐**
+
+**判据来自形态方案**（`RESTRUCTURE_PLAN` §3）：`货与成本` = **②薄内建 + 重手段留岛** ——
+算钱要用的那 20%（款 / SKU / 克重 / 供应商）内建，批量编辑 / 商品清单导入 / 映射维护仍留「产品库」岛。
+为什么克重必须内建：它是**运费两条链的输入**，藏在岛里就等于"想算钱得先装插件"。
+
+- 新模块 `src/modules/goods`（显示名「货与成本」，侧栏排第 2：**今天 → 货与成本 → 算钱 → 拣货 → 便签**）。
+  统计条（产品 / SKU / **缺克重** / **未关联厂家** / 已映射商品ID）+ 产品表（逐款 SKU 数与缺克重数）+ 选中款的 SKU 表。
+- **就地改克重**：改完即存，缺克重计数实时归零，并给保存回执（不只是一闪而过的 toast）。
+  ⚠️ `productVariantUpsert` 是**全量提交** —— 只传 `weightG` 会把该 SKU 的颜色/尺码/名称**静默清空**，
+  所以页面把该行现有字段一起送回，且冒烟**钉住出参**（这正是"点击断言出参"要抓的那类错）。
+- **零新 IPC**：全用既有 product 域通道（`productList` / `productVariantList` / `productVariantUpsert` / `productSkuSummary`）。
+- **首页缺口卡就地补齐**：缺克重 → 「导入商品信息（补克重）」按钮（走 S2 的统一导入，自动识别类型）；
+  缺成本/未识别款 → 「货与成本」入口；**克重齐时按钮不出现**（不催人）。
+
+**验证**：`npm run goods:ui` **10 项**（新）· `npm run today:ui` **17 项**（+缺口卡就地入口）· 602 例单测 · lint 0 error · verify 190/186 · verify:docs · 两侧 tsc · build 全绿。
+
+## [Unreleased]
+
+### Changed · S3：**消掉两条"有数据但接不上"的断链**（拿货成本 / 商品克重）
+
+**实测约束**（本机库普查）：`purchase_orders` 有 3 张而 `ae_cost_map` **0 行** · `pl_variants` 有 5 个而 `pl_item_weights` **0 行**。
+两条链都不是"缺功能"，而是**要用户手动搬一次** —— 这正是本轮要消灭的那类摩擦。
+
+- **① 拿货落账 → 成本自动同步**（新 `electron/purchase-cost-sync.ts`）：拿货单/付款的**每次写操作**之后自动跑一遍
+  `costSnapshot() → ae_cost_map(source='purchase')`，`effective_from` 取该行拿货日期（历史订单毛利仍可复算）。
+  - 用户不再需要知道"还有个成本要同步"；同步**只清 purchase 行**，手工改过的价（`source='manual'`）不受影响。
+  - 同步失败**不影响落账**（单据已写成功，抛出去会让人以为没落）：只打日志，且**首页缺口卡会显示「缺成本 N 行」**（看得见）。
+- **② 一次导入填两处克重**（`product-db.importItemWeights`）：导入商品信息时，**顺带把商品ID克重回填到该产品还没填的 SKU**
+  （`pl_variants.weight_g <= 0` 才写，**绝不覆盖人工值** —— 与 D4b「默认不覆盖、显式才覆盖」同一纪律）。
+  于是"按订单试算"（读商品ID克重）与"按产品试算"（读 SKU 克重）**同一次导入就都可用**；界面文案会带上"顺手回填了 N 个 SKU"。
+
+**验证**：`npm run ae:smoke` **23 项**（新增：落账后成本表出现 purchase 行且生效日=拿货日期 · **同步不碰 manual 行**）·
+`npm run product:smoke` 新增两项（**回填空 SKU 且人工值不动** · 无映射的商品ID不回填）· 602 例单测 · verify 190/186 · verify:docs · 两侧 tsc · build 全绿。
+
+## [Unreleased]
+
+### Changed · C1（**写侧 + 读口**）：采集通道改写主干，算钱/拣货只读**一个口**
+
+- **采集入库改写主干**：`ae-db.upsertOrderBatch`（扩展推送的落库点）不再写 `ae_orders`/`ae_order_lines`/`ae_fees`，
+  改调新的 `order-db.upsertCollectedOrder()` 写进 **`oi_orders`**（`source='collect'`、`image_id` 恒 NULL、每行一个商品）；
+  金额折算放在这里（汇率属 ae 域）：整单收入 =（商品金额 + 买家付运费）× 汇率 × 100，**不扣退款**
+  —— 退款/费用的真值源是「结算明细」，在订单侧再扣一次会得到两套净额口径（同一批货两个数）。
+- **件数真值落行**：采集帧每行自带数量 → `oi_orders.qty`；规格串（`Picture color+XXXL+China Mainland`）解析出颜色/尺码 → 同行 `color`/`size`。
+- **删掉第二个读口**：`order-shipping-rows` 支持 `source` 过滤（`all` / `import` / `collect`）并带出 `source`/`qty`；
+  **删除 `order-collected-rows`**（通道 + 类型 + `ae-db.collectedOrderRows`）—— 主干一个读口、一份语义（IPC 回到 190/190/186）。
+  两个页面改为**单次取数**，来源由宿主在行上标好（页面不再自己打标签）。
+- **拣货页因此也能看到采集单**（真实收益：采集帧带颜色/尺码/件数，只是款编码常空 → 会标"未识别款"）。
+
+**过渡期事项（写在明处，不当默认）**：`ae_orders`/`ae_order_lines`/`ae_fees` 从本轮起**只读、不再写入**；
+岛上「订单明细 / 利润统计」两条视图仍能看**历史数据**，但**新采集单只进主干** —— 随 **C9**（把利润统计并进「算钱」）收编后删表。
+为什么**不双写**：双写 = 两份真相，正是本轮重构要消灭的东西。
+
+**验证**：`npm run ae:smoke` 第 [5] 段**整段重写**（5 项：一帧落两行（件数真值 / 规格解析 / 整单收入 × 汇率）·
+重推 = 整单替换（幂等）· 缺汇率 → 金额 NULL（不是 0）且空单号计数 · **读口三态过滤** · **采集不再写 legacy 表**）；
+两个页面冒烟各自新增/改正「同一个返回里两类行（按 source 区分）」的断言。
+
+## [Unreleased]
+
+### Changed · C1（表侧）：`oi_orders` 归一为**唯一订单主干**（一次重建）
+
+**为什么要重建**（两条事需要改约束/改形状，SQLite 不能直接 ALTER）：
+- `image_id` 从 `NOT NULL` 改为**可空** —— 订单报表里**没有主图列**，这是「订单报表免图导入」（S2-b）的前提；
+- 新增主干两列：**`source`**（`import` / `collect`，界面按它标来源）与 **`qty`**（件数**真值**；`NULL` = 不知道，导入侧仍由渲染层解析块内数量）；
+- **删 8 个零读者列**（`goods/ship_fee/shop_discount/platform_subsidy/currency/biz_mode/paid_time/received_time`）——
+  与「算钱」页的投影精简同一口径；原文仍在 `raw_fields` 里保真，需要时随时可加回（`orderMoney` 同步只提主线列）。
+  ⚠️ `ship_time` **保留**：拣货的「未发货」判定在读它。
+- 同一次迁移里连带：**`oi_styles` 去掉哨兵列 `name`**（历史款名先交接进 `pl_products` 再删列）——
+  原 `migrateStyleAuthority()` 并入迁移（少一个每次启动都跑的交接函数）。
+
+**验证**：`npm run schema:smoke` 场景 [C] 重写为**六条断言**（记账到 3 · 主干形状（含 8 列已删）·
+`image_id` 可空能落库 · **款式名已进 `pl_products` 且 `oi_styles.name` 已删** · 老行 `source='import'`/`qty=NULL` ·
+**新插入 id > 历史最大 id**（行号已追平）· 数据一条不丢）· `order:smoke` 同步（新增"主干两列"与"零读者列已删"两条）。
+
+**重建表的三个坑已固化**：`docs/notes/2026-09-30-table-rebuild-traps.md`
+（父表有 FK 子表时别用 rename→drop；重建后追平 `sqlite_sequence`；交接类步骤自己保证目标表存在）。
+
+## [Unreleased]
+
+### Added · S2-a：**统一导入入口**（一份 Excel 进来 → 自动判断是什么 → 落到对的表）
+
+用户不再需要知道“该去哪个功能选文件”。首页顶栏一个「**导入 Excel**」：
+- **纯检测层 `src/lib/importDetect.ts`**（+ `tests/importDetect.spec.ts` 9 例）：判据**复用各解析器自己的入口条件**（结算=商品id+结算状态 · 商品信息=`parseWeightSheet` · 报价单=`normalizeRateSheet`+《`pickRateSheet`》 · 订单报表=表头签名）。
+  **判定顺序从具体到宽泛**，且**必须回报“凭什么这么判”**（判错会把整份文件导进错的表，而用户只看到“数字不对”）；
+  真实 21 张表的报价单夹具已纳入用例（认得出目标表）。
+- **实现单源 `src/core/services/importSheet.ts`**：解析 + 落库路由只有这一份 ——
+  宿主插件 op（`DB_OPS['shipping-rate']` 的 `parseRateSheet` / `importProductWeights`）**改成薄包装调它**，内建页面也调它（算钱页的结算导入同步改为调服务，去掉重复实现）。
+  三类可自动落库：结算明细（`ae_settle_lines`）· 商品信息克重（`pl_item_weights`）· 报价单（宿主运价表快照）—— **零新表零新通道**。
+- **订单报表只识别、不落库**：它的导入链路（拆行 + 主图 + 识别队列）目前唯一实现在「订单归类」岛，页面会明确告诉用户去哪儿导（收编进宿主排在 C1 的表合并里）。
+- 结果**留在界面上**（`上次导入：识别为「…」（因为…）→ 已导入 N 条`），不只是一个闪就没的 toast；认不出的文件**不写库**并给逐张体检结论。
+
+**同时修一个静默错**：`productWeightGet` 返回的是**行对象**（`{weight_g,…}`），而「算钱」与「今天」两页都把它当**数字**用 ——
+真实数据下“有克重”会被判成“缺克重”（两个冒烟的假数据给的是数字，把它掩盖了）；已修正并把**假数据改成真实形状**，变异测试确认现在会变红。
+
+**验证**：`tests/importDetect.spec.ts` 9 例 · `npm run today:ui` **16 项**（新增：点「导入 Excel」→ 真实 xlsx 解析 → 识别为商品信息 → 落库出参 `items:[{itemId:ITEM9,weightG:320}]`；认不出的文件**不写库**）·
+`tests/pluginTriage.spec.ts` 那条“宿主读表不得回落取第一张 sheet”的守卫已改为**顺着新链路**检查（宿主 op 必须调服务 + 服务里必须用 `pickRateSheet`），守卫未被绕过。
+
+## [Unreleased]
+
+### Added · S1-3：首页工作台「今天」（+ 「订单利润」更名「算钱」）
+
+**新用户打开就能看懂“现在该干什么”**（重构 IA 的第一面）：新建内建模块 `today`（显示名「今天」，侧栏排第一），三张待办卡片，**每张只给一个动作**：
+- **订单**：总数 + 两条摄取通道分开计数 + 最近下单；无数据时给**空态引导**（两条来源说明 + 一键去打开「订单归类」）而不是一句“暂无数据”。
+- **待拣**：SKU 数 / 件数 / 涉及订单（范围写在卡上：未发货 · 近 30 天）→ 「生成待拣清单」。**复用拣货单的同一份纯函数**（`aggregatePicking`），不另算一遍。
+- **钱算得准吗**：只做**存在性检查**（缺克重 / 缺成本 / 未识别款 / 运价表有无），**不跑利润模型**（算法只在「算钱」页一处）。
+- 跳转走宜已有的 `switch-module` 事件机制（零新机制）；空态走 `open-settings` 到插件中心。
+
+**同时更名**：「订单利润」→ **「算钱」**（id 仍为 `order-cost`）—— 这一面回答“这批订单赚不赚”，两条摄取通道与两条轨都在它内部，**不再分两个入口**。
+
+**验证**：`npm run today:ui` **13 项**（新增：三张卡的数字可验算 · 范围写在卡上 · **点击派发的事件出参** · 空态给的是动作）。
+⚙️ 本轮踩到一个冒烟新陷阱并固化：`waitFor` 的**轮询回调抛错 → Promise 永不落地**，只报「没抓到 #smoke-result」而真正的错在断言里
+—— 已加 `try/catch` 并同步到另三个冒烟（见 `docs/notes/2026-09-30-headless-smoke-waitfor-trap.md`）。
+
+## [Unreleased]
+
+### Added · S1-2：页面合一 —— 「订单利润」把两条摄取通道摆在同一张表里
+
+- **数据来源（首屏可见）**：全部 / 仅采集 / 仅导入 + 「采集 N 行 / 导入 N 行」计数；切来源**不重取数**（本地筛完重算）。
+- **税口径的可见默认**：`平台代征代缴（默认，税记 0）` / `不知道（标缺口、不按 0 算）` —— 只补**订单自己没说**的行
+  （采集帧没有「代征代缴」列），行自己的声明永远优先（导入侧照旧）。默认值与来源一起落 `order-cost` 命名空间。
+- **明细表加「来源」列**，每行都能看出是采集来的还是报表导进来的；缺口逐行照旧（采集行会如实显示 未识别款 / 缺成本 / 缺克重）。
+- **修一个真 bug**：件数口径漏了「源直接给的件数」这条 —— 采集行明明带着真值 `qty`，却仍按 1 件并标「缺件数」。
+  现在 `resolveQty` 的顺序是：结算商品行真值 → **行自带 qty** → 报表块文本 → 按 1 件。
+- 验证：`tests/orderCost.spec.ts` **65 例**（新增 8 例：来源标记 / 税默认三态 / 行自带件数）+ `npm run order-profit:ui` **50 项**
+  （含"打开采集后两行都在 / 来源标签 / 采集行件数=真值 2 / 税默认 0.00 与切"不知道"标缺口 / 仅采集筛选"）。
+
+## [Unreleased]
+
+### Added · S1-1（重构第一步）：采集订单进「同一套算钱模型」
+
+**要解决的问题**（`RESTRUCTURE_PLAN` C1）：订单有**两条主干**（`ae_orders` 浏览器采集 101 单 / `oi_orders` Excel 导入 42 单），
+各养一个利润页、各有一套算法 —— 用户面对两个"讲钱"的入口。
+
+**这一步做的事**：
+- **`electron/aeMoney.ts`（新，纯函数层）**：采集链的金额口径**单源** —— 收入 = 商品金额 + 买家付运费 − 退款 ·
+  **行收入按行金额占比分摊**（行金额缺失才回落 qty，再不行平分）· 汇率为 0/缺失 → `null`（不折成 0）·
+  `skuProps` 解析（`Picture color+XXXL+China Mainland` → 颜色/尺码/发货地）。
+  ⚠️ 分摊口径由此前的"一律按 qty 近似"**细化为按行金额占比**（`ae-engine` 同步改为调用它 → 岛上「利润追踪」的口径与将要合并的页面**一致**，不再两套）。
+- **`ae-db.collectedOrderRows()` + 通道 `order-collected-rows`**：采集订单 → **统一订单行投影**
+  （形状与 `order-shipping-rows` 对齐：金额一律 CNY 分、带件数/款色码/状态），于是渲染层的
+  `src/lib/orderCost.ts` 能直接吃两边数据。**只读**；缺汇率的订单**照回**（金额列 null），不静默丢行。
+- 渲染层类型收敛：`UnifiedOrderRow`（两条摄取通道共用一个形状）+ 补齐 `orderCollectedRows` 包装。
+
+**按用户 2026-09-30 的原则精简**（非必要先删、必要再加）：统一投影**只留主线必需字段**，
+删掉 9 个**零读者**字段（货值/买家运费/店铺优惠/平台补贴/币种/业务模式/付款·收货·发货时点），
+`UnifiedOrderRow` 22 → 13 字段；两个投影（`order-shipping-rows` / `order-collected-rows`）的 SQL 与映射同步收窄。
+表里那 9 个列（`oi_orders`）与 `oi_styles.name` 的**物理删除**排进 S6（与 C1 的表变更**合并成一次重建**，避免两次重建）。
+
+**实测发现（写进 `RESTRUCTURE_PLAN` §1）**：采集帧**没有店铺、没有目的国、没有商品ID**（101 单里 `product_id` 全空），
+也**没有「平台是否代征代缴」列** → 采集订单的毛理会缺"税/运费/成本"三环（页面必须逐行标出来，而不是编一个默认值）。
+
+**验证**：`tests/aeMoney.spec.ts` **14 例**（2 条变异测试：去掉"按行金额"分支、缺汇率折成 0 —— 都会变红）·
+`npm run ae:smoke` **21 项**（新增 5 项：整单收入落首行/行金额占比/外币折算/缺汇率照回/采集缺口如实投影）·
+`verify` 191/191/187 · 全套 586 例绿。
+
+## [Unreleased]
+
+### Added · 平台重构方案（`docs/plans/RESTRUCTURE_PLAN.md`）：形态判据 + 多套收敛 + 待拍板清单
+
+用户两条原则落成可执行方案（体验优先 / 重构期不维护多套，历史坑一起拍板）：
+- **判据**：**岛 = 可选的加工手段；宿主 = 必经的主干与契约**（删掉它最小闭环还成立吗）；
+  三分法（内建 / 薄内建+重手段留岛 / 纯岛）+ 铁律**入口唯一**。
+- **目标 IA**：今天（首页·新）· 订单 · 货与成本 · 运费（岛）· 算钱（双轨合一）· 设置；纯岛只留店铺账号 / TV模版 / AI 识别加工 / 报价单试算。
+- **9 处「多套」收敛**：订单主干 ×2 · 利润页 ×2 · 拣货入口 ×2 · 重量源 ×2 · 成本手动同步 · 运价表两处存储 · 设置入口 ×2 · 代码层双份纯函数 · `oi_styles.name` 哨兵列。
+- **10 项历史坑待拍板**（含 1 项大手术：订单主干合并）；S1–S6 迁移顺序 + 四条防复发守卫。
+- **只读实证支撑取舍**（本机库普查 2026-09-30）：`ae_orders` **101**（采集是在用主线）/ `oi_orders` 42（Excel 辅线）→
+  **不能删任一条**，要"单主干 + 双摄取"；而 `pl_item_weights` **0** / `ae_cost_map` **0** / `ae_settle_lines` **0**
+  → 三条断链都是**交互问题**（没导、没同步），不是数据模型缺东西。
+
+## [Unreleased]
+
+### Added · 体验审查复核与优化计划（`docs/plans/UX_POLISH_PLAN.md`）
+
+对 `docs/reviews/UX_REVIEW_2026-09-30.md` **逐条复核**后形成可执行计划（开发 + 运营双视角）：
+- **采纳 15 项**：P0 **宿主外壳 7 项（零发版）** —— 岛工具条去调试化（返回/状态/重试说人话）·
+  空态可点可行动（含修「运费测算」悬空名与"拣货页生成后仍显示点生成"）· 插件中心两步可达 +
+  装完可重载当前岛 · 来源徽标与能力标签人话化 · 文案纪律成文 + 窄口径守卫 · 用户文档过期标注；
+  P1 结构 5 项（首启推荐包 · 统一确认弹层 · **岛侧文案攒批 2 次发版** · 空态规范 · 文档）；
+  P2 打磨 3 项（缺口标签排序跳转 · 导航视觉统一 · ⌘K 帮助）。
+- **改法 2 项**：① ❌ 不把「订单归类」移回默认包（与红线 23 冲突 + 作废市场版 + 复活停更实现）→ 改为
+  **一键安装引导**；② ⚠️ 完整任务向导 → 先做**只读就绪检查**（判据只用宿主自己的表，拿不到的项不猜）。
+- **4 项待拍板**：默认包内容 / 拣货两份入口的二选一 / 用户文档重写或降级 / 是否随包预置市场包。
+
+### Added · `scripts/reset-dev-data.mjs`：清库重跑（重构期用，默认干跑 + 强制备份）
+
+重构期需要"把业务数据清掉、从零走一遍全流程"（用户 2026-09-30 授权，范围＝**含主数据**）。
+做成可审阅的仓库脚本而不是临时命令：
+- **默认干跑**（只打印"会删哪些表、各多少行"），加 `--yes` 才真删；执行前**自动备份**到 `sellerkit.db.bak-<时间戳>`；
+- 走 `sqlite3` CLI（应用库是 Electron ABI，系统 Node 加载不了）；执行前检查宿主是否在运行（并发写纪律，AGENTS §0）；
+- 清 33 张表（订单/派生/拿货/付款/邮件缓存/主数据）；**保留** `sk_schema_migrations`（清了会让迁移重跑）、
+  账号（`sk_mail_accounts`）、企业资质、汇率；邮件 FTS 用 FTS5 `delete-all` 清，避免幽灵命中。
+- ⚠️ 删除动作由**人**执行（工具侧的策略不允许代跑不可逆的真实数据删除）。
+
+### Fixed · `docs/README.md` 索引被并发写清空后恢复
+
+10:22 另一个工具会话把 `docs/README.md` 写空并回退到 HEAD 版，**未提交的索引更新整批消失**。
+本次从 git 恢复骨架并**补回 09-24~09-30 新增的 12 行索引**（ADR-001/002 · UI 岛清单 · 产品库 ·
+域串联 / 运费 / 拣货 / 体验四份计划 · 四份审查 · 结论文档），顺带订正 4 处过期状态
+（`USER_GUIDE` 标为已过期、整改 25/27、插件盘点 T1–T6、基线日期）。
+教训与契约见 `docs/notes/2026-09-30-cross-tool-context-sharing.md` 与 `AGENTS.md` §0：**同一工作区同一时刻只让一个工具写**。
+
+### Added · 结论笔记（`docs/notes/`，AGENTS §0 的共享层）
+
+`docs/notes/2026-09-30-island-read-capability-pattern.md` —— 给 UI 岛加「读数据」能力的正确形态：
+宿主只读域 op 内 `await import('@/lib/…')` 复用渲染层纯函数，岛侧零口径、零新通道；
+含"守卫必须先剥注释"的变异测试取证。已在 `docs/notes/README.md` 登记。
+
+## [Unreleased]
+
+### Added · 拣货线 P5：能力交给 UI 岛（`order-insight` 加「拣货」页签，升 1.5.0）
+
+**宿主**：`src/core/plugin/host.ts` 新增**只读能力域 `picking`（单 op `groups`）**。
+关键：`host.ts` 跑在**渲染进程**，故能 `await import('@/lib/picking')` ——
+于是"取投影 + 取结算件数 + 按 SKU 汇总 + 范围口径"与**内建拣货页共用同一份纯函数**，
+**岛侧零口径**（不必把口径拄一遍 —— 拄一遍必然漂移，而拣货单少一件就是少发一件货）。零新通道（190/186 不变）。
+
+**岛侧**：`ui-plugins/order-insight` 新增「拣货」页签（`dist/views/picking.js` + `api.js` 加 `picking` 助手 + `main.js` 注册）：
+一键看待拣清单（图 / 款色码 / 件数 / 订单数 / 供应商 / 缺）+ 天数窗（7/30/90/不限）+ 导出 xlsx（复用岛内已有的 `exportWorkbook`）。
+manifest：声明 `picking` 域 + `groups` 动作，**版本 1.4.0 → 1.5.0**（版本号是唯一更新判据）。
+
+**验证**：`npm run order-insight:picking:ui` **14 项**（假桥无头：页签出现 / 汇总走 `db picking.groups` 带天数 / 表与缺口逐行 / 缩略图 `maxEdge` / 改天数窗重取 / **导出 payload 形状**）·
+`tests/orderInsightPicking.spec.ts` **10 例**接线守卫（含"岛里不得出现口径实现""宿主必须复用纯层"；
+3 条变异测试逐条变红）。⚙️ 其中"宿主复用纯层"那条**必须先剥注释** ——
+域上方注释里就写着那句 `await import`，不剥的话变异也恒绿（实测已踩）。
+
+**发布动作待攒批**（用户节奏）：`node scripts/publish-plugin.js --dir ui-plugins/order-insight --base <市场仓库>`
+→ 同步本机 `~/Library/Application Support/seller-kit/plugins/` → **重启宿主**（启动会预载上次所在的岛，其 iframe 持旧产物）。
+
+## [Unreleased]
+
+### Added · 拣货线 P3/P4：只读投影 + 一键「生成待拣清单」页
+
+**能干什么**：打开「拣货」→ 点一下 → 按 **SKU（款 × 色 × 码）** 列出"要拣什么、各几件、图与供应商在哪"
+→ 导出 xlsx 交给仓库或自己照着拣。默认范围 **未发货 · 近 30 天**，条件**写在界面上**（含被剔除的行数）。
+
+**宿主侧（`picking-rows`，只读通道，+1 通道 → 190/186）**
+- `electron/picking-db.ts`：未发货订单行投影 = 款色码（识别链 JOIN，同 `shippingRows` 口径）+ **图三层回落**
+  （复用 `itemImagePool`：覆盖图 > 订单图 > 款主图）+ 供应商（缺 `suppliers` 表降级空串）+ `raw_fields`（件数由渲染层解析）。
+- **刻意只回投影、不做聚合**：件数要从 `raw_fields` 的「商品信息」块解析、范围判定要认状态原文与多种日期写法 ——
+  这些的唯一实现都在渲染层纯函数，主进程再抄一份必然漂移。
+- **只做机械筛选**（`ship_time` 空 且 `status<>'shipped'` / 可选店铺 / 上限）：关闭单照收（由渲染层剔并计数）。
+  实测依据：`订单列表-6.xlsx` 153 行里 **101 行"订单关闭"的发货时间是空的** —— 不做这层过滤会多 25 倍噪声。
+
+**渲染层**
+- `src/lib/picking.ts`（纯层，21 例）：按 SKU 汇总件数/订单数/图/供应商/店铺，**逐组**记缺口（缺图 / 缺件数 /
+  缺供应商 / 未识别款）；**范围口径**（已终结剔除 · 超窗剔除 · 无日期照收，三者都计数）；
+  分组键与件数口径**与订单利润页共用同一份实现**（`skuKey` / `resolveQty` —— 顺手把它们从 `orderCost.ts` 提出来单源）。
+  ⚠️ 日期窗用 `dateKey` 认多种写法：在 SQL 里做字符串比较会把 `08/30/2026 07:00` 这种格式**静默丢掉**。
+- `src/modules/picking/`（内建模块，`modules.config.json` 登记）：一键生成 + SKU 表（图/款色码/件数/订单数/供应商/缺）
+  + 导出 xlsx（`orderExportExcel`）+ 「更多」折叠（天数窗 / 店铺 / 含已发货）。顺手补齐 `orderImageThumbBatch` /
+  `orderExportExcel` 两个 core 服务包装（此前只有类型声明、没有导出函数）。
+
+**验证**：`npm run picking:smoke` **15 项**（DB 层：未发货只认机械事实 / 三层回落 / 识别链 / 降级不抛 / 上限钳制 / 脏行不毁整批；
+存量测试确认把筛选改成 `1=1` 会变红）· `npm run picking:ui` **25 项**（无头：一键语义 / 三路取数 / 组内件数可验算 /
+剔除计数标签 / 缺口逐行标 / 缩略图带 maxEdge / 改筛选后重新生成带出店铺 / **导出真的生成 xlsx 字节且文件名带日期**）· `tests/picking.spec.ts` 21 例。
+
+**未做（刻意）**：`db` 能力域 `picking` —— 该域只为 **UI 岛** 存在，而拣货页是内建模块（走 core 服务直连宿主通道）；
+加一个没人消费的域只是死声明。岛消费时（P5）再把域与岛声明一起发版。
+
+## [Unreleased]
+
+### Added · 件数口径接入（P2，拣货线第二刀）
+
+**为什么必须做**：拣货单的"要拣几件"此前恒按 **1 件/行**（与运费岛同样的保守口径），
+而实测真实报表里 **6% 的块是 2~3 件** —— 件数是假的，拣货单就不可用。
+
+**件数的三个来源（优先级已钉住，缺则**逐行标出**、不静默）**：
+1. **结算明细的商品行真值**（`ae_settle_lines.qty`，经 `settleOrders` 带出的 `items`）——
+   ⚠️ **仅当该 `(订单,商品)` 在结算表里恰好一行商品行**时才采用：实测**同一商品会以多个 SKU
+   出现在一张单里**（订单报表 14 行"商品ID 重复"、结算侧 10 组多行），把合计铺到每一行会**翻倍**；
+2. **订单报表「商品信息」块内的 `商品数量`**（`src/lib/orderRowSplitter.ts` 新增 `parseRowQty`）——
+   拆分后每行只剩自己那一块，故就是这一件的数量；**多块原文**（块数 ≠ 商品数时没替换）一律返回 null，
+   **不用「数量」列**（拆行后它仍是整行值，同一理由见 `extractShipping`）；
+3. 两处都没有 → **按 1 件 + 逐行标 `缺件数`**（进"缺哪一环"计数）。
+
+**界面**：明细表新增「件数」列（悬停说明来源：结算明细 / 订单报表 / 兜底），
+统计表新增「件数」合计（与收入/成本同口径，**只含非关闭单**）；
+件数 > 1 时出一枚提示 `多件 N 行 · 成本/运费仍按 1 件计（合并计费口径待定）`。
+
+**⚠️ 刻意不做的**：件数**不参与**成本/运费/毛利算术 —— 单件成本来自 `ae_cost_map`（可放大），
+但多件合并计费仍是运价岛的开放项；只放大成本会得到"成本×N、运费×1"的怪数。
+两件事要一起改且会改动所有已展示的毛利 → **等拍板**（开放项记在 `docs/plans/PICKING_PLAN.md` §3.2）。
+为防止"顺手放大一半"，单测里用一条断言把这个口径钉住（`qty=2` 与 `qty=1` 的运费/成本/毛利逐项相同）。
+
+**验证**：`tests/orderCost.spec.ts` 57 例 + `tests/orderRowSplitter.spec.ts` 28 例；
+UI 冒烟 **40 项**（含"报表 2 件 → 结算真值 3 件盖过它 → 两处都拿掉时按 1 件并出现「缺件数 1」"）；
+4 条新守卫**逐条变异测试**确认会变红（去结算多行守卫 / 去缺件数标记 / 去件数汇总 / 去多块守卫）。
+
+**新增 DB 层冒烟 `npm run ae:settle:smoke`（10 项）**：`ae_settle_lines` 此前**没有任何自动化覆盖**，
+而本次改了 `settleOrders` 的 SQL 与返回形状。覆盖落库幂等（重导 = update 而非重复行）、
+行类型判定、订单级行优先（两类行不可相加）、**`items` 件数明细**（去掉 `lines++` 会变红）、`qty` 兜底、`settleStats` 计数。
+
+## [Unreleased]
+
+### Added · 订单利润页：界面精简（P0）+ 两个新统计维度（P1，拣货线第一刀）
+
+**P0 界面精简**（用户原则：操作极简 / 界面聚焦）：低频操作（**店铺归属 / 导入结算明细 / 平台费率 / 行数**）
+收进折叠的「更多」；首屏只留 **统计数字 + 刷新 + 统计维度**。冒烟新增"首屏确实收起 + 展开后可达"两条断言。
+
+**P1 两个新维度**（对应 `docs/plans/PICKING_PLAN.md` 的 P1，**零新域 / 零通道 / 零发版**）：
+- 投影补 **`color` / `size` / `supplier_id` / `supplier_name`**：颜色/尺码是 `oi_orders` 的列；
+  供应商经 **`LEFT JOIN pl_products → suppliers`**（缺 `suppliers` 表时降级空串，不抛 `no such table`）。
+- `summarizeOrderCosts` 新增 **`'sku'`**（key = `款 · 色 · 码`，**缺哪段就把哪段写进 key** →
+  "缺色 3 组"在表上肉眼可见）与 **`'supplier'`**（按 **id** 分组、显示名字，C2：关联用 ID）。
+- 顺带**收拢 `tableExists`**：原先 product/shop/shop-product 三个域各抄一份 → 现在只留 `electron/db.ts` 一份导出。
+
+**为什么先做这两维**：`oi_orders.color` 由 AI 归类写入、`size` 依赖「尺码列」映射 —— **填充率未知**。
+统计表上一眼能看出色/码缺多少，**决定拣货能做多准**。
+
+**P1 取证结论（2026-09-29 实测用户库 42 行，只读聚合）**：
+`color` / `size` / 款编码 **全部 100% 填充** → **拣货按 款×色×码 做准没有障碍**；
+但 **供应商只填了 1/27**（`pl_products.supplier_id`）→ 按供应商分组先别当主打，
+缺的行显示 `(未识别供应商)` 并计数，**不静默糊成一组**；要真按厂家分单需先去产品库补 `supplier_id`（主数据维护）。
+
+## [Unreleased]
+
+### Added · `order-insight` 岛 1.4.0：导入时指定店铺（**未发布，待与发版一起做**）
+
+**用户反馈**："导入后归到该店"这个补动作本不该存在 —— 订单列表/明细本来就是**按店铺导出**的，
+所以正确的流程是**导入时就带上店铺**。宿主侧无需改动（`order-import` 通道本来就收 `shop`），改的是岛：
+
+- **导入面板**（列映射区）新增「**本次导入店铺**」输入；**设置面板**也可改（不必靠再导入一次）。
+- **落库优先用它**：`shop: s.fixedShop || fieldOf(s, row, 'shop')`（没填才回落到「店铺列」）；
+  入队时的 `info.shop` 也一致（队列界面不出现"空店铺"）。
+- **配置持久化**：`fixedShop` 与列映射同键名空间，与内建版配置双向互通。
+- **版本升到 1.4.0**（`ui-plugins/order-insight/manifest.json`）—— 版本号是唯一更新判据，
+  且发布口会拦"同版本换内容"。
+- **逻辑层验证（手写岛无单测，故做接线守卫）**：新增 `tests/orderInsightShopAtImport.spec.ts`（5 例，
+  扫描型）钉住五个接线点（面板输入 / 读值 / 持久化 / 恢复 / 落库优先）+ 宿主收 `shop` + **版本已升**
+  （防"改了没升版本 = 发了等于没发"）+ 文件存在（防扫描空转）。
+- ⏳ **待办（需你点头的发布动作）**：`node scripts/publish-plugin.js` 打 `order-insight-1.4.0.zip` →
+  同步本机安装目录 → **重启宿主** → 真机验证（清单见下）。同时把此前积压的**拆行三处修复**一并发出。
+
+## [Unreleased]
+
+### Added · 订单归属店铺（让「店铺」维度真正可用）
+
+**背景（用户确认）**：AE 的「订单列表 / 订单明细」都是**按店铺导出**的，但**报表里没有店铺列**
+（只有"店铺优惠"；岛侧"店铺列"是用户手选的，对这类报表选不出来）→ 店铺只能**在导入后由人指定**。
+
+- **新通道 `order-assign-shop`**（payload `{ orderNos, shopName }`）：写 `oi_orders.shop` 的**名称原文** ——
+  与 `purchase_sources.shop` / `ae_orders.shop_name` 一致，归一仍由 `sk_name_map` 在**查询时**旁挂（G2 历史文本不改写）。
+  一个订单号的多行（拆行后的多商品）一起更新；已是同名的不重复改。
+- **页面**：工具栏新增店铺下拉（读店铺实体 `sk_shops`，用现成的 `shopList`）+「归到该店」按钮
+  （把当前列表里的订单号一起归过去，答完提示改动行数）；统计维度新增**按店铺**，未归属的自成 `(未归属店铺)` 一组。
+- **站在用户角度的两处改进（2026-09-29 用户反馈）**：①工具栏显式提示**「未归属 N 单」**（0 就不显示）——
+  让用户一眼知道要不要点那一下，而不是靠猜；②**记住上次选的店铺**（同命名空间持久化）—— 同一家店连着导几次不用重选。
+  ⚠️ **「归到该店」本来就是一次点击整批**（一次 IPC 送当前列表所有订单号），不是逐单点。
+- **正解是"导入时就带店铺"**（用户原话）：那需要改**岛侧导入面板**（加"本次导入属于哪个店铺"）+ 升版发布
+  —— 属发布动作，待确认；届时可与**积压的拆行修复**一次发出去。
+- **冒烟**：新增"未归属提示 → 归属 → 提示消失 + 明细显示店铺"的**全回路**断言（假桥模拟落库）。
+  顺带修一处夹具时序：按钮 `:disabled` 依赖 `shopPick`，**Vue 下一个 tick 才更新** → 必须等按钮可用再点，
+  否则"点了没反应"（这类失败不报错，只会表现为超时）。
+
+## [Unreleased]
+
+### Added · 订单利润页：按维度统计区（款 / 目的国 / 经营状态）
+
+回答"这款赚多少""这个国家赚多少"这类问题 —— 明细页之上加一层汇总（`src/lib/orderCost.ts` 的 `summarizeOrderCosts`，**6 例**新单测）：
+
+- **两个维度天然对应两把成本尺**：`款` 对应款级成本、`目的国` 对应运价卡；第三个 `经营状态` 用来单看关闭单。
+- **口径与汇总一致：只统计非关闭单**（实测某批 2/3 是关闭单，混进每组都会虚高）；关闭单看 `bucket` 组。
+- **未识别款 / 缺国家 / 缺成本的行各自成组，不丢** —— 丢了会让"合计对不上"变成查不出的悬案（沿用既有纪律）。
+- 每组给：行数 · 收入 · 成本 · 预测毛利 · 精准毛利（含行数）· 缺口行数。
+- ⚠️ **「店铺」维度做不了（实测）**：47 列订单报表里**没有店铺列**（只有"店铺优惠"），
+  岛侧"店铺列"是用户手选的；这批订单的店铺为空 → 按店铺统计需要另找来源（店铺实体映射或另一份导出）。
+
+### Fixed · 无头冒烟的三处自身缺陷（都被它自己抓到）
+
+- 页面加了第二张 `.oc-table`（统计表）后，**明细断言的选择器撞上了统计行** → 明细表加 `data-act="detail-table"`，
+  断言一律限定范围（"两张同类表"是这类冒烟的典型坑）。
+- 刷新期间 `v-if="loading"` 会把整块摘掉 → 断言前必须 `waitFor` 表回来（预测轨与统计区两处都踩了）。
+- **注入脚本（模板字符串）里的注释不能含反引号** —— 一个反引号就把字符串截断（本轮踩了三次）；
+  `npm run order-profit:ui` 已加 `node --check` 前置，把"运行时报怪错"变成"一眼语法错"。
+
+## [Unreleased]
+
+### Added · 结算明细落库 + 「预测 / 精准」双轨（真值轨打通）
+
+接上一条解析层，本次把它**落库并接进利润页**：
+
+- **新表 `ae_settle_lines`**（`electron/ae-db.ts` 的 SCHEMA；新表无需迁移）：一表两粒度，
+  `line_type` 区分**商品行**与**订单级行**；费用按 **JSON 科目**存（加科目零 ALTER，同 `ae_fees` 思路）；
+  幂等键 `(order_no, item_id, sku_id)`，落库走 `ON CONFLICT DO UPDATE` + **行级 catch**（不整批回滚）。
+- ⚠️ **口径发现（实测）**：**订单级行的 `成交金额` 是整单**（含买家付的运费那部分），
+  **商品行的只是商品部分** —— 样例 87.15 vs 114.52；全表合计 7833.61 vs 29407.01 → **两类行绝不可相加**。
+  故 `settleOrders()` **优先取订单级行**（整单权威口径），没有时才退化为商品行求和并把 `from` 标成 `items`。
+- **新通道 3 个**：`settle-import` / `settle-orders` / `settle-stats`（preload/types/ipc 三处同步；`verify` 188/188/184）。
+- **算法层双轨**：`OrderCostInput.settleByOrder` 给了该订单的结算数据就走**精准轨**
+  （`preciseGrossProfit = 净收入 − 成本 − 运费`；净收入是平台结算口径，**已扣平台费** → 本层不再估平台费、不再另扣税），
+  否则走预测轨；每行带 `tier`（`precise` / `forecast`）。**39 例单测**覆盖（含"结算数据在、成本缺 → 精准毛利为 null"）。
+- **页面**：新增「导入结算明细」按钮（`selectExcelFile` → 渲染层解析 → 落库 → 重取；⚠️ 文件对话框驱动不了，冒烟未覆盖，与产品库导入同缺口）·
+  新增「轨」列（预测/精准）· 毛利列**按轨取值**（精准行的悬停说明里保留预测值）· 分桶行多一个"精准 N 行 · 毛利 X" chip。
+
+### Changed · `ae` 域迁移转为版本化（house convention）
+
+`ensureAeSchema()` 原先在 `dbMigrate` 前后散着两个幂等函数，现统一为 `migrate('ae.main', …)`（v1 重建 `ae_cost_map`、
+v2 补 `ae_order_lines.style_code`），并**把 `style_code` 补进建表语句** —— 原先它只写在迁移里，
+迁移先跑后**新库会永久缺该列**（与 `oi_images.style_color_id` 同一个坑）。
+`schema:smoke` 新增 **ae 老库场景**（老形状 → 重建 → 行不丢 + 哨兵生效日 + 幂等），共 **21 项 / 4 场景**。
+
+## [Unreleased]
+
+### Added · 结算明细解析层（真值轨的入口）
+
+数据源：AE 后台导出的「订单明细」（真实样本 2 表 / 200 单 / 412 商品行）。本层只做**解析 + 校验**，
+落表与页面接线在下一轮。
+
+- `src/lib/settleImport.ts`（纯函数，**17 例**）：选表（取带 `商品id` + `结算状态` 的**商品级**那张）·
+  行类型判定（**`商品id` 为空 = 订单级行**）· 八类费用 + 退回逐科目存**分** · 幂等键 `(订单号, 商品id, sku id)` ·
+  模板定义行（订单号不是 8 位以上纯数字）**跳过并记 issue，不静默丢**。
+- **两条等式逐行校验**（不符记 issue、不抛错）：`平台分账金额 = Σ八类费用`、`净收入 = 成交金额 − Σ费用`。
+  后者**只对"已结算且无退款"的行**校验 —— 实测待结算行费用列全是 0（平台结算前不给），
+  全额退款单费用与净收入也都是 0（平台口径），公式对它们不成立。
+- **真实数据验证**：在 412 行导出上跑通 —— 商品行 212 / 订单级行 200 / 已结算 332 / 待结算 80 / **issues 0**
+  （与独立探针数字一致，两条等式零误报）。
+
+## [Unreleased]
+
+### Added · 平台费近似费率（预测轨的费用缺口）
+
+**为什么必须估**：实测结算明细（2026-09-28 导出）—— **待结算行的费用列全是 0**（`待结算原因=订单未发货`），
+平台在**结算前不给佣金**，而结算要等到发货/确认收货之后（1–2 个月）。所以「预测」轨的费用只能估。
+
+- **算法层**：`OrderCostInput.platformFeeRatePercent`（百分数）。配了 → `platformFee = 收入 × 费率` 并计入毛利；
+  **没配 → 不扣**，`platformFeeMissing` 标真（**不按 0 算** —— 0 会让毛利看起来更好）。
+- **默认值有据**：实测该批结算数据（剔除 55 条全额退款后 277 行）—— 佣金 **5.50%** + 交易服务费 **2.23%** +
+  联盟佣金 0.59% + 金币营销费 0.50% + 营销类 0.31% ≈ **9.14%**；已写进字段注释与页面 tooltip。
+- **页面**：工具栏加费率输入（0–50%，step 0.1），改动即重算（复用上次取数结果，不再打 IPC）+ 防抖落盘到
+  新命名空间 `order-cost`；提示文案随之在「平台费未扣（未配费率…）」与「平台费按 X% 近似（结算后以真值替换）」之间切换。
+- **冒烟**：`order-profit:ui` 增到 **16 项**，新增「改费率 → 毛利 139.18 扣到 124.31 + 落盘出参」的交互断言。
+  顺带修了夹具两个真 bug：假桥 Proxy **只转发第一个实参**（`setModuleState(ns,data)` 的 data 被丢）、
+  以及断言"最后一次 `setModuleState`"（外壳启动也会调它 → 误判）。
+
+## [Unreleased]
+
+### Added · 运价表快照（宿主中立层）—— 预测可复算
+
+**问题**：运价表原先只以"当前那一份"存在运费岛的私有 storage 里 —— 报价单更新后，
+**历史订单的预测运费会跟着变**（预测不可复算）；而且它挂在可卸载的岛上，违反 ADR-002 C3。
+
+- **新表 `sr_rate_snapshots`**（`electron/ship-rate-db.ts`）：一次导入 = 一条，
+  `content_key`（payload SHA-256）UNIQUE **按内容去重**（反复导入同一张表不堆行），
+  `effective_from` = 导入当日（显式传入合法日期则以传入为准，脏值回落当日、不写脏数据）。
+- **写入时机零改岛**：宿主 op `parseRateSheet` 本来就在用户每次导入报价单时被调用 →
+  在那里顺手留档。**失败不吞**（留档失败会让后续预测悄悄用旧表 → 直接报错让用户重试，导入本身幂等）。
+- **读取侧**：`src/lib/orderCost.ts` 新增 `pickRateSnapshot`（口径同 `ae_cost_map`：
+  `effective_from <= 订单日` 最近一份；早于所有快照 → **回落最早一份**），
+  并**按所选快照分组**逐组调同一个 `quoteOrders`（不重算运费口径）；每行带 `rateVersion`（按哪张表算的）。
+  无快照时退回"当前那份"（老库零回归）。
+- **新通道 3 个**：`ship-rate-snapshot-{save,list,calc}`（preload/types/ipc 三处同步；`verify` 通过）。
+  通道由宿主 op 调用，**岛无需改、无需发版**。
+- **门禁**：`npm run ship-rate:smoke`（11 项）。
+
+## [Unreleased]
+
+### Added · 订单「钱 / 状态 / 时点」入账 + 「订单利润」页（预测口径）
+
+**背景（真实报表实证，`订单数据.xlsx` 1722 行 / 47 列）**：`oi_orders` 原无任何金额列，
+"这单会赚多少"连输入都不完整。本次把利润公式的输入提成正式列：
+
+- **新增 14 列**（`electron/order-db.ts`，版本化迁移 `order.main` = v2；建表与老库补列共用一份列定义）：
+  `amount_cents` / `goods_cents` / `ship_fee_cents` / `vat_cents` / `ddp_cents` /
+  `shop_discount_cents` / `platform_subsidy_cents` / `currency` /
+  `biz_status` / `biz_mode` / `tax_platform` / `paid_time` / `ship_time` / `received_time`。
+  **金额列可空（NULL = 报表里没有），故意不给 DEFAULT 0** —— 0 是"确实是 0"，混起来就会把"缺税"算成"零税"。
+- **解析层** `electron/orderMoney.ts`（零依赖纯函数，11 例单测）：`CN￥ 1,234.56` → 分 + 币种；
+  空/认不出 → `null`；列名族宽松（换平台导出也能认）。**入库这一刻**在主进程完成 → 岛侧无需改、不必发版。
+- **判定与算账** `src/lib/orderCost.ts`（27 例）：新增 收入 / 税 / 毛利 与经营状态分桶：
+  - **预测口径**：在途单也算（这是预测工具，不是只算已结算）；
+  - **关闭单单列一桶、不进利润合计**（实测该报表 54% 是关闭单，混进来整体虚高）；
+  - **平台代征代缴 → 增值税不是我们的成本**（记确定的 0）；不知道谁承担 → 标缺、**不按 0 算**；
+  - **平台费（佣金）无数据源** → 全局标志 `platformFeeMissing` + 页面提示，毛利如实标"未扣平台费"。
+- **页面**：「订单成本」升级为「**订单利润**」（`src/modules/order-cost/`，id 未变）：分桶合计、
+  逐行 运费/成本/税/收入/毛利、缺口提示、关闭单灰显。
+- **门禁补齐（二）**：`npm run order-profit:ui`（11 项，假桥无头冒烟）—— 这一页有四路取数与一条跨域算账链，
+  但纯层单测只覆盖到 `computeCosts`，**接线**（IPC 键名/字段名/分→元/是否真走宿主快照）从未被跑过。
+  冒烟用可验算的样本断言**精确值**（运费 16.00 / 成本 10.00 / 税 0.00 / 收入 165.18 / 毛利 139.18）
+  并断言点击出参，首次运行即通过。
+- **门禁补齐**：`npm run order:smoke`（14 项）—— 订单域是最大的域却一直没有自己的冒烟，
+  本次的入库提列/投影改动此前只能被 `style:smoke` / `product:sku:smoke` 间接兜住。
+
+**不做派生的理由**（实测）：金额列之间没有稳定等式（三种常见关系最高只命中 493/1722 = 29%）
+→ 逐列如实取；少存一列以后就得重导。其余 30 余列仍留在 `raw_fields` 里保真，**随时可提**。
+
+### Fixed · 订单拆行接不住「速卖通订单报表」格式（三处静默错，均据真实报表实证）
+
+真实样本：`订单数据.xlsx`（1722 行 / 47 列，2026-09-29）。三处问题都在**旧实现**里，且都不报错：
+
+- **认列要求存在「产品数量」列** → 该报表无此列，`detectMultiProductColumns` 直接返回 null →
+  **一行多商品完全不拆**（实测 1 商品 1663 行 / 2 商品 49 行 / 3 商品 10 行）。
+  现补第二条信号：**「【N】块 ≥ 2」或「商品ID 逗号分隔 ≥ 2」**，N 取两者较大者
+  （不一致时按较大值拆、多出的行字段留空 —— 与"缺图保留空记录"同一处置：留给人看见，不静默丢产品）。
+- **商品ID 多值分隔符不含逗号** → 该报表的写法是 `1005...,1005...` → 会被当成**一个假商品ID**入库
+  （商品ID→产品/克重全查不中，且无告警）。逗号已加入 ID 分隔符。
+- **商品ID 列名族 `/商品ID/` 匹配不上真实的 `商品 ID`（带空格）** → 连"多值列"都认不出来。
+  已对齐仓内唯一口径（`shopSku.ITEM_ID_KEYS`）：`/商品\s*ID|产品\s*ID|SKU|货号/i`。
+- **顺带收紧**：`missingImage` 只在**存在图片列**时判 —— 像该报表这样压根没有图片列的格式，
+  逐行标"缺图"等于凭空制造 59 行待补图（那种报表的图按商品ID 另有来源）。
+
+改动落在**两份拷贝**（仓内长期笔记约定：改 order-insight 必须两处同改）：
+`src/lib/orderRowSplitter.ts`（留档源码 + vitest，**21 例**）与
+`ui-plugins/order-insight/dist/splitter.js`（**运行版**，手写岛产物）。
+
+⚠️ **运行版尚未生效**：手写岛必须 `manifest.version` 升版本 → `scripts/publish-plugin.js` 发布 →
+本机安装目录同步 → **重启宿主**（版本号是唯一更新判据）。**发布属发布动作，待确认后执行。**
+⚠️ 两份拷贝目前**无一致性守卫**（守卫只扫 `ui-plugins/*/src/`，手写岛无 `src/`）—— 建议补一条扫描型守卫。
+
+### Added · 「订单成本」内建模块（跨域算到一处的第一刀）
+
+- **目标**：回答「这条订单要花多少钱」—— 把 **订单行 × 款级成本 × 克重 × 运价表** 算到一处，
+  逐行给出 运费 / 产品成本 / 合计，并标出**缺哪一环**（无国家 / 无克重 / 运价表没这张卡 /
+  未识别款 / 该款无成本）。任一环缺则 `total` 为 `null` —— **不拿 0 顶替**（0 会让"缺成本"看起来像
+  "零成本的高利润"）。
+- **落点**：纯计算层 `src/lib/orderCost.ts`（口径单源 + 19 例 vitest）；内建模块
+  `src/modules/order-cost/`（已登记进 `modules.config.json` 的 standard/pro）。
+- **口径复用**：运费一律走 `shipRateOrders.quoteOrders`（含拒算五分类），本层**不重算运费**；
+  成本取数照 `ae-engine.costAt`（`effective_from <= 订单日` 最近一条 · 同日 manual 优先 · 无命中回落最早一条）。
+- **过渡形态（有意）**：运价表仍存在运费岛的命名空间，本模块**借宿主同一个 electron-store 读
+  `modules.shipping-rate`** —— 零迁移、零发版、**无双写**（在宿主再存一份必然漂移）。等出现第二个
+  写入方（或该岛退役）再按 `migrate()` 正式把它搬进宿主表（ADR-002 C3）。
+- **为什么是内建模块而非岛**：走渲染层核心不经过岛的 `domains`/`actions` 判定 → **零发版**即可验证
+  跨域骨架；搬进岛时再连带声明新 op 一起发版。
+- **配套**：`order-shipping-rows` 的只读投影加 `shop` / `order_time` / `style_code` / `style_color`
+  （**加法**，老调用方不传不改也能照常工作；款编码走 `oi_images → oi_style_colors → oi_styles` 识别链，
+  与 `purchase-db.outstanding()` 同一套 JOIN，**LEFT JOIN** 保证未识别的行仍在）。
+- ⚠️ 未验证：页面**未经真机点击**（纯计算层有单测、构建产物已生成）；`npm run dev` 起来后需人工看一眼。
+
+### Added · schema 版本化迁移（`electron/db.ts` 的 `migrate()`）+ `schema:smoke`
+
+- **为什么必须加**（实测教训）：`pl_shop_sku` 的唯一键在一对多改造时由 `(platform, shop_id, item_id, spec)`
+  扩成含 `product_id` 的 5 列，而 `CREATE TABLE IF NOT EXISTS` **不会重建老库** ——
+  于是**老库 4 列键 / 新库 5 列键**，代码里对旧形状的假设（`ON CONFLICT(platform, shop_id, item_id, spec)`）
+  在**新库上每次写入都失败**、在老库上完全看不出来。形状差异只能靠一次性迁移收敛。
+- **两条通道，职责不可互相替代**：`dbMigrate(statements)` = 幂等 DDL（新库一次建到当前形状）；
+  `migrate(key, steps)` = 版本化演进（补列 / 重建表 / 改唯一键 / 搬数据），只跑未应用的版本，
+  记账于新表 `sk_schema_migrations(key, version, applied_at)`，**按域 key 分别记版本**。
+- **首个迁移**：`product.sku` v1（补 `image_url`/`imported_at`）+ v2（`pl_shop_sku` 唯一键归一到 5 列，
+  用"建新表 → 显式列名搬数据 → 删旧表 → 补索引"重建，并重置 `AUTOINCREMENT` 序列以免 id 复用）。
+- **门禁**：`npm run schema:smoke`（12 项）造一个**老库形状**的库，断言数据一条不丢、索引没丢、
+  唯一键已升级、序列已重置、幂等可重跑，并断言新库走"跳过重建"那条路。
+- **同轮修正的既有缺陷**（都由上面这个形状差异派生）：
+  - `upsertSkuMappings`：改绑 = **替换**（同 `(platform, shop_id, item_id, spec)` 只有一条映射行，显式"查 → 更新/新增"），
+    不再依赖已失效的 4 列 `ON CONFLICT`；
+  - 池行（`source='shop-import'`）与归款映射行的种群隔离：映射侧的 list / 汇总 / 队列"已映射"判定 /
+    `resolveOrderSku` / `resolveSkuBatch` / `upsert` 一律带 `skuMappingSql()`，池侧一律带 `skuPoolSql()`；
+  - 池的 `删除` 只删池行（此前 `DELETE WHERE item_id = ?` 会把 confirmed 归款映射一并删掉）。
+
+### Added · 发布口加「同版本重发布」守卫（`scripts/publish-plugin.js`）
+
+- **问题**：宿主与市场的更新判据**只有版本号**（`plugins-market-handlers.ts` 的
+  `compareVersions(已装, 目标) >= 0 && !force` 直接拒绝安装，`PluginCenter.vue` 的
+  `updateable = cmp < 0` 连"更新"按钮都不给）。于是"改了内容但没升版本"= 发了等于没发；
+  反过来"同版本覆盖旧包"会让已拉过的人的 sha256 校验对不上。产品库 1.4.0 事故即前者。
+- **守卫**：写 zip / catalog **之前**，用「**打包内容摘要**」（zip 内每个条目的 路径+字节）与
+  已存在的同版本 zip 比对 —— 内容一致 → 幂等放行；**内容不同 → exit 1 拒绝并打印两个摘要前缀**，
+  产物一字未动；确需原地覆盖（刚发出就发现打坏包）加 `--force`，会打印显式告警。
+  catalog 已登记同版本但本地无 zip 可比对 → 告警放行（提示"线上那份可能不是这份"）。
+- **判据不是 zip 自身 sha256**：JSZip 默认给条目打当前时间戳，同内容两次打包字节就不同（实测）。
+  顺带把条目时间戳固定为常量 `ZIP_ENTRY_DATE` —— 同内容现在产出**同字节同 sha256**，
+  `catalog.json` 不再因重发布而无意义抖动。
+- **回归**：`tests/publishGuard.spec.ts` —— 造最小 UI 岛**实跑脚本**，4 条断言
+  （首发给对 sha / 同内容幂等且字节相同 / 内容变则 exit 1 且 zip·catalog 未动 / `--force` 才覆盖）；
+  已做变异自证：关掉守卫 → ③④ 变红；把守卫挪到写盘之后 → ③ 在「zip 未变」上变红。
+- 跨岛核验：`shipping-rate` 1.2.1 走同守卫**同版本同内容**放行（说明线上产物与当前内容一致，非误伤）。
+
+### Added · 产品库新增「商品清单」页签（`product-library` 1.5.0）
+
+- **新页签「商品清单」**：Excel 导入店铺商品池（按 `item_id` 去重，保留最新 `image_url`），
+  一件商品可**一对多**关联产品 —— 覆盖套装 / 组合装场景（与「映射与关联」页的单值映射互补）。
+  数据复用 `pl_shop_sku` 扩展视图，新增宿主 db 能力域 **`shop-products`**（6 op：
+  `import` / `list` / `relations` / `relationAdd` / `relationDelete` + 删除），
+  复用既有 `shop-product-*` IPC 通道，**零新通道**。
+- ⚠️ **这一版是「同一版本号重复发布」事故的补救版**：09-27 发布的 `1.4.0` 不含本页签，
+  09-28 用**同一个 1.4.0** 重打包（内容已含本页签）覆盖了市场 zip，但更新判据只有版本号
+  （`compareVersions(local, market) < 0` 才可更新，主进程 `>= 0` 直接拒绝安装），
+  于是 `1.4.0 == 1.4.0`，**装过的机器永远拿不到新内容**，症状是「页签怎么都不出现」。
+  本次升版到 `1.5.0` 并重发，链路才真正通。详见 `ui-plugins/product-library/README.md` 的陷阱表。
+- **发布与验收**：`market-out/product-library-1.5.0.zip`（sha256 `1f689051…`，条目时间戳固定后为当前值）
+  已写入 `market-out/catalog.json`；本地市场改用 `npm run market:serve`（`no-store`，替换掉 8000 端口上
+  原 `python3 -m http.server`）；`pluginTriage` 68/68 全绿。
+  端到端验收在**真实 userData 的克隆**上跑真实市场 IPC：catalog 见 `1.5.0` → `install(force)`
+  成功 → `pluginsScan` 即时可见 → 侧栏进入岛后可断言页签集合。
+  ⚠️ **装完必须重启宿主（或重载岛文档）**：宿主启动时会预载「上次所在岛」，
+  该 iframe 文档仍持有旧产物（实测重载前 3 页签 / 重载后 4 页签含「商品清单」）。
+
+### Added · 无忧物流运费支持按产品试算（`shipping-rate` 岛 1.2.0）
+
+- **新页签「按产品试算」**：目的国下拉点名（选项即运价表国家行）→ 宿主自取产品库
+  （`pl_products` 分页拉全 + `pl_variants` 联 SKU 克重）→ 逐 SKU 算出到该国实际运费。
+  回答"我的产品发到某国每件运费多少"，与按订单试算（已成交订单侧）互补。
+- **重量锚点是产品库 SKU 子表**（`pl_variants.weight_g`，编辑产品时维护），与订单侧的
+  速卖通商品ID重量表（`pl_item_weights`）是**两条独立数据源**，不混用。
+- 拒算逐行给原因（复用五分类纪律，产品侧为：缺克重 / 表没该国 / 无价 / 未接汇率），
+  未维护克重的 SKU 单独成行提示「去产品库补克重」，不静默丢行；summary 各类互斥 Σ=total。
+- 计价纯函数收在宿主新文件 `src/lib/shipRateProducts.ts`（复用 `shipRateQuote` 单点口径，
+  国家只解析一次）；岛内仍零算术，op 数 5→6（shipping-rate 域 ≤ 10 预算内）。
+- 门禁全绿：`tsc` / `vue-tsc` / `verify` / `vitest` 431（新增 8 用例）/ doc-links；
+  岛 1.2.0 已发布 `market-out/shipping-rate-1.2.0.zip` 并同步本机安装目录。
+
+### Changed · 「产品库」页签更名「识别库」+ 供应商页签降级只读（`order-insight` 岛 1.3.0）
+
+- **正名**：订单归类里的「产品库」页签实际维护的是订单识别用的**识别库**（`oi_styles`
+  款式编码池：款编码 / 款色 / 图片指纹），与产品库岛的款式主数据（`pl_products`）是两个
+  数据域 —— 页签更名为「识别库」，导出文件 / sheet 名、空态文案同步，消除与产品库岛的混淆。
+- **供应商维护迁移补完到运行侧**：1.4.0 迁移只改了宿主侧 `extensions/` 拷贝，市场分发的
+  order-insight 岛（实际运行版本）的供应商页签仍带完整 CRUD。本次将其降级为**只读展示**
+  （对账 / 拿货单仍需对照厂商），`supplierCreate/Update/Delete` 三个 op 移出岛能力声明
+  （声明 ⊆ 调用守卫双向校验），空态与报错文案指向「产品库 → 供应商」。
+- 门禁：`plugins:island:smoke` 6/6（识别库页签生效）· `vitest` 423/423 · 岛已发布
+  `market-out/order-insight-1.3.0.zip` 并同步本机安装目录。
+
+### Changed · 供应商维护迁移产品库 + 产品批量编辑（`product-library` 1.4.0）
+
+- **供应商（厂家）主数据维护自「订单归类 → 拿货对账」迁移到产品库岛**：新增「供应商」页签
+  （列表 + 产品数合并自 `product.summary`、新增/编辑/删除）。语义不变：编辑只改电话/备注
+  （名称是 UNIQUE 键不可改）；删除沿用宿主守卫（已有拿货单/付款记录时拒绝）。拿货单 /
+  付款 / 欠款对账等**业务视图**留在订单归类（数据同源 `suppliers` 表，读侧不受影响）；
+  order-insight 侧移除 `SupplierModal` /「+ 新增厂商」/ 对账卡片「编辑」入口，空态文案指向产品库。
+- 新增宿主 db 能力域 **`product-supplier`**（4 op：list / create / update / delete）：复用既有
+  `purchase-supplier-*` IPC 通道，零新通道。岛声明窄域而不是 24 op 的 `purchase` 万能域 ——
+  授权面最小化（C4）。
+- **产品批量编辑**：列表勾选行后「批量编辑」，一次 op 覆盖厂家（含清空关联）/ 类目 / 状态 /
+  备注。**部分 patch 语义**（与全量 upsert 刻意不同）：payload 未出现的字段宿主一律不动，
+  界面留空即不改；`supplierId: 0` = 清空关联。code / name 不可批量改（跨域关联锚点）。
+- 新增 IPC 通道 `product-batch-update`（handler / preload / types / ipc 四处同步）；
+  `product-admin` 9→10 op **恰好满额**（N5），`product` 域不变 —— 再加任何 op 必须先拆子域。
+
+### 验证与发布（1.4.0）
+
+- 门禁全绿：`verify` ✅（172 通道）· `vue-tsc` 0 error · `vitest` **423/423**（op 预算守卫：
+  product-admin=10 ≤ 10、新域 product-supplier=4 ≤ 10）· `product:smoke`（+3 批量编辑用例：
+  部分patch只改传入字段 / 清空语义与状态兜底 / 空ids-无字段-厂家不存在各自抛错）·
+  `product:sku:ui` **36/36**（新增：3 页签、批量编辑空 patch 拦截、部分 patch payload 形状、
+  供应商列表与编辑弹窗名称锁定）· `plugins:island:smoke` / `product:sku:smoke` / `style:smoke` ✅。
+- 岛 1.4.0 已发布本地市场（`market-out/product-library-1.4.0.zip`）；应用侧在「插件市场」更新后生效。
+
+### Changed · 产品库 SKU 改为服装「颜色 + 尺码」组合（`product-library` 1.3.0）
+
+- SKU 编辑由自由「名称」改为**颜色 + 尺码**两个输入（服装口径）：同款下组合唯一（复用
+  `UNIQUE(product_id, name)`，成对时 name 自动生成为 "颜色 尺码"），编码 / 克重口径不变，
+  每个颜色尺码组合的克重单独设置。
+- 尺码**快捷批量选择**：字母码 / 身高码预设芯片，支持**按住拖动连选 / 连消**；自定义尺码回车
+  加入；颜色输入支持 `，、空格` 分隔一次加多个；「生成组合」= 已选颜色 × 已选尺码笛卡尔积
+  （已存在组合自动跳过），可设默认克重预填，生成后逐行改克重并「保存全部改动」批量提交。
+- `pl_variants` 幂等补列 `color` / `size`（老库 `ALTER`，判定 `PRAGMA table_info`）；老行
+  （仅自由文本 name）不回填不改写，界面标「旧」，补上颜色尺码保存后即升级为新格式。
+- IPC 四处同步（handler / preload / `src/types.ts` / 岛）：`product-variant-upsert` 增
+  `color` / `size` 字段，op 数与能力域划分不变（`product` 8 / `product-admin` 9）。
+
+### 验证与发布（1.3.0）
+
+- 门禁全绿：`verify` ✅ · `vue-tsc` 0 error · `vitest` 422/422 · `product:smoke`（+5 用例：
+  组合生成 name 自动生成 / 重复组合 / 不成对 / 老数据兼容 / 更新升级）· `product:sku:smoke` /
+  `style:smoke` ✅ · `product:sku:ui` 27/27 ✅（岛 dist 重新构建）。
+- 岛 1.3.0 已发布本地市场（`market-out/product-library-1.3.0.zip`，catalog 已更新）；
+  应用侧需在「插件市场」更新到 1.3.0 后生效。
+
+### Added · 产品库图片 + SKU/克重维护（`product-library` 1.2.0）
+
+- 产品（款）主图：编辑抽屉新增主图区（上传/更换/移除），落 `pl_products.image_id` + `pl_images`
+  （SHA-256 去重，文件落 `userData/product-images/` **独立目录** —— 不复用 `oi_images`，订单域的
+  孤图清理会删"无订单引用"的图，产品图挂上去必被误删）。
+- 映射与关联列表新增商品ID「图」列：**三层回落** `itemImagePool`（手动覆盖图 `pl_item_images`
+  → 订单识别图 → 款主图），逐 item 独立判定；支持设覆盖图 / 清除回自动图；缩略图走
+  `imageThumbBatch` 合批转 dataUrl（岛 CSP 只有 `img-src 'self' data:`，远程图必须宿主落盘）。
+- SKU 子表 `pl_variants`（**D3 部分提前**，DDL 与 P5 设计草案不同）：name/code/**weight_g**/status
+  手工增删改；编码部分唯一索引 `WHERE code <> ''`（空编码互不约束）；同款重名/编码全局占用分别抛错。
+- 能力域按 C4 再拆：`product` 只读 8 op（+`variantList`/`itemImagePool`）、`product-admin` 写 9 op
+  （+`variantUpsert`/`variantDelete`）、新增 `product-image` 写域 4 op（attach/detach/itemSet/itemClear
+  —— 并入 admin 必顶穿 N5 上限 10）。
+- 宿主新增 `select-image` 通道（`dialog` kind 加 `'image'`）：系统对话框选中的文件才进
+  `approveUserFile` 白名单（H-02 语义）；图片读取白名单按目录集合收敛
+  （`IMAGE_CACHE_DIRS = Set(['order-images','product-images'])`），`sniffImageFormat` 收敛到
+  `ipc-util` 两域共用。
+
+### 验证与发布（1.2.0）
+
+- 门禁全绿：`verify` ✅ · `vue-tsc` 0 error · `vitest` **422/422**（23 文件，含 pluginTriage
+  修复 manifest 误声明 `order` 域后 66/66）· `product:smoke` **33**（+11）· `product:sku:smoke` /
+  `shop:smoke` / `style:smoke` / `ae:smoke` ✅ · `plugins:island:smoke` ✅。
+- 变异测试 **4/4 变红**（覆盖图层跳过 / 克重负数校验删 / 部分唯一索引丢 WHERE / item_id 归一去掉），
+  直接改 dist 产物，收工 sha256 复原一致。
+- 真机探针 5 步全绿（CDP + 克隆 userData）：列表图列 → 编辑抽屉主图/SKU 区块 → SKU UI 真点增删
+  → 桥直调 4 域 op 权限链 → 映射页图列。上传图片端到端（系统文件框）未自动覆盖，需人工点一次。
+- 发布：`market-out/product-library-1.2.0.zip`，本机 `<userData>/plugins/` 已同步。
+
+### Added · 店铺套编辑抽屉「名下店铺」区块（`shop-accounts` 1.5.2）
+
+- 编辑抽屉新增「名下店铺」段：登记/解绑这套账号实际经营的店铺（`sk_shops` 实体），立即保存、不等抽屉底部「保存」按钮。
+  数据仍落 `sk_shops`（ADR-002 方案 B：UI 在店铺套、实体在主数据层），经 `shop_set_id` 软关联本套装
+  （复用 `shop` 域 `list` 既有的 `shopSetId` 过滤，**未新增 op**）。
+- 平台默认值 = 套装第一个平台的展示名经 `shopPlatformCodeFromLabel()` 映射到 `sk_shops` 的平台代码
+  （两套词表对接）；映射不上时下拉停在占位项，由人显式选择（不猜歧义）。
+- 解绑只解除关联：整行回传 + `shopSetId=0`（`shopUpsert` 全量提交语义下唯一安全的姿势），店铺本体保留、可改挂其它套装。
+
+### Fixed · 店铺登记编辑表单会静默清空平台店铺ID（同轮连带发现）
+
+- 店铺登记页的店铺编辑抽屉此前不回填也不透传 `platformShopId`，而 `shopUpsert` 是**全量提交**
+  —— 编辑保存一次，已登记的店铺标识就被静默抹成空串（比报错更难查）。已回填 + 透传，并在岛 README 记入陷阱表。
+
+### 验证与发布
+
+- 端到端真机探针（CDP，克隆 userData）：区块存在 → 登记 → 桥查 `shopSetId` 关联与标识落库 → 解绑后 `shopSetId` 归 0，四步全绿。
+- `shop:smoke` 基线绿 + **变异测试 4/4 变红**（标识查重短路 / 部分唯一索引丢 WHERE / 标识归一去掉 / `shopSetId` 过滤删除），收工复原逐字节一致。
+- 门禁：`verify` ✅ · `vue-tsc` ✅ 0 error · `vitest` ✅ 23 文件 / 421 例（含 pluginTriage，岛 `actions` 未变）。
+- 发布：`market-out/shop-accounts-1.5.2.zip`（sha256 `8fc1193b…ed284`），本机 `<userData>/plugins/` 已原子替换。
+
+### Fixed · 店铺登记页「账号套装」下拉恒为空（`shop-accounts` 1.5.1）
+
+- **根因是形状错配，不是数据或权限**：`shop` 域的 `list` 返回 `{ rows, total }`，而 `shop-accounts` 域的 `list`
+  返回**裸数组**（账号主页 `store.ts` 一直按数组消费、显示正常）。店铺登记页却按
+  `acc.data?.rows ?? []` 取值 —— 对数组取 `.rows` 恒为 `undefined` → 下拉永远只剩「— 未关联 —」。
+- 修复：按「数组优先、对象回落」双形状兼容取值，并把两个域返回形状的差异写成注释钉在调用点。
+- 真机取证（CDP 克隆真实 userData）：修复前 `shop-accounts.list` 实际**能返回全部 14 条**（桥/权限/数据均正常），
+  纯视图层取值 bug；修复后端到端点开「店铺登记 → 新建店铺」，下拉 **15 项**（占位 + 14 套）。
+- 发布：`market-out/shop-accounts-1.5.1.zip`（sha256 `66f6b70c…5910`），本机 `<userData>/plugins/` 已同步。
+
+### Changed · 文档与基线整理 + 一处冒烟计数的自维护（2026-09-27）
+
+- **文档索引重写**（`docs/README.md`）：主旨压到一行、状态列与各文档头部去重、补上漏登记的 `CHANGELOG.md` / `CONTRIBUTING.md`；
+  删掉「版本管理策略」里那条**已过期且自相矛盾**的注记（它说 `PLUGIN_ARCHITECTURE.md` 不入库会导致悬空引用，而该文件早已入库、`R4-5` 也已定案）。
+  该文件**现在通过 prettier**（此前不过）。
+- **基线瘦身**（`docs/baseline/PROJECT_BASELINE.md`）：§10 把那个 2400 字符的巨型单元格拆成「门禁表 + 10.1 守卫分布 + 10.2 六类盲区」；
+  §6 的"表/对象怎么数"改为**可复跑口径**（并纠正一处算不通的 `sqlite_master` 说法）；§7 补上此前漏登记的 `product:sku:smoke` / `style:smoke` 两个脚本；
+  §9 文档表合并同类行、去掉已删文件的占位行。
+- **跨文档事实订正**：`DOMAIN_INTEGRATION_PLAN.md` 的稳态对象数（32→**33**）、`verify`（161/157→**166/162**）、
+  `vitest`（22 文件 393 例→**23 文件 421 例**）、db 域个数（8→**9**，含 P3 拆出的 `product-admin`）；
+  `REMEDIATION_PLAN.md` 头部状态从"📋 已制定，待执行"改为实际进度 **25 / 27**（并说明执行中新增 `R2-8` 使总数 26→27）。
+- **修掉一处会持续漂移的硬编码**：`scripts/ae-cost-smoke.cjs` 收尾打印的"（13 项）"与实际用例数早已不符（真值 **16**）。
+  改为由新增的 `passed` 计数器自算 —— 这类数字不再需要手改。
+- **新增纪律**（写进 `docs/README.md` 维护规则 5）：IPC 通道数 / 用例数 / 表数这类每轮都变的量**只在 `PROJECT_BASELINE.md` 出现一次**，
+  其他文档引用而不转抄。本次清理的起因正是同一数字在三处各写一遍、其中两处已过期。
+
+### Added · 产品库「映射与关联」+ 款式主数据写入权移交（`docs/features/PRODUCT_LIBRARY.md` 的 P3 / `ADR-002 D1`）
+
+- **要解决的问题**：产品库有了主数据，但**订单和产品之间没有任何关联** —— 订单行里的商品ID只是自由文本，
+  没人知道它属于哪个款。于是"按产品算利润 / 按产品出拣货单"这一步永远走不通。
+  同时 P1 引入 `pl_products` 后，**"款式名"出现了两个写入方**（订单归类写 `oi_styles.name`、产品库写 `pl_products.name`），
+  直接违反 ADR-002 的 **C1 单点写入**。
+- **两件事同批做**（P3 =「映射与关联」，D1 是它的前置）：
+  1. **新增 `pl_shop_sku`**（`electron/product-db.ts`）—— `(platform, shop_id, item_id, spec)` 唯一键，
+     `spec='*'` 通配兜底，`shop_id` 外键 → `sk_shops`（S1 建的店铺实体）。**只有 `status='confirmed'` 才算命中**。
+  2. **D1：`pl_products` 成为款式主数据的唯一权威**，`oi_styles` 降级为「识别编码池」。
+- **D1 的落法（`electron/order-db.ts`，主进程 —— 岛侧零改动）**：
+  - **写侧**：`migrateStyleAuthority()` 在 `ensureOrderSchema()` 末尾把老库的 `oi_styles.name` 灌进 `pl_products`
+    （缺哪补哪、已有产品不动），随后**清空遗留列**——两步在**同一事务**里（插入失败就不清源数据），幂等。
+    此后一律写**空串哨兵** `VALUES (?, '', ?)`：哨兵不携带信息，结构上不可能与主数据分叉。
+  - **读侧**：原来有 **4 处活读点**在 `oi_styles.name` 上（v4 文档只写了 2 处）——`listStyles`、
+    `listOrdersPage` 的 `style_name`、`listOrdersPage` 的**搜索条件**、`purchase-db` 的两处 JOIN（采购域也是消费方）。
+    统一改为 `LEFT JOIN pl_products p ON p.code = s.code` 取 `p.name`。用 **LEFT** 而非 INNER：
+    产品行缺失时**仍要列出该款**（INNER 会让"少一行"看起来像"没这款"），且**回落空名而不是回落遗留列**。
+  - **为什么保留 `oi_styles.name` 列而不 DROP**：`oi_style_colors` / `oi_style_fingerprints` 两张表都
+    `REFERENCES oi_styles(id)`，删列要重建表 —— 为一个没有业务价值的列做不可逆结构手术，风险收益倒挂。
+  - **改名走新增的窄接口 `renameProduct(code, name)`**，**不用 `upsertProduct`**：后者是**全量提交**语义，
+    只传 `{ code, name }` 会把厂家 / 类目 / 状态 / 备注**静默重置成默认值**（静默清空比报错更难查）。
+  - **跨域交接用 `adoptProduct(input, { overwriteName })`**：已有产品默认**不覆盖** name（识别结果不得盖掉人工主数据），
+    只在主数据名为空时补位；`overwriteName: true` 只给「产品库 Excel 导入」这种**显式产品库写入**语义。
+  - **编码池有两个来源**：`nextStyleCode()` 改为 `SELECT code FROM oi_styles UNION SELECT code FROM pl_products`
+    —— 只查前者会让产品库先占用的编码又发一次，撞唯一键，而报错指向产品库（排查方向被带偏）。
+- **订单导入接 `resolve`（确定性优先，零 API 成本）**：`order-db.insertOrder` → 新增的 `autoAssignByMap`
+  → `product-db.resolveOrderSku({ shop, itemId })`：店铺**文本**先经 `sk_name_map` / 店铺实体归一成
+  `platform + shop_id`（**归一不了就不命中**，不拿空平台硬凑 —— 那会把不同平台的同名店并到一个键上）→
+  查 `pl_shop_sku(status='confirmed')` → 命中就归到该产品的款色。**未命中什么都不做**（不清空 AI 已归的款色）；
+  **不 catch**（吞掉会让"看着导入成功却没归款"变成查不出的问题，而 `insertOrder` 幂等重入会再试一次 = 可自愈）。
+  产品库手工建的款没进过识别链路 → 命中时补一行 `oi_styles` 占位，指纹用 **`mapped:<code>` 前缀**
+  （真指纹不可能以此开头，故不会互相误命中）。
+- **`DB_OPS` 按 C4 拆域**（`src/core/plugin/host.ts`）：P3 的 5 个 op 会把 `product` 顶到 13 个，**顶穿 ADR-002 N5 的 10 上限**。
+  故拆成 **`product`（共享只读 6 op：`list`/`get`/`summary`/`skuList`/`skuSummary`/`skuQueue`）**
+  与 **`product-admin`（owner 写 7 op）**。**这不是洁癖**：`security.ts` 的 `decidePermission` 对 `domains` 与
+  `actions` **分别检查**、两者彼此独立 —— 写 op 与读 op 同域时，消费方只要声明这个域就够得着全部 op，
+  "我只读"只能靠自觉；拆开后它变成**结构事实**。P3 计划的 `mapList`/`unmapped` 落地为 `skuList`/`skuQueue`，
+  `resolve` **有意不建 op**（消费方在主进程内，渲染层/岛侧零调用点）。
+- **岛侧**：`ui-plugins/product-library` **1.0.0 → 1.1.0**，新增「映射与关联」页签
+  （待关联队列按 `(店铺, 商品ID)` 聚合、可批量勾选一次提交；已建立映射支持改绑 / 标失效 / 恢复）。
+  **改内容必须升 `manifest.version` 并重跑 `publish-plugin.js`** —— 否则市场与 `<userData>/plugins/` 都还是旧版。
+  已发布 `market-out/product-library-1.1.0.zip`。
+- **IPC 四处同步**：+5 通道（`product-sku-*`）→ `verify` **166 ≡ 166 / 162 通道**（`product-handlers:16`）。
+- **守卫与验证**：
+  - `scripts/style-authority-smoke.cjs`（**22/22**，`npm run style:smoke`）：A 老库交接 / B 写侧唯一 / C 读侧五处派生 / D 订单导入接 resolve。
+  - `scripts/product-sku-smoke.cjs`（**23/23**）：含**验收原文**「1000 行陌生订单 → 1000 组全部进队列，无丢行」与「批量确认后 100% 命中」。
+  - **变异测试 22/22 全中**，带「基线必须绿 / 补丁唯一命中 / 收工比 sha256」三道自检。本轮它自己抓出**两条假守卫**：
+    ① 两道防线互为兜底（`if (!shopId) return null` 先拦住，变异到不了 SQL）→ 拆成 D4a（脏映射考防线本身）+ D4b（换一家已登记的店考店铺维度）；
+    ② 判据正则 `/([A-Z]\d+)\b/` 匹配不到 `D4a`（`4` 后是字母，无单词边界）→ 真失败被漏数、**方向完全反**地报成"假守卫"。
+    **这就是「用例全绿 ≠ 守卫有效」的实例**：不做变异，这两条会一直以"通过"的身份躺在报告里。
+  - 真机 `npm run plugins:island:smoke`：**6/6** 岛握手 + 首屏正常（本岛 3468B），重启后自动回到上次所在岛。
+- **一处结构性文档修复**：`docs/features/PRODUCT_LIBRARY.md` §7 的验收表原先被一个 `> ⚠️` 引用块**从中间劈开**
+  （P3 行与 P4 行之间），导致 P4 / P5 两行实际渲染成了引用块文本 —— `prettier --write` 直接把它改写成 `> > |`，
+  把这个错**显式化**了。现已把注记移到表格之后，并补上 §7.3 P3 验收逐条对账。
+- **已知缺口（如实记）**：① 消费岛（订单归类 / 利润追踪）**尚未**声明 `product` 域 —— 映射结果目前只有
+  订单导入这一个消费方；② `shop` 域仍是写读同域（S1 遗留，放行给别的岛之前要先按 C4 拆）；
+  ③ 导入的第一步是系统文件框，CDP 驱不动 → "选真实文件 → 看到结果"**没有端到端自动验证**，
+  仍需人工点一次；④ D1 的读写切换只有 DB 层冒烟证据，没有真机端到端。
+- **文档回写**：`docs/features/PRODUCT_LIBRARY.md`（v7，§5.1 / §6.2 / §6.3 / §7 / 新增 §7.3）、
+  `docs/baseline/PROJECT_BASELINE.md`（表数 **31 业务表 / 33 对象**、IPC 166/162、`product-library` 1.1.0、`shipping-rate` 1.1.0 补记）、
+  `docs/README.md`、`ui-plugins/product-library/README.md`（新增第四条口径 + 三条陷阱）。
+
+### Added · 店铺实体与名称归一（`ADR-002 S1`）—— `docs/plans/DOMAIN_INTEGRATION_PLAN.md` 的 S1 阶段
+
+- **要解决的问题**：店铺**实体根本不存在**（该计划 D1/D2）。店名以自由文本各存三处且互相拷贝
+  （`oi_orders.shop` / `purchase_sources.shop` / `ae_orders.shop_name`），"某家店的订单 + 拿货成本 + 毛利"
+  这个业务问题在三处各算一遍且互不相识。S1 补上实体层与名称归一映射表。
+- **两张新表**（`electron/shop-db.ts`，宿主侧 = 主数据，ADR-002 C3；卸载任何岛都不影响数据供给）：
+  - `sk_shops` —— 店铺实体，UNIQUE 建在 **`(platform, name_key)`** 而非 `name` 上。
+    ⚠️ `name_key` 不是冗余列：只对 `name` 建唯一约束，`"店A"` 与 `"店A "` 会同时入库 → 同一个归一键命中两家店 →
+    "精确命中"的语义当场破产。
+  - `sk_name_map` —— `(kind, raw_key) → ref_id / ignored` 的归一映射（`kind` 预留 `supplier`/`style`/`product`，
+    供产品库 P3 复用）。**历史文本一律不改写**（G2）：查询时旁挂归一，映射可撤销。
+- **`shop` 能力域 8 op**（`electron/shop-handlers.ts` + `src/core/plugin/host.ts`）：
+  `ensure` / `list` / `get` / `upsert` / `summary` / `unmapped` / `map` / `unmap`。IPC 四处同步
+  → `verify` **161 ≡ 161 / 157 通道**（`shop-handlers:8`）。
+- **六条口径（都是被真实数据/项目规则逼出来的，改宽之前先读理由）**：
+  1. 归一 = **去空白 + 剥不可见字符**（U+200B–200F / U+2028 / U+2029 / U+FEFF，全角空格与连续空白并成单个半角空格）。
+     **不做**大小写折叠、**不做**模糊匹配、**不做**"去掉所有内部空白"——内部空格在真实数据里是**有效差异**（G6）。
+  2. **不猜歧义**：同一个归一键命中 >1 家店（同名不同平台是合法的）时**不给**"一键采纳"的建议。
+  3. **未归一名单是实时聚合**（`listUnmapped` 每次扫三处文本），不是缓存表 —— 否则删订单 / 重导后名单与源头不一致。
+  4. **映射表只存"人的决定"**：不写 `source='auto'` 占位行（故 `source` 至今只有 `manual` 一个值）。
+     ⇒ 设计文档 §3.3 原写的"首启动扫描并写入 `ref_id=0` 的 auto 行"**在实施时被改掉了**，理由已回写该节。
+  5. **模糊匹配只作排序提示、永不写 `ref_id`**（G6）→ `sk_shops` **有意不建 `confidence` 列**（没有任何生产者）。
+  6. `shop_set_id` 对 `sk_shop_sets` 是**软关联**（整数、无外键），套装删除后 id 仍在、只用于回显。
+- **纯函数层单独成文件**（`electron/shopName.ts`）：`toNameKey()` / `mergeNameGroups()`。
+  **为什么要单独一个文件**：主进程 `*-db.ts` 依赖 `better-sqlite3`，按 Electron ABI(149) 编译，而 vitest 跑在系统
+  Node(127) 上直接 require 会崩 —— 把归一逻辑摘成**零依赖**模块，它才进得了 vitest（`tests/shopName.spec.ts` 15 例）。
+- **岛侧**：`ui-plugins/shop-accounts` **1.4.4 → 1.5.0**，新增「店铺登记」页签
+  （统计 chips / 未归一名单：一键采纳·指派·新建并绑定·忽略 / 店铺实体表 / 过期映射说明 / 抽屉表单）。
+  已发布 `market-out/shop-accounts-1.5.0.zip`（`sha256 5f7c1313…`，11 文件；catalog 含 6 个插件）。
+- **守卫与验证**：`tests/shopName.spec.ts`（15 例，每条"应等价"都配一条"不得等价"的反向断言）、
+  `scripts/shop-db-smoke.cjs`（**25/25**，含"未归一名单覆盖 `oi_orders` 每个店铺名且计数一致"这条**验收原文**的用例）、
+  `scripts/shop-registry-smoke.mjs`（**真机 CDP 8/8**：「店铺登记」页挂载 / 面板渲染 / **无 error-bar（= 4 个 shop op 全过权限门）** / chips 渲染）。
+  变异验证：`shp('unmap')` 改坏 → 变红；从 manifest 删 `map` → 变红（带"基线必须绿 / 收工必须复原（比 sha256）"两道自检）。
+- **顺带查出并冻住的存量问题**：新增「宿主 db 能力域的 **op 预算**」守卫（ADR-002 N5，单域 ≤10）后，
+  首次量化出**三个域早就超预算**：`order-insight` **37** / `purchase` **24** / `shop-accounts` **17**（此前无人知道）。
+  它们进 `GRANDFATHERED` 豁免表并**只允许变少**，另加一条断言防止"豁免表被当垃圾桶塞新域"。
+- **已知缺口（如实记，属 S2/S3）**：① 消费岛（订单归类 / 利润追踪）**尚未**声明 `shop` 域 —— 映射结果**还没有任何消费方**，
+  所以 D1 只是"部分收敛"；② `shop` 域**写读同域**（`upsert/map/unmap` 与 `list/summary/unmapped` 混在一起），
+  与 ADR-002 C4「共享域只读」冲突，**放行给其他岛之前必须先按 C4 拆只读子域**；
+  ③ `sk_name_map.kind` 的三个预留值**无生产者**（产品库 P3 才接）。
+- **文档回写**：`docs/plans/DOMAIN_INTEGRATION_PLAN.md`（§0/§1.1–§1.4/§3.3/§4.1 + 新增 **§4.3 执行记录**）、
+  `docs/baseline/PROJECT_BASELINE.md`（§0/§3/§4/§5/§6/§7/§9/§10）、`docs/README.md`、`docs/features/PRODUCT_LIBRARY.md`。
+  其中基线 §3/§5/§6/§9/§10 是**全量重扫**（此前各行快照日期不一、已明显失真）：
+  §6 的"25 业务表 / 27 个对象"被订正为 **30 业务表 / 32 个对象**（漏了 `pl_*` 与 S1 的两张新表，
+  且其自身枚举逐行相加也得 26 而非 25）；§9 补上**长期漏列的 `plans/` 与 `decisions/` 两个整类**；
+  §10 的 IPC 数字 153/149 → **161/157**。
+
+### Added · 产品库 UI 岛（`ui-plugins/product-library` 1.0.0）—— `docs/features/PRODUCT_LIBRARY.md` 的 P2 阶段
+
+- **形态**：市场分发的独立 vite 工程岛（`kind: ui`，`entry: ./dist/index.html`），id **不入**
+  `modules.config.json`（红线 23）。数据层仍在宿主（ADR-002 C3）：岛只是维护界面，卸载岛不改变任何消费方的数据供给。
+- **能做的事**：列表检索（关键字 / 状态 / 全量厂家下拉）、新增与编辑（编辑时 `code` 只读；编码冲突
+  留在表单内可见而不是只弹 toast）、批量删除（二次确认，文案引导"已进业务链路的改用停用"）、
+  **Excel 批量导入三步向导**（选文件 → 预览并**就地修正**错误行的编码/款式名 → 结果页列出失败行与原因、
+  可返回再导一次）、导出当前筛选下的全量行 / 下载导入模板。
+- **解析与校验只在宿主**（`src/lib/productImport.ts`，427 行纯函数）：岛所在 iframe 的 CSP 无
+  `unsafe-eval`，岛也不打包 xlsx；更要紧的是"哪列是编码 / 厂家名怎么对 id / 状态怎么认"必须只有一份口径。
+  列名走**语义扫描**（精确命中优先、再退到包含且长键优先），表头在横幅/说明行之后仍能定位（前 10 行探测）。
+- **两条路径共用一个 op**（op 上限 10，不为"预览"再开一个）：`importProducts` 传 `filePath`（宿主读表 +
+  逐个 sheet 体检 + 校验）或 `rows`（把界面上改过的行回传），`dryRun: true` 只预览不落库。
+- **`DB_OPS['product']` 6 → 8 op**（`importProducts` / `exportExcel`）；IPC 四处同步（+2 通道，
+  `verify` **153≡153 / 149 通道**）。⚠️ 写 op 已达 8，P3 计划的 4 个只读 op 加进来会超过 ADR-002 N5 的
+  上限 10 —— **P3 开工第一步须按 C4 拆只读子域**（见 `PRODUCT_LIBRARY.md` §6.2）。
+- **行级错误不得冒泡出事务**：500 行里有 1 个空编码若整批回滚，用户会"一行都进不去"，而 P2 验收要的正是
+  「490 入库、10 行可重试」。冒烟 `product:smoke` 新增 4 条把这条钉死（18 → **22 项**）；变异验证：
+  把行级 `catch` 改成 `throw e` → 立刻 3 条变红。
+- **顺手修掉两处既有隐患**：
+  - `productSummary().supplierOptions` 原先只返回「**已有产品**的厂家」→ 用户给产品关联一个**新厂家**时
+    下拉里根本没有该项，症状像界面 bug 而不是数据问题。改为返回**全量厂家**（计数为 0 的也在）。
+  - 「空编码」这类行级问题原先只能靠界面 toast 提示，改为随预览/结果**逐行回传**（带 `ok` 标记与原因）。
+- **守卫**：`tests/pluginTriage.spec.ts` 新增 product-library 组（8 条），并修掉三处**让守卫形同虚设**的问题 ——
+  ① `apiBindings()` 原先只认产物里的 `dist/api.js` 与源码侧的 `.ts` 后缀写法（后者其实从未存在——所有岛的
+  api 文件都是 `.js`），两个 vite 工程岛（`ae-profit` / `shop-accounts`，源码在 `ui-plugins/ae-profit/src/api.js`、
+  `ui-plugins/shop-accounts/src/api.js`）**整岛逃过**「调用 ⊆ 声明」与能力缺口检查；现支持三种既有写法（helper 绑域 /
+  `dbCall(DOMAIN_X, 'op')` / 桥里硬编码域）② `stripComments()` 用两条正则剥注释，会把行注释里的
+  `@/core/services/` 后跟星号当成块注释开头，**吞掉后续真实代码**（症状是把域解析成常量名本身）；改为逐字符扫描
+  ③ `hostDomainOps()` 只认带引号的域键，而主数据域按 ADR-002 N4 用**裸标识符**（`product: {`）→ 返回空数组。
+  另新增：manifest 声明的 op 必须都存在且**都被真实调用**（多声明 / 少声明都算缺口）、岛内禁 `eval`/`new Function`/
+  xlsx、禁直连 `electronAPI`、`manifest.version == package.json.version`、**dist 与 src 的 db 调用点一致**（防产物陈旧）。
+  变异测试 **14/14 命中**（+1 条等价改写对照），且脚本带「基线必须绿」「收工必须复原」两道自检 ——
+  上一轮某条变异的残留曾让下一轮对照直接变红，而 `git status` 看不见（岛目录整体未跟踪）。
+- **发布与真机**：`market-out/product-library-1.0.0.zip`（`sha256 5d79e293…`，catalog 含 6 个插件）；
+  按「下载 → 校验 sha256 → 解压落盘」的真实安装路径装到 userData 后跑真机冒烟 **6/6** 岛通过
+  （侧栏出现「产品库（UI 岛）」，握手 + 首屏 3398B 非空，重启恢复到上次所在岛）。
+- **已知缺口（如实记）**：导入的第一步是主进程弹**系统文件框**，CDP 驱不动 ——
+  "点导入 → 选一个真实 500 行 xlsx → 预览出 490/10"这条**没有端到端自动验证**，
+  被拆成前后两半分别覆盖（卡面之前：`tests/productImport.spec.ts` 24 例；卡面之后：`product:smoke`），
+  中间那次「宿主读 xlsx」由 order-insight / excel-copy 的既有链路覆盖。端到端仍需人工点一次。
+
+### Added · 「按订单试算」：订单（收货国家 + 商品ID）× 商品重量 × 运价表 → 逐单实际运费
+
+- **数据源头补齐**（此前三段数据都在但都没接上）：
+  - 商品重量：新表 `pl_item_weights`（商品ID → 克），由速卖通「商品信息」Excel 导入
+    （`src/lib/productWeight.ts`：列名语义匹配、表头位置不写死、kg/g 按列名判、同 ID 后到先得；
+    宿主 op `importProductWeights` 逐张 sheet 探测、取条数最多的一张）。重量挂**商品ID** 而非
+    `pl_products.code`：商品ID → 产品的映射属产品库 P3，提前进款表等于替 P3 造口径不明的字段。
+    > ⚠️ **以上整条链路已于 2026-10-01 删除**（用户领域裁定：克重是 SKU 属性，改挂 `pl_variants.weight_g`，
+    > 在「货与成本」按 SKU 维护）。上面点名的那个纯函数文件随之删除、**现在不存在** ——
+    > 本段是**删除记录**，不是"该文件在这里"。原文保留不改写，只为让后来者对得上当时的决策。
+  - 订单目的地：`oi_orders.raw_fields`「收货国家」多键名回落提取；国名 → 运价表国家行**直接对表解析**
+    （`src/lib/shipRateOrders.ts`：归一化 + 以运价表实际写法为准的少量别名 + ≥4 字符才启用前缀包含），
+    不另维护国名映射表。
+  - 订单原始行：新只读通道 `order-shipping-rows`（`oi_orders` 最小投影 `id/order_no/raw_fields`）——
+    `listOrdersPage` 刻意不带 raw_fields，这里单独开口且大载荷到宿主为止。
+- **逐单计价**：`quoteOrders` 复用 `shipRateQuote` 的选卡/币种拒算/取整口径（不另写实现）；拒算分五类
+  （缺重量 / 无国家 / 表没该国 / 该克重无价 / 未接汇率），**逐行携带 `reasonClass`** 供岛分桶展示。
+  ⚠️ 数量刻意按 **1 件/行**：多产品订单拆行后每行仍带原始「数量」列值，用它会把 3 件拆 3 行按 3 件算
+  （3×3 错算）；多件口径留待 UI 明确选择后再做（PLAN §8 第 6 项）。
+- **岛侧**（`shipping-rate` → **1.1.0**）：新增「按订单试算」页（重量表导入 + 逐单结果，五类拒算分 chip）；
+  `db` 域 actions 增 `importProductWeights` / `productWeightStats` / `quoteOrders`。
+- **验证**：`tests/shipRateOrders.spec.ts` 23 例全绿（累计 332）；变异测试 **7/7 变红** ——
+  其中两条现形的是**测试问题而非实现问题**：对称交换计数器不破坏汇总断言（补 `reasonClass` 行级绑定）、
+  别名与前缀包含互为兜底（改用只有该路径能到达的用例：`UK` 两字符、`United States of America` 带后缀）。
+  真机 CDP 冒烟 5/5 岛 + 新页空库态渲染正确；已发布 `market-out/shipping-rate-1.1.0.zip`
+  （`sha256 50d43f76…4405`，catalog 原地替换 1.0.2）。
+
+### Added · 产品库宿主数据层（产品主数据 + 6 个 IPC 通道 + `product` 能力域）
+
+- **范围**：本轮只做**宿主数据层**。UI 岛（`ui-plugins/product-library`）与订单自动关联未开工；
+  成本维护界面阻塞于 `ae_cost_map` 生效区间改造（见
+  [`docs/decisions/ADR-002-master-data-layer.md`](docs/decisions/ADR-002-master-data-layer.md) Q2）
+  —— **该阻塞已于同日解除**，见下方 Changed 段。
+- **数据层** `electron/product-db.ts`：新增 `pl_products` 表（`code` UNIQUE / `name` / `supplier_id` /
+  `category` / `status` / `note`），含 `ensureProductSchema` / `listProducts` / `getProduct` /
+  `upsertProduct` / `deleteProduct` / `productSummary`。**编码与既有链路同口径**（`oi_styles.code` →
+  `purchase_items.style_code` → `ae_cost_map.style_code`），是后续「店铺商品 ID → 产品」映射与订单自动关联的
+  唯一锚点；编码冲突**明确抛错**，不静默改名或覆盖。厂家**只存 `supplier_id`**，名称从采购域 `suppliers`
+  派生 —— 同一语义不留两个写入者（ADR-002 C1）。
+- **IPC** `electron/product-handlers.ts`：新增 6 个语义化通道 `product-db-ensure` / `-list` / `-get` /
+  `-upsert` / `-delete` / `-summary`，经 `electron/ipc-util.ts` 注册；`preload.ts`、`src/types.ts`、
+  `src/core/services/ipc.ts` 三处同步，`electron/main.ts` 挂载。
+- **能力域** `src/core/plugin/host.ts`：新增 `DB_OPS['product']`（6 op，低于 ADR-002 N5 的 10 上限）。
+- **验证**：新增 `scripts/product-db-smoke.cjs`（`npm run product:smoke`，18 项）—— `better-sqlite3`
+  按 Electron 的 Node ABI 编译，**vitest 无法覆盖 DB 层**，故照 `mail:smoke` 先例用 `electron` 跑冒烟。
+- **文档**：[`docs/features/PRODUCT_LIBRARY.md`](docs/features/PRODUCT_LIBRARY.md) 新增「实施进度」表，
+  标注已落地 / 未开工 / 阻塞项。
+
+### Changed · 成本口径改造：`ae_cost_map` 支持生效区间，手工成本不再被对账导入清掉（P4a / ADR-002 Q2）
+
+- **改造前的真实行为（不是"口径问题"，是数据丢失）**：`ae_cost_map` 是 `style_code TEXT PRIMARY KEY`
+  （一款一行、无生效日），`costMapReplace` 走 `DELETE FROM ae_cost_map` **全表清空**后重灌 ——
+  产品库一开放成本录入，下一次「拿货对账」导入就把用户手填的成本**整表抹掉**；且利润引擎只认
+  "当期一行"，同一款跨两次进货的历史毛利复算不出来。
+- **`electron/ae-db.ts`**：`ae_cost_map` 改 **`(style_code, effective_from, source)` 复合主键**
+  （一款多行、带生效区间；主键含 `source` 才能让同 (款, 生效日) 的 `manual` 与 `purchase` **并存**，
+  再由读取侧定优先级）。新增 `migrateCostMapIntervals()`：SQLite 不能改主键，故走
+  `rename → create → copy → drop`（整体在事务内）；存量行补**基准生效日 `0000-01-01`** ——
+  该值早于任何真实业务日期，保证**迁移瞬间历史订单毛利不变**（若补成 `last_biz_date`，
+  早于该日的订单会取不到成本，属回归）。幂等判定 = `effective_from` 列是否存在。
+  `costMapReplace` 的 `DELETE` 收窄为 `WHERE source='purchase'`；新增 `costMapUpsertManual()`
+  （手工写入，界面归 P4）；`costMapList()` 增出 `effectiveFrom`。
+- **`electron/purchase-db.ts`**：`costSnapshot()` 由 `GROUP BY style_code` + `MAX(biz_date)` 改为
+  **`GROUP BY style_code, biz_date`** —— 这是设计文档漏掉的一环：不改源头的话一款永远只导出一行区间，
+  上面的多行结构白改、验收不可能达成。`lastBizDate` 语义随之从「该款最近一次拿货日」变为「本行的拿货日」。
+- **`electron/ae-engine.ts`**：成本取数由「全表字典」改为**按订单业务日期取区间**
+  （`effective_from <= 订单日` 取最近一条，同生效日 `manual` 优先；无命中**回落最早一条**，
+  不把历史订单判成缺成本）。
+- **零岛侧改动**：`ae-profit` 岛本就渲染 `source` 列，且快照 `lastBizDate` 直接作为 `effective_from`
+  落库 —— IPC 形状、`domains`、manifest 均未变，**未发新版本**。
+- **验证**：新增 `scripts/ae-cost-smoke.cjs`（`npm run ae:smoke`，**13 项全绿**）：老库迁移零丢失 + 幂等、
+  手工行不被对账导入清掉、同 (款, 生效日) `manual` 优先、跨两次进货两笔订单分别按当时成本、
+  快照按拿货日分组（含 `draft` 单必须被排除）、无命中回落最早、汇率变化不影响已取到的成本。
+  `npm run verify` 通过（**未改 IPC 契约**：`ae-handlers` 仍 9 通道）。
+- **未覆盖（勿误认为已解决）**：`ae_rates` 仍无生效区间 → 「改汇率会改变历史毛利」这条**仍在**，
+  归 `ADR-002` Q2 后续范围；手工成本的**写入口**只到数据层（IPC / host op / 界面随 P4 一起做）。
+- **文档**：[`docs/features/PRODUCT_LIBRARY.md`](docs/features/PRODUCT_LIBRARY.md) 出 **v5**（记录 P4a 落地时
+  纠正的 4 处 v4 错误预期，其中「改汇率不影响历史毛利」如实标 ❌ 并移出本阶段验收）；
+  `ADR-002` Q2 删掉已废弃的 `pl_cost_cards` 表名；`DOMAIN_INTEGRATION_PLAN` 的 G5 / D4 / 数据流图 /
+  实体锚点表 / 章节号漂移全部回写；PRODUCT_LIBRARY §11 的「引用方待同步」转为「已同步」记录。
+
+### Added · 新增 UI 岛 `shipping-rate`（无忧物流运费：输入克重 → 算出到每个国家的实际运费）
+
+- **需求**：读物流报价 Excel 的「无忧物流-标准」sheet，输入实际克重（g）→ 列出全部目的国的实际运费；
+  报价单数值会随谈价变更，**必须支持更新运价数据而不改代码**。方案与执行记录见
+  [`docs/plans/SHIPPING_RATE_ISLAND_PLAN.md`](docs/plans/SHIPPING_RATE_ISLAND_PLAN.md)。
+- **数据建模（宿主侧纯函数）**：报价单不是一张二维表，而是 **17 段列结构互不相同的价卡拼在同一张 sheet** 上
+  （268 行 × 40 列）。归一化后为 **184 个国家 / 857 张价卡（791 `perKg` + 66 `firstStep`）**；
+  已逐段验证 **17 段的国家集合两两不交**，故不需要任何优先级/覆盖规则。新增
+  `src/lib/shipRate.ts`（解析，479 行）+ `src/lib/shipRateQuote.ts`（计价，218 行）：
+  按**语义**扫描定位价卡列（不依赖列下标）、两种计价模式共存（`perKg` = 配送服务费元/KG × g ÷ 1000 + 挂号费；
+  `firstStep` = 0.5KG 首重 + ⌈(g−500)÷500⌉ × 续重），且**模式是价卡级属性**——
+  摩洛哥大包 0–5000g 走 `perKg`、5000–30000g 走 `firstStep`。
+- **三类计费**（普货小包 / 非普货小包 / 大包）：按克重自动判定（≤2kg 小包、>2kg 大包）并可手动切换；
+  类别是**集合**（韩国「小包普货&小包非普货计费」同时命中两类）；带仓库前缀的变体（乌克兰「其他仓 / 香港仓」）
+  只做同变体匹配、**不替换**，无前缀变体优先。逐段回溯合并单元格时不得越过类别起点（否则大包会继承小包的 `0~2000g` 档）。
+- **解析容错**：`暂无服务` / 空单元格 = 「该路向不提供服务」（`null`，不是异常），**只有非数值脏数据才记 warning**——
+  修订前会误报 101 条「首重价缺失」，现为 **0 条**。
+- **UI 岛**（`ui-plugins/shipping-rate/`，原生 ESM 手写岛：`dist/` 即源码、**无构建步骤**、零 npm 依赖，
+  与 `excel-copy` / `order-insight` 同形态）：两页签「报价」「运价表」。报价页＝克重输入（局部重绘保焦点/输入法）、
+  筛选、类别手动切换、进位方式（四舍五入 / 进位到分）、复制单国行或整表、克重变更后的「结果已过期」提示；
+  运价表页＝来源信息（文件 / sheet / 导入时间 / 国家与价卡覆盖率）、解析告警、17 段结构表、逐国价卡明细，
+  外加换 sheet 与「两步确认」清空（iframe 内不弹原生 `confirm`）。
+- **能力边界（沿用基线硬约束）**：Excel 解析与费用计算**都在宿主**——新增 db 能力域 `shipping-rate` 的
+  `parseRateSheet` / `quote` 两个 op（`src/core/plugin/host.ts`）；岛内不打包 `xlsx`、不出现
+  `eval` / `new Function`（iframe CSP `script-src 'self'` 无 `unsafe-eval`），岛只做「收集参数 → 调用 → 渲染」。
+  **未新增 IPC 通道**（复用既有 `importExcelByPath` + 动态 `import('xlsx')`），故 `electron/preload.ts` 与
+  `src/types.ts` 的 141 项契约不变。
+- **运价更新流程**：归一化后的运价表落岛自己的命名空间 `modules.shipping-rate`（`useModuleStorage` 同源机制），
+  换版只需在「运价表」页重新导入一次，之后**离线可用**；清空是显式写入 `{table:null, source:null, sheetNames:[]}`
+  （宿主写回是**合并**语义，不能靠「不传」来清空）。
+- **测试与守卫**：新增 `tests/shipRate.spec.ts`（30 例：结构自洽 / 三个算法陷阱 / 计价与边界 / 载荷预算）；
+  夹具 `tests/fixtures/shipping-rate.xlsx` 经 `xlsx` 库切片生成（与源文件**逐格一致**：0 处差异、1714 个数值格，
+  用 openpyxl 生成时曾因 `166.54999999999998 → 166.55` 浮点往返漂移出 90 处差异）；
+  `tests/pluginTriage.spec.ts` 新增 `shipping-rate` 分组（宿主 op 必须真被调用 / 禁 `eval`、`new Function` /
+  禁岛内打包 `xlsx` / 禁岛内对费率字段做算术 —— 只允许显示层面的取整）。
+- **已发布到本地市场**：`market-out/shipping-rate-1.0.0.zip`（24.5 KB，zip 内仅 `manifest.json` + `dist/**` 共 13 条目），
+  `sha256 7b7cfd22…ffb504`（**已被 1.0.1 原地替换，见下方 Fixed 段**），`catalog.json` upsert 后共 5 条；宿主「插件市场」地址填 `http://127.0.0.1:8000/catalog.json`，
+  静态服务用 **`npm run market:serve`**（`scripts/serve-market.mjs`，**别用 `python3 -m http.server`**，原因见下方 Fixed 条目）。
+  发布链路的端到端验收：隔离 userData 起宿主 + CDP 直驱
+  **真实市场 IPC**（catalog 拉取 → sha256 强校验安装 → 落盘仅 `manifest.json` + `dist/**` → 重启后侧栏出现入口 → 岛握手并渲染），14 项断言全绿。
+- ⚠️ **新增手写岛必须在 `.gitignore` 的 `dist/` 规则下加反向例外** `!ui-plugins/<id>/dist/`
+  （裸 `dist/` 匹配任意层级），否则「`dist/` 即源码」的岛会静默不入库。
+
+### Fixed · 「导入运价表」必失败：读错了工作表（报价单在第 10 张，代码却取第 1 张「目录」）
+
+- **症状**（用户实测，2026-09-24）：在「无忧物流运费」岛点「导入运价表」，稳定弹
+  「该 sheet 没解析出运价：未找到任何「运达国家/地区」表头行 —— 该 sheet 不是报价单结构，未解析出任何运价」。
+  文案指向"报价单结构不对"，但**数据本身完全正常**（夹具逐格核对过）。
+- **根因**：运营商报价单是**一本 21 张工作表的工作簿** —— 第 1 张是「目录」，其后 20 条线路各自一张，
+  本岛要用的「无忧物流-标准」在**第 10 张**。而宿主 `parseRateSheet` 在岛没传 sheet 名时写的是
+  `const sheetName = want && sheetNames.includes(want) ? want : sheetNames[0]` —— **回落到第一张**。
+  岛首屏那句「默认取「无忧物流-标准」sheet」的文案一直是**承诺**，实现从没做到。
+  更糟的是失败被归因成"结构无法识别"，用户会去怀疑报价单而不是去看读的是哪张表。
+- **修复**：
+  - `src/lib/shipRate.ts` 新增 `pickRateSheet()` + `DEFAULT_SHEET_HINT`：**逐张体检 + 按语义排序**选表
+    （名称完全相同 > 名称包含且越短越近 > 国家数 > 价卡数 > 工作簿顺序兜底）；国家数为 0 的 sheet
+    不参与排序但**仍作为候选回报**（自动挑错时用户能看到有哪些可选）。
+  - `src/core/plugin/host.ts` 的 `parseRateSheet` 拆开两个语义：`sheetName` = **显式点名**（严格，不存在即报错，
+    不静默改判）、`prefer` = **名称提示**（优先但可回落，用于"换版后 sheet 改名"）；返回值新增
+    `picked` / `candidates`，`table` 在整本都不可用时为 `null`。
+  - 岛侧：导入改传 `prefer`；`store.js` 新增持久键 `lastFile`（上次**打开过**的文件，导入失败时
+    `source` 可能仍是更早的另一个文件）与 `candidates`（体检结果）；「运价表」页把导入失败从**死路**
+    改成可自愈 —— 列出已体检张数、可用工作表（带国家数）按钮、以及标注「非报价单」的全表下拉；
+    列表里也标出每张表的可用性；`switchSheet(sheetName, filePath)` 第二参数用于失败态重试。
+- **验证**：`tests/shipRate.spec.ts` 新增「自动选表」分组（9 例）+ `tests/pluginTriage.spec.ts` 新增
+  2 条守卫（宿主域内不得出现 `sheetNames[0]` 回落、导入必须传 `prefer` 而非 `sheetName`）。
+  **7 条断言已实测「破坏对应实现即变红」**。真机验收（隔离 userData + CDP 直驱岛自身 `api.js`）
+  14 项全绿：自动选中「无忧物流-标准」、184 国 / 857 卡 / 0 告警、21 张表全部回报、
+  点名切表严格生效、点名不存在的表会报错、失败恢复面板可渲染出 3 个候选按钮与 22 个下拉项。
+- ⚠️ **两个过程教训（已写进 `tests/fixtures/generate-fixtures.mjs` 与岛 README §5）**：
+  1. **夹具必须复刻结构，不只是单元格**。旧夹具把报价单放在**第一张**，于是"取第一张"这个错误写法
+     在测试里**恒绿** —— 夹具现已保留源工作簿顺序（首张「目录」+ 一张**能解析但位置更靠前**的
+     「无忧物流-特惠」，否则"取第一张能解析的"也能蒙对）。
+  2. **"默认值"不能靠位置（顺序/下标）**，要靠**语义**。同类写法在 `src/lib/excelParser.ts` 与
+     `extensions/order-insight` 里也存在，但那些是各自功能的**既定契约**（"只读第一个工作表"已写进
+     需求文档），本次未改动。
+
+### Fixed · 「无忧物流运费」切到别的线路就报「表头结构无法识别」：表头版式是一族，不是一种
+
+- **症状**（用户实测，2026-09-25）：在岛的「运价表」页切换工作表到「燕文航空挂号小包」，提示
+  「没解析出运价：分节 1（第 9 行）：表头结构无法识别，整节跳过」。数据完全正常 ——
+  21 张 sheet 里当时只有 **3 张**能解析。
+- **根因**：归一化把表头**写死成 3 行**（类别 / 档位 / 叶子，`hdr` / `hdr+1` / `hdr+2`）。
+  实测源工作簿的表头行数与**上下顺序**都不统一：燕文 / 超级经济 / 顺友 / 4PX 只有 1~2 行，
+  无忧物流-特货标准 / 特货标快是**叶子在上、档位在下**。固定偏移在这些表上会把**数据行**当成叶子行。
+  伴随的三个静默错：`Item 服务费`（= 挂号费的别称，6 张表这么写）整列丢失、报价单单列的
+  「最低计费重量 10g」从未被套用、`无忧物流-特惠` / `超级经济` 是**美元**报价却被按人民币算（差 7 倍）。
+- **修复**（`src/lib/shipRate.ts` / `src/lib/shipRateQuote.ts`）：
+  - 新增 `detectLayout()`：**按角色命中数探测** cat/zone/leaf 三行（行号不写死、不假设上下顺序）；
+    数据区起点 = `max(leafRow, zoneRow) + 1`。探测时「最低计费重量」列**不算叶子命中**
+    （否则表头行被判成叶子行 → 真正的档位行被挤掉 → 整节档位退化成 `[0, 30000]`）。
+  - `leafKind` 补同义词 `Item 服务费` / `操作处理费` / `处理费`，并新增 `minCharge` 种类；
+    `parseZoneRange` 认「两数相同 = 只说上限」且单位按**整段文本**判 kg/g。
+  - `maxG` 改为**本列档位优先于整组限重**（此前摩洛哥的大包按 KG 档会被限重 30kg 吃掉整段首重续重档）。
+  - 新增 `Currency` / `RateCard.currency` 与非本币**拒算**（`QUOTE_CURRENCY = 'CNY'`）：
+    拒算文案与「该重量段无可用运价」**分开**，界面分两枚 chip，不合成一句。
+  - `computeFee` 套用 `minChargeG`（计费克重 = `max(克重, 最低计费重量)`），`QuoteBreakdown` 新增 `chargeG`。
+  - `Category` 新增 `any`（该表不分品类），`pickCard` 里**永远排在最后**：有明确类别的价卡先说话，
+    但任何类别（含强制类别）的查询都能落到它身上。
+  - 新增判据「**同一目的地在一节内占多行** = 行式分档表」→ **整节拒绝**并给出明确文案。
+    这类表（海运大件专线 / 超大件专线 / 优先与特货标准的部分分节）把"该档总价"写在单元格里，
+    会被当成"每 KG 费率"，算出**大两个数量级且不报错**的金额 —— 宁可拒绝，不可产出量纲错的价。
+  - 被拒绝的节不再把它自己的建卡告警（如"挂号费按 0 计"）漏进总表。
+- **岛侧** `ui-plugins/shipping-rate`（`manifest.json` → **1.0.2**）：运价来源新增「报价币种」行与
+  非本币说明条；分节结构表新增「币种 / 最低计费」两列；价卡明细对非 CNY 与 `minChargeG` 打标签
+  （升级前导入的旧运价表没有这两个字段 → 判空跳过，不误报）；查询页摘要拆成「该克重无价」/
+  「未接汇率」两枚 chip，并在全表拒算时给出币种说明。`ui-plugins/shipping-rate/dist/styles.css`
+  补 `.notice`（此前 `ui-plugins/shipping-rate/dist/views/quote.js` 用了未定义的类名，
+  会渲染成无样式裸文本且不报错）。
+- **验证**：21 张 sheet 的可用覆盖率 **3/21 → 19/21**（仅「目录」与「无忧物流-超大件专线-优选仓」为 0 国，
+  属预期）；「无忧物流-标准」核心数字**零回归**（184 国 / 857 卡 / 17 节 / 0 告警）。
+  `tests/shipRate.spec.ts` 39 → **50 例**（夹具新增 5 张不同版式族的真表切片，放在目标表**之后**以保住
+  "报价单不在第一张"的结构）；全量 `npx vitest run` 309 例全绿。
+- ⚠️ **两个过程教训**：
+  1. **同时查出一处真错**：`pickCard` 的强制类别分支漏了 `'any'` 兜底 → 不分品类的表被强制查询判成无价
+     （那条用例当时是**红的**，不是"假守卫"）。已修为 `[forced, 'any']`。
+  2. **变异测试的判据必须先剥 ANSI**。直接匹配 vitest 彩色输出里的 `Tests\s+(\d+) failed` 会**永远匹配不到**
+     （真实行夹着 `\u001b[22m \u001b[1m\u001b[31m`），于是 10 条变异全被误报成"这条断言是假守卫"。
+     剥掉后 10/10 条变异**全部被抓住**。判据写错会把好测试冤枉成假守卫，排查方向完全相反。
+- **已重新上架**：`market-out/shipping-rate-1.0.2.zip`（30.2 KB，仅 `manifest.json` + `dist/**` 共 13 条目）、
+  `sha256 52f61332…74dc`，catalog 第 5 条原地替换 1.0.1（base 仍为 `http://127.0.0.1:8000`）；
+  运行时目录 `<userData>/plugins/shipping-rate` 已重建为 1.0.2；真机冒烟 **5/5 岛通过 + 重启恢复通过**。
+  ⚠️ `market-out/` 是独立 git 仓，本轮**只更新工作区，未 commit / push**，对外分发需另发一次。
+
+### Fixed · 「插件已发布到市场，宿主刷新却看不到」（catalog 被 Chromium 启发式缓存钉住）
+
+- **症状**：`market-out/catalog.json` 已是新内容（磁盘与 HTTP 实测都对、`plugins-scan` 也正常），
+  本地静态服务也没换过，但宿主「插件中心 → 市场」刷新后**仍然只列旧条目**，新插件不出现。
+  用**真实 userData 克隆**起宿主 + CDP 实测复现：宿主拿到的是 6 条两天前的旧目录，且连续两次拉取结果一模一样。
+- **根因**：`downloadFile`（`electron/http-client.ts`，走 Electron `net` = Chromium 网络栈）用裸 `net.request({ method:'GET', url })`，
+  **没有任何缓存指令**；而 `python3 -m http.server` 只发 `Last-Modified`、不发 `Cache-Control`，
+  Chromium 于是套用启发式新鲜度 `freshness = (Date − Last-Modified) × 10%`。catalog 上次改动距今两天
+  → 新鲜期算出 5 小时量级 → 宿主刷新市场**连请求都不发**，直接用两天前的副本。
+  （隔离 userData 的端到端验收之所以全绿，正是因为那份 userData 里**没有历史缓存**——弱验收漏掉的正是这一环。）
+- **修复（两侧都补，缺一不可）**：
+  - 请求端 `downloadFile(url, dest, { noCache: true })` → 带 `Cache-Control: no-cache` + `Pragma: no-cache`，
+    把「直接用缓存」降级为「回源验证」（没变走 304，变了拿新的）；市场侧 catalog 与插件 zip 两处调用点均已传。
+  - 服务端新增 `scripts/serve-market.mjs` / `npm run market:serve`：所有响应 `Cache-Control: no-store`，
+    且**不发** `Last-Modified` / `ETag`（避免 304 复核路径）。
+- **验证**：同一份「缓存里还留着旧目录」的 userData，修复前宿主看到 6 条旧目录、修复后立刻拿到 5 条含
+  `shipping-rate@1.0.0` —— A/B 对照成立。新增守卫 `tests/marketCache.spec.ts`（4 例，市场侧每处
+  `downloadFile` 必须 `noCache:true` / 服务端必须 `no-store` 且不设 `Last-Modified`·`ETag` / 市场侧不得绕过
+  `downloadFile` 自行发请求），并已实测「撤掉修复即变红」。
+- ⚠️ 修复在主进程，**改完必须重启宿主**（dev 模式 `npm run dev` 会重新 `tsc`）才生效。
+
+### Fixed · UI 岛重启后不回到上次所在的岛（启动时序：扫描晚于恢复）
+
+- **症状**：上次停在某个 UI 岛，重启后落在别的模块，要手动点一次；岛本身完全正常（侧栏在、点进去也好）。
+- **根因**：恢复「上次活动模块」用 `pm.has(id)` 判定，而 UI 岛只在 `pm.discoverExternal()` 里登记。
+  原 `onMounted` 里外部插件扫描排在 `await activate(initialId)` **之后**（且是 `void` 不等待）→ 恢复时岛尚未登记
+  → 判假 → 静默回落首个非岛模块。**判假处没有任何日志**，属静默失效（与前两条同类：不报错、只是"不对"）。
+  修：把扫描拆出 `scanExternalPlugins()`，**在恢复之前 `await`**；`activateStartupPlugins()` 单独成
+  `startStartupExternalPlugins()`，仍在恢复之后不阻塞首屏。无存档时的默认落点不变——岛 meta 的 `order` 固定 120，
+  排在所有内建模块之后。`src/core/AppShell.vue`
+- 扩展 `tests/uiIslandBridgeLifecycle.spec.ts`（9 → 11 例）：新增启动时序守卫 —— onMounted 体内「扫描调用点」
+  必须早于「恢复 `lastActiveModuleId`」且必须 `await`；并禁止回退成「扫描+启动合一」的单函数。
+  ⚠️ 该守卫**只在 onMounted 体内**做 `indexOf`：对整个文件 `indexOf('pm.discoverExternal()')` 命中的是函数**定义**，
+  那样把调用挪回恢复之后仍然全绿（实现时已实测踩到，故注释写死在测试里）。
+- 扩展 `npm run plugins:island:smoke`：逐岛点击之后**用同一份 userData 重启一次**，不点任何导航，
+  断言自动回到了最后点开的岛（`[重启恢复]` 段）。已双向验证：修复后 ✓ 回到 `shop-accounts`；把扫描挪回恢复之后 → ✗
+  「重启后没有任何岛被渲染」。
+- 文档：`docs/architecture/UI_ISLAND_INTAKE_CHECKLIST.md` 新增 §3.10 故障条目，§4.1 冒烟说明补重启段，
+  §5 移除该「已知缺口」。
+
+### Fixed · UI 岛「重启后点导航一片空白」（切岛未重建桥 + 打包缺运行时）
+
+- **切岛未重建桥 → 本会话第一个岛能用、之后每个岛永久空白**（用户多次报障的根因，此前几轮修的是握手内部逻辑，
+  故一直没治好）：AppShell 用 `<UiIslandView :plugin-id="activeIslandId">` 渲染岛，而 Vue 会**复用**同位置同类型
+  组件——切岛只换 prop、组件实例与「桥」不重建，旧桥带着**上一个岛的 `expectedOrigin` 与 token** 继续服务：
+  新岛的 `hello` 被判串台丢弃，旧桥补发的 `boot` 又以旧岛 origin 为 targetOrigin，被 `postMessage` **静默丢弃**
+  （规范上 targetOrigin 不匹配不抛错、不打印）→ 新岛永久停在「等待桥握手」；把首屏门控在 boot 之后的岛即整屏空白，
+  而宿主工具条还显示「桥已连接」（旧会话状态）。修：① `src/core/AppShell.vue` 的 `<UiIslandView>` 加
+  `:key="activeIslandId"`（按岛重建组件）；② `UiIslandView.attach()` 改按 `bridgePluginId === props.pluginId`
+  判定，换岛先 `dispose` 再建桥（组件被复用时的自保）；③ `uiBridgeHost` 对「来源与 expectedOrigin 不符」的岛消息
+  留一次性告警（这一类失败过去完全静默，是它反复复发的直接原因）。
+- **打包版所有岛空白（dev 正常）**：`electron/plugin-ui-runtime.js` 是经 `sk-plugin://` 注入 UI 包 HTML 的
+  **桥运行时源码文本**，既不参与 tsc 编译（`tsconfig.electron.json` 的 include 只收 `*.ts`，且用 `allowJs` 搬运会被
+  全文重写），也未进 `electron-builder.yml` 的 `files` → 打包版 asar 内两处候选路径全 miss
+  → `loadRuntimeSource()` 返回 null → 不注入桥 → **所有**岛 `window.__sk` 缺失。修：builder `files` 显式收录该文件
+  （原样分发，不编译）；并在 `loadRuntimeSource()` 全候选 miss 时打一次性 `[ui-island] 桥运行时源码缺失：<候选路径>`
+  ——这条静默路径过去在打包版里连一行日志都没有。
+- 新增接线守卫 `tests/uiIslandBridgeLifecycle.spec.ts`（现 11 例）：钉住「切岛必须重建桥（`:key` + `pluginId` 判定）」
+  「运行时源文件存在且是经典脚本、必须进 builder files、不得交给 tsc 编译」「宿主 `UI_MSG` 与 runtime `TYPE`
+  的消息字面量一致」。
+- 新增一键冒烟 `npm run plugins:island:smoke`（`scripts/ui-island-smoke.mjs`）：复制一份 `<userData>/plugins` 到
+  临时 userData 起隔离宿主 → 用 CDP 逐个点岛 → 断言岛内 `window.__sk` 存在且 `ready` 落地、首屏非空；
+  失败时按「首个岛正常/全部坏」给出定位引导。已在真机验证可复现旧故障（旧代码 3/4 失败）与确认修复（4/4 通过）。
+- 新增 `docs/architecture/UI_ISLAND_INTAKE_CHECKLIST.md`：UI 岛接入 8 步 SOP + 五类检查清单 + 故障速查表
+  （症状→根因→定位→修复）+ 回归验证方法；`AGENTS.md` 增红线 24/25，`PLUGIN_DEVELOPMENT.md` §12 增 12.5 接入自检。
+
+### Fixed · UI 岛（外置插件）冷启动「加载不出数据 + 样式不跟主题」
+
+- **冷启动握手死锁**：iframe 的 `load` 早于 iframe 端 `hello` 到达宿主时，宿主「load 安全网」先发 boot，
+  随后迟到的 `hello` 又轮转 token → 岛**已在途**的首批能力调用被判为串台，而旧实现在 token 不匹配时
+  **静默丢弃且不回包** → iframe 侧 pending 永不 reject，表现为「重启后岛内数据加载不出来，
+  必须点工具条的『重新加载』才恢复」（冷启动必现，非偶发）。
+  修：`hello` 改为**复用同一会话密钥**再发一次 boot（`repostBoot`，不轮转）；token 不匹配的 `call`
+  一律回错误包，不再静默吞掉。`src/core/plugin/uiBridgeHost.ts`
+- **深色主题下岛内原生控件仍是浅色**：`color-scheme` 不是设计令牌，无法随 `--wb-*` 注入；
+  岛里写死 `color-scheme: light`（或完全不声明）时，深色主题下日期选择器 / 下拉弹层 / 滚动条 /
+  复选框仍是浅色——文字与面板都变黑了，只有原生件是白的，即「页面样式跟主题不一样」。
+  修：宿主 boot/theme 载荷下发 `theme.mode`（新增 `currentThemeMode()`），iframe 端运行时
+  `applyTheme` 把它写到 `<html>` 内联样式（内联优先级可覆盖岛内写死的值）。
+  `src/core/plugin/uiBridgeHost.ts` + `electron/plugin-ui-runtime.js`（双端同步，AGENTS 红线 20）
+- **`dispose()` 的 `abort` 发不出去**：`alive = false` 先于 `post(...)`，被 `post` 自身的
+  `if (!alive) return` 守卫吞掉 → 岛内在途调用无法被中止（同属"静默挂起"）。改为先广播再置位。
+  由新增用例 `tests/uiBridgeHost.spec.ts` 抓出。
+- 新增回归守卫 `tests/uiBridgeHost.spec.ts`（7 例，自建 window/document 桩、不引 jsdom）：
+  钉住「hello 不轮转 token」「token 不匹配必回错包」「boot/theme 带 `theme.mode`」「dispose 发得出 abort」。
+
+### Fixed · UI 岛产物（岛内元素级 `color-scheme` 收敛）
+
+- `shop-accounts` **1.4.4**：`AccountEditor.vue` 的 `.date-input` 写死 `color-scheme: light`，**元素级声明会盖过**
+  宿主写在 `<html>` 上的内联主题值 → 深色主题下账号编辑抽屉的日期面板/日历图标仍发白。改为 `inherit`；
+  同时删除 `:global([data-theme='dark']) .date-input` —— 宿主只注入内联令牌、**不同步 `data-theme` 属性**到 iframe，
+  该选择器永不命中（死代码）。
+- `ae-profit` **1.0.2**：`style.css` 的 `@layer components` 日期/时间输入组同因改为 `inherit`。
+- 两岛 `package.json` 版本同步递增，产物已重建；`<userData>/plugins/` 已按「manifest + dist」重装；
+  `market-out/` 已产出 `shop-accounts-1.4.4.zip` / `ae-profit-1.0.2.zip` 并更新 `catalog.json`
+  （**远端仓库未推送**，待人工确认）。
+
+### Removed · 删除样例岛 `sk-ui-starter`（`PLUGIN_TRIAGE_PLAN` T6）
+
+- 该岛与脚手架 `scripts/ui-plugin-template` 内容重复（同为 189 行 / 2 文件），且 README 已自述"样例岛，供参照非脚手架" ——
+  样例无独立价值，**删除**（非"下架"，不再从市场分发）。
+- 清场范围：① 源码包 `ui-plugins/sk-ui-starter/`（`git rm -r`，9 个跟踪文件）；
+  ② 市场产物 `market-out/sk-ui-starter-0.1.0.zip` 与 `catalog.json` 条目；
+  ③ 本机已装副本 `<userData>/plugins/sk-ui-starter`（移入废纸篓，可恢复）。
+- **脚手架保留** `scripts/ui-plugin-template`（`plugin-create.js --ui` 的 `TEMPLATE_UI` 指向它）——
+  `npm run plugins:create:ui <id>` 生成新岛的能力不受影响。`pluginTriage` / `uiIslandThemeTokens` 等守卫按目录动态枚举，
+  无需改动；`ui-plugins/` 现有 4 个岛（`ae-profit` / `excel-copy` / `order-insight` / `shop-accounts`）。
+- 连带回写：`AGENTS.md` §1.9 实例列表、`PROJECT_BASELINE.md` §3/§4/§6、`PLUGIN_ARCHITECTURE.md` §15.6、
+  `CODE_REVIEW_REPORT.md` §5.5、`HOST_REVIEW_2026-09-22.md` §4、`.gitignore` 注释、
+  `ui-plugins/{ae-profit,shop-accounts}/src/style.css` 的模板指引注释。
+- 残留未动（有意）：`<userData>/config.json` 的 `modules['app-shell'].lastActiveModuleId` 若曾指向该岛，
+  由 AppShell 启动时按"模块不存在"回落，无需手改用户态数据。
+
+### Removed · 下架示例外置插件 `sk-hello`（外置示例 · 你好 0.1.0）
+
+- 与本轮删除 `sk-ui-starter` 同一判据：**示例插件无独立价值，且它的市场条目会持续出现在插件市场**。
+- 清场范围：① 本机已装副本 `<userData>/plugins/sk-hello`（移入废纸篓，可恢复）；
+  ② **市场仓**（`market-out/` 是独立 git 仓，远端 `SayakABC/SellerKitPlugin`）删除 `sk-hello-0.1.0.zip`
+  并从 `catalog.json` 摘除条目，**已 commit & push**（`3831453`）。同一提交顺带把上一轮 `sk-ui-starter`
+  的条目也一并下架 —— 上一轮只清了本地工作区，远端市场仍能装到它。
+- **脚手架保留**：`scripts/templates/l2-demo`（`sk-hello` 的源码本体，即 `scripts/plugins-install-demo.js`
+  的 `SOURCE`）—— 删了它 `npm run plugins:demo:install` 会直接坏。需临时复现示例时仍可本地安装。
+- 未动：`scripts/sandbox-smoke.mjs` 里以 `sk-hello` 为名字的夹具（只是 token/命名空间字面量，不依赖该目录）。
+- 连带回写：`PROJECT_BASELINE.md` §2（脚手架旧名改为 `l2-plugin` / `l2-demo`）、
+  `PLUGIN_DEVELOPMENT.md`（市场形态示例在架包）、`docs/plans/PLUGIN_TRIAGE_PLAN.md` §0。
+
+### Removed · 删除 dev 种子 UI 岛 `sk-ui-hello`（UI 岛 Hello 0.2.0）
+
+- 它是 P0 起用于验证的**开发期种子 demo**（manifest 自述"勿发布"），由 dev 启动自动播种，从未进市场。
+- **必须连播种链路一起删**，否则只删 `<userData>` 副本，下次 `npm run dev` 又会被同步回来：
+  ① 本机副本 `<userData>/plugins/sk-ui-hello`（移入废纸篓，可恢复）；
+  ② 种子包 `scripts/poc-ui-hello/`（`dist/` + manifest，未入库）；
+  ③ `electron/plugin-ui-protocol.ts`：`UI_POC_ID` / `seedDevPocPackage()` / `ensurePocPackageSeeded()` 移除；
+  ④ `electron/main.ts`：`ensurePocPackageSeeded()` 调用与 import 移除（`initPluginUiProtocol()` 保留）；
+  ⑤ 连带清掉 `eslint.config.mjs` 与 `.gitignore` 里针对该目录的忽略项。
+- **能力面无变化**：`sk-plugin://` 协议服务、桥 runtime 注入、`UiIslandView` 渲染、PluginCenter 启停/卸载全部保留 ——
+  删的只是"造一个 demo 岛"的便利入口；要再起 demo 用 `npm run plugins:create:ui <id>`（模板 `scripts/ui-plugin-template`）。
+- 连带回写：`PLUGIN_ARCHITECTURE.md` §15/§15.6（状态行 + P0/P1/P2 历史结论加"已不可复现"提示）、
+  `PLUGIN_TRIAGE_PLAN.md` §3 脚注、`UiIslandView.vue` 注释示例。
+
 ## [1.1.0] — 2026-09-22
 
 > 首个**真实发布节点**（文首说明：1.0.x 的四个 tag 全部错位指向 `9ccb73d`，不代表发布）。
@@ -109,7 +2489,7 @@
 
 复查结论见 `docs/reviews/HOST_REVIEW_2026-09-22.md`（六道门禁全绿，但 11 项问题**全部落在门禁盲区**）。
 
-- **已下记模块仍被当作打包候选**：`extensions/` 留档目录里仍有 `src/meta.ts`，于是
+- **已下记模块仍被当作打包候选**：`extensions/` 留档目录里仍有 `meta.ts`，于是
   「有 meta.ts 即模块」的枚举把 `excel-copy` / `order-insight` 重新算成可打包模块 ——
   勾选即占住岛 id（`registerUiIsland` 见 `records.has(id)` 静默 return → 从市场装的岛永远没有侧栏入口，
   AGENTS 红线 23）。现由 `scripts/lib/module-roots.cjs` 的 `isUndocked()`（判据：`ui-plugins/<id>` 存在）

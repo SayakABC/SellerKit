@@ -1,7 +1,7 @@
 # 内置插件盘点与处置方案（PLUGIN_TRIAGE_PLAN）
 
-> **状态**：🟡 执行中 —— T1（`order-insight`）✅、T3（`excel-copy`）✅ 已完成；T2 用户决定**先保留**；T4/T5 待办
-> **生成日期**：2026-09-21（2026-09-22 更新执行记录）
+> **状态**：🟢 已完成 —— T1（`order-insight` 下记）✅、T2（`quick-note` 用户决定保留）✅、T3（`excel-copy` 转 UI 岛）✅、T4/T5（脚手架归位 + 文档回写）✅、T6（`sk-ui-starter` 删除）✅、示例外置插件 `sk-hello` 下架 ✅（均 2026-09-24）
+> **生成日期**：2026-09-21（2026-09-22 / 2026-09-24 更新执行记录）
 > **依据**：`docs/baseline/PROJECT_BASELINE.md`、`AGENTS.md` §1.8/§1.9/红线 23、`docs/reviews/CODE_REVIEW_REPORT.md`（P1-5）、`docs/plans/REMEDIATION_PLAN.md`（R1-5 先例）、`docs/features/PROFIT_TRACKER.md` §10 D1'
 > **目标**：清理无用内置插件，把有用内置插件转为市场分发的 UI 岛
 
@@ -26,8 +26,11 @@
 | 2026-09-22 | **T4 完成**：两处脚手架归位 | `extensions/_template` → `scripts/templates/l2-plugin`、`extensions/sk-hello` → `scripts/templates/l2-demo`（`git mv`，历史连续）；`scripts/plugin-create.js:22` 的 `TEMPLATE_BG` 与 `scripts/plugins-install-demo.js:15` 的 `SOURCE` 已重指向；两脚本用法注释同步 |
 | 2026-09-22 | T4 验证（实跑） | `npm run plugins:create test-x` → `extensions/test-x/` 生成 manifest（`name: "test-x"`）+ index.js（占位符已替换），产物已删除；`SK_USER_DATA=/tmp/sk-demo-check npm run plugins:demo:install` → `/tmp/sk-demo-check/plugins/sk-hello/` 复制 2 文件成功，临时目录已清理 |
 | 2026-09-22 | T4 连带同步 | `scripts/lib/module-roots.cjs`（注释）、`scripts/publish-plugin.js`（用法注释）、`AGENTS.md` §1.9 警示段、`docs/architecture/PLUGIN_ARCHITECTURE.md`（§8.1 / T6 / Phase 3 表）、`docs/architecture/PLUGIN_DEVELOPMENT.md`（§3 模板示例、§8.3 批量发布脚本）的旧路径一并改到新址 |
-| 2026-09-22 | `sk-ui-starter` 非破坏性处置 | 未删除（不可逆且未拍板）：`ui-plugins/sk-ui-starter/README.md` 顶部加声明——**样例岛，供参照非脚手架**，脚手架是 `scripts/ui-plugin-template`；「是否下架」写入 §7 待决策 |
+| 2026-09-22 | `sk-ui-starter` 非破坏性处置 | 未删除（不可逆且未拍板）：给该岛（`ui-plugins/sk-ui-starter/`，**2026-09-24 已删除**）的 README 顶部加声明——**样例岛，供参照非脚手架**，脚手架是 `scripts/ui-plugin-template`；「是否下架」写入 §7 待决策 |
 | 2026-09-22 | **T5 完成**：文档回写 | `README.md` 核心能力表、`PROJECT_BASELINE.md` §2/§3/§4/§6、`AGENTS.md` §1.8/§1.9、`docs/README.md` 索引、`CHANGELOG.md` 条目（未升版本号） |
+| 2026-09-24 | **T6 完成**：`sk-ui-starter` 删除（用户拍板，§7-4） | 「删除」而非「下架」——**全量清场**：① 源码包 `ui-plugins/sk-ui-starter/`（`git rm -r`，9 个跟踪文件）；② 市场产物 `market-out/sk-ui-starter-0.1.0.zip` + `catalog.json` 条目；③ 本机已装副本 `<userData>/plugins/sk-ui-starter`（移入废纸篓）。**脚手架保留**在 `scripts/ui-plugin-template`（`plugin-create.js --ui` 的 `TEMPLATE_UI`），删除的只是与其内容重复的样例岛。连带回写：`AGENTS.md` §1.9、`PROJECT_BASELINE.md` §3/§4/§6、`PLUGIN_ARCHITECTURE.md` §15.6、`CODE_REVIEW_REPORT.md` §5.5、`HOST_REVIEW_2026-09-22.md` §4、`.gitignore` 注释、`ui-plugins/{ae-profit,shop-accounts}/src/style.css` 注释 |
+| 2026-09-24 | **示例外置插件下架**：`sk-hello`（外置示例 · 你好）0.1.0（用户拍板） | ① 本机已装副本 `<userData>/plugins/sk-hello` 移入废纸篓；② **市场仓**（`market-out/` 是独立 git 仓，远端 `SayakABC/SellerKitPlugin`）删除 `sk-hello-0.1.0.zip` + catalog 条目，**commit & push**（`3831453`，顺带把 T6 的 `sk-ui-starter` 条目一并从远端下架——T6 当时只清了本地）；③ **源码脚手架 `scripts/templates/l2-demo` 保留**：它是 `scripts/plugins-install-demo.js` 的 `SOURCE` 硬编码目标，删除会让 `npm run plugins:demo:install` 直接坏（与 T6 的"删样例、留脚手架"同一判据）。连带回写：`PROJECT_BASELINE.md` §2（脚手架旧名 `_template`/`sk-hello` → `l2-plugin`/`l2-demo`）、`PLUGIN_DEVELOPMENT.md`（市场形态示例 zip）、`CHANGELOG.md` |
+| 2026-09-24 | **dev 种子 UI 岛下架**：`sk-ui-hello`（UI 岛 Hello 0.2.0，用户拍板） | 它是 P0 起用于验证的开发期种子 demo（manifest 自述"勿发布"），**从未进市场**。① 本机副本 `<userData>/plugins/sk-ui-hello` 移入废纸篓；② 种子包 `scripts/poc-ui-hello/`（未入库）删除；③ **播种链路一并移除**（否则下次 `npm run dev` 又同步回来）：`plugin-ui-protocol.ts` 的 `UI_POC_ID` / `seedDevPocPackage()` / `ensurePocPackageSeeded()` + `main.ts` 的调用与 import；④ 连带清掉 `eslint.config.mjs` / `.gitignore` 的忽略项。**能力面零变化**：`sk-plugin://` 协议、桥 runtime 注入、`UiIslandView`、PluginCenter 启停/卸载全保留。连带回写：`PLUGIN_ARCHITECTURE.md` §15/§15.6、`PLUGIN_TRIAGE_PLAN.md` §3 脚注、`UiIslandView.vue` 注释、`CHANGELOG.md` |
 | — | T2 | `quick-note` 用户已决定**先保留**（不变） |
 
 **下记 ≠ 删除。** 宿主侧 `electron/order-db.ts` 与 db 能力域 `order-insight` / `purchase` 原样保留（岛照常调用）；
@@ -74,7 +77,7 @@
 - **1 个是 demo**：`quick-note` 源码 124 行，`meta.ts` 自述"最小业务模块示例"。
 - **1 个用户已主动停用**：`excel-copy` 记录在 `plugins.disabled`，且配置为空壳（0 条记录）。
 
-曾有**两个放错位置的脚手架**（`sk-hello` / `_template`，已归位到 `scripts/templates/`）和**一个与脚手架模板重复的市场样例**（`sk-ui-starter`，待拍板）。
+曾有**两个放错位置的脚手架**（`sk-hello` / `_template`，已归位到 `scripts/templates/`）和**一个与脚手架模板重复的市场样例**（`sk-ui-starter`，已于 2026-09-24 删除，见 §0 / §7-4）。
 
 ### 处置矩阵
 
@@ -83,9 +86,9 @@
 | `order-insight` | `extensions/order-insight` | 扩展包·L0 | **ID 冲突，功能已被岛覆盖** | **下记内建 → 让已装的 UI 岛生效** | **P0** |
 | `quick-note` | `src/modules/quick-note` | 内建·L0 | 自述 demo，无真实数据 | 删除，或转为 UI 岛示例 | P1 |
 | `excel-copy` | `extensions/excel-copy` | 扩展包·L0 | 已停用、数据空壳 | **下记内建 + 转 UI 岛（已完成，见 §0/§7）** | P1 |
-| `sk-hello` | ~~`extensions/sk-hello`~~ → `scripts/templates/l2-demo` | 脚手架·示例 | 放置错误（不被构建收录） | ✅ **已归位**（T4，2026-09-22） | P2 |
+| `sk-hello` | ~~`extensions/sk-hello`~~ → `scripts/templates/l2-demo` | 脚手架·示例 | 放置错误（不被构建收录） | ✅ **已归位**（T4，2026-09-22）；其**示例包本体**（市场 zip + 本机安装）已于 2026-09-24 下架，脚手架保留（见 §0） | P2 |
 | `_template` | ~~`extensions/_template`~~ → `scripts/templates/l2-plugin` | 脚手架·模板 | 放置错误，**但被构建脚本硬编码依赖** | ✅ **已归位 + 脚本重指向**（T4） | P2 |
-| `sk-ui-starter` | `ui-plugins/sk-ui-starter` | 市场 UI 岛 | 与 `scripts/ui-plugin-template` 内容重复 | 🟡 部分处置：README 已标注"样例岛"；**是否下架待拍板**（§7） | P2 |
+| `sk-ui-starter` | ~~`ui-plugins/sk-ui-starter`~~ | 市场 UI 岛 | 与 `scripts/ui-plugin-template` 内容重复 | ✅ **已删除**（T6，2026-09-24：源码包 + 市场 zip/catalog 条目 + 本机安装副本一并清场；模板保留在 `scripts/ui-plugin-template`） | P2 |
 
 ---
 
@@ -96,11 +99,11 @@
 | 类别 | 目录 | 判定标志 | App 徽标 | 分发 |
 |---|---|---|---|---|
 | 内建业务模块 | `src/modules/<id>/` | 存在 `meta.ts` | **内建 · L0** | 随宿主 |
-| 随宿主视图插件包 | `extensions/<id>/` | 存在 `src/meta.ts`，manifest `kind: 'view'` | **扩展包 · L0** | 随宿主 |
+| 随宿主视图插件包 | `extensions/<id>/` | 存在 `meta.ts`，manifest `kind: 'view'` | **扩展包 · L0** | 随宿主 |
 | 市场 UI 岛 | `ui-plugins/<id>/` | manifest `kind: 'ui'`，`entry: './dist/index.html'` | **外置 · 视图** | 市场 zip |
 | （L2 后台插件） | `<userData>/plugins/` | manifest 无 `kind`，`entry: './index.js'` | **外置 · L2** | 市场 zip |
 
-> `extensions/` 下**没有 `src/meta.ts`** 的目录（`_template` / `sk-hello`）是第 4 类的脚手架，**不被 registry 收录、不随包分发**——放在这里属于位置错误。
+> `extensions/` 下**没有 `meta.ts`** 的目录（`_template` / `sk-hello`）是第 4 类的脚手架，**不被 registry 收录、不随包分发**——放在这里属于位置错误。
 
 ---
 
@@ -130,9 +133,10 @@
 | `shop-accounts` | 1.4.3 | 9,979 行 / 29 文件 | 1.4.1（待更新） | ✅ **生产级主力**：账号库/企业管理/收件箱，Vite+Vue3+Pinia，含 `manifest.settings` |
 | `ae-profit` | 1.0.1 | 1,783 行 / 9 文件 | 1.0.1 | ✅ 有效（`docs/features/PROFIT_TRACKER.md` 三端方案展示端） |
 | `order-insight` | 1.0.1 | dist 2,450 行 / 16 文件（**无 `src/`，dist 即源码，无构建步骤**） | 1.0.1 | 🔴 **已装但注册被静默跳过**（见 F1） |
-| `sk-ui-starter` | 0.1.0 | 189 行 / 2 文件 | 0.1.0 | ⚠️ 与 `scripts/ui-plugin-template`（同为 189 行 / 2 文件）内容重复 |
+| ~~`sk-ui-starter`~~ | ~~0.1.0~~ | ~~189 行 / 2 文件~~ | — | ✅ **已删除**（2026-09-24）：与 `scripts/ui-plugin-template`（同为 189 行 / 2 文件）内容重复，样例无独立价值（源码包 / 市场 zip / 本机安装副本全清） |
 
-> 另有 `scripts/poc-ui-hello/`（开发期种子 UI 包，dev 模式自动同步为 `<userData>/plugins/sk-ui-hello`，manifest 自述"勿发布"）。
+> ~~另有 `scripts/poc-ui-hello/`（开发期种子 UI 包，dev 模式自动同步为 `<userData>/plugins/sk-ui-hello`，manifest 自述"勿发布"）。~~
+> **2026-09-24 已删除**：该 dev 种子 UI 岛 `sk-ui-hello`（UI 岛 Hello 0.2.0）连种子包与播种链路（`ensurePocPackageSeeded`）一并移除，见 §0 执行记录。
 
 ---
 
@@ -174,13 +178,13 @@
 | `styleMatcher` / `aggregator` | `extensions/order-insight/*` |
 | `excelParser` | `src/core/services/excel.ts`（宿主侧） |
 
-即：**`src/lib/` 的存在主要就是为这两个内置插件服务**。两者都外置化后，`src/lib/` 可大幅瘦身（岛要自带纯函数，`ui-plugins/order-insight/dist/lib.js` 已是这个模式的先例）。
+即：**`src/lib/` 的存在主要就是为这两个内置插件服务**。两者都外置化后，`src/lib/` 可大幅瘦身（岛要自带纯函数，既有的手写岛就是这么做的 —— 它们各自在 `dist/` 下带一份 `lib.js` / `util.js`）。
 
 ### F4 脚手架位置错误 + 两个 UI 岛样例重复 —— ✅ 已处置（T4，2026-09-22）
 
 - `sk-hello` / `_template` 实际运行位置应是 `<userData>/plugins/`，放 `extensions/` 下既不被收录、又和真插件包混淆（基线文档自己也点出了这个语义冲突）。**已迁出** → `scripts/templates/l2-demo` / `scripts/templates/l2-plugin`（`git mv`，历史连续）。
 - **二者都是构建脚本的活依赖**：原 `scripts/plugin-create.js:20` 的 `TEMPLATE_BG` 指向 `extensions/_template`、`scripts/plugins-install-demo.js:15` 的 `SOURCE` 指向 `extensions/sk-hello`。**已同步重指向**（现为 `scripts/templates/l2-plugin` / `scripts/templates/l2-demo`），并已实跑两个脚本验证不坏；连带同步了 `scripts/lib/module-roots.cjs`、`scripts/publish-plugin.js`、`AGENTS.md`、`PLUGIN_ARCHITECTURE.md`、`PLUGIN_DEVELOPMENT.md`、`PROJECT_BASELINE.md` 里的旧路径。
-- UI 岛模板其实在 `scripts/ui-plugin-template`（`plugin-create.js` 的 `TEMPLATE_UI`），与 `ui-plugins/sk-ui-starter` 内容重复 —— **本轮只做非破坏处置**（README 标注"样例岛"），是否下架待拍板（§7）。
+- UI 岛模板其实在 `scripts/ui-plugin-template`（`plugin-create.js` 的 `TEMPLATE_UI`），与 `ui-plugins/sk-ui-starter` 内容重复 —— 2026-09-22 只做非破坏处置（README 标注"样例岛"）；**2026-09-24 用户拍板删除**，重复的一方（`sk-ui-starter`）清场，模板保留（§0 T6 / §7-4）。
 
 ### F5 文档已多处漂移（清理前后都应回写）
 
@@ -239,7 +243,7 @@
 | 选项 | 动作 | 代价 |
 |---|---|---|
 | **A. 删除**（推荐） | 删 `src/modules/quick-note/` + 从 `profiles.standard`/`pro` 移除 | **副作用**：`src/modules/` 变空 → `scripts/lib/module-roots.cjs` 的 `modules` 根失去实例（机制仍在，但基线文档 §2/§4 需改写；「内建模块」这条路径将无活样例） |
-| B. 转为 UI 岛示例 | 迁到 `ui-plugins/`（可顺带取代内容重复的 `sk-ui-starter`） | 岛无 `icon` 字段，侧栏图标会固定成 `box` |
+| B. 转为 UI 岛示例 | 迁到 `ui-plugins/`（原可顺带取代内容重复的 `sk-ui-starter`，后者已于 2026-09-24 删除，此路已不成立） | 岛无 `icon` 字段，侧栏图标会固定成 `box` |
 | C. 保留 | 不动 | 继续作为机制样例维护 |
 
 > 若选 A，建议同时把"内建模块 SOP"的活样例改由文档承载，或明确 `src/modules/` 为"预留路径、当前无实例"。
@@ -254,7 +258,7 @@
 |---|---|---|
 | **A. 保留内置** | 不动 | 0 |
 | **B. 转 UI 岛**（若确认在用） | ① 岛内自带 `templateEngine`/`fieldProcessor`（纯函数，可直接拷）；② Excel 解析走宿主已有的 `db.parseExcel` / `exportWorkbook`（`order-insight` 岛已验证该路径）；③ 剪贴板走 `clipboard` 能力域（注意动作名是 `write`）；④ 设置面板迁到 `manifest.settings`（`shop-accounts` 已验证该机制）；⑤ 旧扁平 key 数据需一次迁移 | 中等：约 1,853 行移植 + 权限声明 + 配置迁移 |
-| **C. 删除** | 删包 + 从 profile 移除 | 需处理 `src/lib/templateEngine.ts` / `fieldProcessor.ts` 失去唯一消费者（可一并删） |
+| **C. 删除** | 删包 + 从 profile 移除 | 需处理 `templateEngine` / `fieldProcessor` 失去唯一消费者（可一并删）。✅ **已收口（2026-10-05）**：`templateEngine` 随孤儿代码清理删除（宿主侧那份已无人调用，岛自带副本）；`fieldProcessor` **保留** —— excel-copy 岛的 `applyRules` 仍在宿主 `db` 域里复用它 |
 
 > **判据建议**：若"Excel→模板→复制"仍是主业务链路，选 B；若已被 `order-insight` / `ae-profit` 取代，选 C。**这一条我不替你决定**——`plugins.disabled` 里它是被停用的，但可能只是试过启停按钮。
 
@@ -267,7 +271,7 @@
 3. 改 `scripts/plugin-create.js:20` → `TEMPLATE_BG = path.join(ROOT, 'scripts', 'templates', 'l2-plugin')`
 4. 改 `scripts/plugins-install-demo.js:15` → `SOURCE = path.resolve(__dirname, 'templates', 'l2-demo')`
 5. `npm run plugins:create test-x` 与 `npm run plugins:demo:install` 各跑一次验证不坏
-6. 顺带处置 `ui-plugins/sk-ui-starter`：与 `scripts/ui-plugin-template` 重复 → 从市场下架，或保留但 README 标明"样例岛，供参照非脚手架"
+6. ✅ 顺带处置 `ui-plugins/sk-ui-starter`（2026-09-24，T6）：与 `scripts/ui-plugin-template` 重复 → 用户拍板**删除**（源码包 + 市场 zip/catalog 条目 + 本机安装副本），模板保留
 
 ### T5 · 文档回写（P2）—— ✅ 已完成（2026-09-22）
 
@@ -296,7 +300,7 @@
 | 1 | `excel-copy` | **转为 UI 岛** | ✅ 已完成：岛 1.0.0 已发布（`market-out/excel-copy-1.0.0.zip`），内建包已从 `minimal`/`standard`/`pro` 三处下记，id 已释放 |
 | 2 | `quick-note` | **先保留** | ✅ 维持现状（`src/modules/` 保留活样例，`module-roots.cjs` 的 modules 根不悬空） |
 | 3 | `order-insight` | **下记内建，达到"市场安装可用 + 功能完善"** | ✅ 下记已完成（1.1.0 发布）；内建能力缺口已于 1.2.0 **全部补齐并清零**（见 §0） |
-| 4 | `ui-plugins/sk-ui-starter`（与 `scripts/ui-plugin-template` 内容重复） | **待用户决定**：① 从市场下架；② 保留但仅作样例岛 | 🟡 未拍板。本轮已做非破坏处置：README 顶部标注"样例岛，供参照非脚手架，脚手架是 `scripts/ui-plugin-template`"。**删除/下架不可逆，需用户拍板** |
+| 4 | `ui-plugins/sk-ui-starter`（与 `scripts/ui-plugin-template` 内容重复） | **用户拍板：删除**（选项 ① 下架 → 升级为③ 源码包一并删） | ✅ 已完成（2026-09-24，T6）：`ui-plugins/sk-ui-starter/` 源码包删除、`market-out/sk-ui-starter-0.1.0.zip` 与 catalog 条目移除、本机 `<userData>/plugins/sk-ui-starter` 卸载；**脚手架保留** `scripts/ui-plugin-template`（删除的只是重复样例）。连带文档回写见 §0 |
 | 5 | `npm run plugins:create <id>` 的 L2 产物落点仍是 `extensions/<id>/` | **待用户决定**：是否一并迁出（如 `plugins/<id>/`），使 `extensions/` 彻底只含随宿主分发的视图插件包 | 🟡 未拍板。本轮按计划**只搬模板与示例、未改落点**（落点变更影响 `.gitignore` / 文档 / 用户习惯，改动面更大）。现状已在 `AGENTS.md` §1.9 与本文档 §2 注明 |
 
 ### 术语：什么叫「下记内建」

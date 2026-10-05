@@ -1,7 +1,7 @@
 # SellerKit 整改计划（REMEDIATION_PLAN）
 
 > **依据**：[`../reviews/CODE_REVIEW_REPORT.md`](../reviews/CODE_REVIEW_REPORT.md)（31 项发现：1×P0 + 13×P1 + 17×P2）
-> **状态**：📋 已制定，待执行
+> **状态**：🟢 **25 / 27 任务已完成**（Phase 0–3 全部关闭；Phase 4 只剩 `R4-2`「补写 USER_GUIDE 缺失章节」，`R4-6` 的 `LICENSE` 待项目方选定协议）。逐任务 commit sha 与遗留标记见 **§8**。
 > **范围**：仅覆盖审查报告的发现项，不含新功能开发
 > **本计划不重复**：规则原文在 [`../../AGENTS.md`](../../AGENTS.md)，现状快照在 [`../baseline/PROJECT_BASELINE.md`](../baseline/PROJECT_BASELINE.md)
 > **原则**：**增量执行、每阶段独立提交、每阶段可验证可回滚**——不搞一次性大改。
@@ -30,7 +30,9 @@
 | **Phase 2** | 扩展模型与工程化护栏 | 7 | C-18, C-19, C-06, C-07, C-12, C-05, C-02† | 把靠人记的规则变成自动化拦截；清扫升级障碍 | 中 |
 | **Phase 3** | 依赖与结构升级 | 5 | C-10, C-11, C-13, C-09 | 摆脱 EOL 依赖；削复杂度 | **高** |
 | **Phase 4** | 文档补齐 | 7 | D-01, D-02, D-03, D-09, D-10, D-11, D-07, C-16 | 补齐缺失文档、消除过期内容 | 低 |
-| — | **合计** | **26** | — | — | — |
+| — | **合计** | **27** | — | — | — |
+
+> 表中 `Phase 2` 的 7 是**制定时**的任务数；执行中新增 `R2-8`（消除源码内嵌裸控制字节，R2-3 执行时发现），故实际总数 **27**。
 
 **Phase 4 可与 Phase 2 / 3 并行**——它只碰 `docs/`，无代码冲突。
 
@@ -227,8 +229,8 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3
 |---|---|
 | **目标** | 为承担 Excel 解析与模板生成核心逻辑的纯函数层建立回归网 |
 | **改动文件** | 新增 `vitest.config.mts`、`tests/`（含 `tests/fixtures/`）；`package.json` 加 `test` / `test:watch` 脚本 |
-| **动作** | 阶段一（优先）覆盖：`src/lib/excelParser.ts`、`src/lib/templateEngine.ts`、`src/lib/fieldProcessor.ts`；<br>阶段二：`orderRowSplitter` / `aggregator` / `orderClassifier` / `styleMatcher`。<br>**夹具自建**：不要依赖根目录的 `导出测试.xlsx`（它被 `.gitignore` 忽略，CI/他机不可用），改为在 `tests/fixtures/` 放小型自造 Excel + 期望输出 |
-| **验收** | ① `npm test` 全绿；② 故意改坏 `templateEngine` 的占位符替换逻辑，测试必须失败（验证测试真的在断言） |
+| **动作** | 阶段一（优先）覆盖：`src/lib/excelParser.ts`、`src/lib/fieldProcessor.ts`、`templateEngine`（**已于 2026-10-05 随孤儿代码清理删除，该项作废**）；<br>阶段二：`orderRowSplitter` / `aggregator` / `orderClassifier` / `styleMatcher`（其中 `aggregator` 同样已随该次清理删除）。<br>**夹具自建**：不要依赖根目录的 `导出测试.xlsx`（它被 `.gitignore` 忽略，CI/他机不可用），改为在 `tests/fixtures/` 放小型自造 Excel + 期望输出 |
+| **验收** | ① `npm test` 全绿；② 故意改坏 `templateEngine` 的占位符替换逻辑，测试必须失败（验证测试真的在断言）——**当时已执行通过**；该模块已于 2026-10-05 删除，此条不复可做 |
 | **风险** | 低。纯函数无副作用、无 DOM、无 IPC，是成本最低的测试切入点 |
 | **回滚** | 删除 `vitest.config.mts` + `tests/` + 还原 `package.json` |
 
@@ -249,7 +251,7 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3
 | 项 | 内容 |
 |---|---|
 | **目标** | 消除"视图插件包 / 外置插件脚手架"混放导致的判定歧义 |
-| **现状** | `extensions/` 下三类内容：①`excel-copy`/`order-insight`/`shop-accounts`（有 `src/meta.ts`，被 registry 收录）②`ae-profit`（R1-5 处置）③`_template`/`sk-hello`（`entry: ./index.js`、无 `src/meta.ts`，不被收录） |
+| **现状** | `extensions/` 下三类内容：①`excel-copy`/`order-insight`/`shop-accounts`（有 `meta.ts`，被 registry 收录）②`ae-profit`（R1-5 处置）③`_template`/`sk-hello`（`entry: ./index.js`、无 `meta.ts`，不被收录） |
 | **动作（方案 A，推荐）** | 把 ③ 类移到独立目录（如 `scaffolds/plugin/` 与 `examples/plugins/sk-hello/`）；同步更新 `scripts/plugin-create.js` 的模板路径与 `scripts/plugins-install-demo.js` |
 | **动作（方案 B，最小改动）** | 目录不动，仅在 `AGENTS.md` 中固化判定规则（**已在本次审查中完成**：§1.9 + 红线 23），并加 `.gitignore` 注释说明 |
 | **验收** | 方案 A：`npm run plugins:create test-demo` 脚手架生成到新位置且能装到 `<userData>/plugins/`；`npm run plugins:demo:install` 正常；`node scripts/select-build.js --list` 仍输出 4 项 |
@@ -551,4 +553,5 @@ Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3
 | D-11 | 🟡 P2 | R4-4 | 4 |
 | D-12 | 🟡 P2 | R4-7 | 4 |
 
-> 已完成 5 项（`C-17` / `D-04` / `D-05` / `D-06` / `D-08`），剩余 **26 项** 对应本计划的 26 个任务（`R0-0` 为前置准备，不含发现项）。
+> 发现项侧：`C-17` / `D-04` / `D-05` / `D-06` / `D-08` 5 项在制定计划时已顺手修掉，其余 26 项各对应一个任务。
+> 任务侧：**27 个任务中 25 个已完成**，`R4-2` 未开始、`R4-6` 部分完成（`LICENSE` 待定）。

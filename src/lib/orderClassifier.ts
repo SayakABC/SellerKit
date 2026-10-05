@@ -39,16 +39,76 @@ const COLOR_SYNONYMS: Record<string, string> = {
   多色: '印花',
 };
 
+/**
+ * 标准色名词表 —— **唯一真相源**，两处消费者：
+ *   ① `VISION_PROMPT` 让模型从这里选（枚举是**注入**的，不是再抄一份）；
+ *   ② 核对页的输入建议（`ClassifyPanel` 的 datalist）。
+ *
+ * 刻意**由字典的值域派生**而不是手写一份：手写就会出现"字典能归一成 A、词表里却没有 A"
+ * 的漂移 —— 症状是提示词让模型选一个归一化认不出的词，于是又原样穿透、颜色照样分裂。
+ * 顺序即字典值域的出现顺序（藏蓝/宝蓝/浅蓝/蓝色…），没有别的含义。
+ */
+export const COLOR_WHITELIST: readonly string[] = [...new Set(Object.values(COLOR_SYNONYMS))];
+
 /** 去掉多余空白，去除内部空格 */
 export function normalizeText(v: string): string {
   return (v || '').trim().replace(/\s+/g, '');
 }
 
-/** 颜色归一化：命中同义词映射则替换，否则原样返回 */
+/**
+ * 颜色描述里的**分段**字符：`底色+花色` 的 `+`、顿号/斜杠，以及「底/配/带/和/与」这类连接字。
+ * 与 `VISION_PROMPT` 里"多色按 `底色+花色` 写、底色在前"的约定成对 —— 改一处要改两处。
+ */
+const COLOR_SPLIT_RE = /[+/|｜、,，]|底|配|带|和|与/;
+
+/**
+ * 一段（已按分段符切开）颜色文本 → 标准名；认不出返回空串。
+ *
+ * 三段，从严到宽：
+ *   ① 整段命中同义字典（`黑` → `黑色`）；
+ *   ② 整段命中词表（大小写/全角变体归并）；
+ *   ③ **前缀回退**：识别结果常把主色当短语的开头（`白条纹`、`军绿色`、`藏蓝白条纹`），
+ *      按最长前缀逐级试。为什么不扫"任意位置"：那会把 `灰蓝色` 判成 `蓝色`
+ *      （前缀给 `灰色`）—— 我们的约定是**主色在前**，宁可认不出也不猜。
+ */
+function colorFromSegment(seg: string): string {
+  const s = normalizeText(seg);
+  if (!s) return '';
+  const direct = COLOR_SYNONYMS[s];
+  if (direct) return direct;
+  const hit = (t: string): string =>
+    COLOR_WHITELIST.find((c) => fullToHalf(c).toLowerCase() === fullToHalf(t).toLowerCase()) ?? '';
+  const exact = hit(s);
+  if (exact) return exact;
+  // 前缀回退：最长 3 字（现有标准色名最长 3 字：香芋紫 / 咖啡色 / 燕麦色）
+  for (let n = Math.min(s.length - 1, 3); n >= 1; n--) {
+    const whole = COLOR_SYNONYMS[s.slice(0, n)];
+    if (whole) return whole;
+    const pre = hit(s.slice(0, n));
+    if (pre) return pre;
+  }
+  return '';
+}
+
+/**
+ * 颜色归一化：字典 → 词表 → **描述式解析**（分段取第一个认得出的）→ 原样保留。
+ *
+ * 为什么要有描述式这一段：提示词曾要求模型写「底色+花色」的描述（`藏蓝底白色条纹`），
+ * 而归一化只做**整串**字典精确匹配 ⇒ 描述式**原样穿透**，同一个颜色两次措辞不同就成两个款色
+ * （"颜色口径两头打架"）。现在两头对齐：提示词优先让模型选枚举、确要多色时按 `底色+花色` 写，
+ * 归一化按同一约定**只取底色**。
+ *
+ * ⚠️ 认不出来时**原样保留**，不强行归类：颜色是款色（SKU 级）的区分维度，错并（两色合一色）
+ * 比拆（一色成两色）更难发现、更难回退。
+ */
 export function normalizeColor(v: string): string {
   const t = normalizeText(v);
   if (!t) return '';
-  return COLOR_SYNONYMS[t] || t;
+  for (const seg of t.split(COLOR_SPLIT_RE)) {
+    const hit = colorFromSegment(seg);
+    if (hit) return hit;
+  }
+  return t;
 }
 
 /** 视为"空值"的识别结果（款式归一化时丢弃） */
@@ -105,7 +165,15 @@ const CATEGORY_ALIASES: Record<string, string> = {
 
 /**
  * 款式归一化：清空不合法值；白名单精确命中归并（大小写/全角变体）；
- * 命中别名映射则替换；未命中保留原词（不做强行归类，避免错误合并）。
+ * 命中别名映射则替换；**未命中保留原词**（不做强行归类，避免错误合并）。
+ *
+ * ⚠️ "未命中保留原词"是刻意的：品类是指纹的**第一段**（`buildStyleFingerprint`），
+ * 错并（两款合一款）比拆款更难发现。但它不等于"静默"—— 词表通过与界面建议两条路可见：
+ *   ① `CATEGORY_WHITELIST` 直接注入 `VISION_PROMPT`（模型只会从里面选）；
+ *   ② 核对页的品类输入带 datalist 建议（标准词表 + 本库已用过的写法），用户能看见系统里
+ *      已经有哪些写法 ⇒ 第二次遇到同一个词时选中同一个，而不是各写各的。
+ * 加品类只能加在**这两处同源的地方**，别在别的分支里悄悄合并。
+ *
  * @param v 识别结果中的 category 原词
  * @returns 归一化后的款式名；空值返回 ''
  */

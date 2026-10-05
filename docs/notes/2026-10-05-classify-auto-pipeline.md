@@ -16,6 +16,11 @@
 > **②③ 两个缺口仍在**（颜色口径两头打架、品类白名单未命中静默保留原词），
 > 而 ④（`confidence` 无消费者）与"`logo` 不进指纹且无下游"**在回流落地后依然不是瓶颈**
 > —— 回流把绝大多数重复订单从"每次都判"变成"配一次"，在这之后 `confidence` 才有意义（用来决定**哪些**要给人看）。
+>
+> **2026-10-05 深夜续二：②③ 已治**（颜色口径收成一份 + 品类的"未命中"不再静默），见 §六。
+> ④（`confidence`）与 `logo` 仍排最后，理由不变。**另有一条重要的口径提醒**：②③ 改的是
+> **L2 的归一口径**，而 L2 今天仍无入口 ⇒ 这两条修的是"等 L2 回来时它是对的"，**不是**今天的收益；
+> 今天真实的收益来自同一轮里给核对页加的**输入建议词表**（让同一个词别各写各的）。
 
 ## 一、三层链路（现状，均已取证）
 
@@ -24,7 +29,7 @@
 | **L0 确定性** | 商品ID → 款 + 色（`pl_shop_sku`，只认 `status='confirmed'`） | `resolveOrderSku` → `autoAssignByMap` | **写时**：订单落库那一刻（`order-db.ts:1062` 附近） |
 | **L0 回填** | 配完映射回头补存量未归款的订单 | `reassignOrdersByItemIds`（`order-db.ts:1117` 附近） | 映射写入成功后自动跑 |
 | **L1 指纹** | `category + features` 归一化后算指纹；人工"点名某款"会把该指纹**记入该款** | `buildStyleFingerprint`（`styleMatcher.ts:33`）+ `oi_style_fingerprints` 表 | 识别落库 / 人工保存时 |
-| **L2 模型** | VLM 出 `category / features / color / logo / style_name` → 归一化 | `createVisionEngine` → `classifyResult`（`orderClassifier.ts:195`） | 只在被调用时（现无入口） |
+| **L2 模型** | VLM 出 `category / features / color / logo / style_name` → 归一化 | `createVisionEngine` → `classifyResult`（`orderClassifier.ts` 末尾） | 只在被调用时（现无入口） |
 
 **L0 已升到「款 + 色」级**（颜色存 `pl_shop_sku.spec`），背景见
 [商品ID 映射带上颜色](2026-10-05-mapping-carries-color.md) —— 也就是说**"品类 + 颜色"对已配映射的
@@ -54,23 +59,25 @@
 ⚠️ 踩到的一个假绿：提示断言**不能**在"通道被调用"那一刻取 DOM —— 假桥是同步记录调用的，
 而那时刻 toast 还没进 DOM，反向断言会因此在"没渲染"与"没有那句话"之间恒绿。
 
-### 2. 颜色口径**两头打架**（prompt 要描述式，归一化要字典式）
+### 2. 颜色口径**两头打架**（prompt 要描述式，归一化要字典式）—— ✅ **已治（2026-10-05 深夜续二，见 §六）**
 
-- prompt 要的是"底色 + 花色"描述，示例 `藏蓝底白色条纹`（`openaiCompatible.ts:41`）；
-- 归一化是**整串精确字典匹配**：`COLOR_SYNONYMS[t] || t`（`orderClassifier.ts:48`）。
+- prompt 要的是"底色 + 花色"描述，示例 `藏蓝底白色条纹`（当时在 `openaiCompatible.ts` 的
+  `VISION_PROMPT`，现已搬到 `visionPrompt.ts`）；
+- 归一化是**整串精确字典匹配**：`COLOR_SYNONYMS[t] || t`（`orderClassifier.ts` 的 `normalizeColor`）。
+  ⚠️ 下面几处只写**函数名**不写行号：本文件在 2026-10-05 续二里改过，行号会漂。
 
 ⇒ 凡是模型按 prompt 输出的描述式颜色，**一律原样穿透**（既没归并、也没报错），
 `oi_style_colors` 会随措辞长出无穷款色。
 
-### 3. 品类白名单**未命中就静默保留原词**
+### 3. 品类白名单**未命中就静默保留原词** —— ✅ **已治（2026-10-05 深夜续二，见 §六）**
 
-`orderClassifier.ts:118`：`return exact || t` —— 白名单外的新词**不告警、不标记**，直接成为新指纹 ⇒
+`normalizeCategory` 的 `return exact || t` —— 白名单外的新词**不告警、不标记**，直接成为新指纹 ⇒
 同款拆成多款（而这一层的代价很贵：拆了之后 L0 的款编码也跟着分叉）。同理 `features` 完全自由生成，
 "字母印花 / 印花字母 / 字母图案"三种措辞 = 三个指纹。
 
 ### 4. `confidence` 解析了但**没有任何消费者**
 
-`RecognitionResult.confidence` 有产出（`openaiCompatible.ts:277`），全仓 `grep confidence` 找不到
+`RecognitionResult.confidence` 有产出（`openaiCompatible.ts` 的 `analyze()` 里 `Math.min(1, ...)`），全仓 `grep confidence` 找不到
 读取方 ⇒ 差得离谱的结果与稳稳正确的结果走**同一条落库路径**。
 
 ### 附带两条（不属于"识别质量"，但同属这条链路）
@@ -140,4 +147,62 @@
   变异 `focusRowIdx: idx → idx + 1` 在那之后当场变红。
 - **主进程侧的口径只能由数据层冒烟守**（`npm run order:smoke`）：假桥里的 `itemId` 是**夹具给的**，
   宿主忘了 select `raw_fields` 时 `today:ui` 照样全绿（夹具"太干净"把真实缺陷盖住了）。
+
+## 六、②③ 的口径收成一份 + 核对页能选（2026-10-05 深夜续二 已落地）
+
+### 6.1 颜色：两头对齐，而不是把宽的那头砍掉
+
+原状：prompt 要「底色+花色」的描述（示例 `藏蓝底白色条纹`），归一化做**整串**字典精确匹配 ⇒
+描述式**原样穿透**，同一个颜色两次措辞不同就成两个款色。
+
+修法是**两头都动**（只动一头必留缝）：
+
+| 头 | 改法 |
+| --- | --- |
+| 提示词 | `color` 字段改为**注入** `COLOR_WHITELIST`（枚举），并明确"分不清主次的多色选`印花`；确要表达配色按 `底色+花色` 写且**底色在前**" |
+| 归一化 | `normalizeColor` 升级为 **字典 → 词表 → 描述式解析 → 原样保留**：按 `+ / 、 底 配 带 和 与` 分段，逐段做"整段精确 + **最长前缀回退**"，取**第一个**认得出的段（即底色） |
+
+三条刻意的取舍：
+
+1. **词表由字典的值域派生**（`[...new Set(Object.values(COLOR_SYNONYMS))]`）而不是手写一份 ——
+   手写必然出现"字典能归一成 A、词表里没有 A"，那正是同一个病换个地方复发。
+2. **不做"任意位置"扫描**：`灰蓝色` 判成 `灰色`（主色在前），不是 `蓝色`。扫任意位置等于全靠猜。
+3. **认不出仍原样保留**：颜色是款色（SKU 级）的维度，**错并**（两色合一色）比**拆**（一色成两色）
+   更难发现、更难回退 —— 宁可拆。
+
+### 6.2 品类：不强行合并，但**不再静默**
+
+`normalizeCategory` 的 `return exact || t` 保持不变（品类是**指纹第一段**，错并比拆贵得多）。
+"静默"由**两条可见的路**治掉：
+
+- `CATEGORY_WHITELIST` 现在**直接注入** `VISION_PROMPT`（模型只会从里面选，不再有"第二份列表"）；
+- 核对页的品类输入挂 **datalist 建议 = 标准词表 + 本库已用过的写法** ⇒ 用户看得见系统里已经有哪些写法，
+  第二次遇到同一个词时**选中同一个**，自己不声不响地收敛。
+  ⚠️ 刻意**不把用户输入悄悄改写成词表里的词**：那才是真正的"静默改判"，比写得不一致更难查。
+  词表里覆盖不到的现实品类（帽子 / 汉服 / 围巾）就靠"库内写法"这一半收敛。
+
+建议列表里**排除了「其他」**：它在 `EMPTY_LIKE` 里属空值语义（归一化后是空串、不进指纹），
+把它列成可选值等于教用户选一个会被清空的词。
+
+### 6.3 ⚠️ 一条通用约束：提示词必须住在**纯模块**里才能被单测
+
+`VISION_PROMPT` 原在 `src/core/ai/openaiCompatible.ts`，而那个文件 `import '@/core/network/request'`
+→ `src/core/services/ipc.ts` **顶层就求值 `window.electronAPI`** ⇒ **node 环境的 vitest 一 import 就抛**。
+于是"提示词的枚举必须与归一化词表同源"这条不变量只能退化成"扫源码文本"（模式写歪就恒绿）。
+
+现在提示词在 `src/core/ai/visionPrompt.ts`（只依赖 `@/lib/orderClassifier` 这个纯函数），
+`tests/visionPrompt.spec.ts` 可以直接断言 `VISION_PROMPT` 里含的正是 `COLOR_WHITELIST.join('|')` 的结果。
+**别把它挪回 `openaiCompatible.ts`。**
+
+### 6.4 守卫与变异（逐条确认会变红后复原）
+
+- 新增 `tests/visionPrompt.spec.ts`：品类枚举注入 / **颜色枚举注入** / 自证非空转（`join('|')` 长度下限）/
+  多色写法与解析规则成对。
+- `tests/orderClassifier.spec.ts`：描述式各分支（`底` / `+` / `、` / 斜杠 / 前缀回退 / 不扫任意位置 /
+  认不出原样保留）+ 词表自洽（每一项都能被自身归一命中）。
+- `today:ui` 131 → **135**：品类建议"list 指向的 datalist 存在且非空"、内容含词表与库内两半、
+  **不**推荐「其他」、颜色同理。
+- 变异 4 组：提示词颜色枚举换成字面量（`visionPrompt.spec` 红）· 摘掉前缀回退（描述式用例红）·
+  建议只留词表（"帽子"那条红）· `list` 属性写歪（"datalist 存在"那条红，且颜色那条**仍绿** ——
+  证明两条断言各自独立，不是一条恒真的合并断言）。
 

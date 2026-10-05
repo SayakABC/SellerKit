@@ -1168,6 +1168,37 @@ async function main() {
       'P-42=' + (card('cl-style-42') ? card('cl-style-42').value : '?') +
         ' P-41=' + (card('cl-style-41') ? card('cl-style-41').value : '?'));
 
+    // ---- 品类/颜色的输入建议（datalist）：标准词表 + 本库已用过的写法 ----
+    // 存在的意义是"同一个词各写各的"：T恤 与 短袖T恤 会算成两个款。词表给规范写法，
+    // 库内写法让第二次遇到同一个词时能选到同一个（白名单覆盖不到的现实品类只能这样收敛）。
+    // ⚠️ 只断言"有 datalist"不够 —— list 属性写歪、datalist 空壳都会让它恒绿，
+    //    所以三条分开：①list 指向的元素真的在 ②选项非空 ③内容里既有词表也有库内写法。
+    function datalistValues(inputAct) {
+      var el = card(inputAct);
+      var id = el ? el.getAttribute('list') : '';
+      var dl = id ? document.getElementById(id) : null;
+      if (!dl) return { id: id, found: false, values: [] };
+      return {
+        id: id,
+        found: true,
+        values: Array.prototype.map.call(dl.querySelectorAll('option'), function (o) { return o.value; }),
+      };
+    }
+    var catOpt = datalistValues('cl-cat-41');
+    report('品类框的输入建议真的挂上了（list 指向的 datalist 存在且选项非空）',
+      !!catOpt.id && catOpt.found && catOpt.values.length > 0,
+      'list=' + catOpt.id + ' found=' + catOpt.found + ' 选项数=' + catOpt.values.length);
+    report('品类建议 = 标准词表 + 本库已用过的写法（短袖T恤 来自词表；帽子 来自本页数据）',
+      catOpt.values.indexOf('短袖T恤') >= 0 && catOpt.values.indexOf('帽子') >= 0,
+      JSON.stringify(catOpt.values));
+    report('品类建议**不**推荐「其他」（它是空值语义，归一化后是空串，不是一个可选值）',
+      catOpt.values.indexOf('其他') < 0,
+      JSON.stringify(catOpt.values));
+    var colOpt = datalistValues('cl-color-41');
+    report('颜色建议 = 标准词表 + 本库写法（黑色 来自词表；蓝 来自本页数据）',
+      colOpt.found && colOpt.values.indexOf('黑色') >= 0 && colOpt.values.indexOf('蓝') >= 0,
+      'list=' + colOpt.id + ' ' + JSON.stringify(colOpt.values));
+
     // ---- ⭐「同商品」徽标：这一页到底有几件事要定 ----
     // P-41 与 P-42 是**同一家店的同一个商品ID**（店A/IT-A）⇒ 两行都标「同商品 ×2」；
     // P-43 没有商品ID、P-44 的商品只此一行 ⇒ 两者都**不许**有徽标。

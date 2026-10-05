@@ -100,6 +100,7 @@
                   v-model="draftOf(o).category"
                   class="wb-input wb-input--sm cl-cell"
                   :data-act="`cl-cat-${o.id}`"
+                  list="cl-cat-options"
                 />
               </td>
               <td>
@@ -107,6 +108,7 @@
                   v-model="draftOf(o).color"
                   class="wb-input wb-input--sm cl-cell"
                   :data-act="`cl-color-${o.id}`"
+                  list="cl-color-options"
                 />
               </td>
               <td>
@@ -189,6 +191,20 @@
         </button>
       </div>
     </section>
+
+    <!-- 输入建议（datalist）。**不限制自由输入** —— 词表覆盖不全（帽子 / 汉服 / 围巾…），
+         硬做成下拉会把真实存在的品类挡在外面，用户就只能去别处改。
+         它要解决的是**同一个词各写各的**（"T恤" 与 "短袖T恤" 会算成两个款）：
+           · 标准词表（与提示词、归一化同一份）给出规范写法；
+           · 「本库已用过的写法」让第二次遇到同一个词时能选中同一个，自己收敛。
+         ⚠️ 刻意**不把用户输入悄悄改写成词表里的词**：品类是指纹的第一段、颜色是款色的区分维度，
+            "替用户改判"比写得不一致更难查。要收敛就摆在明面上让他选。 -->
+    <datalist id="cl-cat-options" data-act="cl-cat-options">
+      <option v-for="c in categoryOptions" :key="c" :value="c"></option>
+    </datalist>
+    <datalist id="cl-color-options" data-act="cl-color-options">
+      <option v-for="c in colorOptions" :key="c" :value="c"></option>
+    </datalist>
   </div>
 </template>
 
@@ -227,6 +243,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
+import { CATEGORY_WHITELIST, COLOR_WHITELIST } from '@/lib/orderClassifier';
 import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
 import { useShipping } from '../flowCtx';
 import {
@@ -262,6 +279,25 @@ const styles = ref<StyleRecord[]>([]);
 const counts = reactive({ pending: 0, unclassified: 0, styles: 0 });
 const thumbs = ref<Record<string, string>>({});
 const drafts = reactive<Record<number, Draft>>({});
+/** 库里已用过的写法（`pendingCounts` 顺带返回）—— 输入建议的另一半材料 */
+const usedCategories = ref<string[]>([]);
+const usedColors = ref<string[]>([]);
+
+/** 有序去重（保持传入顺序：词表在前、库内写法在后） */
+function uniq(list: readonly string[]): string[] {
+  return [...new Set(list.filter(Boolean))];
+}
+
+/**
+ * 品类 / 颜色的输入建议 = **标准词表 + 本库已用过的写法**。
+ *
+ * ⚠️ 品类里排除「其他」：它在 `EMPTY_LIKE` 里属**空值语义**（归一化后是空串，不参与款式指纹），
+ * 把它列成可选值等于教用户选一个会被清空的词。白名单里留着它只是为了与提示词的枚举同源。
+ */
+const categoryOptions = computed(() =>
+  uniq([...CATEGORY_WHITELIST.filter((c) => c !== '其他'), ...usedCategories.value]),
+);
+const colorOptions = computed(() => uniq([...COLOR_WHITELIST, ...usedColors.value]));
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 /** 库里到底有没有订单（区分"没有待核对"与"压根还没导入"两种空态） */
@@ -413,6 +449,8 @@ async function load(): Promise<void> {
     counts.pending = cnt.pending;
     counts.unclassified = cnt.unclassified;
     counts.styles = cnt.styles;
+    usedCategories.value = cnt.usedCategories;
+    usedColors.value = cnt.usedColors;
     // 草稿按行重建：主进程回来的才是真值，旧的编辑态一律作废
     for (const k of Object.keys(drafts)) delete drafts[Number(k)];
     for (const o of rows.value) draftOf(o);

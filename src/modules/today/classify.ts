@@ -113,18 +113,49 @@ export async function listStyles(): Promise<StyleRecord[]> {
   return r.data ?? [];
 }
 
+export interface PendingCounts {
+  pending: number;
+  unclassified: number;
+  styles: number;
+  /**
+   * 库里**已经用过**的品类 / 颜色写法（去重、有上限）—— 给核对页的输入建议当候选。
+   * 这是"第二次遇到同一个词时选中同一个写法"的材料：词表给标准名，这份给**本库的自洽写法**
+   * （白名单覆盖不到的现实品类，如「汉服」，只能靠它自己收敛）。
+   * ⚠️ 与下面那次 `limit: 2000` 的取数是**同一次请求**顺带算出来的，没有额外往返；也因此
+   * 只覆盖最近 2000 行 —— 建议列表够用即可，它不是"全库词表"的承诺。
+   */
+  usedCategories: string[];
+  usedColors: string[];
+}
+
+/** 取一列去重值（去空白、排序、上限） */
+function distinctColumn(
+  rows: OrderRecord[],
+  pick: (o: OrderRecord) => string,
+  cap = 40,
+): string[] {
+  const s = new Set<string>();
+  for (const o of rows) {
+    const v = String(pick(o) ?? '').trim();
+    if (v) s.add(v);
+  }
+  return [...s].sort().slice(0, cap);
+}
+
 /** 待核对 + 其中**还没有归属款**的行数（页头指标用；独立查一次是为了不受分页影响） */
-export async function pendingCounts(): Promise<{ pending: number; unclassified: number; styles: number }> {
-  const [pending, unclassified, styles] = await Promise.all([
+export async function pendingCounts(): Promise<PendingCounts> {
+  const [pending, all, styles] = await Promise.all([
     ipc.orderList({ limit: 1, corrected: false }),
     ipc.orderList({ limit: 2000 }),
     ipc.orderStyleList(),
   ]);
-  const un = unclassified.success ? (unclassified.data?.rows ?? []) : [];
+  const rows = all.success ? (all.data?.rows ?? []) : [];
   return {
     pending: pending.success ? Number(pending.data?.total ?? 0) : 0,
-    unclassified: un.filter((o) => !o.styleCode).length,
+    unclassified: rows.filter((o) => !o.styleCode).length,
     styles: styles.success ? (styles.data ?? []).length : 0,
+    usedCategories: distinctColumn(rows, (o) => o.category),
+    usedColors: distinctColumn(rows, (o) => o.color),
   };
 }
 

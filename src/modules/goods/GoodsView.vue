@@ -9,6 +9,76 @@
         <p class="wb-head__desc">{{ TAB_DESC[tab] }}</p>
       </div>
       <div class="wb-head__actions">
+        <!-- ⭐ 应用内帮助（2026-10-08 R3 · UX-G5）：全仓原先**没有任何用户可见的帮助入口**
+             （扫描"教|教程|帮助|引导|新手|指南"在 `src/**` 的命中全是代码注释）。
+             不新建长文档：就把三句话 + 一张三步图放在这里，够回答"这页怎么用"。
+             ⚠️ 面板里那两步**都带真按钮**（去「今天」导订单 / 打开店铺登记）——
+             本仓既有结论是"提示不是入口"，一份只说"你应该先去别处"的帮助就是那句话的现行犯。 -->
+        <div class="gd-help">
+          <button
+            class="wb-btn gd-help__btn"
+            type="button"
+            data-act="help"
+            aria-label="这一页怎么用"
+            :aria-expanded="helpOpen"
+            @click="helpOpen = !helpOpen"
+          >
+            ?
+          </button>
+          <div v-if="helpOpen" class="gd-help__panel" data-act="help-panel" role="dialog">
+            <div class="wb-panel__head gd-help__head">
+              <span>这一页怎么用</span>
+              <button
+                class="wb-btn wb-btn--sm"
+                type="button"
+                data-act="help-close"
+                aria-label="关闭"
+                @click="helpOpen = false"
+              >
+                ✕
+              </button>
+            </div>
+            <div class="gd-help__body">
+              <p>
+                这一页管两件事：<b>左边</b>给自己立款（款 = 你自己定义的产品），
+                <b>右边</b>把店铺里卖的那个商品认到款上（这叫映射 / 认款）。
+              </p>
+              <p>
+                右边那些商品不是导入进来的，是从<b>订单</b>里长出来的 ——
+                「今天」页导过订单，这里才会有待办；订单里没有商品ID的行会单独报出来，不会静默丢掉。
+              </p>
+              <p>
+                左边点开任意一行就能看到它的规格与已认的商品。<b>认款入口左右各有一个</b>，
+                但落到哪一款只看<b>左边展开的那一行</b>（不是列表里高亮的第一行）。
+              </p>
+              <p class="gd-help__sub">从零开始的话，顺序是这三步：</p>
+              <ol class="gd-help__steps">
+                <li v-for="(st, i) in helpSteps" :key="st.id">
+                  <span class="gd-help__no">{{ i + 1 }}</span>
+                  <span><b>{{ st.title }}</b> —— {{ st.desc }}</span>
+                </li>
+              </ol>
+              <div class="gd-help__acts">
+                <button
+                  class="wb-btn wb-btn--sm"
+                  type="button"
+                  data-act="help-go-today"
+                  @click="goImportOrders"
+                >
+                  去「今天」导入订单
+                </button>
+                <button
+                  class="wb-btn wb-btn--sm"
+                  type="button"
+                  data-act="help-go-registry"
+                  @click="goRegistry"
+                >
+                  打开「店铺登记」
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
         <!-- 页级不再自己取数，所以这里没有"读取中…"可报（那是各视图自己的状态，
              它们在各自的工具栏里显示）。按钮只负责发一个刷新信号。 -->
         <button class="wb-btn" data-act="refresh" @click="refresh">刷新</button>
@@ -47,11 +117,21 @@
       <!-- 工作台形态（S0 骨架 → S4 定型）：左「产品」右「商品池」**恒同屏**。
            S4 把「产品」与「映射与关联」合成一个页签后，池栏不再有"当前看不见"的时候 ——
            于是 `pool` 这个懒挂载开关也一并撤掉（它的唯一理由是"首屏停在产品页签、池栏看不见"，
-           合并后该前提消失）。判据与代价见 `GoodsWorkbenchView.vue` 顶部注释。 -->
+           合并后该前提消失）。判据与代价见 `GoodsWorkbenchView.vue` 顶部注释。
+
+           `@navigate` 是**页签级导航的回调**（右栏的「现在登记」要用）：外壳转手递给右栏，
+           免得右栏为了切到自己这一页的另一个页签去 import 外壳的页签枚举。
+           命名刻意不含任何具体页签名 —— 外壳不需要知道有哪几个页签，只知道"能请求导航"。 -->
       <GoodsWorkbenchView
         v-if="GOODS_LAYOUT === 'workbench' && tab === 'workbench'"
         :refresh-nonce="refreshNonce"
+        :navigate="goTab"
       />
+      <!-- 「店铺登记」：2026-10-08 从市场岛「店铺账号管家」收进内建（方案 R1 / UX-G6）。
+           判据不是"少一个岛更省事"，而是：待关联队列里"店铺未归一"的行**必须**先来这里登记才能动，
+           而那个岛**不在默认包里** —— 提示指着一个全新安装根本没有的目的地（真机走查 D1 死锁）。
+           它只是"原始店名 → 规范店名"的一条旁挂映射，做在需要它的这一页上，比引导人去装一个岛诚实。 -->
+      <ShopRegistryView v-else-if="tab === 'registry'" :refresh-nonce="refreshNonce" />
       <SupplierView v-else-if="tab === 'suppliers'" />
       <!-- 「商品清单」页签当前**收起**（见 `SHOP_PRODUCTS_TAB_ENABLED`）：分支与组件保留在这里，
            是为了要放回来时只改那一个常量。`tab` 永远取不到这个值，所以这段是不渲染的死代码 ——
@@ -59,7 +139,7 @@
       <ShopProductView v-else-if="tab === 'shop-products'" />
       <!-- 以下两支是 `GOODS_LAYOUT === 'tabs'` 的**回退路径**（与重构前逐字一致），不是死代码。 -->
       <ProductListView v-else-if="tab === 'products'" :refresh-nonce="refreshNonce" />
-      <SkuMappingView v-else />
+      <SkuMappingView v-else :refresh-nonce="refreshNonce" :navigate="goTab" />
     </div>
   </div>
 </template>
@@ -83,10 +163,15 @@ import * as api from './api';
 import ProductListView from './components/ProductListView.vue';
 import GoodsWorkbenchView from './components/GoodsWorkbenchView.vue';
 import ShopProductView from './components/ShopProductView.vue';
+import ShopRegistryView from './components/ShopRegistryView.vue';
 import SkuMappingView from './components/SkuMappingView.vue';
 import SupplierView from './components/SupplierView.vue';
+import { GOODS_TAB_LABEL, GOODS_TAB_REGISTRY, type GoodsTabId } from './tabs';
+import { gloss } from './glossary';
+import { FIRST_RUN_STEPS } from './firstRun';
+import { switchModule } from '@/core/services/shell';
 
-type TabId = 'workbench' | 'products' | 'shop-products' | 'mappings' | 'suppliers';
+type TabId = GoodsTabId;
 
 /**
  * 「商品清单」页签**暂时收起**（2026-10-08）。
@@ -123,33 +208,41 @@ const SHOP_PRODUCTS_TAB_ENABLED = false;
 const GOODS_LAYOUT: 'workbench' | 'tabs' = 'workbench';
 
 /**
- * 页签表（2026-10-08 重构 S4：3 → 2）。
+ * 页签表（2026-10-08 重构 S4：3 → 2；同日 R1 又新增「店铺登记」）。
  *
  * **按页面形态分叉** —— 不是两套界面各自任性，而是两种形态的导航结构本就不同：
  *   · `'workbench'` 把「产品」与「映射与关联」**合并成一个左右分栏的工作台**。合并的判据不是
  *     "少一个页签更清爽"，而是：分栏的全部价值在于**同屏**（左栏看着款、右栏认着货，
  *     左栏选一款右栏就能直连、就能对比）—— 分成两个页签，两侧永远不可能同时出现在屏幕上，
  *     直连与对比这两条动线在物理上就不成立。
- *   · `'tabs'` 回退形态是整宽单栏，产品表与队列必须各自独占一屏 ⇒ **仍是三个页签**。
+ *   · `'tabs'` 回退形态是整宽单栏，产品表与队列必须各自独占一屏 ⇒ **仍是两个独立页签**。
  *     回退时页签跟着一起回去，否则"改一个常量回退"就是假的（会退到一个只剩两个页签、
  *     却仍然单栏渲染的表上）。
  *
+ * 「店铺登记」**两种形态都有**，且紧跟在建档页签后面：它不是"回退形态才有的东西"，
+ * 而是右栏"店铺未归一"那几行的**唯一出口**（写在提示条上、也在行内）—— 摆得离它越远，
+ * 那个出口就越像没有。
+ *
  * ⚠️ `'workbench'` 那一支里没有「商品清单」：该页签的产出（`pl_shop_sku` 的池行）
  *    没有下游消费方，`SHOP_PRODUCTS_TAB_ENABLED` 的判据见下。
+ * ⚠️ 页签名一律从 `./tabs` 的 `GOODS_TAB_LABEL` 取，**别在这里写裸字符串** ——
+ *    页签名是文案里会被点名的**入口名**，两处各写一遍必然有一天漂开。
  */
 const TABS: { id: TabId; label: string }[] =
   GOODS_LAYOUT === 'workbench'
     ? [
-        { id: 'workbench', label: '建档与关联' },
-        { id: 'suppliers', label: '供应商' },
+        { id: 'workbench', label: GOODS_TAB_LABEL.workbench },
+        { id: 'registry', label: GOODS_TAB_LABEL.registry },
+        { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
       ]
     : [
-        { id: 'products', label: '产品' },
+        { id: 'products', label: GOODS_TAB_LABEL.products },
         ...(SHOP_PRODUCTS_TAB_ENABLED
-          ? [{ id: 'shop-products' as TabId, label: '商品清单' }]
+          ? [{ id: 'shop-products' as TabId, label: GOODS_TAB_LABEL['shop-products'] }]
           : []),
-        { id: 'mappings', label: '映射与关联' },
-        { id: 'suppliers', label: '供应商' },
+        { id: 'mappings', label: GOODS_TAB_LABEL.mappings },
+        { id: 'registry', label: GOODS_TAB_LABEL.registry },
+        { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
       ];
 
 /**
@@ -160,11 +253,16 @@ const TABS: { id: TabId; label: string }[] =
  */
 const TAB_DESC: Record<TabId, string> = {
   // 合并后的说明 = 原「产品」+「映射与关联」两句的**一句话版**：左边建档、右边认货，
-  // 并且点出分栏独有的那一步（左栏选一款 → 右栏直接关联过去），否则用户不会知道两栏是联动的。
-  workbench: '左边给自己的款和 SKU 建档，右边把店铺商品认到款上 —— 左栏选一款，右栏就能直接关联过去。',
+  // 并且点出分栏独有的那一步（左栏选一款 → 右栏直接关联过去）。
+  // ⭐ 2026-10-08 R2（UX-G1）：这是**首屏唯一那段说明**，所以三个最常出现、也最容易被新手
+  //    当成黑话的词（款 / SKU / 映射）在这里各补一句括号 —— 用 `./glossary` 的词表，不另写一遍。
+  //    除此之外全页照旧只用术语，不在别处重复解释（每处都写一遍括号反而成了噪音）。
+  workbench: `左边给${gloss('style')}和它的${gloss('sku')}建档，右边把店铺商品认到款上 —— 这就是${gloss('mapping')}。左栏选一款，右栏就能直接关联过去。`,
   products: '自己的款和 SKU 在这里建档 —— 先有它，订单 / 采购 / 成本才挂得上这行货。',
   'shop-products': '从订单里认出来的店铺商品，看它们各自认到了哪个款、卖了多少行。',
   mappings: '把店铺商品认到自己的款上。左边是待办队列，右边是已经认完的。',
+  // 这句要回答"我什么时候会来这"——答案是"队列里有一行写着「需先登记店铺」的时候"。
+  registry: '给订单里出现过的店名指定它是哪家店 —— 队列里写着「需先登记店铺」的商品，先在登记完才能认款。',
   suppliers: '拿货的供应商（厂）主数据 —— 产品建档与采购单据都引它。',
 };
 
@@ -180,6 +278,24 @@ const refreshNonce = ref(0);
 
 function goTab(id: TabId): void {
   tab.value = id;
+}
+
+/**
+ * 页头「?」的开关。
+ *
+ * 状态放在外壳而不是子组件里：面板**横跨**页签（三个页签下说的都是同一句"这页怎么用"），
+ * 而且它的两个按钮一个要切页签、一个要跳模块 —— 两件事都只有外壳做得了。
+ */
+const helpOpen = ref(false);
+/** 三步与首次动线引导卡**共用同一份**（`./firstRun`）：同一件事不写两遍，也就不会漂成两种说法 */
+const helpSteps = FIRST_RUN_STEPS;
+
+function goImportOrders(): void {
+  switchModule('today');
+}
+function goRegistry(): void {
+  helpOpen.value = false;
+  goTab(GOODS_TAB_REGISTRY);
 }
 
 /**
@@ -248,5 +364,76 @@ onMounted(async () => {
 
 .gd-error {
   margin: 0;
+}
+
+/* ---- 页头「?」帮助（R3 · UX-G5）---- */
+.gd-help {
+  position: relative;
+}
+/* 面板绝对定位挂在按钮下方：`z-index` 必须高于下面的页签（它们是后面的兄弟节点，
+   不给层级的话会盖在面板上）。`.wb-mask` 是 40，所以弹层仍会盖住它 —— 顺序是对的。 */
+.gd-help__panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 420px;
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-lg);
+  background: var(--wb-surface);
+  box-shadow: var(--wb-elev-2);
+}
+.gd-help__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gd-help__head .wb-btn {
+  margin-left: auto;
+}
+.gd-help__body {
+  padding: 12px 14px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.gd-help__body p {
+  margin: 0 0 8px;
+}
+.gd-help__sub {
+  margin-top: 10px !important;
+}
+.gd-help__steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gd-help__steps li {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+.gd-help__no {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--wb-primary);
+  color: var(--wb-primary-contrast);
+  font-size: 11px;
+}
+.gd-help__acts {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>

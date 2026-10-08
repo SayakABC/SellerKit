@@ -1,13 +1,20 @@
 <template>
-  <div class="wb-mask ed-mask" @click.self="$emit('close')">
+  <div class="wb-mask ed-mask" @click.self="requestClose()">
     <aside class="wb-drawer ed-drawer" role="dialog" aria-modal="true" aria-label="产品编辑">
       <div class="wb-dialog__head ed-head">
         <span>{{ isEdit ? '编辑产品' : '新增产品' }}</span>
         <span v-if="isEdit" class="wb-mono wb-muted ed-head__code">{{ form.code }}</span>
-        <button class="ed-x" type="button" aria-label="关闭" @click="$emit('close')">✕</button>
+        <button class="ed-x" type="button" aria-label="关闭" @click="requestClose()">✕</button>
       </div>
 
       <div class="wb-dialog__body ed-body">
+        <!-- 保存模型**必须先说清**（UX-G3）：编辑模式是"离开输入框就写库"，不说明的话
+             用户会继续找那个已经不存在的「保存」按钮。 -->
+        <p v-if="isEdit" class="wb-notice" data-act="ed-autosave-hint">
+          这一屏<b>边改边存</b>：字段离开输入框就写库了，底部只剩一个「完成」。
+          <b>SKU 行不自动存</b>（一次要改几十行），改完按那一行的「保存」或下面的「保存全部改动」。
+        </p>
+
         <label class="wb-field">
           <span class="wb-field__label">款编码 <i class="wb-field__req">*</i></span>
           <!-- 编辑时只读：编码是订单 / 采购 / 成本三域的关联锚点，改了会让历史数据指向另一个产品 -->
@@ -25,13 +32,13 @@
 
         <label class="wb-field">
           <span class="wb-field__label">款式名</span>
-          <input v-model="form.name" class="wb-input" placeholder="例：折叠收纳箱 60L" />
+          <input v-model="form.name" class="wb-input" placeholder="例：折叠收纳箱 60L" @blur="autoSave" />
         </label>
 
         <div class="ed-row">
           <label class="wb-field">
             <span class="wb-field__label">供应商</span>
-            <select v-model="form.supplierId" class="wb-input">
+            <select v-model="form.supplierId" class="wb-input" @change="autoSave">
               <option :value="0">未关联</option>
               <option v-for="s in suppliers" :key="s.id" :value="s.id">
                 {{ s.name || `#${s.id}` }}{{ s.productCount ? `（${s.productCount}）` : '' }}
@@ -44,13 +51,13 @@
 
           <label class="wb-field">
             <span class="wb-field__label">类目</span>
-            <input v-model="form.category" class="wb-input" placeholder="例：家居收纳" />
+            <input v-model="form.category" class="wb-input" placeholder="例：家居收纳" @blur="autoSave" />
           </label>
         </div>
 
         <label class="wb-field">
           <span class="wb-field__label">状态</span>
-          <select v-model="form.status" class="wb-input">
+          <select v-model="form.status" class="wb-input" @change="autoSave">
             <option value="active">启用</option>
             <option value="archived">停用</option>
           </select>
@@ -59,7 +66,7 @@
 
         <label class="wb-field">
           <span class="wb-field__label">备注</span>
-          <textarea v-model="form.note" class="wb-input" rows="2" placeholder="选填"></textarea>
+          <textarea v-model="form.note" class="wb-input" rows="2" placeholder="选填" @blur="autoSave"></textarea>
         </label>
 
         <!-- 主图：窄接口立即保存（不等底部「保存」） -->
@@ -224,17 +231,39 @@
       </div>
 
       <div class="wb-dialog__foot">
-        <button class="wb-btn" type="button" :disabled="saving" @click="$emit('close')">取消</button>
+        <!-- 页脚那行小字把两个问题一次答完：**存了没有**（`savedHint`）与
+             **关掉会丢什么**（`closeGuard`）。后者必须常显而不是只在点了 ✕ 之后才说 ——
+             "还有 3 条 SKU 改动没保存"本身就是"别急着关"的提示。 -->
+        <span v-if="savedHint" class="wb-muted ed-hint" data-act="ed-saved-hint">{{ savedHint }}</span>
+        <span v-else-if="closeGuard" class="wb-muted ed-hint" data-act="ed-guard-hint">{{ closeGuard }}</span>
+        <!-- ⚠️ 编辑模式**不再给「取消」**：改动已经边改边存，它已经没有可取消的东西了。
+             再留一个「取消」，用户会以为那是"撤销我刚才的修改" —— 而它做不到（UX-G3）。
+             新增模式仍是「取消 / 保存」：那时确实有一个还没创建的草稿可以取消。 -->
+        <button v-if="!isEdit" class="wb-btn" type="button" :disabled="saving" @click="requestClose()">
+          取消
+        </button>
         <button
           class="wb-btn wb-btn--primary"
           type="button"
-          :disabled="saving || !form.code.trim()"
-          @click="save"
+          :disabled="saving || (!isEdit && !form.code.trim())"
+          @click="isEdit ? complete() : save()"
         >
-          {{ saving ? '保存中…' : '保存' }}
+          {{ saving ? '保存中…' : isEdit ? '完成' : '保存' }}
         </button>
       </div>
     </aside>
+
+    <!-- 关闭确认（W1）：只有"真的会丢"的两类才走到这里，见 `closeGuard` 的说明。 -->
+    <ConfirmDialog
+      v-if="confirmDiscard"
+      title="关掉就会丢掉这些"
+      confirm-text="放弃改动并关闭"
+      @close="confirmDiscard = false"
+      @confirm="discardAndClose"
+    >
+      <p>{{ closeGuard }} —— 关掉抽屉就没有了。</p>
+      <p v-if="dirtyCount">先按那一行的「保存」或下面的「保存全部改动」，再关就不会丢。</p>
+    </ConfirmDialog>
   </div>
 </template>
 
@@ -245,13 +274,23 @@
 // 用户在改的同时经常要回头看列表里的其它款（对照编码、看还有哪些缺克重）。居中弹窗会把列表
 // 整个盖住，抽屉只占右侧 560px，列表始终可见 —— 这是这一页刻意留的"记忆点"。
 //
-// SKU 的两条写入路径都是**即时保存**（不等底部「保存」）：
-//   · 主图 —— 换图是独立动作，不该被"表单还没填完"卡住；
-//   · SKU 行 —— 一次生成几十行，逐行即时保存才能边改边看到结果。
-// 保存后 emit('saved', null, { keepOpen: true }) 让列表刷新但**不关抽屉**。
+// ⭐ 保存模型（2026-10-08 R2 · UX-G3）：**统一为即时保存**。
+//   旧模型是"一半一半"（主图 / SKU 即时存，表单要按底部「保存」），于是"填了名字直接点 ✕"
+//   就是**没保存**，而「取消」不提示就关了 —— 真机走查实测：用户以为存了，其实没有。现在：
+//     · 编辑模式：表单字段**离开输入框就写库**（`@blur` / `@change` → `autoSave`），
+//       底部主按钮从「保存」改成「完成」（把还没落库的改动冲掉再关）；
+//     · 关闭（✕ / 遮罩 / 完成）统一走 `requestClose()` —— 有**真的**会丢的东西时先确认（W1）；
+//     · 新增模式没有 id 可写，"即时保存"无从谈起 ⇒ 保持显式「保存」（= 创建并关闭）。
+//       这一处差异是**模式本身的性质**，不是"还有一半没改完"，所以它写在界面上（页首那句提示）
+//       而不是假装统一。
+//
+// SKU 两条写入路径**仍是显式保存**，这不是漏改：一次生成几十行时逐行 blur 存会变成
+// 几十次写 + 几十次重拉，而这屏最有辨识度的交互恰恰就是"一次生成几十个组合"。
+// 代价（"改了没存就关"）由 `closeGuard` 兜住 —— **刻意不自动存的东西必须有别的兜底**。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import * as api from '../api';
 import { pickImage as selectImageFile } from '../productIo';
+import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 import { toast } from '@/core/services/toast';
 import type { ProductListItem, VariantRow } from '@/types';
 
@@ -297,11 +336,67 @@ const form = reactive({
   note: props.product?.note ?? '',
 });
 
-async function save(): Promise<void> {
+/* ---- 保存模型：快照 / 自动保存 / 关闭守卫（UX-G3 + W1）---- */
+
+interface SaveOpts {
+  /** 不关抽屉 —— 即时保存都带它（主图 / SKU / 字段自动保存同理） */
+  keepOpen?: boolean;
+  /** 不弹 toast，改在页脚显示一行小字（逐字段自动保存时每存一次弹一个 toast 会刷屏） */
+  silent?: boolean;
+}
+
+/** 表单的**已落库快照**（字段与 `api.upsert` 的载荷同口径：文本 trim、id 归一为数字） */
+function snapshot() {
+  return {
+    name: form.name.trim(),
+    supplierId: Number(form.supplierId) || 0,
+    category: form.category.trim(),
+    status: form.status,
+    note: form.note,
+  };
+}
+
+const lastSaved = ref(snapshot());
+const formDirty = computed(() => {
+  const s = snapshot();
+  const l = lastSaved.value;
+  return (
+    s.name !== l.name ||
+    s.supplierId !== l.supplierId ||
+    s.category !== l.category ||
+    s.status !== l.status ||
+    s.note !== l.note
+  );
+});
+
+/** 正在飞的那条表单保存（同一条复用，不并发写同一行） */
+let flying: Promise<boolean> | null = null;
+
+const savedHint = ref('');
+let hintTimer: ReturnType<typeof setTimeout> | null = null;
+function flashSaved(text: string): void {
+  savedHint.value = text;
+  if (hintTimer) clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => {
+    savedHint.value = '';
+  }, 2500);
+}
+
+async function save(opts: SaveOpts = {}): Promise<boolean> {
+  // 同一条表单保存**至多一条在飞**：`blur` 与「完成」可能在同一帧撞上，
+  // 不串起来就会对同一行写两遍（第二遍的成功 toast 盖掉第一遍的失败）。
+  if (flying) return flying;
+  flying = doSave(opts).finally(() => {
+    flying = null;
+  });
+  return flying;
+}
+
+async function doSave(opts: SaveOpts): Promise<boolean> {
   const code = form.code.trim();
   if (!code) {
     error.value = '款编码不能为空';
-    return;
+    return false;
   }
   saving.value = true;
   error.value = '';
@@ -315,14 +410,87 @@ async function save(): Promise<void> {
       status: form.status,
       note: form.note,
     });
-    toast(r?.created ? `已新增 ${code}` : `已更新 ${code}`, 'success');
-    emit('saved', r);
+    // 快照跟着更新：`formDirty` 的判据是"与已落库的值比"，不是"按过按钮没有"
+    lastSaved.value = snapshot();
+    if (opts.silent) flashSaved('已自动保存');
+    else toast(r?.created ? `已新增 ${code}` : `已更新 ${code}`, 'success');
+    emit('saved', r, opts.keepOpen ? { keepOpen: true } : undefined);
+    return true;
   } catch (e: unknown) {
     // 编码冲突这类错误必须留在表单里可见（toast 一闪而过，用户还要照着改）
     error.value = e instanceof Error ? e.message : String(e);
+    if (opts.silent) toast(error.value, 'error');
+    return false;
   } finally {
     saving.value = false;
   }
+}
+
+/**
+ * 字段**离开即存**（编辑模式）。
+ *
+ * 判据是 `formDirty`（与已落库快照比），所以"点进来又原样离开"不会白白写一次库。
+ * 新增模式直接返回：没有 id 可写（见文件头的保存模型说明）。
+ */
+async function autoSave(): Promise<void> {
+  if (!isEdit.value || !formDirty.value) return;
+  await save({ keepOpen: true, silent: true });
+}
+
+/**
+ * 编辑模式的「完成」：把还没落库的表单改动冲掉，然后关。
+ *
+ * ⚠️ 必须先 `await flying`：点「完成」时输入框会先 blur（→ `autoSave` 已在飞），
+ * 不等它落地就再发一条，两条写的是同一行。
+ * ⚠️ 保存**失败就不关**：留在抽屉里让 `error` 可见 —— 关掉等于把"没存上"变成"存过了"。
+ */
+async function complete(): Promise<void> {
+  if (flying) await flying;
+  if (formDirty.value && !(await save({ keepOpen: true, silent: true }))) return;
+  requestClose();
+}
+
+/**
+ * 「关掉会丢的东西」—— 空串 = 可以放心关。
+ *
+ * ⚠️ 它**刻意不包含"表单有改动"**：编辑模式下那些改动是边改边存的。写进来的话就会变成一个
+ * 每次关闭都弹、内容却已经不存在的确认框 —— 用户学两下就闭眼点过，真出事那次也照点。
+ * 真正会丢的只有两类：
+ *   · SKU 行 —— 刻意不自动存（见文件头），页面上有 `.ed-sku--dirty` 高亮与「保存全部改动」；
+ *   · 新增模式的草稿 —— 还没有 id，一个字段都没写进库。
+ */
+const closeGuard = computed(() => {
+  if (dirtyCount.value > 0) return `还有 ${dirtyCount.value} 条 SKU 改动没保存`;
+  if (createTouched.value) return '这个新产品还没创建';
+  return '';
+});
+
+/** 新增模式下**填过东西**（判据是"界面上有内容"，不是"有改动"——新增没有可比的基线） */
+const createTouched = computed(
+  () =>
+    !isEdit.value &&
+    ([form.code, form.name, form.category, form.note].some((v) => String(v).trim() !== '') ||
+      (Number(form.supplierId) || 0) !== 0)
+);
+
+const confirmDiscard = ref(false);
+
+/** 所有关闭路径的唯一出口（✕ / 点遮罩 / 保存成功后的收尾） */
+function requestClose(): void {
+  if (saving.value) {
+    toast('还在保存，稍等一下再关', 'info');
+    return;
+  }
+  if (closeGuard.value) {
+    confirmDiscard.value = true;
+    return;
+  }
+  emit('close');
+}
+
+function discardAndClose(): void {
+  confirmDiscard.value = false;
+  emit('close');
 }
 
 /* ---- 主图 ---- */
@@ -617,6 +785,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('mouseup', sizeLeave);
+  if (hintTimer) clearTimeout(hintTimer);
 });
 </script>
 
@@ -650,6 +819,14 @@ onUnmounted(() => {
 .ed-x:hover {
   background: var(--wb-hover);
   color: var(--wb-text);
+}
+
+/* 页脚那行小字（`已自动保存` / `还有 N 条 SKU 改动没保存`）靠左，
+   两个按钮保持右对齐 —— 与产品选择器 `ProductPicker` 同一条排法。 */
+.ed-hint {
+  margin-right: auto;
+  font-size: 12px;
+  white-space: normal;
 }
 
 .ed-body {

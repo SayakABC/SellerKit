@@ -213,11 +213,17 @@
                 </td>
                 <!-- SKU 数与缺克重合成一格：栏宽有限，它们是同一个问题的两面（有几个 / 还差几个）。
                      两个 data-act 各自留在自己的 span 上 —— 断言钉的是"那个数字对不对"，
-                     不是"它占几格"。 -->
+                     不是"它占几格"。
+                     ⚠️ 2026-10-08 R2（UX-G2/W2）：「缺 0」只在**这款有 SKU 时**才渲染。
+                     新建一款还没生成 SKU 时，`0 · 缺 0` 是一句什么都没说的废话 —— 新手第一屏
+                     看到的就是它。但**有** SKU 而缺 0 时必须照旧写 0（不能改成「—」：那会被读成
+                     "没读到数据"，2026-10-01 已实报过一次）。 -->
                 <td class="wb-num" :class="{ 'gd-warn': missingOf(p.id) > 0 }">
                   <span data-act="p-sku">{{ countVariants(p.id) }}</span>
-                  <span class="wb-muted"> · 缺 </span>
-                  <span data-act="missing-weight-cell">{{ missingOf(p.id) }}</span>
+                  <template v-if="countVariants(p.id) > 0">
+                    <span class="wb-muted"> · 缺 </span>
+                    <span data-act="missing-weight-cell">{{ missingOf(p.id) }}</span>
+                  </template>
                 </td>
                 <td data-act="p-status">
                   <span class="wb-tag" :class="p.status === 'archived' ? '' : 'is-on'">
@@ -232,6 +238,32 @@
               <tr v-if="p.id === expandedId" class="gd-pane__drow" data-act="row-detail">
                 <td :colspan="7">
                   <div class="gd-detail">
+                    <!-- ⭐ 认款入口（2026-10-08 R2 · W3）：「动线终点必须在视线焦点上」。
+                         右栏工具栏那个「关联到 S2」离"刚展开的这一行"隔了一个栏宽 ——
+                         用户点开款之后眼睛在左边，动作却在右边顶部。这里放**同一个动作的第二处入口**：
+                         展开区第一眼就能看到，勾选数直接写在按钮上。
+                         ⚠️ 本按钮**只发一个信号**（`relate-request`），真正写库的仍是右栏那一条
+                         `commitMap` —— 两处入口、一条写路径，不存在第二套失败语义。 -->
+                    <div class="gd-detail__relate">
+                      <button
+                        class="wb-btn wb-btn--sm wb-btn--primary"
+                        type="button"
+                        data-act="relate-from-expanded"
+                        :disabled="relateCount === 0"
+                        :title="`把右栏勾选的商品一次认到 ${p.code} 上`"
+                        @click="emit('relate-request')"
+                      >
+                        认到本款<template v-if="relateCount">（{{ relateCount }} 项）</template>
+                      </button>
+                      <span class="wb-muted gd-detail__relate-hint" data-act="relate-hint">
+                        {{
+                          relateCount
+                            ? `把右栏勾选的 ${relateCount} 个商品认到「${p.code}」`
+                            : '先在右栏勾选商品，这个按钮就会亮（认款见右栏队列）'
+                        }}
+                      </span>
+                    </div>
+
                     <!-- SKU 子表：改克重走与整宽形态**同一个**保存路径（全量提交，带全部现有字段） -->
                     <div class="gd-detail__block">
                       <div class="gd-detail__head">
@@ -240,6 +272,10 @@
                           {{ variantsOf(p.id).length }} 个 · 缺 {{ missingOf(p.id) }} 个
                         </span>
                       </div>
+                      <!-- 术语首次出现处：`weight` 的括号说明放在**真正往里填数字的地方**，
+                           而不是页头 —— 页头那句已经背了款 / SKU / 映射三个词（UX-G1 的口径：
+                           只在每个术语真正的首次出现处解释一次，之后照旧用术语）。 -->
+                      <p class="wb-muted gd-detail__note">{{ gloss('weight') }}</p>
                       <table class="wb-table gd-detail__table" data-act="variant-table">
                         <thead>
                           <tr>
@@ -321,7 +357,7 @@
                     </div>
 
                     <div class="gd-detail__ops">
-                      <button class="wb-btn wb-btn--sm" type="button" @click="openEditor(p)">
+                      <button class="wb-btn wb-btn--sm" type="button" data-act="edit-product" @click="openEditor(p)">
                         编辑
                       </button>
                       <button
@@ -497,12 +533,21 @@ import { useProductList } from '../useProductList';
 import * as api from '../api';
 import type { ShopSkuRow, VariantRow } from '@/types';
 import ProductEditorDrawer from './ProductEditorDrawer.vue';
+import { gloss } from '../glossary';
 import ProductImportDialog from './ProductImportDialog.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 
 const props = defineProps<{
   /** 页级「刷新」信号：值一变就重拉（筛选入口已搬进本栏工具栏，不再由页级下传） */
   refreshNonce: number;
+  /**
+   * 右栏**已勾选**的待关联商品数（0 = 没勾）。
+   *
+   * 为什么要从外壳转一手：勾选状态住在右栏的 `useSkuPool` 里（本栏用不到那份数据，
+   * 也不该为了一个数字再拉一遍队列）。左栏只需要"有几个"，动作本身由右栏执行 ——
+   * 见展开区那个「认到本款」按钮上的注释。
+   */
+  relateCount: number;
 }>();
 
 /**
@@ -515,6 +560,22 @@ const props = defineProps<{
  */
 const emit = defineEmits<{
   'select-product': [product: { id: number; code: string; name: string } | null];
+  /**
+   * **全库**款数报给外壳（`null` = 汇总还没拉到）。
+   *
+   * 为什么本栏自己不用它、却要往上报：首次动线（空库引导卡）的判据要**同时**看"零款"与
+   * "队列已拉过且为空"，而这两个数分别住在本栏与右栏 —— 外壳是唯一同时拿到两者的地方。
+   * 报的是原始数字而不是"该不该显示卡片"的布尔：判据只写一遍（`./../firstRun.ts`），
+   * 外壳不推导（同 `relateCount` 的分工）。
+   */
+  'styles-total': [total: number | null];
+  /**
+   * 「把右栏勾选的商品认到本款」—— 只发信号，不做动作。
+   *
+   * ⚠️ 为什么不让本组件自己调：写映射只有一条路径（右栏的 `commitMap`：单事务、行级失败回传、
+   * 写完必须重拉队列）。本栏再写一条就多出一套失败语义，而且它连队列数据都没有。
+   */
+  'relate-request': [];
 }>();
 
 const {
@@ -543,6 +604,7 @@ const {
   thumbs,
   countVariants,
   missingOf,
+  stylesTotal,
   totalPages,
   filtered,
   allChecked,
@@ -569,6 +631,13 @@ const {
   batchError,
   batch,
 } = useProductList({ refresh: () => props.refreshNonce });
+
+/**
+ * 全库款数往上报（→ 外壳 → 首次动线的判据）。
+ * `immediate` 是必须的：汇总比列表先/后到都可能，不带上它，"零款 + 空队列"这个瞬间
+ * 就只能等下一次变化才传出去（那时用户已经看到界面停在空态上了）。
+ */
+watch(() => stylesTotal.value, (n) => emit('styles-total', n), { immediate: true });
 
 /** 当前展开的款（同时是"当前款"—— 展开就是选中，避免"高亮一行、展开另一行"两套状态） */
 const expandedId = ref(0);
@@ -622,8 +691,20 @@ function linksBusy(id: number): boolean {
   return !!linksLoading[id];
 }
 
+/**
+ * 按款反查：这个款关联了哪些店铺商品。
+ *
+ * ⚠️ **每次展开都重拉**，不做"拉过就缓存"（2026-10-08 真机走查修正的缺陷）。
+ *
+ * 缓存版本的实测症状：用户刚在右栏完成一次认款（右栏指标条立刻变「已关联 1」），左栏**同一屏**
+ * 仍写着首次展开时那个旧数字 —— 点「刷新」、收起再展开都无效，只有重启应用才恢复。用户刚做完
+ * 一件"大事"却立刻看到两个互相矛盾的数字；对不会电脑的人，这不叫 bug，叫"这软件靠不住"。
+ *
+ * 代价可忽略：`skuList({productId})` 回的是**单款**的映射条数（通常个位数）。
+ * 收益是"同屏两栏不可能各说各话"——那比省一次 IPC 重要得多。
+ */
 async function loadLinks(productId: number): Promise<void> {
-  if (links[productId] !== undefined || linksLoading[productId]) return;
+  if (linksLoading[productId]) return; // 只去重"同一次并发"，不拦"第二次展开"
   linksLoading[productId] = true;
   try {
     // 一次把该款的全部映射拿回来（含失效的），再按状态分开渲染 ——
@@ -637,6 +718,19 @@ async function loadLinks(productId: number): Promise<void> {
     linksLoading[productId] = false;
   }
 }
+
+/**
+ * 页级「刷新」也刷新这一栏的展开区。
+ *
+ * 不刷的后果与上面那条缓存缺陷同源：页级刷新看起来"刷新了同屏每一栏"，而展开区里那块
+ * 「已关联商品」纹丝不动 —— 又是"同一屏两个数字各说各话"。
+ */
+watch(
+  () => props.refreshNonce,
+  () => {
+    if (expandedId.value) void loadLinks(expandedId.value);
+  }
+);
 </script>
 
 <style scoped>

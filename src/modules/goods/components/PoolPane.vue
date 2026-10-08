@@ -53,20 +53,10 @@
       </div>
     </div>
 
-    <!-- 统计条：这一条是**当前交付口径的画像**（待办 / 阻塞 / 已完成 / 覆盖率）。
-         关联率的分母刻意用 `groups`（= 已关联 + 待关联 + 店铺未归一，主进程保证这个恒等式），
-         而不是"已确认映射条数"——后者会把已经没有订单的历史映射算进去，比率虚高到看不出问题。 -->
-    <div class="wb-metabar" data-act="map-stats">
-      <span class="wb-metric" :class="{ 'is-warn': (qStats?.unmapped ?? 0) > 0 }">
-        待关联 <b>{{ qStats?.unmapped ?? 0 }}</b>
-      </span>
-      <span class="wb-metric" :class="{ 'is-warn': unresolvedShops.length > 0 }">
-        店铺未归一 <b>{{ qStats?.shopUnresolved ?? 0 }}</b>
-      </span>
-      <span class="wb-metric"> 已关联 <b>{{ qStats?.mapped ?? 0 }}</b> </span>
-      <span class="wb-metric"> 关联率 <b>{{ rateText }}</b> </span>
-      <span class="wb-metric"> 映射记录 <b>{{ mSummary?.total ?? 0 }}</b> </span>
-    </div>
+    <!-- 统计条：**0 不占位、全零说一句人话**（W2/全零，2026-10-08 R2）。
+         规则（含"`null` 不是空"、关联率 `—` 不渲染）全部在 `PoolMetrics.vue` 里写了一遍 ——
+         整宽回落形态 `SkuMappingView` 用的是同一个组件，所以不存在"只改了一处"。 -->
+    <PoolMetrics :stats="qStats" :summary="mSummary" :rate-text="rateText" />
 
     <p v-if="error" class="wb-notice wb-notice--error">{{ error }}</p>
 
@@ -83,10 +73,24 @@
     <!-- ── 待关联队列 ─────────────────────────────────────────────── -->
     <template v-if="sub === 'queue'">
       <div v-if="hasQueueHints" class="gd-hints">
-        <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn">
-          下面这些店铺还没归一，它们的商品<b>无法</b>写映射（订单里没有平台，平台只能从店铺实体取）：
-          <b>{{ unresolvedShops.join('、') }}</b>
-          。请先到「店铺账号管家」的「店铺登记」把门店认下来，再回来刷新。
+        <!-- ⭐ 这一条**必须带按钮**（2026-10-08 走查 D1）：它是队列里"店铺未归一"那几行的出口，
+             而原文写成纯文本长句 + "请先到「店铺账号管家」的「店铺登记」" —— 那个岛**不在默认包里**。
+             于是全新安装上这里是一个两端都不可点的死胡同：提示不可点、目的地不存在。
+             现在目的地是内建的「店铺登记」页签，按钮直接跳过去。 -->
+        <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn gd-hint-shops" data-act="hint-shops">
+          <span>
+            <b>{{ unresolvedShops.length }}</b> 家店铺还没登记，它们的商品<b>无法</b>写映射
+            （订单里没有平台，平台只能从店铺实体取）：
+            <b>{{ unresolvedShops.join('、') }}</b>。到「店铺登记」把它们认下来，这几行才能关联。
+          </span>
+          <button
+            class="wb-btn wb-btn--sm gd-hint-shops__act"
+            type="button"
+            data-act="open-registry"
+            @click="navigate(GOODS_TAB_REGISTRY)"
+          >
+            现在登记
+          </button>
         </p>
         <p v-if="qStats?.truncated" class="wb-notice wb-notice--warn">
           订单行数超过单次扫描上限（50000 行），本次队列可能不完整。建议先按时间分批导入订单。
@@ -118,7 +122,7 @@
           :disabled="busy || !selectedUnmapped.length"
           @click="openBatchPicker"
         >
-          批量关联选中 {{ selectedUnmapped.length }} 项…
+          {{ batchLabel }}
         </button>
         <button
           class="wb-btn"
@@ -130,7 +134,7 @@
           清空选择
         </button>
         <button
-          v-if="(qStats?.groups ?? 0) > (qStats?.shown ?? 0)"
+          v-if="queueHasMore"
           class="wb-btn"
           type="button"
           data-act="queue-more"
@@ -139,14 +143,17 @@
         >
           显示更多
         </button>
-        <span class="wb-muted gd-toolbar__hint">
-          共 {{ qStats?.groups ?? 0 }} 组待处理，已列出 {{ qStats?.shown ?? 0 }} 组
+        <!-- 计数用**待办总数**（未关联 + 店铺未归一），不是 `stats.groups`。
+             `groups` 是"聚合出的全部组"，含**已经关联好的**那一半 —— 拿它当分母会写出
+             「共 3 组待处理」而实际上只剩 1 组（2026-10-08 真机走查实测的同一处口径分裂）。 -->
+        <span class="wb-muted gd-toolbar__hint" data-act="queue-count">
+          共 {{ queuePendingTotal }} 组待处理，已列出 {{ qStats?.shown ?? 0 }} 组
         </span>
       </div>
 
       <section class="wb-panel gd-panel">
         <div class="wb-panel__body">
-          <table class="wb-table" data-act="queue-table">
+          <table class="wb-table gd-queue" data-act="queue-table">
             <thead>
               <tr>
                 <th class="gd-c-check">
@@ -159,11 +166,8 @@
                     @change="toggleQueueAll"
                   />
                 </th>
-                <th>店铺</th>
                 <th class="gd-c-img">图</th>
                 <th>商品ID</th>
-                <th>商品标题</th>
-                <th class="wb-num">订单行</th>
                 <th class="gd-c-ops">操作</th>
               </tr>
             </thead>
@@ -183,20 +187,8 @@
                     @change="toggleQueueOne(r)"
                   />
                 </td>
-                <!-- 店铺格：平台折成这里的小标签（省一列），未归一时整行浅底 + 店名原文照显 -->
-                <td class="gd-c-shop">
-                  <template v-if="r.shopId">{{ r.shopName || `#${r.shopId}` }}</template>
-                  <span v-else class="wb-muted" :title="`订单里的店铺原文：${r.shopRaw || '（空）'}`">
-                    {{ r.shopRaw || '（无店铺名）' }}
-                  </span>
-                  <span v-if="r.platform" class="wb-tag gd-shop__plat">{{ r.platform }}</span>
-                  <!-- 自动建议只作提示（未自动落库）：认店铺时给个参照，不替用户决定 -->
-                  <span v-if="r.autoShopName" class="gd-note">
-                    疑似 {{ r.autoShopName }}<template v-if="r.autoShopPlatform">（{{ r.autoShopPlatform }}）</template>
-                  </span>
-                </td>
                 <!-- 认款只能靠肉眼比图（订单里没有任何字段能推出"这是哪一款"），
-                     所以这一列不是装饰：没有它，用户只能对着一个 16 位商品ID 猜。
+                     所以「图」是**主要依据**而不是装饰：没有它，用户只能对着一个 16 位商品ID 猜。
                      图来自订单（`itemImagePool` 的第 ② 层），不用另准备任何文件。 -->
                 <td class="gd-c-img">
                   <button
@@ -217,9 +209,27 @@
                     title="这个商品在订单里没有图"
                   ></span>
                 </td>
-                <td class="wb-mono">{{ r.itemId }}</td>
-                <td :class="{ 'wb-muted': !r.title }">{{ r.title || '—' }}</td>
-                <td class="wb-num">{{ r.orderCount }}</td>
+                <!-- 商品ID 格 —— 这一行**只剩「图」和它两样要看的**（2026-10-08 精简）。
+                     原先「店铺 / 商品标题 / 订单行」各占一整列，7 列在**默认 1200×800 窗口**下
+                     放不下：队列表整体超出容器右界，被 `.wb-panel{overflow:hidden}` 静默裁掉右半截
+                     —— 「对比」按钮与「操作」表头都在裁掉的那一侧，S3 刚建好的对比动线等于没做。
+                     现在店铺 / 平台 / 卖出笔数 / 疑似店铺折成第二行小字，一个字段都没丢，
+                     但列数从 7 降到 4。 -->
+                <td class="gd-c-item">
+                  <span class="wb-mono gd-item__id" data-act="q-item-id">{{ r.itemId }}</span>
+                  <span class="gd-item__sub">
+                    <template v-if="r.shopId">{{ r.shopName || `#${r.shopId}` }}</template>
+                    <span v-else class="wb-muted" :title="`订单里的店铺原文：${r.shopRaw || '（空）'}`">
+                      {{ r.shopRaw || '（无店铺名）' }}
+                    </span>
+                    <span v-if="r.platform" class="wb-tag gd-shop__plat">{{ r.platform }}</span>
+                    <span class="wb-muted">· 卖出 {{ r.orderCount }} 笔</span>
+                    <!-- 自动建议只作提示（未自动落库）：认店铺时给个参照，不替用户决定 -->
+                    <span v-if="r.autoShopName" class="gd-note">
+                      疑似 {{ r.autoShopName }}<template v-if="r.autoShopPlatform">（{{ r.autoShopPlatform }}）</template>
+                    </span>
+                  </span>
+                </td>
                 <!-- 状态折进行态：能关联的只剩「关联…」与「对比」，不能关联的在这里说清原因
                      （而不是给个灰按钮就完事）。「对比」是**分栏/整宽都成立**的：它不依赖左栏，
                      只要这一行有图就能把候选产品与它并起来看。 -->
@@ -240,20 +250,33 @@
                     </button>
                   </template>
                   <template v-else>
+                    <!-- 「需先登记店铺」保持**禁用**：这一行确实不能关联（订单里没有平台字段，
+                         硬塞会把两家店并到同一个键上）。但灰因不能只躺在 title 里 ——
+                         触屏 / 不会悬停的人永远看不到它，而灰按钮旁边的**可点出口**才是关键。
+                         所以紧跟着给「去登记」：同一个动作在提示条上也有一份（两处入口、一条路径）。 -->
                     <button
                       class="wb-link"
                       type="button"
                       data-act="row-blocked"
                       disabled
-                      :title="`先到「店铺账号管家」的「店铺登记」把「${r.shopRaw}」归一，再回来处理`"
+                      title="订单里没有平台字段，平台只能从已登记的店铺取 —— 所以先登记店铺才能写映射"
                     >
                       需先登记店铺
+                    </button>
+                    <button
+                      class="wb-link"
+                      type="button"
+                      data-act="row-open-registry"
+                      :disabled="busy"
+                      @click="navigate(GOODS_TAB_REGISTRY)"
+                    >
+                      去登记
                     </button>
                   </template>
                 </td>
               </tr>
               <tr v-if="!queueRows.length && !loading">
-                <td colspan="7" class="gd-panel__empty">
+                <td colspan="4" class="gd-panel__empty">
                   <div class="wb-empty">
                     <div class="wb-empty__icon" aria-hidden="true">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -321,19 +344,19 @@
 
       <section class="wb-panel gd-panel">
         <div class="wb-panel__body">
-          <table class="wb-table" data-act="mapped-table">
+          <table class="wb-table gd-mapped" data-act="mapped-table">
             <thead>
               <tr>
                 <th class="gd-c-img">图</th>
                 <th>商品ID</th>
-                <th>店铺</th>
                 <th>关联产品</th>
-                <th>状态</th>
                 <th class="gd-c-ops">操作</th>
               </tr>
             </thead>
             <tbody>
-              <!-- 来源 / 更新时间折进行 `title`：它们只回答"这条为什么变了"，不该常驻占宽 -->
+              <!-- 来源 / 更新时间折进行 `title`：它们只回答"这条为什么变了"，不该常驻占宽。
+                   店铺折进「商品ID」第二行、状态折进「关联产品」格：列数 6 → 4，
+                   理由同队列表（默认窗口下右栏只有 ~500px，6 列必然横向溢出）。 -->
               <tr
                 v-for="r in mappedRows"
                 :key="r.id"
@@ -373,18 +396,18 @@
                     </button>
                   </span>
                 </td>
-                <td class="wb-mono">{{ r.itemId }}</td>
-                <td :class="{ 'wb-muted': !r.shopName }">
-                  {{ r.shopName || `#${r.shopId}（店铺已删）` }}
-                  <span v-if="r.platform" class="wb-tag gd-shop__plat">{{ r.platform }}</span>
+                <td class="gd-c-item">
+                  <span class="wb-mono gd-item__id">{{ r.itemId }}</span>
+                  <span class="gd-item__sub">
+                    <span :class="{ 'wb-muted': !r.shopName }">{{ r.shopName || `#${r.shopId}（店铺已删）` }}</span>
+                    <span v-if="r.platform" class="wb-tag gd-shop__plat">{{ r.platform }}</span>
+                  </span>
                 </td>
-                <td>
+                <td class="gd-c-product">
                   <span class="wb-mono">{{ r.productCode || '—' }}</span>
                   <span v-if="r.productName" class="gd-note">{{ r.productName }}</span>
                   <span v-if="!r.productCode" class="gd-note">产品已不存在</span>
-                </td>
-                <td>
-                  <span class="wb-tag" :class="STATUS_CLASS[r.status] || ''">
+                  <span class="wb-tag gd-product__status" :class="STATUS_CLASS[r.status] || ''">
                     {{ STATUS_LABEL[r.status] || r.status }}
                   </span>
                 </td>
@@ -415,7 +438,7 @@
                 </td>
               </tr>
               <tr v-if="!mappedRows.length && !loading">
-                <td colspan="6" class="gd-panel__empty">
+                <td colspan="4" class="gd-panel__empty">
                   <div class="wb-empty">
                     <div class="wb-empty__icon" aria-hidden="true">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -537,16 +560,53 @@
 //
 // 左栏的「当前款」（`product`）也接进来 → 换来队列工具栏那个「关联到 `<款编码>`」直连入口，
 // 以及对比弹层的初始候选。它由外壳转一手（两个子组件互不认识，见 `GoodsWorkbenchView`）。
+import { watch } from 'vue';
 import { useSkuPool, SKU_STATUS_LABEL as STATUS_LABEL, SKU_STATUS_CLASS as STATUS_CLASS, SKU_SOURCE_LABEL as SOURCE_LABEL } from '../useSkuPool';
 import ProductPicker from './ProductPicker.vue';
+import PoolMetrics from './PoolMetrics.vue';
 import CompareModal from './CompareModal.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
+import type { GoodsTabId } from '../tabs';
+import { GOODS_TAB_REGISTRY } from '../tabs';
 
 const props = defineProps<{
   /** 页级「刷新」信号：值一变就重拉 */
   refreshNonce: number;
   /** 左栏「当前款」（用户展开的那一行）；`null` = 没选款 ⇒ 不给直连入口 */
   product: { id: number; code: string; name: string } | null;
+  /**
+   * 请求切到本页另一个页签 —— 「店铺登记」那一支。
+   *
+   * 为什么右栏需要它：队列里"店铺未归一"的行**不能**写映射（订单里没有平台字段），
+   * 而它们的出口（登记店铺）在另一个页签上。只给一句文字就等于让用户自己去猜在哪 ——
+   * 2026-10-08 真机走查实测：那句文字在全新安装上指着一个**根本没装的目的地**（D1 死锁）。
+   * 现在「店铺登记」已收进内建（见 `ShopRegistryView.vue`），这里把它变成一次点击。
+   */
+  navigate: (tab: GoodsTabId) => void;
+  /**
+   * 左栏展开区那个「认到本款」按钮发来的信号（自增 nonce，同 `refreshNonce` 的写法）。
+   *
+   * 为什么是"信号"而不是"回调"：真正写库的路径只有右栏这一条 `commitMap`（单事务、
+   * 行级失败回传、写完重拉队列）。左栏没有队列数据、也不该有第二套失败语义 ——
+   * 它只能说"用户想认款"，由本栏决定认哪些、怎么认。
+   */
+  relateNonce: number;
+}>();
+
+const emit = defineEmits<{
+  /**
+   * 右栏**已勾选**的待关联商品数 —— 报给外壳转手给左栏（左栏要靠它决定「认到本款」亮不亮）。
+   * 只报一个数字：勾选状态本身不出这个组件（谁都不该在别处重建一份）。
+   */
+  'selection-changed': [count: number];
+  /**
+   * 队列聚合出的**组数**报给外壳（`null` = 队列还没拉过）。
+   *
+   * 报的是原始数字而不是"该不该显示引导卡"的布尔：判据只写一遍（`../firstRun.ts`），
+   * 外壳只做原样转手、不推导。`null` 与 `0` 必须分得开 —— 见 `firstRun.ts` 顶部那段：
+   * 把"还没拉过"当成"没有待办"，界面就会说出一个它不知道的结论。
+   */
+  'queue-groups': [groups: number | null];
 }>();
 
 const {
@@ -586,9 +646,12 @@ const {
   mappedPages,
   mappedFiltered,
   rateText,
+  queuePendingTotal,
+  queueHasMore,
   pickerTitle,
   pickerConfirm,
   pickerInitialColor,
+  batchLabel,
   queueKey,
   openImage,
   pickItemThumb,
@@ -613,6 +676,27 @@ const {
   refresh: () => props.refreshNonce,
   selectedProduct: () => props.product,
 });
+
+/**
+ * 勾选数上报（→ 外壳 → 左栏展开区那个「认到本款」按钮的亮/灭）。
+ *
+ * 只报一个数字：勾选状态本身住在 `useSkuPool` 里，谁都不该在别处重建一份。
+ * `immediate` 是必须的 —— 初次挂载时如果已经有勾选（例如刷新后保留了选择），
+ * 左栏那个按钮必须一上来就是亮的，不能等用户再点一次才同步。
+ */
+watch(() => selectedUnmapped.value.length, (n) => emit('selection-changed', n), { immediate: true });
+
+/**
+ * 左栏展开区的「认到本款」按下来 ⇒ 走本栏**同一条**写路径（`relateToSelected`，
+ * 内部再落 `commitMap`：单事务、行级失败回传、写完重拉队列）。
+ *
+ * 为什么不直接在左栏调 `relateToSelected`：它依赖的 `selectedUnmapped` / `currentProduct`
+ * 都住在本栏，左栏拿不到也不该拿到；信号式（nonce 自增）与 `refreshNonce` 同一写法。
+ */
+watch(() => props.relateNonce, () => void relateToSelected());
+
+/** 组数往上报（→ 外壳 → 首次动线的判据）。`null` = 队列还没拉过，**不是 0**（见 `firstRun.ts`）。 */
+watch(() => qStats.value?.groups ?? null, (n) => emit('queue-groups', n), { immediate: true });
 </script>
 
 <style scoped>
@@ -663,6 +747,17 @@ const {
 .gd-hints :deep(p) {
   margin: 0;
 }
+/* 「N 家店铺还没登记」这条：文字与按钮**同一行**（按钮是这个出口的全部价值，
+   挤到第二行就跟一句纯文本没区别了）。窄栏下按钮换行也无妨 —— 关键是它可点、不是装饰。 */
+.gd-hint-shops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gd-hint-shops__act {
+  flex-shrink: 0;
+}
 
 .gd-panel {
   flex: 1;
@@ -674,16 +769,52 @@ const {
 .gd-c-check {
   width: 34px;
 }
-.gd-c-img {
-  width: 56px;
+/* 两张表都用**固定布局**，列宽由这一处说了算。
+   为什么必须固定：默认 1200×800 窗口下右栏只有 ~500px 宽，而 `.wb-panel` 是 overflow:hidden ——
+   表格一旦比容器宽，右半截（含「操作」表头与「对比」按钮）会被**静默裁掉**：没有滚动条、没有报错、
+   DOM 里字段一个不少，于是"元素存在"类断言对它恒绿（2026-10-08 真机走查实测：表格右缘 1424 > 视口 1200，
+   「对比」按钮中心点落在视口外）。固定布局 + width:100% 让表格**按构造**不越界。 */
+.gd-queue,
+.gd-mapped {
+  width: 100%;
+  table-layout: fixed;
 }
-/* 店铺格：店名下面挂平台小标签，省掉「平台」整列（§7-2） */
-.gd-c-shop {
-  min-width: 120px;
+/* 队列的图放大一档：认款**只能靠肉眼比图**（订单里没有任何字段能推出"这是哪一款"），
+   它是这一列的主要依据，不是装饰。 */
+.gd-c-img {
+  width: 64px;
+}
+.gd-queue .wb-thumb {
+  width: 52px;
+  height: 52px;
+}
+/* 商品ID 格：第一行是 ID 本身，第二行是折进来的店铺 / 平台 / 卖出笔数 / 疑似店铺。
+   ⚠️ 两行都**允许换行**（`.wb-table td` 全局是 nowrap）：固定布局下格子宽度是死的，
+   折进来的信息若靠省略号裁掉，就等于"界面上看不见、DOM 里却有" —— 正是本轮要消掉的那类错觉。 */
+.gd-queue td.gd-c-item,
+.gd-mapped td.gd-c-item {
+  white-space: normal;
+}
+.gd-item__id {
+  display: block;
+  word-break: break-all;
+}
+.gd-item__sub {
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--wb-text-muted);
 }
 .gd-shop__plat {
   margin-left: 6px;
   font-size: 11px;
+}
+.gd-c-product {
+  width: 132px;
+  white-space: normal;
+}
+.gd-product__status {
+  margin-left: 6px;
 }
 /* 队列的缩略图包一层按钮（点开看原图）—— 剥掉按钮默认外观，只留"可点开"的光标 */
 .gd-thumb-btn {
@@ -714,9 +845,10 @@ const {
 tr.is-blocked :deep(td) {
   background: var(--wb-surface-2);
 }
-/* 商品ID图下的小操作（设图 / 换图 / 清除） */
+/* 商品ID图下的小操作（设图 / 换图 / 清除）：固定列宽下允许换行，别溢出格子 */
 .gd-imgops {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 2px;
 }

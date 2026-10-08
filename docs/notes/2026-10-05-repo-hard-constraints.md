@@ -14,6 +14,17 @@
   仍往下跑、冒烟跑的是**旧 `dist/`**。曾因此把"变异后仍然全绿"读成"断言恒绿"（实际是断言有效、产物是旧的）。
   ⇒ **逐条命令单独看退出码**；也别与前一个后台任务（尤其 `vitest` 里 fork 子进程的 `publishGuard`）并发跑 build。
   （2026-10-05；通用写法见技能 `esm-spa-headless-smoke` §4.14）
+- ⭐ **变异跑完必须 `npm run build` 再跑最终门禁**：`*:ui` 一律读 `dist/`，而变异改的是 `src/` ——
+  改回来却忘了 rebuild，**变异体就留在 `dist/` 里**，最后一次全量冒烟会挂着几条"源码看着完全对"的假 FAIL。
+  识别特征：**红的正是那条变异所针对的断言**。2026-10-08 实测踩到（`firstRun.ts` 的 `&&` 变异体
+  让「零款但订单已进队列 → 卡不出现」与窄视口的同款断言同时假红，rebuild 即恢复）。
+- ⚠️ **子进程/GUI 类冒烟不能只看退出码**：`plugins:island:smoke` 在 Chromium sandbox 起不来时
+  （`sandbox initialization failed` → GPU 反复崩 → `GPU process isn't usable. Goodbye.` → SIGTRAP）
+  **退出码仍是 0**。两条纪律：①本机跑要显式传参 `npm run plugins:island:smoke -- --no-sandbox --disable-gpu`；
+  ②必须看输出里有没有 `4/4 个 UI 岛` 那一行。另：它要求 vite dev server 在跑，而**起它和跑它必须在同一次
+  命令调用里**（分两次调用连不上，脚本只说"连不上 vite dev server"）。（2026-10-08）
+- **本机是 zsh**：取管道前一环的退出码用 `${pipestatus[1]}` —— `PIPESTATUS[0]` 是 bash 写法，在 zsh 里
+  **恒展开为空**，看起来像"命令没报错"。（2026-10-08）
 - **变异测试一律用 Edit 工具改，别用 `node -e "…"` 拼引号**：shell 转义会把判据弄坏，脚本打印"❌ 未命中"
   却**已经把改动写进去了** ⇒ 变完白、还留下半截修改。收工前 `grep -rn MUTANT src/ scripts/ tests/` 是必做的一步。
   另一条：**变红要打在真正的守卫点**（内层 `throw` 可能被外层 `catch` 吞掉 ⇒ 照绿），**"没变红"什么都证明不了**。

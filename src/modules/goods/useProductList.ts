@@ -46,6 +46,14 @@ export function useProductList(opts: ProductListOptions) {
 
   const rows = ref<ProductListItem[]>([]);
   const total = ref(0);
+  /**
+   * **全库**款数（来自 `productSummary.total`）；`null` = 汇总还没拉到 —— **不是 0**。
+   *
+   * 与 `total` 的区别必须留着：`total` 是"当前筛选下的条数"（列表分页要用它），
+   * 而"这个库到底有没有货"只能由这个不受筛选影响的数字回答。
+   * 消费者：首次动线（`shouldShowFirstRunCard`，见 `./firstRun.ts`）。
+   */
+  const stylesTotal = ref<number | null>(null);
   const page = ref(1);
   const selectedIds = ref<Set<number>>(new Set());
 
@@ -158,9 +166,16 @@ export function useProductList(opts: ProductListOptions) {
     try {
       const s = await api.summary();
       supplierOptions.value = s?.supplierOptions ?? [];
+      // 全库款数（首次动线要用它判"零款"）。
+      // ⚠️ 刻意取 `summary.total` 而不是列表的 `total`：后者是**按当前筛选**算的 ——
+      //    用户开着"缺克重"筛选时它可以是 0，于是"零款"会被一个筛选条件伪造出来，
+      //    首启引导卡就会在**有货**的库里冒出来。
+      stylesTotal.value = typeof s?.total === 'number' ? s.total : null;
     } catch {
       // 供应商下拉拿不到不该挡住列表：只是筛选项少一个
       supplierOptions.value = [];
+      // ⚠️ 拉不到就是**不知道**，必须回落 `null` 而不是留 0：留 0 会被读成"这个库是空的"。
+      stylesTotal.value = null;
     }
   }
 
@@ -486,6 +501,7 @@ export function useProductList(opts: ProductListOptions) {
     savedHint,
     rows,
     total,
+    stylesTotal,
     page,
     selectedIds,
     supplierOptions,

@@ -164,14 +164,47 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     return `${Math.round((m / g) * 100)}%（${m}/${g}）`;
   });
 
+  /**
+   * 队列里的**待办总数** = 未关联 + 店铺未归一。
+   *
+   * ⚠️ 不能用 `stats.groups` 代替它：`groups` 是**聚合出的全部组**（含已经关联好的那一半），
+   * 拿它去和 `shown` 比会**恒真** —— 于是渲染出一个"点了纹丝不动"的「显示更多」。
+   * 实测：认完两行之后队列只剩 1 行，按钮却还在，点下去行列数一个都不变（本仓既有结论
+   * 里的"假动作"）。`unmapped + shopUnresolved` 才是"队列里还有多少组"，与列表实现同源。
+   */
+  const queuePendingTotal = computed(
+    () => (qStats.value?.unmapped ?? 0) + (qStats.value?.shopUnresolved ?? 0)
+  );
+  /** 还有**没列出来**的组 —— 判据 = 待办总数 > 本页返回的行数 */
+  const queueHasMore = computed(() => (qStats.value?.shown ?? 0) < queuePendingTotal.value);
+
   /** 队列行的稳定键（主进程按 `(店铺归一键, 商品ID)` 聚合，这里用同一对） */
   function queueKey(r: SkuQueueRow): string {
     return `${r.shopKey}\u0000${r.itemId}`;
   }
 
-  const pickerTitle = computed(() =>
-    picker.value?.mode === 'queue' ? `批量关联 ${picker.value.queue.length} 项到产品` : '改绑到产品'
+  /**
+   * 「批量关联选中 N 项…」的按钮文案（W4）。
+   *
+   * ⚠️ **单项时不说「批量」**：批量是一个承诺（一次写多行、一次事务、一次回执），
+   * 只有 1 行的时候它什么都没兑现，反而让用户以为自己勾错了（"我明明只点了一个，怎么成了批量"）。
+   *
+   * 为什么这句放钩子里而不是两个模板各写一遍：同一句话在整宽形态与工作台右栏**都要出现**，
+   * 复制两份之后必然有一天只改一份 —— 本仓"同一个意思两套文案"的老毛病（UX-G1 同源）。
+   */
+  const batchLabel = computed(() =>
+    selectedUnmapped.value.length === 1
+      ? '关联选中 1 项…'
+      : `批量关联选中 ${selectedUnmapped.value.length} 项…`
   );
+
+  const pickerTitle = computed(() => {
+    if (picker.value?.mode !== 'queue') return '改绑到产品';
+    const n = picker.value.queue.length;
+    // 同 `batchLabel`：单项时不说「批量」。弹层标题比按钮多带一个数字，
+    // 因为它要回答"我这就要写几行"。
+    return n === 1 ? '关联 1 项到产品' : `批量关联 ${n} 项到产品`;
+  });
   const pickerConfirm = computed(() =>
     picker.value?.mode === 'queue' ? `关联这 ${picker.value.queue.length} 项` : '改绑'
   );
@@ -585,6 +618,9 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     const p = currentProduct.value;
     const target = selectedUnmapped.value;
     if (!p || !target.length) return;
+    // 认款入口现在有**两处**（右栏工具栏 + 左栏展开区），后者是"发信号"式的 ——
+    // 不挡一下的话，连点两次会发两次同样的写入（第二次数出来的行级失败会盖掉第一次的回执）。
+    if (busy.value) return;
     await commitMap(queueWriteRows(target, p.id, ''), '');
   }
 
@@ -696,9 +732,12 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     mappedPages,
     mappedFiltered,
     rateText,
+    queuePendingTotal,
+    queueHasMore,
     pickerTitle,
     pickerConfirm,
     pickerInitialColor,
+    batchLabel,
     // 方法
     queueKey,
     loadQueue,

@@ -63,15 +63,24 @@
       </div>
 
       <div class="wb-dialog__foot">
-        <!-- 颜色（D4 起承载在映射的 `spec` 上）：颜色是**商品ID 的属性**，不是每单的属性。
-             配一次，之后该商品的所有订单自动带色 —— 不配则仍需人工逐单看图。故默认给出后果提示。 -->
-        <label class="pk-color">
-          <span class="wb-muted pk-color__label">颜色</span>
-          <select v-model="color" class="wb-input wb-input--sm" data-act="pick-color">
-            <option value="">不指定（订单仍需人工看色）</option>
-            <option v-for="c in COLOR_OPTIONS" :key="c" :value="c">{{ c }}</option>
-          </select>
-        </label>
+        <div class="pk-foot__left">
+          <!-- 颜色（D4 起承载在映射的 `spec` 上）：颜色是**商品ID 的属性**，不是每单的属性。
+               配一次，之后该商品的所有订单自动带色 —— 不配则仍需人工逐单看图。故默认给出后果提示。 -->
+          <label class="pk-color">
+            <span class="wb-muted pk-color__label">颜色</span>
+            <select v-model="color" class="wb-input wb-input--sm" data-act="pick-color">
+              <option value="">不指定（订单仍需人工看色）</option>
+              <option v-for="c in COLOR_OPTIONS" :key="c" :value="c">{{ c }}</option>
+            </select>
+          </label>
+          <!-- 灰因**常显**（与「店铺登记」表单、右栏「需先登记店铺」同一条口径）：
+               确定按钮在没选产品时是灰的，原先只能靠"为什么点不动"去猜 ——
+               而弹层里恰恰是产品很多、最需要知道"还差一步什么"的地方。 -->
+          <span v-if="!picked" class="wb-muted pk-blocked" data-act="pick-blocked">
+            先选中一款产品
+          </span>
+          <span v-else-if="busy" class="wb-muted pk-blocked" data-act="pick-busy">写入中…</span>
+        </div>
         <button class="wb-btn" type="button" @click="$emit('close')">取消</button>
         <button
           class="wb-btn wb-btn--primary"
@@ -288,9 +297,16 @@ onMounted(() => void load());
   font-size: 12px;
 }
 
-/* 颜色选择靠左，两个按钮保持右对齐 */
-.pk-color {
+/* 灰因与颜色同在左侧一组（`margin-right: auto` 上移到这一层）：
+   两个都在按钮左边排开，窄窗口下允许换行 —— 关键是灰因始终可见，不是悬停才有。 */
+.pk-foot__left {
   margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pk-color {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -298,5 +314,8 @@ onMounted(() => void load());
 .pk-color__label {
   font-size: 13px;
   white-space: nowrap;
+}
+.pk-blocked {
+  font-size: 12px;
 }
 </style>

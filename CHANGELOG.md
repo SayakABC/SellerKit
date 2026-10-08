@@ -13,6 +13,40 @@
 
 ## [Unreleased]
 
+### Changed · 「货与成本」按新手可用性方案执行 **R0–R3**（2026-10-08 续十）
+
+`docs/plans/GOODS_UX_REFACTOR_PLAN.md` 的 R0–R3 全部落地（用户拍板"R0–R3 全做"）。四段顺序**不可换**：修 bug 先于文案、解死锁先于包装层、包装层先于首次动线（理由见笔记）。
+
+| 段 | 内容 | 主要位置 |
+| --- | --- | --- |
+| **R0 修 bug** | ① 左栏「已关联商品」缓存不再"拉过一次即置位"（认款后两栏口径自相矛盾）；② 「显示更多」真假判据（`queuePendingTotal` / `queueHasMore`，原判据恒真）；③ 窄形态（<1180px）左栏空态不再溢出被遮（`grid-template-rows: max-content max-content`）；④ 右栏队列**列精简**——只留商品ID + 图片（图为主），「对比」在默认 1200×800 下不再被裁 | `ProductPane.vue` / `useSkuPool.ts` / `PoolPane.vue` / `GoodsWorkbenchView.vue` / `goods-ui-smoke.mjs` |
+| **R1 解死锁** | 「店铺登记」**收进内建页签**（`ShopRegistryView.vue`，原在未安装的 UI 岛里）⇒ 提示条「现在登记」与行内「去登记」**都**有真出口；页签 id/显示名收成单一真源 `tabs.ts`；`shopApi.ts` 隔离店铺域调用 | 新增 `tabs.ts` / `shopApi.ts` / `ShopRegistryView.vue`；`GoodsView.vue` |
+| **R2 包装层** | 左栏展开区「**认到本款**」按钮（带计数、0 时禁用、写真进左栏展开的那一款）；指标条抽成 `PoolMetrics.vue`（**0 不占位** + 全零**说一句真话** + `null` 时一项都不渲染）；单项操作不说"批量"（`batchLabel`）；术语首现加括号白话（`glossary.ts`）；编辑抽屉**统一保存模型**（离开输入框即落库 / 快照对比 `formDirty` / 单飞 `flying` / `closeGuard` 只对"真的会丢"的 SKU 改动确认） | 新增 `glossary.ts` / `PoolMetrics.vue`；`ProductPane.vue` / `PoolPane.vue` / `useSkuPool.ts` / `ProductEditorDrawer.vue` / `ProductPicker.vue` / `SkuMappingView.vue` |
+| **R3 首次动线** | **空库一次性引导卡**（零款 + 队列已拉过且为空才出现，三步 订单→店铺→认款，第三步**刻意无按钮**，有款后**自己消失**）；页头「?」帮助面板与卡**共用**同一份三步（`firstRun.ts` 的 `FIRST_RUN_STEPS`） | 新增 `firstRun.ts` / `FirstRunCard.vue`；`useProductList.ts`（`stylesTotal` 取**全库**汇总）/ `GoodsView.vue` / `GoodsWorkbenchView.vue` |
+
+**守卫升级（本轮最重要的一条）**：断言从**存在性**升级为**可达性** —— `getBoundingClientRect` 在视口内 **且** `elementFromPoint(中心)` 命中自己。原 bug 的症状正是"元素在 DOM 里但用户点不到"，存在性断言对它恒绿。冒烟 runner 由两遍视口扩为**三遍**（1440×900 全量 / 1200×800 默认窗口可达性 / 900×800 窄视口），`goods:ui` **110 → 180 项**。
+
+**门禁**：`vue-tsc` ✅ · `build` ✅ · `verify:docs` ✅ · `goods:ui` **180 PASS / 0 FAIL** · `vitest run` **36 文件 / 593 用例**（新增 `tests/goodsFirstRun.spec.ts` 8 例）。7 组变异逐条确认变红（见 `docs/notes/2026-10-08-goods-ux-refactor-r0-r3.md`）。
+
+> ⚠️ **变异跑完必须 `npm run build` 再跑最终门禁** —— 本轮真的踩了：C1b 的变异体（`firstRun.ts` 的 `&&` 改 `||`）留在 `dist/` 里，让最后一次全量冒烟挂着两条"源码看着对"的假 FAIL。`*:ui` 读 `dist/`，"改界面先 build"在本仓是前提不是建议。
+
+### Removed · `docs/guides/USER_GUIDE.md` 正文**已删除**（594 行 → 下线说明）
+
+原文描述的是「TV模版」时代的三栏界面，与现在的界面**对不上**（照着找会找不到）。**594 行正文整篇删除**，文件改为下线说明：现在去哪儿看 = 应用内「货与成本」页头右上角的 **「?」**（三句话 + 一张三步图，R3 加的）；历史版本走 `git log --follow docs/guides/USER_GUIDE.md`。保留文件路径只为不让别处的引用悬空（`docs/README.md` 三处引用同步改为「已下线」）。
+
+### Added · 「货与成本」**真机走查**完成并产出新手可用性交互重构方案（2026-10-08 续九）
+
+用真实 userData 克隆 + 全新空 userData 各跑一遍应用（CDP 实测，含 `elementFromPoint` 命中检测），**推翻同日静态审查"只差包装层"的结论**：实测出 4 个硬 bug——
+
+1. 左栏「已关联商品」缓存永不刷新（`ProductPane.vue` `loadLinks` 拉过一次即置位）：认款后两栏口径自相矛盾，仅重启恢复；
+2. 「显示更多」假动作（`useSkuPool` 判据 `groups > shown` 恒真）：点击后计数与行数均不变；
+3. 窄形态（<1180px，**全新安装默认视口即在此**）左栏空态溢出容器且被工具栏遮挡，按钮点不到；
+4. 默认 1200×800 下右栏队列「对比」按钮被裁、超出视口——**S3 的对比动线在默认窗口不可达**。
+
+另实测坐实：店铺未归一死锁成立（提示条零可点元素 + 全新安装侧边栏无「店铺账号管家」）；编辑抽屉静默丢弃未保存内容；`0 · 缺 0` 与全零指标条复现。
+
+产出：`docs/plans/GOODS_UX_REFACTOR_PLAN.md`（R0 修 bug → R1 解死锁 → R2 包装 → R3 首次动线；守卫升级为**可达性断言**；新增待拍板 UX-G6/G7）。静态审查 `docs/reviews/UX_GOODS_NOVICE_2026-10-08.md` 补 §7 修正记录。**本条只含文档，未改任何代码。**
+
 ### Changed · 「货与成本」重构 **S4**：页签 3→2 收口、工作台恒两栏，并补上拖了两轮的窄视口守卫（2026-10-08 续八）
 
 `docs/plans/GOODS_WORKBENCH_PLAN.md` 的 S4：把「产品」与「映射与关联」**合并成一个页签**。

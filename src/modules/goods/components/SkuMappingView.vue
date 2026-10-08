@@ -41,20 +41,9 @@
       </div>
     </div>
 
-    <!-- 统计条：这一条是**当前交付口径的画像**（待办 / 阻塞 / 已完成 / 覆盖率）。
-         关联率的分母刻意用 `groups`（= 已关联 + 待关联 + 店铺未归一，主进程保证这个恒等式），
-         而不是"已确认映射条数"——后者会把已经没有订单的历史映射算进去，比率虚高到看不出问题。 -->
-    <div class="wb-metabar" data-act="map-stats">
-      <span class="wb-metric" :class="{ 'is-warn': (qStats?.unmapped ?? 0) > 0 }">
-        待关联 <b>{{ qStats?.unmapped ?? 0 }}</b>
-      </span>
-      <span class="wb-metric" :class="{ 'is-warn': unresolvedShops.length > 0 }">
-        店铺未归一 <b>{{ qStats?.shopUnresolved ?? 0 }}</b>
-      </span>
-      <span class="wb-metric"> 已关联 <b>{{ qStats?.mapped ?? 0 }}</b> </span>
-      <span class="wb-metric"> 关联率 <b>{{ rateText }}</b> </span>
-      <span class="wb-metric"> 映射记录 <b>{{ mSummary?.total ?? 0 }}</b> </span>
-    </div>
+    <!-- 统计条：**0 不占位、全零说一句人话**（W2/全零，2026-10-08 R2）。
+         规则全部在 `PoolMetrics.vue` 里写了一遍 —— 工作台右栏 `PoolPane` 用的是同一个组件。 -->
+    <PoolMetrics :stats="qStats" :summary="mSummary" :rate-text="rateText" />
 
     <p v-if="error" class="wb-notice wb-notice--error">{{ error }}</p>
 
@@ -71,10 +60,22 @@
     <!-- ── 待关联队列 ─────────────────────────────────────────────── -->
     <template v-if="sub === 'queue'">
       <div v-if="hasQueueHints" class="gd-hints">
-        <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn">
-          下面这些店铺还没归一，它们的商品<b>无法</b>写映射（订单里没有平台，平台只能从店铺实体取）：
-          <b>{{ unresolvedShops.join('、') }}</b>
-          。请先到「店铺账号管家」的「店铺登记」把门店认下来，再回来刷新。
+        <!-- 与两栏形态的右栏**同一处改动**（2026-10-08 D1）：出口是内建的「店铺登记」页签，
+             按钮直接跳过去，不再是一句"请先到「店铺账号管家」…"（那个岛不在默认包里）。 -->
+        <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn gd-hint-shops">
+          <span>
+            <b>{{ unresolvedShops.length }}</b> 家店铺还没登记，它们的商品<b>无法</b>写映射
+            （订单里没有平台，平台只能从店铺实体取）：
+            <b>{{ unresolvedShops.join('、') }}</b>。到「店铺登记」把它们认下来，这几行才能关联。
+          </span>
+          <button
+            class="wb-btn wb-btn--sm gd-hint-shops__act"
+            type="button"
+            data-act="open-registry"
+            @click="navigate(GOODS_TAB_REGISTRY)"
+          >
+            现在登记
+          </button>
         </p>
         <p v-if="qStats?.truncated" class="wb-notice wb-notice--warn">
           订单行数超过单次扫描上限（50000 行），本次队列可能不完整。建议先按时间分批导入订单。
@@ -93,7 +94,7 @@
           :disabled="busy || !selectedUnmapped.length"
           @click="openBatchPicker"
         >
-          批量关联选中 {{ selectedUnmapped.length }} 项…
+          {{ batchLabel }}
         </button>
         <button
           class="wb-btn"
@@ -105,7 +106,7 @@
           清空选择
         </button>
         <button
-          v-if="(qStats?.groups ?? 0) > (qStats?.shown ?? 0)"
+          v-if="queueHasMore"
           class="wb-btn"
           type="button"
           data-act="queue-more"
@@ -115,7 +116,7 @@
           显示更多
         </button>
         <span class="wb-muted gd-toolbar__hint">
-          共 {{ qStats?.groups ?? 0 }} 组待处理，已列出 {{ qStats?.shown ?? 0 }} 组
+          共 {{ queuePendingTotal }} 组待处理，已列出 {{ qStats?.shown ?? 0 }} 组
         </span>
       </div>
 
@@ -224,9 +225,18 @@
                       type="button"
                       data-act="row-blocked"
                       disabled
-                      :title="`先到「店铺账号管家」的「店铺登记」把「${r.shopRaw}」归一，再回来处理`"
+                      title="订单里没有平台字段，平台只能从已登记的店铺取 —— 所以先登记店铺才能写映射"
                     >
                       需先登记店铺
+                    </button>
+                    <button
+                      class="wb-link"
+                      type="button"
+                      data-act="row-open-registry"
+                      :disabled="busy"
+                      @click="navigate(GOODS_TAB_REGISTRY)"
+                    >
+                      去登记
                     </button>
                   </template>
                 </td>
@@ -249,7 +259,7 @@
                          它是纯文本节点，`**实时**` 会原样显示成四个星号。） -->
                     <p class="wb-empty__desc">
                       {{
-                        qStats?.groups
+                        queuePendingTotal
                           ? '还有更多组没列出来时，点上面的「显示更多」继续。'
                           : '队列不是缓存表，而是实时从订单里聚出来的：在「今天」页导入订单后，出现过的「店铺 × 商品ID」会在这里等着确认。'
                       }}
@@ -531,8 +541,20 @@ import {
   SKU_SOURCE_LABEL as SOURCE_LABEL,
 } from '../useSkuPool';
 import ProductPicker from './ProductPicker.vue';
+import PoolMetrics from './PoolMetrics.vue';
 import CompareModal from './CompareModal.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
+import { GOODS_TAB_REGISTRY, type GoodsTabId } from '../tabs';
+
+const props = defineProps<{
+  /** 页级「刷新」信号（值变化即重拉） */
+  refreshNonce?: number;
+  /**
+   * 请求切到本页另一个页签 —— 「店铺登记」那一支。见 `PoolPane.vue` 里同一条 prop 的说明：
+   * 回退形态与两栏形态必须走**同一个**出口，否则"改一个常量回退"会退到一个死胡同里去。
+   */
+  navigate: (tab: GoodsTabId) => void;
+}>();
 
 // ⚠️ 2026-10-08：原先这里还 emit `changed`（把「待关联数」报给外壳的页签徽标）。
 //    指标条与徽标一起撤掉后它已**零消费者**，于是整条删掉（不留"转发了没人听"的空管道）。
@@ -572,9 +594,12 @@ const {
   mappedPages,
   mappedFiltered,
   rateText,
+  queuePendingTotal,
+  queueHasMore,
   pickerTitle,
   pickerConfirm,
   pickerInitialColor,
+  batchLabel,
   queueKey,
   openImage,
   pickItemThumb,
@@ -594,7 +619,7 @@ const {
   applyPick,
   confirmInvalidate,
   restore,
-} = useSkuPool();
+} = useSkuPool({ refresh: () => props.refreshNonce ?? 0 });
 </script>
 
 <style scoped>
@@ -643,6 +668,16 @@ const {
 }
 .gd-hints :deep(p) {
   margin: 0;
+}
+/* 与两栏形态右栏同一条（PoolPane.vue）：出口按钮必须与文字同处一行 */
+.gd-hint-shops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gd-hint-shops__act {
+  flex-shrink: 0;
 }
 
 .gd-panel {

@@ -88,8 +88,40 @@ const FAKE_BRIDGE = `<script>
     { id: 901, itemId: 'SKU-A1', productId: 1, productCode: 'S1', productName: '款一', createdAt: '2026-09-27 12:00' },
   ];
 
-  /** 本会话已建立的映射键（队列据此剔除"已关联"的组）—— 真实里是 pl_shop_sku WHERE status='confirmed' */
+  /** 本会话已建立的映射键（队列据此剔除\"已关联\"的组）—— 真实里是 pl_shop_sku WHERE status='confirmed' */
   var MAP = {};
+
+  /* ==========================================================================
+     店铺实体域（sk_shops / sk_name_map）—— 2026-10-08 起「店铺登记」收进内建，
+     右栏提示条的「现在登记」与行内的「去登记」都跳它 ⇒ 这一页真的会调这几个通道。
+
+     ⚠️ 样本必须与队列**同源**（这是本文件最容易写错的地方）：
+        · 两家店 = 队列里那两行 unmapped 的归属（shopId 11 / 12，平台 shopee / amazon）；
+        · 一条未归一店名 = 队列里那一行 shopUnresolved 的原文（「新奇怪物店」，
+          且 autoShopId=12 精确命中 Aurora Store —— 「采纳」按钮只在唯一命中时出现）。
+     这样"登记完 → 回队列刷新 → 那一行就能关联了"这条**端到端**断言才成立。
+     两端各造一套互不相干的夹具（店名对不上队列里的原文）—— 界面照样全绿，
+     但那条断言会变成恒真：它验的正是"两端是不是同一件事"。
+     ========================================================================== */
+  var SHOPS_INIT = [
+    { id: 11, platform: 'shopee', name: 'HK 优品店', nameKey: 'hk 优品店', platformShopId: '', site: 'MY', shopSetId: 0, status: 'active', openedAt: '', note: '', createdAt: '2026-09-01 10:00', updatedAt: '', aliasCount: 1 },
+    { id: 12, platform: 'amazon', name: 'Aurora Store', nameKey: 'aurora store', platformShopId: 'A1B2C3D4', site: 'US', shopSetId: 7, status: 'active', openedAt: '', note: '', createdAt: '2026-09-02 10:00', updatedAt: '', aliasCount: 1 },
+  ];
+  /* 未归一店名（主进程 listUnmapped 每次实时聚合算出来的，不是缓存表）—— 两条各有分工：
+       ① 「新奇怪物店」= 队列里那行 shopUnresolved 的原文，且**唯一命中** Aurora Store
+          ⇒ 必须出现「采纳：Aurora Store」（这是"不猜"的反面：唯一时给一键采纳）；
+       ② 「GAIA」= **歧义**样本（同名两平台，主进程给的 autoShopId 恒为 0）
+          ⇒ 界面上**不许**有「采纳」（恒渲染采纳的话，①那条断言就变成了恒真），只能靠人选。
+     只放 ① 的话，"采纳是条件渲染"这条判据恒绿 —— 它恰好是"不猜歧义"纪律的唯一机器守卫。 */
+  var UNMAPPED_SHOPS_INIT = [
+    { key: '新奇怪物店', raw: '新奇怪物店', occurrences: 3, sources: ['order'], autoShopId: 12, autoShopName: 'Aurora Store', autoShopPlatform: 'amazon' },
+    { key: 'gaia', raw: 'GAIA', occurrences: 5, sources: ['purchase'], autoShopId: 0, autoShopName: '', autoShopPlatform: '' },
+  ];
+  var SHOPS = SHOPS_INIT.map(function (s) { return Object.assign({}, s); });
+  var UNMAPPED_SHOPS = UNMAPPED_SHOPS_INIT.map(function (r) { return Object.assign({}, r); });
+  /** 已登记的"历史店名 → 店铺id"绑定（队列据此把 shopUnresolved 行放行成可关联） */
+  var SHOP_BIND = {};
+  var SHOP_STALE = 0;
 
   // 队列的图：图池只认**归一后**的商品ID。上面 B0XYZ1234 那行的订单原文故意带尾随空格
   // （订单报表里很常见），界面若拿原文去查池就查不到 —— 症状是那一列的图全变空占位且不报错。
@@ -122,6 +154,12 @@ const FAKE_BRIDGE = `<script>
   window.__smokeReset = function () {
     MAP = {};
     MAPPED = MAPPED.filter(function (m) { return m.id < 900; });
+    // 店铺侧也要回到原点：否则「登记完这一行就能关联了」的断言在复用同一会话的第二个场景里
+    // 会直接看到"已经登记过了"，那条断言就恒绿了。
+    SHOPS = SHOPS_INIT.map(function (s) { return Object.assign({}, s); });
+    UNMAPPED_SHOPS = UNMAPPED_SHOPS_INIT.map(function (r) { return Object.assign({}, r); });
+    SHOP_BIND = {};
+    SHOP_STALE = 0;
     for (var k in calls) delete calls[k];
   };
 
@@ -149,6 +187,10 @@ const FAKE_BRIDGE = `<script>
       } else if (p && p.supplierId) {
         rows = rows.filter(function (x) { return x.supplierId === p.supplierId; });
       }
+      // 空库分支（仅当断言脚本打开 window.__smokeEmptyProducts 时走）：用于验"窄窗口下左栏
+      // 空态的按钮真的点得到"。空态只在**真的零款**时才渲染 —— 造不出零款，那条可达性断言
+      // 会因为组件根本没渲染而恒绿（等于没测）。
+      if (window.__smokeEmptyProducts) rows = [];
       return { success: true, data: { rows: rows, total: rows.length } };
     },
     'productVariantList': function (p) {
@@ -159,6 +201,19 @@ const FAKE_BRIDGE = `<script>
     // 供应商下拉与「供应商」页签的产品数列都取自这里（不各自数一遍，避免两处口径打架）
     'productSummary': function () {
       rec('productSummary', {});
+      // 与 productList 的 __smokeEmptyProducts 同步（空库样本必须**处处**都是零，否则
+      // 空态判据里的"零款"会被这一处的非零值顶掉）。
+      if (window.__smokeEmptyProducts) {
+        return { success: true, data: {
+          total: 0,
+          byStatus: [],
+          withoutSupplier: 0,
+          supplierOptions: [
+            { id: 7, name: '厂A', productCount: 0 },
+            { id: 8, name: '厂B', productCount: 0 },
+          ],
+        } };
+      }
       return { success: true, data: {
         total: PRODUCTS.length,
         byStatus: [{ status: 'active', count: PRODUCTS.length }],
@@ -184,6 +239,34 @@ const FAKE_BRIDGE = `<script>
     },
     'productVariantUpsert': function (p) { rec('productVariantUpsert', p); return { success: true, data: { id: p.id, created: false } }; },
     'productDbEnsure': function () { return { success: true, data: { ok: true } }; },
+
+    /* ---- 产品表单 upsert（编辑抽屉的**即时保存**走它）---- */
+    // 桩必须**真的改夹具对象**：只记调用不改数据的话，"离开输入框就落库 → 列表/表单是新值"
+    // 那类断言会恒绿（界面读到的永远是旧值，而它只看自己的表单副本，照样"对"）。
+    // 真进程返回 {id, created}：新增给 created:true，编辑给 false（抽屉据此选 toast 文案）。
+    'productUpsert': function (p) {
+      rec('productUpsert', p);
+      var pid = Number((p && p.id) || 0);
+      var hit = null;
+      for (var i = 0; i < PRODUCTS.length; i++) if (PRODUCTS[i].id === pid) hit = PRODUCTS[i];
+      if (!hit) {
+        hit = {
+          id: 900 + PRODUCTS.length, code: String(p.code), name: String(p.name || ''),
+          supplierId: Number(p.supplierId || 0), supplierName: '', category: String(p.category || ''),
+          status: p.status || 'active', note: String(p.note || ''), imageId: 0, imagePath: '',
+          createdAt: '', updatedAt: '',
+        };
+        PRODUCTS.push(hit);
+        return { success: true, data: { id: hit.id, created: true } };
+      }
+      hit.name = String(p.name || '');
+      hit.supplierId = Number(p.supplierId || 0);
+      hit.supplierName = hit.supplierId === 7 ? '厂A' : hit.supplierId === 8 ? '厂B' : '';
+      hit.category = String(p.category || '');
+      hit.status = p.status || hit.status;
+      hit.note = String(p.note || '');
+      return { success: true, data: { id: hit.id, created: false } };
+    },
 
     /* ---- 批量编辑（部分 patch：只应用 payload 里出现的字段）---- */
     'productBatchUpdate': function (p) {
@@ -217,15 +300,49 @@ const FAKE_BRIDGE = `<script>
           },
         } };
       }
-      var rows = QUEUE.filter(function (r) { return !(r.shopId && MAP[keyOf(r)]); });
-      var unmapped = rows.filter(function (r) { return r.status === 'unmapped'; }).length;
+      // 大批量分支（window.__smokeQueueMany）：造 205 组待办，用来验「显示更多」是**真动作** ——
+      // 初始上限 200 ⇒ 已列出 200、还有 5 组没列出（按钮该出现）；点一下变 205（按钮该消失）。
+      // 只有"待办总数 > 已列出"的样本才分得清"点了不动的假动作"和"真的多列出了"。
+      var all = QUEUE;
+      if (window.__smokeQueueMany) {
+        all = [];
+        for (var mi = 1; mi <= 205; mi++) {
+          all.push({ shopKey: 'many shop', shopRaw: 'Many Shop', itemId: 'MANY-' + mi, itemKey: 'MANY-' + mi, title: '', orderCount: 1, shopId: 11, shopName: 'HK 优品店', platform: 'shopee', autoShopId: 0, autoShopName: '', autoShopPlatform: '', status: 'unmapped' });
+        }
+      } else {
+        // 「店铺未归一」那几行**跟着登记状态走**：在「店铺登记」里把它认下来之后，
+        // 这一行就该变成可关联的 unmapped（真实里也一样 —— 平台只能从店铺实体取，
+        // 取到了这一行就不再受阻）。夹具不跟着变，"登记完回来就能关联"那条端到端断言
+        // 会被永远卡在"登记前后一模一样"上（等于没验）。
+        all = QUEUE.map(function (r) {
+          var sid = SHOP_BIND[r.shopKey];
+          if (r.status === 'shopUnresolved' && sid) {
+            var sh = null;
+            for (var si = 0; si < SHOPS.length; si++) if (SHOPS[si].id === sid) sh = SHOPS[si];
+            return {
+              shopKey: r.shopKey, shopRaw: r.shopRaw, itemId: r.itemId, itemKey: r.itemKey,
+              title: r.title, orderCount: r.orderCount,
+              shopId: sid, shopName: sh ? sh.name : '', platform: sh ? sh.platform : '',
+              autoShopId: 0, autoShopName: '', autoShopPlatform: '', status: 'unmapped',
+            };
+          }
+          return r;
+        });
+      }
+      var pending = all.filter(function (r) { return !(r.shopId && MAP[keyOf(r)]); });
+      var lim = Number((p && p.limit) || 0);
+      var rows = lim > 0 ? pending.slice(0, lim) : pending;
+      // ⚠️ 与主进程**同口径**：shown 是这一页**返回**的行数，而 unmapped / shopUnresolved
+      //    数的是**全部待办**（不受 limit 影响）——「还有没有没列出的组」正是这两个数之差。
+      //    夹具若把三者都按 rows 数，"已列出 < 待办总数"永远不成立，那条守卫会恒绿。
+      var unmapped = pending.filter(function (r) { return r.status === 'unmapped'; }).length;
       return { success: true, data: {
         rows: rows,
         stats: {
-          groups: QUEUE.length, shown: rows.length, unmapped: unmapped,
-          shopUnresolved: rows.length - unmapped, mapped: Object.keys(MAP).length,
+          groups: all.length, shown: rows.length, unmapped: unmapped,
+          shopUnresolved: pending.length - unmapped, mapped: Object.keys(MAP).length,
           withItemId: 52, withoutItemId: 4, truncated: false,
-          unresolvedShops: rows.filter(function (r) { return r.status !== 'unmapped'; }).map(function (r) { return r.shopRaw; }),
+          unresolvedShops: pending.filter(function (r) { return r.status !== 'unmapped'; }).map(function (r) { return r.shopRaw; }),
         },
       } };
     },
@@ -378,6 +495,78 @@ const FAKE_BRIDGE = `<script>
       RELATIONS = RELATIONS.filter(function (r) { return r.itemId !== p.itemId; });
       return { success: true, data: { removed: 1 } };
     },
+    /* ---- 店铺实体域（sk_shops / sk_name_map）----
+       「店铺登记」2026-10-08 收进内建后，这一页真的会调这几个通道（原先只有岛会调）。
+       ⚠️ 桩必须真的**改状态**（map 后从名单移走、upsert 后进列表）：
+          只 rec 不改的桩会让"登记完变成什么样"整段断言恒绿 —— 而那段正是 R1 要守的东西。 */
+    'shopDbEnsure': function () { return { success: true, data: { ok: true } }; },
+    'shopList': function (p) {
+      rec('shopList', p);
+      return { success: true, data: { rows: SHOPS.map(function (s) { return Object.assign({}, s); }), total: SHOPS.length } };
+    },
+    'shopUnmapped': function () {
+      rec('shopUnmapped', {});
+      return { success: true, data: UNMAPPED_SHOPS.map(function (r) { return Object.assign({}, r); }) };
+    },
+    'shopSummary': function () {
+      rec('shopSummary', {});
+      var mapped = SHOPS.reduce(function (n, s) { return n + Number(s.aliasCount || 0); }, 0);
+      var auto = UNMAPPED_SHOPS.filter(function (r) { return !!r.autoShopId; }).length;
+      return { success: true, data: {
+        total: SHOPS.length,
+        byPlatform: [],
+        byStatus: [],
+        names: {
+          total: SHOPS.length + UNMAPPED_SHOPS.length,
+          mapped: mapped,
+          unmapped: UNMAPPED_SHOPS.length,
+          ignored: 0,
+          autoMatched: auto,
+          stale: SHOP_STALE,
+        },
+      } };
+    },
+    'shopMap': function (p) {
+      rec('shopMap', p);
+      var raw = String((p && p.raw) || '');
+      var refId = Number((p && p.refId) || 0);
+      UNMAPPED_SHOPS = UNMAPPED_SHOPS.filter(function (r) { return r.key !== raw; });
+      if (refId > 0) {
+        SHOP_BIND[raw] = refId;
+        for (var i = 0; i < SHOPS.length; i++) if (SHOPS[i].id === refId) SHOPS[i].aliasCount++;
+      }
+      return { success: true, data: { key: raw, refId: refId, ignored: p && p.ignored === true } };
+    },
+    'shopUpsert': function (p) {
+      rec('shopUpsert', p);
+      var id = Number((p && p.id) || 0);
+      if (!id) {
+        id = ++SEQ;
+        SHOPS.push({
+          id: id, platform: p.platform || '', name: p.name || '', nameKey: String(p.name || '').toLowerCase(),
+          platformShopId: p.platformShopId || '', site: p.site || '', shopSetId: Number(p.shopSetId) || 0,
+          status: p.status || 'active', openedAt: p.openedAt || '', note: p.note || '',
+          createdAt: '2026-10-08 12:00', updatedAt: '', aliasCount: 0,
+        });
+        return { success: true, data: { id: id, created: true } };
+      }
+      for (var j = 0; j < SHOPS.length; j++) {
+        if (SHOPS[j].id !== id) continue;
+        // 全量提交：payload 里给什么就是什么（界面漏透传哪个字段，这里就真的被清空 ——
+        // 夹具若"贴心地"保留旧值，那条坑就永远抓不到）
+        SHOPS[j].platform = p.platform || '';
+        SHOPS[j].name = p.name || '';
+        SHOPS[j].nameKey = String(p.name || '').toLowerCase();
+        SHOPS[j].platformShopId = p.platformShopId || '';
+        SHOPS[j].site = p.site || '';
+        SHOPS[j].shopSetId = Number(p.shopSetId) || 0;
+        SHOPS[j].status = p.status || 'active';
+        SHOPS[j].openedAt = p.openedAt || '';
+        SHOPS[j].note = p.note || '';
+      }
+      return { success: true, data: { id: id, created: false } };
+    },
+
     // 假桥兜底是 {success:true, data:null}，而 externalLoader 判的是 !r.data ⇒ 不补这个桩，
     // 每张截图右下角都挂一条**常驻红 toast**「扫描插件目录失败（IPC 不可用）」。
     // 真机这里返回 {root, plugins}（plugins-handlers），补桩是让夹具**忠于真形状**，
@@ -474,6 +663,41 @@ function isShown(el) {
   if (!el.getClientRects().length) return false;
   return getComputedStyle(el).display !== 'none';
 }
+/**
+ * 元素是否**真的能被点到**（不只是"在 DOM 里"）。
+ *
+ * 为什么需要它：本脚本原有 110 条断言**全部**按"元素存在"判定，拦不住"渲染了但点不到"。
+ * 2026-10-08 真机走查实测到两类，在存在性断言下都**恒绿**：
+ *   ① 默认 1200×800 下右栏队列表超出容器右界 ⇒ 「对比」被容器裁剪面盖住、完全点不到；
+ *   ② 窄窗口堆叠时左栏被压扁 ⇒ 空态内容溢出容器、按钮被后续栏盖住（"新手第一屏点不到"）。
+ *
+ * 判据：元素**中心点**上 document.elementFromPoint 命中的是它自己、它的子孙或祖先。
+ * 中心点出视口直接判不可达 —— 默认窗口下的关键动作不该需要先滚动才能用。
+ */
+function reachInfo(el) {
+  if (!el) return { ok: false, why: 'missing' };
+  var r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return { ok: false, why: 'zero-size' };
+  var cx = r.left + r.width / 2;
+  var cy = r.top + r.height / 2;
+  if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) {
+    return { ok: false, why: 'out-of-viewport(' + Math.round(cx) + ',' + Math.round(cy) + ') 视口=' + window.innerWidth + 'x' + window.innerHeight };
+  }
+  var hit = document.elementFromPoint(cx, cy);
+  if (!hit) return { ok: false, why: 'elementFromPoint=null' };
+  if (hit === el || el.contains(hit) || hit.contains(el)) return { ok: true, why: '' };
+  return { ok: false, why: 'covered-by ' + String(hit.tagName) + '.' + String(hit.className || '').slice(0, 48) };
+}
+/** 断言某选择器命中的元素**可达**（存在 + 在视口内 + 命中自身）；返回该元素便于继续操作。
+    失败时把元素自己的矩形一并带出来 —— 只报 covered-by 会让人看不出"是盖子的问题还是它自己被压扁了"。 */
+function reportReachable(name, sel, root) {
+  var el = (root || document).querySelector(sel);
+  var info = reachInfo(el);
+  var r = el ? el.getBoundingClientRect() : null;
+  var geo = r ? ' 自身rect=' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height) : '';
+  report(name, info.ok, info.ok ? geo.trim() : info.why + geo);
+  return el;
+}
 function mapFlat(sel) { return all(sel).map(flat).join('/'); }
 /** 队列行 / 映射行：必须**按所在表格**限定 —— [data-item-id] 是这一页三个视图共用的锚点
     （「商品清单」收起前它确实会串到那边去；收起后仍按表限定，免得页签放回来时又串）。 */
@@ -554,15 +778,105 @@ async function narrowViewportChecks() {
   report('窄窗口下右栏队列仍在（"窄了"不是"少给点东西"的理由）',
     all('[data-act="queue-table"] tbody tr[data-item-id]').length >= 1,
     'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length);
+
+  // ── 空态**可达性**（B3）────────────────────────────────────────────
+  // "两栏都在"≠"两边都能用"：窄窗口堆叠时左栏高度被压扁过，空态（图标 + 文案 + 两个按钮）
+  // 整段溢出容器、被后面的栏盖住 —— 症状是"全新安装的默认窗口下，新手第一屏唯一该点的按钮
+  // 点不到"，而存在性断言对它恒绿（DOM 里确实有那个按钮）。这一遍专门验它。
+  step('viewport-narrow-empty');
+  window.__smokeEmptyProducts = true;
+  await clickText('[data-act="refresh"]', '刷新');
+  await settle(function () { return !!document.querySelector('.gd-list__empty .wb-empty__actions button'); }, 8000);
+  report('窄窗口下左栏空态渲染出来了（零款样本：造不出零款这条守卫就恒绿）',
+    !!document.querySelector('.gd-list__empty .wb-empty__actions button'),
+    'empty=' + !!document.querySelector('.gd-list__empty'));
+  // 反向守卫（首次动线 R3）：这一遍是"零款 + **队列非空**" —— 引导卡不该出现。
+  // 这是与 empty-entry 那一条**不同的组合**（那条是"有款 + 空队列"），两条合起来才说明
+  // 判据真的是"两端同时为零"，而不是跟着其中一个开关走。
+  // ⚠️ 这条断言也是"dist 里残留变异"的照妖镜：把 firstRun.ts 的 && 改成 || 再 build、
+  //    跑完记得**再 build 回来** —— 否则 dist 里留着变异体，这一遍会挂着一条 FAIL
+  //    （2026-10-08 实测踩到，见 docs/notes/2026-10-08-goods-ux-refactor-r0-r3.md §2）。
+  report('窄窗口下零款 + 队列非空 → 首启引导卡不出现',
+    !document.querySelector('[data-act="first-run-card"]'),
+    '队列指标条=[' + flat(document.querySelector('[data-act="map-stats"]')) + ']');
+  reportReachable('窄窗口下空态「导入 Excel」可达（新手第一屏的动作之一）',
+    '.gd-list__empty .wb-empty__actions button:first-child');
+  reportReachable('窄窗口下空态「新增产品」可达（第一印象按钮，点不到等于这页没用）',
+    '.gd-list__empty .wb-empty__actions button:last-child');
+}
+
+/**
+ * 默认窗口（1200×800，即 electron/main.ts 建窗口用的尺寸）下的**可达性**那一遍。
+ *
+ * 为什么必须单独跑这一遍：这类缺陷**只在默认窗口宽度下才出现** —— 全量那遍跑的是 1440 宽，
+ * 两栏都宽裕，什么都点得到。而 1200×800 正是绝大多数用户第一次看到的那个宽度：
+ * 在那里点不到，等于那个功能不存在（S3 刚建好的「对比」动线就是这样"等于没做"）。
+ */
+async function defaultWindowReachChecks() {
+  step('reach-default-window');
+  await waitFor(function () { return document.querySelector('[data-act="goods-workbench"]'); }, 12000);
+  await waitFor(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length >= 1; }, 12000);
+  var vw = window.innerWidth;
+  report('默认窗口宽度 ' + vw + 'px：走并排形态（与真机默认窗口一致）', vw >= 1180 && vw < 1440, 'vw=' + vw + ' vh=' + window.innerHeight);
+
+  // ① 队列表必须整体落在视口内。超出的那半截列在界面上**看不见也点不到**，而 .wb-panel 是
+  //    overflow:hidden —— 没有滚动条、没有报错、DOM 里字段一个不少，存在性断言对它恒绿。
+  var qTable = document.querySelector('[data-act="queue-table"]');
+  var qr = qTable.getBoundingClientRect();
+  report('队列表没有横向溢出视口（右半截会被容器静默裁掉）',
+    qr.right <= vw + 1, 'right=' + Math.round(qr.right) + ' vw=' + vw);
+
+  // ② 表头最后一列必须完整可见（被裁掉的表头 = 那一列的动作等于没有）
+  reportReachable('队列表头「操作」列完整可见', '[data-act="queue-table"] thead th:last-child');
+
+  // ③ 行内两个动作（认款的两条动线）必须点得到
+  reportReachable('队列行「关联…」按钮可达',
+    '[data-act="queue-table"] tbody tr[data-item-id="SKU-A1"] [data-act="row-relate"]');
+  reportReachable('队列行「对比」按钮可达（S3 的对比动线在默认窗口下必须真的可用）',
+    '[data-act="queue-table"] tbody tr[data-item-id="SKU-A1"] [data-act="row-compare"]');
+  // ④ 图列：认款只能靠肉眼比图，这一列不可点等于整条动线断了
+  reportReachable('队列行缩略图可达（点开看原图）', '[data-act="queue-table"] [data-act="q-thumb"]');
+  // ⑤ 左栏的关键入口
+  reportReachable('左栏「新增产品」可达', '[data-act="new-product"]');
+  reportReachable('左栏产品行展开钮可达',
+    '[data-act="product-table"] tbody tr[data-product-id] [data-act="row-expand"]');
+  // ⑦ D1 死锁的出口：默认窗口下必须**真的能点**。
+  //    它躺在一张提示条里、而右栏在这一档宽度下只有 ~500px —— 正是"存在性断言恒绿"的典型位置
+  //    （元素在 DOM 里、却被容器裁到视口外或被别的层盖住）。
+  reportReachable('右栏提示条的「现在登记」可达（死锁的出口在默认窗口下必须能点）',
+    '[data-act="open-registry"]');
+
+  // ⑥ 已建立映射段：列更多，更容易被裁
+  await clickText('[data-act="sub-mapped"]', '已建立映射');
+  await settle(function () { return all('[data-act="mapped-table"] tbody tr[data-item-id]').length >= 1; }, 8000);
+  reportReachable('「已建立映射」行「改绑」可达',
+    '[data-act="mapped-table"] tbody tr[data-item-id] [data-act="row-rebind"]');
+  var mTable = document.querySelector('[data-act="mapped-table"]');
+  report('映射表没有横向溢出视口',
+    !!mTable && mTable.getBoundingClientRect().right <= window.innerWidth + 1,
+    mTable ? 'right=' + Math.round(mTable.getBoundingClientRect().right) + ' vw=' + window.innerWidth : 'missing');
 }
 
 async function main() {
-  // ── 窄视口那遍：只跑视口守卫 ──────────────────────────────────────────
-  // 全量断言在宽视口那遍跑（见 runner 的两次 spawn）。这里按视口宽度**自判**，
-  // 所以 runner 不需要额外注入任何变量 —— 视口宽度本身就是判据。
-  if (window.innerWidth < 1180) {
+  // ── 三遍视口，各跑各的那一套 ────────────────────────────────────────
+  // 由 runner 用 ?mode= 指定（不指定则按视口宽度自判，保持单独打开页面时的旧行为）：
+  //   full   1440×900  全量断言
+  //   reach  1200×800  **默认窗口**下的可达性（B4 只在默认窗口宽度下暴露）
+  //   narrow  900×800  堆叠形态 + 左栏空态可达性（B3）
+  var MODE = new URLSearchParams(location.search).get('mode') ||
+    (window.innerWidth < 1180 ? 'narrow' : 'full');
+  if (MODE === 'narrow') {
     try {
       await narrowViewportChecks();
+    } catch (e) {
+      lines.push('SMOKE: FAILED at [' + STEP + '] - ' + (e && e.message ? e.message : String(e)));
+    }
+    finish();
+    return;
+  }
+  if (MODE === 'reach') {
+    try {
+      await defaultWindowReachChecks();
     } catch (e) {
       lines.push('SMOKE: FAILED at [' + STEP + '] - ' + (e && e.message ? e.message : String(e)));
     }
@@ -756,6 +1070,70 @@ async function main() {
       flat(document.querySelector('[data-act="saved"]')).indexOf('黑 M') >= 0,
       flat(document.querySelector('[data-act="saved"]')));
 
+    // ── 编辑抽屉的保存模型（2026-10-08 R2 · UX-G3 + W1）──────────────────
+    // 旧模型是"一半一半"：表单要按底部「保存」，主图 / SKU 却即时保存 ⇒ "填了名字直接点 ✕"
+    // 就是**没保存**，而「取消」不提示就关掉了（真机走查实测：用户以为存了）。
+    // 三条判据都超出"按钮换了文案"：
+    //   ① 编辑模式底部只有「完成」、**没有「取消」**（没有可取消的对象，留着就是骗人）；
+    //   ② 改一个字段**离开输入框就落库**（不用按任何按钮），且**只写一次**（blur 与「完成」撞上时）；
+    //   ③ 关掉**真的会丢**的东西（未保存的 SKU 改动）先确认；选「取消」抽屉还在，选「放弃」才关。
+    step('editor-save-model');
+    document.querySelector('[data-act="edit-product"]').click();
+    await waitFor(function () { return !!document.querySelector('.wb-drawer [data-act="ed-autosave-hint"]'); }, 5000);
+    var footBtns = Array.prototype.map.call(document.querySelectorAll('.wb-drawer .wb-dialog__foot button'), flat);
+    report('编辑模式底部只剩一个「完成」，**没有「取消」**（改动已即时落库，取消没有可取消的对象）',
+      footBtns.length === 1 && footBtns[0].indexOf('完成') >= 0, JSON.stringify(footBtns));
+    report('抽屉自己把保存模型说清（不说明的话用户会继续找那个已经不存在的「保存」）',
+      flat(document.querySelector('[data-act="ed-autosave-hint"]')).indexOf('边改边存') >= 0,
+      flat(document.querySelector('[data-act="ed-autosave-hint"]')).slice(0, 50));
+    // 类目是纯文本字段：blur 即存，**一个按钮都不用按**
+    var catInput = document.querySelector('.wb-drawer .ed-body input[placeholder="例：家居收纳"]');
+    catInput.value = '收纳';
+    catInput.dispatchEvent(new Event('input'));
+    catInput.dispatchEvent(new Event('blur'));
+    await settle(function () { return calls('productUpsert').length >= 1; }, 6000);
+    // 给"再写一次"留出机会：只判 >= 1 的话，并发写两次照样绿
+    await sleep(150);
+    var upSent = calls('productUpsert');
+    report('⭐ 改类目后**离开输入框就落库**（没按任何按钮），且只写一次、带全字段（漏字段会清空别的列）',
+      upSent.length === 1 && upSent[0].id === 1 && upSent[0].category === '收纳' &&
+        upSent[0].code === 'S1' && upSent[0].supplierId === 7 && upSent[0].note === '',
+      JSON.stringify(upSent));
+    report('页脚给出"已自动保存"的回执（逐字段静默保存，不能再靠一闪而过的 toast）',
+      !!document.querySelector('[data-act="ed-saved-hint"]'),
+      flat(document.querySelector('[data-act="ed-saved-hint"]')));
+
+    // SKU 行**刻意不自动存**（一次生成几十行，逐行 blur 存会变成几十次写）——
+    // 所以必须有别的兜底：页脚常显"还有 N 条没保存"，关闭前还要确认。
+    // 先等 SKU 子表**渲染出来**再取那一行（子表是异步拉的，取不到会让下面抛 TypeError
+    // 把整段冒烟打断，读日志的人只看到"异常"，看不出是"子表还没来"）。
+    await waitFor(function () { return !!document.querySelector('.wb-drawer .ed-sku__weight'); }, 6000);
+    var dirtyWeight = document.querySelector('.wb-drawer .ed-sku__weight');
+    dirtyWeight.value = '333';
+    dirtyWeight.dispatchEvent(new Event('input'));
+    await settle(function () { return !!document.querySelector('[data-act="ed-guard-hint"]'); }, 4000);
+    report('页脚常显"还有 1 条 SKU 改动没保存"（不自动存的东西必须有别的兜底，且要**提前**说）',
+      flat(document.querySelector('[data-act="ed-guard-hint"]')).indexOf('1 条 SKU 改动没保存') >= 0,
+      flat(document.querySelector('[data-act="ed-guard-hint"]')));
+    report('没保存的 SKU 行不该被静默写库（判据：此刻仍然只有那一次表单写入）',
+      calls('productVariantUpsert').length === 1, 'calls=' + calls('productVariantUpsert').length);
+    document.querySelector('.wb-drawer .ed-x').click();
+    await settle(function () { return !!document.querySelector('[data-act="confirm-dialog"]'); }, 4000);
+    report('带未保存的 SKU 改动点 ✕ → 先确认（不是无声关掉，"我改的没了"是新手最贵的一课）',
+      flat(document.querySelector('[data-act="confirm-dialog"]')).indexOf('1 条 SKU 改动没保存') >= 0,
+      flat(document.querySelector('[data-act="confirm-dialog"]')).slice(0, 50));
+    await clickText('[data-act="confirm-cancel"]', '取消');
+    await settle(function () { return !document.querySelector('[data-act="confirm-dialog"]'); }, 4000);
+    report('确认框里选「取消」→ 抽屉**还在**（不是把"取消"当成了关闭）',
+      !!document.querySelector('.wb-drawer [data-act="ed-autosave-hint"]') &&
+        !document.querySelector('[data-act="confirm-dialog"]'));
+    document.querySelector('.wb-drawer .ed-x').click();
+    await settle(function () { return !!document.querySelector('[data-act="confirm-dialog"]'); }, 4000);
+    await clickText('[data-act="confirm-ok"]', '放弃改动并关闭');
+    await settle(function () { return !document.querySelector('.wb-drawer'); }, 4000);
+    report('选「放弃改动并关闭」→ 抽屉真的关掉（确认框不是又一个假动作）',
+      !document.querySelector('.wb-drawer'));
+
     step('switch');
     productRows()[1].click();
     await waitFor(function () {
@@ -789,13 +1167,20 @@ async function main() {
     var tabNames = mapFlat('.gd-tabs .gd-tab');
     // S4（2026-10-08）：页签由 3 个收成 2 个 ——「产品」与「映射与关联」合并为「建档与关联」。
     // 合并的判据不是"少一个页签更清爽"，而是分栏的价值全在**同屏**：分成两个页签，
-    // 左栏选款 → 右栏直连 / 对比这两条动线在物理上就不成立。断言口径跟着改：
-    // 两个都在 + 默认停在合并后的那个 + 旧的两个名字与它们的 data-act 都必须消失。
-    report('两个页签都在（「产品」+「映射与关联」已合并为「建档与关联」），且默认停在它',
-      ['建档与关联', '供应商'].every(function (n) { return tabNames.indexOf(n) >= 0; }) &&
-        all('.gd-tabs .gd-tab').length === 2 &&
+    // 左栏选款 → 右栏直连 / 对比这两条动线在物理上就不成立。
+    // 同日 R1 又加回一个「店铺登记」（从市场岛收进内建，解 D1 死锁）⇒ 现在是 3 个。
+    report('三个页签都在（建档与关联 / 店铺登记 / 供应商），且默认停在「建档与关联」',
+      ['建档与关联', '店铺登记', '供应商'].every(function (n) { return tabNames.indexOf(n) >= 0; }) &&
+        all('.gd-tabs .gd-tab').length === 3 &&
         flat(document.querySelector('.gd-tabs .gd-tab.is-active')).indexOf('建档与关联') === 0,
       tabNames);
+    // 「店铺登记」的存在性**必须单独钉一条**：它对用户的意义是"队列里「需先登记店铺」那几行的出口"，
+    // 而 2026-10-08 走查抓到的 D1 就是"文案让用户去登记，那个入口却不在软件里"。
+    // 只断言页签名出现在 .gd-tabs 里还不够 —— 点开是空白同样等于没有（下一页的 registry 步验内容）。
+    report('「店铺登记」页签有真实锚点 tab-registry（文案点名它，所以它必须在）',
+      !!document.querySelector('[data-act="tab-registry"]') &&
+        flat(document.querySelector('[data-act="tab-registry"]')).indexOf('店铺登记') >= 0,
+      flat(document.querySelector('[data-act="tab-registry"]')) || 'missing');
     // 反向守卫：合并后**不许**再冒出「产品」/「映射与关联」两个旧页签 —— 它们一回来，用户又得
     // 在两个页签之间来回切、看不到同屏的两栏，正是这次重构要消掉的东西。
     // 同时 data-act 必须真的迁到 tab-workbench：只换名字不换选择器的话，任何按旧名定位的东西
@@ -863,14 +1248,33 @@ async function main() {
     var mstats = flat(document.querySelector('[data-act="map-stats"]'));
     report('统计条反映待办与阻塞，关联率分母用「组数」（未关联时为 0%，不是虚高）',
       /待关联 2/.test(mstats) && /店铺未归一 1/.test(mstats) && mstats.indexOf('0%（0/3）') >= 0, mstats);
-    report('未归一店铺被点名（引导去「店铺登记」，而不是给个灰按钮就完事）',
+    // 0 不占位（W2/全零，2026-10-08 R2）：此刻已关联是 0，条上**不该有**「已关联」这一项。
+    // 用 indexOf < 0 而不是 /已关联 0/ 取反：后者在"这项被渲染成非 0"时也成立（假绿）。
+    report('值为 0 的指标**不渲染**（"0 · 0 · 0 · — · 0"读起来像页面坏了）',
+      mstats.indexOf('已关联') < 0 && mstats.indexOf('待关联') >= 0,
+      mstats);
+    // ── D1 死锁：出口必须**可点**，而且指向一个真的在软件里的地方 ─────────────
+    // 原文是一句纯文本"请先到「店铺账号管家」的「店铺登记」…"，而那个岛不在默认包里 ——
+    // 全新安装上这就是个两端都不可点的死胡同（提示不可点 + 目的地不存在）。
+    // 现在：① 提示条上有一个真按钮；② 行内也有一份；③ 目的地是内建页签（下一页 registry 步验它真能开）。
+    report('未归一店铺被点名，且旁边就是一个真按钮（不是一句"请先到…"的纯文本）',
       flat(document.querySelector('.gd-hints')).indexOf('新奇怪物店') >= 0 &&
-        flat(document.querySelector('.gd-hints')).indexOf('店铺登记') >= 0,
+        flat(document.querySelector('.gd-hints')).indexOf('店铺登记') >= 0 &&
+        !!document.querySelector('[data-act="open-registry"]'),
       flat(document.querySelector('.gd-hints')).slice(0, 60));
+    var openReg = document.querySelector('[data-act="open-registry"]');
+    report('提示条的「现在登记」不是灰按钮（死锁的出口不能是个点不动的装饰）',
+      !!openReg && !openReg.disabled,
+      openReg ? 'disabled=' + openReg.disabled : 'missing');
     var blockedBtn = queueRow('TB-999').querySelector('[data-act="row-blocked"]');
-    report('店铺未归一的行动作禁用且给出原因',
+    report('店铺未归一的行**关联**动作禁用且给出原因',
       !!blockedBtn && blockedBtn.disabled && flat(blockedBtn) === '需先登记店铺',
       blockedBtn ? flat(blockedBtn) + ' / disabled=' + blockedBtn.disabled : 'missing');
+    // 灰因不能只躺在 title 里（触屏 / 不会悬停的人永远看不到）—— 行内紧跟一个可点的出口
+    var rowReg = queueRow('TB-999').querySelector('[data-act="row-open-registry"]');
+    report('同一行里有可点的「去登记」（灰因不再只藏在 title，行内就有出路）',
+      !!rowReg && !rowReg.disabled,
+      rowReg ? flat(rowReg) + ' / disabled=' + rowReg.disabled : 'missing');
     var blockedCb = queueRow('TB-999').querySelector('input[type="checkbox"]');
     report('店铺未归一的行不可勾选（平台取不到，硬塞会把两家店并成一个键）', !!blockedCb && blockedCb.disabled);
     report('自动建议只作提示（疑似 Aurora Store），未自动落库',
@@ -989,9 +1393,86 @@ async function main() {
       !!document.querySelector('[data-act="relate-to-selected"]'),
       flat(document.querySelector('[data-act="relate-to-selected"]')));
 
+    // ── B1：认款之后，左栏「已关联商品」必须跟着更新 ────────────────────
+    // 真机实测的现行缺陷：loadLinks 拉过一次（哪怕空数组）就**不再重拉** ⇒ 右栏刚写完
+    // （指标条变「已关联 3」）而左栏同一屏仍写旧值，刷新按钮/重新展开都无效，只有重启才恢复。
+    // 用户刚做完一件"大事"却立刻看到两个互相矛盾的数字 —— 对不会电脑的人，这不叫 bug，叫"这软件靠不住"。
+    // 这一步之前刚把 S2 展开过（那时它只有 1 条 confirmed），随后认款给它加了 2 条 ⇒ 现在必须是 3。
+    step('links-fresh');
+    await settle(function () {
+      var d = document.querySelector('[data-act="detail-links"]');
+      return !!d && flat(d).indexOf('B0XYZ1234') >= 0;
+    }, 6000);
+    var linksBlock = document.querySelector('[data-act="detail-links"]');
+    var linksHead = linksBlock ? linksBlock.parentElement.querySelector('.gd-detail__head') : null;
+    report('认款后左栏「已关联商品」是**新值**（缓存不刷新的话永远停在首次展开时那一条）',
+      !!linksBlock &&
+        linksBlock.querySelectorAll('[data-act="detail-link"]').length === 3 &&
+        !!linksHead && flat(linksHead).indexOf('3 个店铺商品') >= 0,
+      'rows=' + (linksBlock ? linksBlock.querySelectorAll('[data-act="detail-link"]').length : 'no-block') +
+        ' head=' + (linksHead ? flat(linksHead) : 'none'));
+
+    // ── B2 反向守卫：没有"还没列出的组"时，「显示更多」必须**不存在** ────
+    // 此刻 2 行待关联已被认掉、队列里只剩 1 行店铺未归一：待办总数（unmapped + shopUnresolved）
+    // 恰好等于已列出数 ⇒ 不该有"显示更多"。旧判据 groups > shown 在这里**恒真**
+    // （groups 数的是"聚合出的全部组"，含已关联的），于是渲染出一个点了纹丝不动的按钮 ——
+    // 这正是本仓既有结论"假动作"的现行犯。
+    report('队列已列完时「显示更多」不存在（判据是"还有没有没列出的组"，不是 groups > shown）',
+      !document.querySelector('[data-act="queue-more"]'),
+      'btn=' + !!document.querySelector('[data-act="queue-more"]') +
+        ' 计数=' + flat(document.querySelector('[data-act="queue-count"]')));
+
     // ── 夹具复位：上面那条动线把两行待关联商品消耗掉了 ──────────────
     step('reset');
     report('夹具复位：队列回到 3 行（直连消耗掉的两行回来了，后续场景各自从干净态开始）',
+      await resetFixture(), 'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length);
+
+    // ── W3（2026-10-08 R2）：认款入口必须在**视线焦点**上 ────────────────
+    // 真机走查：用户点开左边一款之后眼睛在左栏，而当时唯一的认款按钮在**右栏顶部** ——
+    // 中间隔着一个栏宽。这里是同一个动作的第二处入口（左栏展开区第一行）。
+    //
+    // ⚠️ 判据必须超出"按钮存在"，否则把「@relate-request」接到一个空函数上照样全绿：
+    //   ① 没勾选时它是灰的，且灰因写在旁边（不是只藏在 title）；
+    //   ② 勾了 2 项它自己亮起来并把项数写在脸上；
+    //   ③ **按下去真的写出那 2 行、且落到展开的那一款**（S2 / id=2）—— 写死"第一行"的实现在这里红。
+    step('relate-from-expanded');
+    var rfBtn = document.querySelector('[data-act="relate-from-expanded"]');
+    report('展开区里有认款入口，没勾选时是灰的，且灰因就写在旁边（不是只藏在 title 里）',
+      !!rfBtn && rfBtn.disabled &&
+        flat(document.querySelector('[data-act="relate-hint"]')).indexOf('先在右栏勾选') >= 0,
+      rfBtn
+        ? 'disabled=' + rfBtn.disabled + ' hint=' + flat(document.querySelector('[data-act="relate-hint"]'))
+        : 'missing');
+    all('[data-act="queue-table"] tbody tr[data-item-id] input[type="checkbox"]')
+      .filter(function (c) { return !c.disabled; })
+      .forEach(function (b) { b.click(); });
+    await settle(function () {
+      var b = document.querySelector('[data-act="relate-from-expanded"]');
+      return !!b && !b.disabled;
+    }, 4000);
+    rfBtn = document.querySelector('[data-act="relate-from-expanded"]');
+    report('右栏勾了 2 项后，左栏那个按钮自己亮起来（跨栏状态真的转过来了）',
+      !!rfBtn && !rfBtn.disabled && flat(rfBtn).indexOf('（2 项）') >= 0 &&
+        flat(document.querySelector('[data-act="relate-hint"]')).indexOf('2 个商品') >= 0,
+      rfBtn ? flat(rfBtn) + ' | ' + flat(document.querySelector('[data-act="relate-hint"]')) : 'missing');
+    rfBtn.click();
+    // ⚠️ 等待与判定**分开**：waitFor 超时会中断整段冒烟、把后面几十条断言一起吞掉，
+    //    读日志的人只看到"timeout @ relate-from-expanded"，看不出是"根本没写库"。
+    //    这里用有界轮询等它出现，再由 report 给出可读 FAIL（并让后面的断言继续跑）。
+    await settle(function () { return calls('productSkuMap').length >= 1; }, 6000);
+    var viaLeft = (calls('productSkuMap')[0] || {}).rows || [];
+    report('⭐ 左栏那个按钮按下去**真的写库**（一次 2 行，且落到展开的 S2 —— 与右栏直连同一条写路径）',
+      viaLeft.length === 2 && viaLeft.every(function (r) { return r.productId === 2; }),
+      'calls=' + calls('productSkuMap').length + ' ' + JSON.stringify(viaLeft));
+    report('左栏入口写入的颜色也落 *（它同样没有选色的机会，不替用户猜）',
+      viaLeft.length === 2 && viaLeft.every(function (r) { return r.spec === '*'; }),
+      JSON.stringify(viaLeft.map(function (r) { return r.spec; })));
+    await settle(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length === 1; }, 6000);
+    report('写完队列重拉（两处入口一条写路径 ⇒ 不存在第二套失败语义）',
+      all('[data-act="queue-table"] tbody tr[data-item-id]').length === 1,
+      'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length);
+    // 夹具复位：这一步也把 2 行消耗掉了，后面的对比场景要从干净态开始
+    report('夹具复位：队列回到 3 行（左栏入口消耗掉的两行回来了）',
       await resetFixture(), 'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length);
 
     // ── 对比模式（S3）：候选产品 × 店铺商品，同屏放大，键盘定夺 ──────────
@@ -1240,6 +1721,35 @@ async function main() {
       'inputs=' + all('.wb-mask .sup-form input').length);
     await clickText('.wb-mask .wb-dialog__foot button', '取消');
 
+    // ── 「显示更多」必须是**真动作**（B2 的正向半边）─────────────────────
+    // 反向半边（没有更多时不渲染按钮）已在 links-fresh 那步钉过。这一半钉"真的还有没列出的组时，
+    // 点下去要真的多列出来"：夹具造 205 组待办，初始上限 200 ⇒ 已列出 200、「显示更多」在；
+    // 点一下 ⇒ 205 组全列出、按钮消失。
+    // ⚠️ 只有"待办总数 > 已列出"的样本才分得清"点了不动"和"真的多列了" —— 默认夹具只有 3 组，
+    //    永远到不了上限，拿它验这条会恒绿（等于没测）。
+    step('queue-more');
+    // 上一步停在「供应商」页签、且分段控件停在「已建立映射」—— 先切回来（幂等）。
+    await clickText('.gd-tabs .gd-tab', '建档与关联');
+    await clickText('[data-act="sub-queue"]', '待关联队列');
+    window.__smokeQueueMany = true;
+    await clickText('[data-act="map-refresh"]', '刷新');
+    await settle(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length === 200; }, 10000);
+    report('待办 205 组 > 单页上限 200：已列出 200 组、「显示更多」出现',
+      all('[data-act="queue-table"] tbody tr[data-item-id]').length === 200 &&
+        !!document.querySelector('[data-act="queue-more"]'),
+      'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length +
+        ' btn=' + !!document.querySelector('[data-act="queue-more"]'));
+    var moreBtn = document.querySelector('[data-act="queue-more"]');
+    await settle(function () { return !!moreBtn && !moreBtn.disabled; }, 6000);
+    if (moreBtn && !moreBtn.disabled) moreBtn.click();
+    await settle(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length === 205; }, 10000);
+    report('点「显示更多」→ 真的多列出 5 组，按钮随之消失（不是点了纹丝不动）',
+      all('[data-act="queue-table"] tbody tr[data-item-id]').length === 205 &&
+        !document.querySelector('[data-act="queue-more"]'),
+      'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length +
+        ' btn=' + !!document.querySelector('[data-act="queue-more"]'));
+    window.__smokeQueueMany = false;
+
     // ── 空态必须是**入口**，不是提示 ──────────────────────────────────
     // 「映射与关联」的队列是这一页唯一"从订单里长出来"的东西，而导入订单只在「今天」页。
     // 原先空态只写一句"导入订单后…"，用户得自己去找「今天」在哪 —— 这类"提示只说有问题、
@@ -1248,14 +1758,260 @@ async function main() {
     //    守卫），空态永远进不去 ⇒ 这里临时把队列置空，专门验空态的形态。
     //    若不动这个开关，"空态有按钮"这条断言会因为组件没渲染而**恒绿**（等于没测）。
     step('empty-entry');
+    // ⚠️ 先复位夹具：本步到了这里，会话里**已经写过映射**（「batch-map」「rebind」那两步），
+    //    「已关联 N」会照常渲染 ⇒ 指标条上还剩非 0 项，"全零说一句人话"那条判据永远走不到
+    //    （断言会恒绿）。复位同时也让紧随其后的「registry」步回到"还没登记过"的初始态。
+    window.__smokeReset();
     window.__smokeEmptyQueue = true;
     // S4 起不再需要"切回映射视图"：只有一个工作台页签。仍然显式点一次（幂等），
     // 理由同 queue 步 —— 别让"默认页签被改错"变成后面断言集体失败的假象。
     await clickText('.gd-tabs .gd-tab', '建档与关联');
+    // ⚠️ 必须显式刷新一次：本步之前工作台**可能已经挂载**（那就点页签是幂等的、不会重新取数），
+    //    "切页签会重新挂载"只是副作用，不能当成取数保证（2026-10-08 实测：上一轮新增 queue-more
+    //    之后工作台已挂载 ⇒ 空队列信号推不下去 ⇒ 这一步 timeout）。
+    await clickText('[data-act="refresh"]', '刷新');
     await waitFor(function () { return !!document.querySelector('[data-act="go-today"]'); }, 6000);
     report('队列为空时给出「去「今天」导入订单」的真入口（不是一句"导入订单后…"）',
       flat(document.querySelector('[data-act="go-today"]')).indexOf('今天') >= 0,
       flat(document.querySelector('[data-act="go-today"]')));
+    // 全零的另一端（W2/全零）：五项全零时**一项都不列**，改说一句人话。
+    // 「null」（队列没拉过）不能走进这一句 —— 那会替用户宣布一个它不知道的结论
+    //（2026-10-08-goods-page-entry-guide.md 第 4 条）。夹具此刻「withoutItemId」已归零。
+    await settle(function () { return !!document.querySelector('[data-act="map-allclear"]'); }, 6000);
+    var zeroBar = flat(document.querySelector('[data-act="map-stats"]'));
+    report('全零时指标条不铺一排 0，改说一句人话（且不再出现"关联率 —"这种无从计算的项）',
+      zeroBar.indexOf('待关联') < 0 && zeroBar.indexOf('关联率') < 0 &&
+        zeroBar.indexOf('队列里还没有待认的店铺商品') >= 0,
+      zeroBar);
+    // 反向守卫（首次动线 R3）：此刻是"队列空但**有款**"——引导卡**不该**出现。
+    // 它的判据是那条链的**两端同时为零**，不是"有一端为零就显示"。
+    report('队列空但有款 → 首启引导卡不出现（判据是两端同时为零，不是"一条不满足就显示"）',
+      !document.querySelector('[data-act="first-run-card"]'));
+
+    // ── 首次动线（R3 · UX-G4）：空库那张卡 ───────────────────────────────
+    // 判据是"零款 + 队列已拉过且为空"——**两个条件都不容易造**，所以夹具两个开关一起用：
+    // __smokeEmptyProducts 造零款、__smokeEmptyQueue 造空队列。
+    // 少造任何一个，这张卡要么恒不出现（等于没测），要么在有货的库里冒出来（真机上没人会看见）。
+    // ⚠️ 断言必须超出"卡出现了"：三步的顺序、两步有真按钮、第三步**刻意没有**按钮，各是一条。
+    step('first-run');
+    window.__smokeEmptyProducts = true;
+    window.__smokeEmptyQueue = true;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !!document.querySelector('[data-act="first-run-card"]'); }, 8000);
+    var fr = document.querySelector('[data-act="first-run-card"]');
+    report('零款 + 队列已拉过且为空 → 首启引导卡出现（全新安装的唯一时刻）', !!fr);
+    report('卡上恰好三步、顺序是 订单 → 店铺 → 认款（顺序错了这三步就不成立）',
+      !!fr && all('[data-act="first-run-card"] .gd-firstrun__step').length === 3 &&
+        !!document.querySelector('[data-act="fr-step-orders"]') &&
+        !!document.querySelector('[data-act="fr-step-shops"]') &&
+        !!document.querySelector('[data-act="fr-step-relate"]'),
+      fr ? 'steps=' + all('[data-act="first-run-card"] .gd-firstrun__step').length : 'missing');
+    report('前两步都带**真按钮**（不是"请先去别处导入"那种纯文本提示）',
+      !!document.querySelector('[data-act="fr-import-orders"]') &&
+        !!document.querySelector('[data-act="fr-open-registry"]'));
+    report('第 3 步**刻意不给按钮**（它的动作就是"回到这一页"，给按钮只能是把当前页再切一次）',
+      !!document.querySelector('[data-act="fr-step-here"]') &&
+        !document.querySelector('[data-act="fr-step-relate"] button'),
+      flat(document.querySelector('[data-act="fr-step-here"]')));
+    // 有款之后必须自己消失 —— "做完即消失"不是靠用户去关它（那种「我知道了」按钮
+    // 只会造出一个查不出原因的持久状态）。
+    window.__smokeEmptyProducts = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !document.querySelector('[data-act="first-run-card"]'); }, 8000);
+    report('有款之后引导卡**自己消失**（不需要用户去点"我知道了"）',
+      !document.querySelector('[data-act="first-run-card"]'));
+    // 反向二：零款但**订单已经进了队列** → 同样不出现（链的另一端不满足）。
+    window.__smokeEmptyProducts = true;
+    window.__smokeEmptyQueue = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length >= 1; }, 8000);
+    report('零款但订单已进队列 → 引导卡也不出现（那时该做的是认款，不是"从零开始"）',
+      !document.querySelector('[data-act="first-run-card"]') &&
+        all('[data-act="queue-table"] tbody tr[data-item-id]').length >= 1,
+      'rows=' + all('[data-act="queue-table"] tbody tr[data-item-id]').length);
+    // 复原：后面的「店铺登记」端到端要的是"3 行队列 + 真有款"的初始态
+    window.__smokeEmptyProducts = false;
+    window.__smokeEmptyQueue = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return all('[data-act="queue-table"] tbody tr[data-item-id]').length === 3; }, 8000);
+
+    // ── 「店铺登记」：D1 死锁的**端到端**验证 ────────────────────────────
+    // 走的正是用户真会走的那条路：右栏提示条点「现在登记」→ 在名单里采纳 → 回队列 →
+    // 那一行从「需先登记店铺」变成「可以关联」。
+    //
+    // ⚠️ 为什么必须端到端，而不是"页签能打开"就够：这个 bug 的本质是**两端接不上**
+    //    （出口不存在 / 出口指向的地方不在软件里）。夹具若在店铺侧和队列侧各造一套互不
+    //    相干的店名，界面照样全绿，而用户走完这一圈**什么都不会变** —— 那正是恒绿断言。
+    //    所以夹具两端共用同一个店名（「新奇怪物店」），并且登记后队列那一行真的放行。
+    step('registry');
+    window.__smokeEmptyQueue = false; // 上一步为了验空态把它置空了
+    window.__smokeQueueMany = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !!document.querySelector('[data-act="open-registry"]'); }, 8000);
+
+    await clickText('[data-act="open-registry"]', '现在登记');
+    await settle(function () { return !!document.querySelector('[data-act="registry-view"]'); }, 8000);
+    report('提示条上的「现在登记」真的切到「店铺登记」（且是**页内**跳转，没离开「货与成本」）',
+      isShown(document.querySelector('[data-act="registry-view"]')) &&
+        flat(document.querySelector('.gd-tabs .gd-tab.is-active')).indexOf('店铺登记') >= 0 &&
+        !!document.querySelector('.gd-view'),
+      'active=' + flat(document.querySelector('.gd-tabs .gd-tab.is-active')));
+
+    await settle(function () {
+      return all('[data-act="reg-unmapped-table"] tbody tr[data-shop-key]').length === 2;
+    }, 8000);
+    var unmappedKeys = all('[data-act="reg-unmapped-table"] tbody tr[data-shop-key]').map(function (tr) {
+      return tr.getAttribute('data-shop-key');
+    });
+    report('未归一名单渲染 2 条（唯一命中 + 歧义各一条；少了歧义那条，「不猜」就没人守了）',
+      unmappedKeys.length === 2 && unmappedKeys.indexOf('新奇怪物店') >= 0 && unmappedKeys.indexOf('gaia') >= 0,
+      JSON.stringify(unmappedKeys));
+
+    var uniqueRow = document.querySelector('[data-act="reg-unmapped-table"] tbody tr[data-shop-key="新奇怪物店"]');
+    var ambRow = document.querySelector('[data-act="reg-unmapped-table"] tbody tr[data-shop-key="gaia"]');
+    report('唯一命中的行给「采纳：Aurora Store」（带上店名，人才能核对再点）',
+      !!uniqueRow && !!uniqueRow.querySelector('[data-act="reg-take"]') &&
+        flat(uniqueRow.querySelector('[data-act="reg-take"]')).indexOf('Aurora Store') >= 0,
+      uniqueRow ? flat(uniqueRow).slice(0, 60) : 'missing');
+    report('歧义行**没有**「采纳」（同名两平台必须让人来选 —— 恒渲染采纳的话上面那条就变恒真了）',
+      !!ambRow && !ambRow.querySelector('[data-act="reg-take"]'),
+      ambRow ? 'take=' + !!ambRow.querySelector('[data-act="reg-take"]') : 'missing');
+    // 「不预选」：指派下拉的默认值必须是"未选择"。预选第一家店（按位置取默认）会把
+    // "读错了对象"伪装成"对象本身有问题" —— 用户点一下就静默把名字归到错误的店上。
+    var regSel = uniqueRow ? uniqueRow.querySelector('select') : null;
+    report('指派下拉**不预选**（默认空值）且选项里有全部已登记店铺',
+      !!regSel && regSel.value === '' && regSel.options.length >= 3,
+      regSel ? 'value=' + JSON.stringify(regSel.value) + ' options=' + regSel.options.length : 'missing');
+    report('没选店时「指派」是灰的（不预选 ⇒ 必须自己先选，不可能误点）',
+      !!uniqueRow && !!uniqueRow.querySelector('[data-act="reg-assign"]') &&
+        uniqueRow.querySelector('[data-act="reg-assign"]').disabled,
+      uniqueRow ? 'disabled=' + uniqueRow.querySelector('[data-act="reg-assign"]').disabled : 'missing');
+
+    await settle(function () { return all('[data-act="reg-shop-table"] tbody tr[data-shop-id]').length === 2; }, 6000);
+    report('已登记店铺渲染 2 行（与名单同源的那两家店）',
+      all('[data-act="reg-shop-table"] tbody tr[data-shop-id]').length === 2,
+      'rows=' + all('[data-act="reg-shop-table"] tbody tr[data-shop-id]').length);
+    // 反向守卫：店铺实体表里**不许**出现「账号套装」列 —— 那个字段在宿主内零消费者
+    // （全仓只有岛和它自己的表读），摆在这里只会让人看不懂又不敢删。值仍然透传（见下一条断言）。
+    var shopHead = all('[data-act="reg-shop-table"] thead th').map(flat);
+    report('店铺表不含「账号套装」列（宿主内零消费者的字段不该占一列）',
+      shopHead.indexOf('账号套装') < 0, shopHead.join('|'));
+
+    // ⭐ **全量提交**的坑：shopUpsert 缺省即空 —— 界面上没有的字段必须原样送回，
+    //    否则"编辑一次店铺名"就把 platformShopId / shopSetId 静默清空（岛时代踩过，这次
+    //    刻意不给这两个控件，所以只有这条断言能证明它们没被清掉）。
+    document.querySelector('[data-shop-id="12"] [data-act="reg-edit"]').click();
+    await settle(function () { return !!document.querySelector('.wb-drawer [data-act="reg-save"]'); }, 6000);
+    await clickText('[data-act="reg-save"]', '保存');
+    await waitFor(function () { return calls('shopUpsert').length >= 1; }, 6000)
+      .catch(function () { throw new Error('编辑保存没发出 shopUpsert：界面错误=' + flat(document.querySelector('.wb-notice--error'))); });
+    var up = calls('shopUpsert')[0];
+    report('编辑保存把界面上**没有控件**的字段原样送回（platformShopId / shopSetId 不被清空）',
+      Number(up.id) === 12 && up.platformShopId === 'A1B2C3D4' && Number(up.shopSetId) === 7 &&
+        up.platform === 'amazon' && up.name === 'Aurora Store',
+      JSON.stringify(up));
+
+    await clickText('[data-act="reg-take"]', '采纳');
+    await waitFor(function () { return calls('shopMap').length >= 1; }, 6000)
+      .catch(function () { throw new Error('采纳没发出 shopMap：界面错误=' + flat(document.querySelector('.wb-notice--error'))); });
+    var mp = calls('shopMap')[0];
+    report('采纳写的正是「原始店名 → 店铺id」这一条映射（不写别的、不顺手改订单）',
+      String(mp.raw) === '新奇怪物店' && Number(mp.refId) === 12 && mp.ignored !== true,
+      JSON.stringify(mp));
+    await settle(function () {
+      return all('[data-act="reg-unmapped-table"] tbody tr[data-shop-key]').length === 1;
+    }, 6000);
+    var leftKeys = all('[data-act="reg-unmapped-table"] tbody tr[data-shop-key]').map(function (tr) {
+      return tr.getAttribute('data-shop-key');
+    });
+    report('登记完这条就离开名单（名单是实时算出来的，不是缓存）',
+      leftKeys.length === 1 && leftKeys[0] === 'gaia', JSON.stringify(leftKeys));
+
+    // ── 回到队列：死锁真的解开了吗 ────────────────────────────────────
+    step('registry-back');
+    await clickText('.gd-tabs .gd-tab', '建档与关联');
+    await settle(function () {
+      return !!document.querySelector('[data-act="queue-table"] tbody tr[data-item-id="TB-999"] [data-act="row-relate"]');
+    }, 10000);
+    var afterRow = queueRow('TB-999');
+    report('⭐ 登记完回队列：那一行**真的能关联了**（「需先登记店铺」整段消失，端到端闭环）',
+      !!afterRow && !!afterRow.querySelector('[data-act="row-relate"]') &&
+        !afterRow.querySelector('[data-act="row-open-registry"]') &&
+        !afterRow.querySelector('[data-act="row-blocked"]'),
+      afterRow ? flat(afterRow).slice(0, 80) : 'missing');
+    var afterCb = afterRow ? afterRow.querySelector('input[type="checkbox"]') : null;
+    report('同一行的复选框也不再禁用（平台已经从店铺实体取到了）', !!afterCb && !afterCb.disabled);
+    // ⚠️ 断言随 R2 的「0 不占位」一起改了**判据**，没有丢掉它要守的那件事：
+    //    原判据是「/店铺未归一 0/」（= 那一项被渲染成 0）。现在值归 0 的这一项**整项不渲染**，
+    //    所以"回落为 0"表现为**这一项从条上消失** —— 比渲染一个 0 更强的陈述，
+    //    而且它顺带守住了"别把 0 又铺回来"。
+    var afterBar = flat(document.querySelector('[data-act="map-stats"]'));
+    report('「店铺未归一」归 0 后**整项从指标条上消失**（不留"0"占位），提示条也整条消失（不留没人能处理的假待办）',
+      afterBar.indexOf('店铺未归一') < 0 && !document.querySelector('[data-act="open-registry"]'),
+      afterBar);
+
+    // ── W4：单项时不说「批量」（2026-10-08 R2）────────────────────────
+    // 批量是一个承诺（一次写多行、一次事务、一次回执）；只有 1 行时它什么都没兑现，
+    // 反而让人以为自己勾错了。判据必须在**只勾 1 项**的场景下取 —— 一直有 2 项勾着的话，
+    // 单项措辞永远走不到，这条断言会变成恒绿。
+    step('batch-label');
+    var oneBox = all('[data-act="queue-table"] tbody tr[data-item-id] input[type="checkbox"]')
+      .filter(function (c) { return !c.disabled; })[0];
+    report('此刻确实有可勾选的行走得到（没有的话下面两条会变成假绿）', !!oneBox);
+    oneBox.click();
+    await settle(function () {
+      return flat(document.querySelector('[data-act="queue-batch"]')).indexOf('关联选中 1 项') >= 0;
+    }, 4000);
+    var oneLabel = flat(document.querySelector('[data-act="queue-batch"]'));
+    report('只勾 1 项时按钮**不说「批量」**（措辞跟着项数走，不是写死的字符串）',
+      oneLabel.indexOf('批量') < 0 && oneLabel.indexOf('关联选中 1 项') >= 0, oneLabel);
+    all('[data-act="queue-table"] tbody tr[data-item-id] input[type="checkbox"]')
+      .filter(function (c) { return !c.disabled; })[1].click();
+    await settle(function () {
+      return flat(document.querySelector('[data-act="queue-batch"]')).indexOf('批量关联选中 2 项') >= 0;
+    }, 4000);
+    report('勾到 2 项时「批量」回来（真的是随项数变，不是把"批量"两个字删了）',
+      flat(document.querySelector('[data-act="queue-batch"]')).indexOf('批量关联选中 2 项') >= 0,
+      flat(document.querySelector('[data-act="queue-batch"]')));
+    await clickText('[data-act="queue-clear"]', '清空选择');
+    await settle(function () {
+      return flat(document.querySelector('[data-act="queue-batch"]')).indexOf('关联选中 0 项') >= 0;
+    }, 4000);
+
+    // ── 应用内帮助（R3 · UX-G5）────────────────────────────────────────
+    // 全仓原先**没有任何用户可见的帮助入口**（src/** 里"教|教程|帮助|引导|新手|指南"的命中
+    // 全是代码注释），而 docs/guides/USER_GUIDE.md 描述的是「TV模版」时代的界面。
+    // 判据必须超出"有个 ? 按钮"：面板真的开、有三句话、有那张三步图、两个按钮**真的能用** ——
+    // 不然把内容换成一句"请自行查阅文档"照样全绿，而那正是被否掉的那种"帮助"。
+    step('help');
+    var helpBtn = document.querySelector('[data-act="help"]');
+    report('页头有「?」帮助入口（原先一个都没有）', !!helpBtn, helpBtn ? flat(helpBtn) : 'missing');
+    report('帮助面板默认**关着**（没有打开的面板不该占着一块界面 / 盖住列表）',
+      !document.querySelector('[data-act="help-panel"]'));
+    if (helpBtn) helpBtn.click();
+    await settle(function () { return !!document.querySelector('[data-act="help-panel"]'); }, 4000);
+    var helpPanel = document.querySelector('[data-act="help-panel"]');
+    report('点「?」打开面板，且里面有**三句**"这页怎么用"（不是一句"请查阅用户指南"）',
+      !!helpPanel && helpPanel.querySelectorAll('.gd-help__body > p').length >= 3,
+      helpPanel ? 'p=' + helpPanel.querySelectorAll('.gd-help__body > p').length : 'missing');
+    report('面板里有那张三步图（与首启引导卡**同一份** steps，不是各写一套）',
+      !!helpPanel && helpPanel.querySelectorAll('.gd-help__steps li').length === 3,
+      helpPanel ? 'steps=' + helpPanel.querySelectorAll('.gd-help__steps li').length : 'missing');
+    report('帮助里的动作是**真按钮**（"提示不是入口"：只说"你应该先去别处"的帮助不算入口）',
+      !!helpPanel && !!helpPanel.querySelector('[data-act="help-go-today"]') &&
+        !!helpPanel.querySelector('[data-act="help-go-registry"]'));
+    report('帮助面板说明"认款落到哪一款看**展开**的那一行"（这正是本页最容易写错款的一处）',
+      !!helpPanel && flat(helpPanel).indexOf('展开') >= 0,
+      helpPanel ? flat(helpPanel).slice(0, 40) : 'missing');
+    // 真的能用：点它 → 切到「店铺登记」，且面板自己关掉（不留在屏幕上挡着刚打开的那一页）
+    if (helpPanel) helpPanel.querySelector('[data-act="help-go-registry"]').click();
+    await settle(function () {
+      return flat(document.querySelector('.gd-tabs .gd-tab.is-active')).indexOf('店铺登记') >= 0;
+    }, 8000);
+    report('帮助里的「打开「店铺登记」」真的切过去（不是个装饰按钮）',
+      flat(document.querySelector('.gd-tabs .gd-tab.is-active')).indexOf('店铺登记') >= 0 &&
+        !document.querySelector('[data-act="help-panel"]'),
+      'active=' + flat(document.querySelector('.gd-tabs .gd-tab.is-active')));
 
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));
@@ -1291,20 +2047,22 @@ const server = http.createServer((req, res) => {
 await new Promise((resolve) => server.listen(PORT, '127.0.0.1', resolve));
 
 /**
- * 跑一遍无头 Chrome 并取回 #smoke-result 的文本。
+ * 跑一遍无头 Chrome 并取回 `#smoke-result` 的文本。
  *
- * `--window-size` 决定视口宽，而注入脚本**自己按 window.innerWidth 判断**该跑哪一套 ——
- * 所以这里不需要额外注入任何标记，视口宽度就是判据本身。
- * 宽（1440）那遍跑全量断言（含"两栏并排"）；窄（1000）那遍只跑窄视口守卫。
+ * `--window-size` 决定视口宽，`?mode=` 决定跑哪一套断言（注入脚本按 mode 分派；不传则按
+ * 视口宽度自判，保持单独打开页面时的旧行为）。三遍各自的判据见 `main()` 顶部：
+ *   full 1440×900（全量）/ reach 1200×800（**默认窗口**可达性）/ narrow 900×800（堆叠 + 空态可达性）。
+ * ⚠️ reach 那一遍不能省：B4 这类"渲染了但点不到"的缺陷**只在默认窗口宽度下出现**，
+ *    1440 下两栏都宽裕、什么都点得到 —— 拿宽视口验它等于没验。
  */
-async function runChrome(size, budget) {
+async function runChrome(size, budget, mode) {
   const dom = await new Promise((resolve, reject) => {
     const cp = spawn(CHROME, [
       '--headless=new', '--disable-gpu', '--no-sandbox',
       `--window-size=${size}`,
       `--virtual-time-budget=${budget}`,
       '--dump-dom',
-      `http://127.0.0.1:${PORT}/index.html`,
+      `http://127.0.0.1:${PORT}/index.html?mode=${mode}`,
     ]);
     let out = '';
     cp.stdout.on('data', (d) => (out += String(d)));
@@ -1316,20 +2074,28 @@ async function runChrome(size, budget) {
   return m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
 }
 
-const WIDE = await runChrome('1440,900', 45000);
-if (!WIDE) {
-  console.error('✗ 宽视口那遍没抓到 #smoke-result（页面可能没挂载）。排查：产物新鲜度（npm run build）→ 资源 404 → 内联脚本语法错 → 假桥缺键');
-  process.exit(1);
+const passes = [
+  { mode: 'full', size: '1440,900', budget: 60000, label: '全量断言（宽 1440）' },
+  { mode: 'reach', size: '1200,800', budget: 40000, label: '默认窗口可达性（1200×800）' },
+  { mode: 'narrow', size: '900,800', budget: 40000, label: '窄视口 + 空态可达性（900×800）' },
+].filter((p) => !process.env.SMOKE_MODE || p.mode === process.env.SMOKE_MODE);
+const results = {};
+for (const p of passes) {
+  const out = await runChrome(p.size, p.budget, p.mode);
+  results[p.mode] = out;
+  if (passes.indexOf(p) === 0) {
+    if (!out) {
+      console.error('✗ 宽视口那遍没抓到 #smoke-result（页面可能没挂载）。排查：产物新鲜度（npm run build）→ 资源 404 → 内联脚本语法错 → 假桥缺键');
+      process.exit(1);
+    }
+    console.log(out);
+  } else {
+    console.log(`\n── ${p.label} ──`);
+    console.log(out || '✗ 这一遍没抓到 #smoke-result');
+  }
 }
-console.log(WIDE);
-
-// 第二遍：把视口压到 1180px 以下，只跑窄视口守卫（方案 §9-1 的判据：堆叠且两栏都在）。
-const NARROW = await runChrome('1000,900', 30000);
-console.log('\n── 窄视口守卫（第二遍，视口 1000px）──');
-console.log(NARROW || '✗ 窄视口那遍没抓到 #smoke-result');
 server.close();
 
-const ok = WIDE.split('\n').pop() === 'SMOKE: ALL PASS' &&
-  !!NARROW && NARROW.split('\n').pop() === 'SMOKE: ALL PASS';
-console.log(ok ? '\n✓ 货与成本页冒烟通过（宽 + 窄两遍）' : '\n✗ 货与成本页冒烟失败');
+const ok = passes.every((p) => !!results[p.mode] && results[p.mode].split('\n').pop() === 'SMOKE: ALL PASS');
+console.log(ok ? '\n✓ 货与成本页冒烟通过（宽 + 默认窗口 + 窄，共三遍）' : '\n✗ 货与成本页冒烟失败');
 process.exit(ok ? 0 : 1);

@@ -410,6 +410,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : undefined,
     }),
   orderClear: () => ipcRenderer.invoke('order-clear'),
+  // 本页汇总（核对页指标条）：订单行的（店铺原文 + 商品ID）→ 已配到的产品/供应商数。
+  // ⚠️ 载荷形状必须与主进程 `order-sku-rollup` 的读取方式对齐（它读 `payload.rows` 的
+  //    `shop`/`itemId`）：**声明收裸数组而这里包成 `{items:[]}` 会得到"成功但空"**，
+  //    页面只是显示 0，一条报错都没有（先例见 docs/notes/2026-10-04-preload-payload-shape.md）。
+  orderSkuRollup: (rows: any) =>
+    ipcRenderer.invoke('order-sku-rollup', {
+      rows: Array.isArray(rows)
+        ? rows.slice(0, 500).map((r: any) => ({
+            shop: typeof r?.shop === 'string' ? r.shop.slice(0, 200) : '',
+            itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
+          }))
+        : [],
+    }),
   // 运费原始行（oi_orders 最小投影 id/order_no/raw_fields，只读；供按订单算运费的宿主 op 提取）
   orderAssignShop: (payload: any) =>
     ipcRenderer.invoke('order-assign-shop', {
@@ -924,6 +937,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
       status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
       shopId: typeof payload?.shopId === 'number' ? payload.shopId : 0,
+      productId: typeof payload?.productId === 'number' ? payload.productId : 0,
     }),
   productSkuSummary: () => ipcRenderer.invoke('product-sku-summary'),
   productSkuQueue: (payload: any) =>

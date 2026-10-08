@@ -29,6 +29,23 @@
             :class="{ 'is-picked': picked === p.id }"
           >
             <input type="radio" :checked="picked === p.id" @change="picked = p.id" />
+            <!-- 产品主图：认款靠肉眼比图（款编码 / 名称常常也认不出来），弹层里没有图就只能靠记忆 ——
+                 而队列那边的商品图是**有**的，只有一边的图等于白给。取图失败渲染空占位，
+                 **不是**整列空掉（图取不到不该让人连产品都选不了）。
+                 复用全局 `.wb-thumb`（与产品列表 / 队列同一套尺寸与边框，不另立一套）。 -->
+            <img
+              v-if="thumbs.get(p.id)"
+              :src="thumbs.get(p.id) || ''"
+              class="wb-thumb"
+              data-act="pick-thumb"
+              alt=""
+            />
+            <span
+              v-else
+              class="wb-thumb wb-thumb--empty"
+              data-act="pick-thumb-empty"
+              title="这款没有主图"
+            ></span>
             <span class="wb-mono pk-code">{{ p.code }}</span>
             <span class="pk-name">{{ p.name || '—' }}</span>
             <span class="pk-meta wb-muted">
@@ -117,6 +134,30 @@ const picked = ref(0);
 const color = ref(props.initialColor || '');
 const busy = ref(false);
 
+/**
+ * 产品主图缩略图（`id → dataUrl`）。
+ *
+ * 合批取（一屏一次调用，不是每行一次）—— 与产品列表 / 队列用**同一条**通道（`image-thumb-batch`），
+ * 因此不新增 IPC。单项失败为 `null` ⇒ 界面空占位：图是"帮你认"，不是"能不能选"的前提。
+ */
+const thumbs = ref(new Map<number, string>());
+
+async function loadThumbs(): Promise<void> {
+  const items = rows.value.filter((p) => p.imagePath).map((p) => ({ key: p.id, path: p.imagePath }));
+  const next = new Map<number, string>();
+  if (items.length) {
+    try {
+      const r = await api.imageThumbBatch(items.map((it) => ({ localPath: it.path })));
+      (r?.dataUrls ?? []).forEach((url, i) => {
+        if (url) next.set(items[i].key, url);
+      });
+    } catch {
+      // 取图失败不挡选择：退化成整列空占位，产品照样能选
+    }
+  }
+  thumbs.value = next;
+}
+
 /** 搜索防抖（与产品页同一节奏；每次按键都发一次 IPC 会让弹层发顿） */
 let timer: ReturnType<typeof setTimeout> | null = null;
 watch(keyword, (v) => {
@@ -146,6 +187,8 @@ async function load(): Promise<void> {
     total.value = res?.total ?? 0;
     // 选中项被筛掉了就清掉 —— 否则"看不见却仍然选中"，改绑会落到意外的产品上
     if (picked.value && !rows.value.some((p) => p.id === picked.value)) picked.value = 0;
+    // 拉完行才知道要取哪些图（图不挡列表：整列先空占位，拿到再填）
+    void loadThumbs();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {

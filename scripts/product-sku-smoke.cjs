@@ -443,6 +443,52 @@ check('映射列表：按状态 / 店铺过滤，total 为过滤后总数', () =
   assert.strictEqual(queryMap({ limit: 1 }).total, 3);
 });
 
+check('映射列表：按**款**反向过滤 —— 只出这一款的行（同店另一款不得串进来）', () => {
+  reset();
+  const shops = seedShops(2);
+  const products = seedProducts(3);
+  pdb.upsertSkuMappings([
+    // 同一款挂在两家店 → 两条都该出（反向过滤不是"取第一条"）
+    { platform: 'amazon', shopId: shops[0], itemId: 'R1', productId: products[0] },
+    { platform: 'shopee', shopId: shops[1], itemId: 'R2', productId: products[0] },
+    // 同一家店的**另一个款** → 一条都不该出（按 shop 过滤的实现会在这里蒙对，所以要同时钉住"不串款"）
+    { platform: 'amazon', shopId: shops[0], itemId: 'R3', productId: products[1] },
+    { platform: 'amazon', shopId: shops[0], itemId: 'R4', productId: products[2] },
+  ]);
+  assert.strictEqual(queryMap({ productId: 0 }).total, 4, 'productId=0 是"没指定"，不是"id 为 0"');
+  const r0 = queryMap({ productId: products[0] });
+  assert.strictEqual(r0.total, 2, `应只出 R1/R2，实际出了 ${r0.rows.map((x) => x.itemId).join(',')}`);
+  assert.deepStrictEqual(
+    r0.rows.map((x) => x.itemId).sort(),
+    ['R1', 'R2'],
+  );
+  assert.ok(
+    r0.rows.every((x) => x.productId === products[0]),
+    '反向过滤串了别的款（界面会把别人的商品当成这一款关联的）',
+  );
+  const r2 = queryMap({ productId: products[2] });
+  assert.deepStrictEqual(r2.rows.map((x) => x.itemId), ['R4']);
+  assert.strictEqual(r2.total, 1);
+});
+
+check('反向过滤默认不替调用方筛状态：confirmed / invalid 要由 status 语义分开', () => {
+  reset();
+  const shops = seedShops(1);
+  const products = seedProducts(1);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'V1', productId: products[0] },
+    { platform: 'amazon', shopId: shops[0], itemId: 'V2', productId: products[0], status: 'invalid' },
+  ]);
+  // 自证非空转：不传 status 时**两行都在**（否则下面的「1」可能只是因为失效行根本没写进去）
+  assert.strictEqual(queryMap({ productId: products[0] }).total, 2, '失效行没落库，下面的断言就是空转');
+  const live = queryMap({ productId: products[0], status: 'confirmed' });
+  assert.strictEqual(live.total, 1, '失效行混进了「已关联」—— 用户会以为那个商品还在用');
+  assert.strictEqual(live.rows[0].itemId, 'V1');
+  const dead = queryMap({ productId: products[0], status: 'invalid' });
+  assert.strictEqual(dead.total, 1, '失效行要能**单列**出来（不是被删掉，人得看得见）');
+  assert.strictEqual(dead.rows[0].itemId, 'V2');
+});
+
 check('映射汇总：总数 / 状态分布 / 按店铺（店铺被删也留行，不隐藏）', () => {
   reset();
   const shops = seedShops();
@@ -737,6 +783,310 @@ check('验收②：批量确认后同一批 1000 个商品 100% 命中', () => {
   const hit = resolved.filter((r) => r.matched).length;
   assert.strictEqual(hit, 1000, `期望 1000 命中，实际 ${hit}`);
   assert.ok(resolved.every((r) => r.productCode), '命中必须带出产品编码，否则界面无法显示');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ 本页汇总（「归类核对」页指标条的产品维度）：一批订单行（店铺**原文** + 商品ID）
+//    → 已配到的**产品数 / 供应商数**
+//
+// 为什么钉在数据层：「这一页的活落在哪些产品上」= 店铺原文归一 + `pl_shop_sku` 匹配 + 去重，
+// 三件事都在主进程。假桥冒烟只能证明"界面把回来的两个数画出来了"，证明不了**数的来历**。
+// 判据全部成对：没有任何可命中的行时是 0，插进一行能命中的就变 1 —— 否则"恒 0"也能全绿。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** 带厂家的产品（`supplier_id` 不做存在性校验，故不必建采购域的 suppliers 表） */
+function seedProductWithSupplier(code, supplierId) {
+  return pdb.upsertProduct({
+    id: 0,
+    code,
+    name: code,
+    supplierId,
+    category: '',
+    status: 'active',
+    note: '',
+  }).id;
+}
+
+check('本页汇总：一个映射都没有 → 0 产品 / 0 供应商（是"还没配"，不是"没有这个维度"）', () => {
+  reset();
+  seedShops(2);
+  mapShopNames(2);
+  seedProducts(2);
+  const r = pdb.resolveOrderSkuRollup([
+    { shop: '店1', itemId: 'R-1' },
+    { shop: '店1', itemId: 'R-2' },
+    { shop: '店2', itemId: 'R-3' },
+  ]);
+  assert.deepStrictEqual(r, { products: 0, suppliers: 0 });
+});
+
+check('本页汇总：两个商品指向同一产品 → 只算 1 个产品；同一商品的重复行不翻倍', () => {
+  reset();
+  const shops = seedShops(1);
+  mapShopNames(1);
+  const pid = seedProductWithSupplier('R-A', 7);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-2', productId: pid },
+  ]);
+  const r = pdb.resolveOrderSkuRollup([
+    { shop: '店1', itemId: 'R-1' },
+    { shop: '店1', itemId: 'R-2' },
+    { shop: '店1', itemId: 'R-1' },
+  ]);
+  assert.strictEqual(r.products, 1, '同一产品被算了多次');
+  assert.strictEqual(r.suppliers, 1);
+});
+
+check('本页汇总：产品数按产品去重、供应商按 supplier_id 去重（"未关联厂家"不算一家）', () => {
+  reset();
+  const shops = seedShops(1);
+  mapShopNames(1);
+  const a = seedProductWithSupplier('R-A', 7);
+  const b = seedProductWithSupplier('R-B', 7); // 与 R-A 同一厂家
+  const c = seedProductWithSupplier('R-C', 0); // 还没关联厂家
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-A1', productId: a },
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-B1', productId: b },
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-C1', productId: c },
+  ]);
+  const r = pdb.resolveOrderSkuRollup([
+    { shop: '店1', itemId: 'R-A1' },
+    { shop: '店1', itemId: 'R-B1' },
+    { shop: '店1', itemId: 'R-C1' },
+  ]);
+  assert.strictEqual(r.products, 3, '三个不同的产品');
+  assert.strictEqual(r.suppliers, 1, '两个产品同属厂家 7；supplier_id = 0 的不计家数');
+});
+
+check('本页汇总：店铺未归一 / 没有商品ID 的行不计入（与归款同口径：不认跨店池行）', () => {
+  reset();
+  const shops = seedShops(1);
+  mapShopNames(1);
+  const pid = seedProductWithSupplier('R-A', 7);
+  const poolPid = seedProductWithSupplier('R-POOL', 8); // 池行的产品（**不该被算进来**）
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
+  ]);
+  // 池行 = 「商品清单」的**跨店共用**关联（`shop_id = 0` + `source='shop-import'`），
+  // 只能直接写（`upsertSkuMappings` 会以"请选择店铺"拒掉）。它存在是为了让上面那条
+  // "店铺未归一 ⇒ 不计入"**可判别**：只放一个查不到的行，任何实现都会给出 0（恒绿）；
+  // 放上它之后，"拿 itemId 全库匹配"（例如改用 `resolveOrderSkuList`，它允许池行）
+  // 就会把 R-POOL 算成第二个产品 ⇒ 当场变红。
+  dbRun(
+    `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, status, source, note, created_at, updated_at)
+     VALUES ('', 0, 'R-9', '*', ?, 'confirmed', 'shop-import', '', '', '')`,
+    [poolPid],
+  );
+  const r = pdb.resolveOrderSkuRollup([
+    { shop: '店1', itemId: 'R-1' }, // 命中
+    { shop: '野店X', itemId: 'R-9' }, // 店铺没归一 ⇒ 无从查起（池行也不算：归款也不认它）
+    { shop: '店1', itemId: '' }, // 没有商品ID
+    { shop: '', itemId: 'R-8' },
+  ]);
+  assert.strictEqual(r.products, 1, '产物数对不上：池行或未归一的行被算进来了');
+  assert.strictEqual(r.suppliers, 1);
+});
+
+check('本页汇总：映射指向的产品已删 → 按未命中（悬空指针不能算成"这一页配了 N 个产品"）', () => {
+  reset();
+  const shops = seedShops(1);
+  mapShopNames(1);
+  const pid = seedProductWithSupplier('R-A', 7);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
+  ]);
+  assert.deepStrictEqual(pdb.resolveOrderSkuRollup([{ shop: '店1', itemId: 'R-1' }]), {
+    products: 1,
+    suppliers: 1,
+  });
+  pdb.deleteProduct(pid); // deleteProduct 不级联删映射 ⇒ 映射行真成了悬空指针
+  assert.strictEqual(queryMap({ search: 'R-1' }).total, 1, '夹具前提：映射行还在（否则这条测的是另一件事）');
+  assert.deepStrictEqual(pdb.resolveOrderSkuRollup([{ shop: '店1', itemId: 'R-1' }]), {
+    products: 0,
+    suppliers: 0,
+  });
+});
+
+check('本页汇总：入参是**订单原文** —— 「店1」与归一后的「店铺1」落在同一家店、同一个产品', () => {
+  reset();
+  const shops = seedShops(1);
+  mapShopNames(1);
+  const pid = seedProductWithSupplier('R-A', 7);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
+  ]);
+  const r = pdb.resolveOrderSkuRollup([
+    { shop: '店1', itemId: 'R-1' },
+    { shop: '店铺1', itemId: 'R-1' },
+  ]);
+  assert.strictEqual(r.products, 1, '两种写法没归到同一家店（说明这层没走人工归一规则）');
+  assert.strictEqual(r.suppliers, 1);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ 认款顺手采纳：订单图 → **款主图**（`pendingProductImages` 只负责"挑对对象"）
+//
+// 为什么这一层必须单独守：「采纳哪张图给哪个款」全在这个挑选函数里。挑错了 —— 挑到**别的商品**的图、
+// 挑到**已经有主图**的款（把人的决定覆盖掉）、同款多商品时挑得**不稳定** —— 界面一切正常，坏的只是
+// **产品主数据**，而主图恰好是产品页上最显眼的字段。落库（复制文件 / 登记 pl_images / 写 image_id）
+// 由 `ipc:shape:smoke` 走真 handler 端到端守 —— 两边都省不掉。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 产品图两表（pl_images / pl_item_images）由 `ensureVariantSchema` 建 —— handler 与
+// `pendingProductImages` 都会走它，这里显式先建好，免得清表时撞 `no such table`。
+pdb.ensureVariantSchema();
+
+const ADOPT_IMG_A = '/tmp/sk-adopt/order-images/a.webp';
+const ADOPT_IMG_B = '/tmp/sk-adopt/order-images/b.webp';
+const ADOPT_IMG_OVERRIDE = '/tmp/sk-adopt/product-images/override.webp';
+
+/** 清掉产品图两表：`reset()` 不管它们，不清会串到上一条用例 */
+function clearProductImages() {
+  for (const t of ['pl_item_images', 'pl_images']) dbRun(`DELETE FROM ${t}`);
+}
+
+let adoptSeq = 0;
+/** 给某个 (店铺, 商品ID) 的订单挂一张**有本地路径**的图（路径为空时图池 ② 层会跳过它） */
+function seedOrderImage(shop, itemId, localPath) {
+  adoptSeq += 1;
+  const img = dbRun(
+    `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+    [`fp-adopt-${adoptSeq}`, `ufp-adopt-${adoptSeq}`, '', localPath],
+  ).lastInsertRowid;
+  dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
+    img,
+    `ADO-${adoptSeq}`,
+    shop,
+    JSON.stringify({ 商品ID: itemId }),
+  ]);
+}
+
+/** 给某个款设一张主图（走真接口，别直接 UPDATE —— 那样测的就不是生产路径了） */
+function attachOwnImage(pid) {
+  const img = pdb.upsertImageRecord({
+    fingerprint: `fp-own-${pid}`,
+    localPath: `/tmp/sk-adopt/product-images/own-${pid}.webp`,
+    source: 'upload',
+  });
+  pdb.attachProductImage(pid, img.imageId);
+  return img.imageId;
+}
+
+/** 采纳待办 → 只留 localPath（断言里最关心的就是"挑了哪张"） */
+const adoptsOf = (list) => list.map((x) => `${x.itemId}=${x.localPath}`);
+
+check('采纳：款还没主图 + 这个商品在订单里有图 → 挑出**那张**图（并自证非空转）', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-1', ADOPT_IMG_A);
+
+  const list = pdb.pendingProductImages([{ productId: pid, itemId: 'AD-1' }]);
+  assert.strictEqual(list.length, 1, '款还空着图却不采纳 —— 这个功能等于没做');
+  assert.strictEqual(list[0].productId, pid);
+  assert.strictEqual(list[0].localPath, ADOPT_IMG_A, '采纳的不是这个商品自己的订单图');
+  assert.strictEqual(list[0].source, 'order-image');
+
+  // 自证：同一个款**已有主图**时必须回空 —— 证明上面那个 1 来自"款空着"，不是恒给
+  attachOwnImage(pid);
+  assert.strictEqual(
+    pdb.pendingProductImages([{ productId: pid, itemId: 'AD-1' }]).length,
+    0,
+    '款已有主图还被挑出来 ⇒ 会把人的主图悄悄换掉',
+  );
+});
+
+check('取对那张：同一商品有多张订单图 → 取图池首选（最新一张），不抓错', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-2', ADOPT_IMG_A); // 先落（oi_images.id 小）
+  seedOrderImage('店1', 'AD-2', ADOPT_IMG_B); // 后落（id 大 = 更新）
+
+  const list = pdb.pendingProductImages([{ productId: pid, itemId: 'AD-2' }]);
+  assert.strictEqual(list.length, 1);
+  assert.strictEqual(list[0].localPath, ADOPT_IMG_B, '取的是这个商品较早那张图（与界面首选不是同一张）');
+});
+
+check('一个款只挑一张：同款被两个商品映射 → 只挑一条，且**不随入参顺序漂**', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-A', ADOPT_IMG_A);
+  seedOrderImage('店1', 'AD-B', ADOPT_IMG_B);
+
+  const a = pdb.pendingProductImages([
+    { productId: pid, itemId: 'AD-B' },
+    { productId: pid, itemId: 'AD-A' },
+  ]);
+  const b = pdb.pendingProductImages([
+    { productId: pid, itemId: 'AD-A' },
+    { productId: pid, itemId: 'AD-B' },
+  ]);
+  assert.strictEqual(a.length, 1, '一个款被挑出多张 ⇒ 后采纳的会盖掉先采纳的');
+  assert.deepStrictEqual(adoptsOf(a), adoptsOf(b), '入参顺序不同挑出不同的图（同一次操作两次结果不一样）');
+  assert.strictEqual(a[0].itemId, 'AD-A', '没按 itemKey 升序取第一个');
+  assert.strictEqual(a[0].localPath, ADOPT_IMG_A);
+});
+
+check('商品ID 先归一：带空白 / 不可见字符仍命中同一件商品', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-3', ADOPT_IMG_A);
+
+  // 界面传的 itemId 是**订单原文**（`extractSkuFields` 只 trim，还可能夹着不可见字符）
+  const list = pdb.pendingProductImages([{ productId: pid, itemId: ' AD-3\u200b ' }]);
+  assert.strictEqual(list.length, 1, '归一没走 ⇒ 界面传原文时永远挑不到图，且不报错');
+  assert.strictEqual(list[0].localPath, ADOPT_IMG_A);
+  assert.strictEqual(list[0].itemId, 'AD-3', '带回来的 itemId 该是归一键（池键口径）');
+});
+
+check('挑不到就回空：该商品在订单里没图 / 产品不存在 / 空入参 → 都不挑（不拿别人的图凑）', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-4', ADOPT_IMG_A);
+
+  assert.strictEqual(pdb.pendingProductImages([{ productId: pid, itemId: 'AD-NONE' }]).length, 0,
+    '这个商品在订单里没有图，却挑了一张出来');
+  assert.strictEqual(pdb.pendingProductImages([{ productId: 999999, itemId: 'AD-4' }]).length, 0,
+    '产品不存在还给出待办 ⇒ handler 会对着不存在的款写图');
+  assert.deepStrictEqual(pdb.pendingProductImages([]), []);
+  assert.strictEqual(pdb.pendingProductImages([{ productId: 0, itemId: '' }]).length, 0);
+  // 自证：同夹具下**正确的一对**能挑到 —— 否则上面那几个 0 可能来自"整条链路都空"
+  assert.strictEqual(pdb.pendingProductImages([{ productId: pid, itemId: 'AD-4' }]).length, 1);
+});
+
+check('与界面同口径：该商品有**覆盖图**时采纳覆盖图（你看着哪张就采纳哪张）', () => {
+  reset();
+  clearProductImages();
+  seedShops(1);
+  mapShopNames(1);
+  const pid = seedProducts(1)[0];
+  seedOrderImage('店1', 'AD-5', ADOPT_IMG_A);
+  const ov = pdb.upsertImageRecord({
+    fingerprint: 'fp-ov-5',
+    localPath: ADOPT_IMG_OVERRIDE,
+    source: 'upload',
+  });
+  pdb.setItemImage({ itemId: 'AD-5', imageId: ov.imageId });
+
+  const list = pdb.pendingProductImages([{ productId: pid, itemId: 'AD-5' }]);
+  assert.strictEqual(list.length, 1);
+  assert.strictEqual(list[0].localPath, ADOPT_IMG_OVERRIDE, '忽略了人的覆盖图（界面里显示的就是那张）');
+  assert.strictEqual(list[0].source, 'item-override');
 });
 
 // ---- 收尾 ----

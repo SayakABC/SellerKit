@@ -11,6 +11,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
 const orderDb = require('./order-db');
+// 「本页汇总」（order-sku-rollup）的实现住在产品域：那里是 `pl_shop_sku` 匹配规则的唯一出处
+// （`resolveShopRef` + `resolveSkuBatch`），本文件只接线，不复制规则。
+const productDb = require('./product-db') as typeof import('./product-db');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
 const { isUserFileAllowed } = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
@@ -156,6 +159,24 @@ register('order-list', async (payload) => {
 register('order-clear', async () => {
   orderDb.clearAll();
   return { success: true };
+});
+
+// ⭐ 本页汇总（核对页指标条）：这批订单行（店铺**原文** + 商品ID）已配到哪些产品 / 几家供应商。
+//   为什么走主进程：判"这个商品属于哪个产品"要先按**人工归一规则**把店铺原文变成店铺实体，
+//   再查 `pl_shop_sku` —— 这套规则在落库/回流/待关联队列三处已经在用，渲染层再写一份必然分叉
+//   （症状：队列说这家店已归一、核对页却统计不出来，两边分别看都正常）。实现见
+//   `product-db.resolveOrderSkuRollup`（本文件只是薄接线 + 入参二次校验）。
+register('order-sku-rollup', async (payload) => {
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  return {
+    success: true,
+    data: productDb.resolveOrderSkuRollup(
+      rows.slice(0, 500).map((r: any) => ({
+        shop: typeof r?.shop === 'string' ? r.shop.slice(0, 200) : '',
+        itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
+      })),
+    ),
+  };
 });
 
 // 订单原始行（最小投影：id/order_no/raw_fields + shop/order_time/style_code/style_color；只读）——

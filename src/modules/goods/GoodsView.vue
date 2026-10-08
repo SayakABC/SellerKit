@@ -9,54 +9,22 @@
         <p class="wb-head__desc">{{ TAB_DESC[tab] }}</p>
       </div>
       <div class="wb-head__actions">
-        <button class="wb-btn" data-act="refresh" :disabled="loading" @click="refresh">
-          {{ loading ? '读取中…' : '刷新' }}
-        </button>
+        <!-- 页级不再自己取数，所以这里没有"读取中…"可报（那是各视图自己的状态，
+             它们在各自的工具栏里显示）。按钮只负责发一个刷新信号。 -->
+        <button class="wb-btn" data-act="refresh" @click="refresh">刷新</button>
       </div>
     </header>
 
-    <!-- 指标条：**只读事实**与**可去处理的待办**分开。
-         左段（产品 / SKU）是规模事实，没有"点了去哪"的目的地，所以不做成按钮 ——
-         原先它们和右边一样是可点的，但点下去都是 `goProducts('all')`（回到全部），
-         看着能点、实际什么也不发生，属于假动作。
-         右段每一项都能点：点了就切到对应页签并带上筛选，把"看到数字"和"去处理它"缝成一步。
-         ⚠️ 每格必须是「标签 + 空格 + <b>数字</b>」同一串文本：goods:ui 冒烟按元素取 textContent
-         断言 /产品 2/ 这类子串，拆成兄弟元素会拼成「产品2」而失配（见 docs/notes 的"铁律"）。 -->
-    <div class="wb-metabar gd-stats" data-act="stats">
-      <span class="wb-metric gd-metric gd-metric--fact">
-        <span data-act="metric-products">产品 <b>{{ stats.products }}</b></span>
-        <span class="gd-metric__sep" aria-hidden="true">·</span>
-        <span data-act="metric-sku">SKU <b>{{ stats.variants }}</b></span>
-      </span>
-      <button
-        class="wb-metric gd-metric"
-        type="button"
-        :class="{ 'is-warn': stats.missingWeight }"
-        data-act="metric-missing"
-        @click="goProducts('missingWeight')"
-      >
-        缺克重 <b>{{ stats.missingWeight }}</b>
-      </button>
-      <button
-        class="wb-metric gd-metric"
-        type="button"
-        :class="{ 'is-warn': stats.noSupplier }"
-        data-act="metric-no-supplier"
-        @click="goProducts('noSupplier')"
-      >
-        未关联供应商 <b>{{ stats.noSupplier }}</b>
-      </button>
-      <button
-        class="wb-metric gd-metric"
-        type="button"
-        data-act="metric-mapped"
-        @click="goTab('mappings')"
-      >
-        已映射商品ID <b>{{ stats.mapped }}</b>
-      </button>
-    </div>
+    <!-- 页签：紧贴主体 —— 页面顶部只剩「页头 + 页签」两层。
+         ⚠️ 这里原先还有一条**指标条**（产品 / SKU / 缺克重 / 未关联供应商 / 已映射商品ID）
+         与一条**起点引导条**（立款 → 补克重 → 认货），2026-10-08 按用户要求整块撤掉：
+           · 指标条那五个数字，左栏每一行本来就带着（`n · 缺 m`、状态列），单独再汇总一行是重复；
+           · 引导条的三步，点一遍页签就知道顺序，常驻一条占着一行高度没有换来新的信息。
+         配套改动：页签上的**数字徽标**一并去掉（徽标与被撤的指标条同源，留着就要保留整套页级
+         汇总取数）；「缺克重 / 未关联供应商」这两个筛选的入口搬进了左栏工具栏（`filter-issue`）。
 
-    <!-- 页签：徽标只放**待办**数（缺克重 / 待关联），不放总数 —— 放总数等于没有信息量 -->
+         ⚠️ 同日 S4：`'workbench'` 形态下**页签由 3 个收成 2 个** ——「产品」与「映射与关联」
+         合并为「建档与关联」（`data-act="tab-workbench"`）。页签表按形态分叉，理由见 `TABS` 上方的注释。 -->
     <nav class="gd-tabs" role="tablist" aria-label="货与成本">
       <button
         v-for="t in TABS"
@@ -70,55 +38,119 @@
         @click="goTab(t.id)"
       >
         {{ t.label }}
-        <span v-if="badgeOf(t.id)" class="gd-tab__badge" :class="{ 'is-warn': t.id !== 'suppliers' }">
-          {{ badgeOf(t.id) }}
-        </span>
       </button>
     </nav>
 
     <p v-if="error" class="wb-notice wb-notice--error gd-error">{{ error }}</p>
 
     <div class="gd-tabpanel">
-      <ProductListView
-        v-if="tab === 'products'"
-        :intent="productIntent"
-        @changed="void loadStats()"
-        @suppliers-changed="void loadStats()"
+      <!-- 工作台形态（S0 骨架 → S4 定型）：左「产品」右「商品池」**恒同屏**。
+           S4 把「产品」与「映射与关联」合成一个页签后，池栏不再有"当前看不见"的时候 ——
+           于是 `pool` 这个懒挂载开关也一并撤掉（它的唯一理由是"首屏停在产品页签、池栏看不见"，
+           合并后该前提消失）。判据与代价见 `GoodsWorkbenchView.vue` 顶部注释。 -->
+      <GoodsWorkbenchView
+        v-if="GOODS_LAYOUT === 'workbench' && tab === 'workbench'"
+        :refresh-nonce="refreshNonce"
       />
-      <ShopProductView v-else-if="tab === 'shop-products'" @changed="void loadStats()" />
-      <SkuMappingView v-else-if="tab === 'mappings'" @changed="onMappingChanged" />
-      <SupplierView v-else @changed="void loadStats()" />
+      <SupplierView v-else-if="tab === 'suppliers'" />
+      <!-- 「商品清单」页签当前**收起**（见 `SHOP_PRODUCTS_TAB_ENABLED`）：分支与组件保留在这里，
+           是为了要放回来时只改那一个常量。`tab` 永远取不到这个值，所以这段是不渲染的死代码 ——
+           别当成"多余的 else-if"清掉，那是恢复开关的另一半。 -->
+      <ShopProductView v-else-if="tab === 'shop-products'" />
+      <!-- 以下两支是 `GOODS_LAYOUT === 'tabs'` 的**回退路径**（与重构前逐字一致），不是死代码。 -->
+      <ProductListView v-else-if="tab === 'products'" :refresh-nonce="refreshNonce" />
+      <SkuMappingView v-else />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 「货与成本」外壳：页头 + 可点指标条 + 四页签。
+// 「货与成本」外壳：页头 + 三页签（「商品清单」已收起）。
 //
 // 这一页在 2026-10-01 之前是**薄内建**（只看产品/SKU/克重，重手段在「产品库」UI 岛）。
 // 岛与宿主共用同一批数据、同一批 IPC，却因为"岛要单独发布 + 三个版本坐标要同步"而维护成本很高，
 // 于是把岛的功能整体收回内建 —— 界面与交互按**单一工作台**重新组织（不再有"这功能在岛里"的心理负担）。
 //
 // 分工：
-//   · 外壳（本文件）只负责**页签、页级指标、跨页签跳转**；
-//   · 各页签自己取自己那份数据，改动后 emit('changed') 让外壳重算指标。
-//   · 指标不在这里算第二遍，也不缓存到子视图 —— 只有一个数据源（`loadStats`）。
-import { computed, onMounted, ref } from 'vue';
+//   · 外壳（本文件）只负责**页头、页签、跨页签跳转**；
+//   · 各页签自己取自己那份数据，外壳**不再**汇总任何页级数字。
+//
+// ⚠️ 2026-10-08 撤掉了两层页级 UI（指标条 + 起点引导条）和页签徽标（见模板中间那段注释）。
+//    连带把 `stats` / `loadStats` / `flow.ts` / 子视图→外壳的回报链整条移除：它们唯一的消费者
+//    就是那两层，留着只会是"每次刷新都多打几次 IPC、却没有任何人看"的页级空转。
+import { onMounted, ref } from 'vue';
 import * as api from './api';
-import { toast } from '@/core/services/toast';
 import ProductListView from './components/ProductListView.vue';
+import GoodsWorkbenchView from './components/GoodsWorkbenchView.vue';
 import ShopProductView from './components/ShopProductView.vue';
 import SkuMappingView from './components/SkuMappingView.vue';
 import SupplierView from './components/SupplierView.vue';
 
-type TabId = 'products' | 'shop-products' | 'mappings' | 'suppliers';
+type TabId = 'workbench' | 'products' | 'shop-products' | 'mappings' | 'suppliers';
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'products', label: '产品' },
-  { id: 'shop-products', label: '商品清单' },
-  { id: 'mappings', label: '映射与关联' },
-  { id: 'suppliers', label: '供应商' },
-];
+/**
+ * 「商品清单」页签**暂时收起**（2026-10-08）。
+ *
+ * 判据是"有没有下游消费者"（同 `docs/notes/2026-10-01-ui-island-retirement` 的域删除判据）：
+ * 这一页签的产出是 `pl_shop_sku` 的**池行**（`source='shop-import'` / `shop_id=0`），
+ * 而订单归款 / 拣货 / 算钱一律走它的**补集** `skuMappingSql()` —— `skuPoolSql()` 全仓只有
+ * `electron/shop-product-db.ts` 自己用。也就是：用户在这里导入商品、关联产品之后，
+ * **其它任何页面都不会变**。
+ *
+ * 它还额外要求一份**独立准备**的 Excel（列名须为「产品ID」「产品图片链接」），而用户真正想要的
+ * "导入后看看到底进来了哪些数据"由「映射与关联」的待关联队列（从订单实时聚出）与「今天」页的
+ * 导入回执覆盖了。留着它只会让人以为"少做了这一步所以后面算不出来"。
+ *
+ * **只收界面，不动数据**：`ShopProductView.vue`、`shop-product-*` 6 个 IPC 通道、`shop-product-db.ts`
+ * 与存量池行全部原样保留。要放回来 = 把本常量改成 `true`（TABS 恢复四项），其余一行不用改。
+ * 反向守卫在 `scripts/goods-ui-smoke.mjs`（断言页签**没有**它），防止它以"补个入口吧"的名义回来。
+ */
+const SHOP_PRODUCTS_TAB_ENABLED = false;
+
+/**
+ * 页面形态开关（2026-10-08，重构 S0）。
+ *
+ * `'workbench'` = 左右分栏工作台：左栏「产品」、右栏「商品池」，两栏同屏
+ *   （方案见 `docs/plans/GOODS_WORKBENCH_PLAN.md`）。
+ * `'tabs'`      = 回到旧的三页签形态（产品 / 映射与关联 / 供应商 各自独占整宽）。
+ *
+ * **回退 = 改这一个常量**（同 `SHOP_PRODUCTS_TAB_ENABLED` 的先例）：旧组件一个都不删，
+ * `'tabs'` 分支保留的是**今天这套一模一样的 DOM**。分阶段上线期间，任何一步出问题都可以
+ * 一行改成 `'tabs'` 退回原状，不用回滚代码。
+ *
+ * ⚠️ `'tabs'` 之外的那套 DOM 不是"死代码"，别当多余的 else 分支删掉 —— 它是回退路径的另一半。
+ */
+const GOODS_LAYOUT: 'workbench' | 'tabs' = 'workbench';
+
+/**
+ * 页签表（2026-10-08 重构 S4：3 → 2）。
+ *
+ * **按页面形态分叉** —— 不是两套界面各自任性，而是两种形态的导航结构本就不同：
+ *   · `'workbench'` 把「产品」与「映射与关联」**合并成一个左右分栏的工作台**。合并的判据不是
+ *     "少一个页签更清爽"，而是：分栏的全部价值在于**同屏**（左栏看着款、右栏认着货，
+ *     左栏选一款右栏就能直连、就能对比）—— 分成两个页签，两侧永远不可能同时出现在屏幕上，
+ *     直连与对比这两条动线在物理上就不成立。
+ *   · `'tabs'` 回退形态是整宽单栏，产品表与队列必须各自独占一屏 ⇒ **仍是三个页签**。
+ *     回退时页签跟着一起回去，否则"改一个常量回退"就是假的（会退到一个只剩两个页签、
+ *     却仍然单栏渲染的表上）。
+ *
+ * ⚠️ `'workbench'` 那一支里没有「商品清单」：该页签的产出（`pl_shop_sku` 的池行）
+ *    没有下游消费方，`SHOP_PRODUCTS_TAB_ENABLED` 的判据见下。
+ */
+const TABS: { id: TabId; label: string }[] =
+  GOODS_LAYOUT === 'workbench'
+    ? [
+        { id: 'workbench', label: '建档与关联' },
+        { id: 'suppliers', label: '供应商' },
+      ]
+    : [
+        { id: 'products', label: '产品' },
+        ...(SHOP_PRODUCTS_TAB_ENABLED
+          ? [{ id: 'shop-products' as TabId, label: '商品清单' }]
+          : []),
+        { id: 'mappings', label: '映射与关联' },
+        { id: 'suppliers', label: '供应商' },
+      ];
 
 /**
  * 页头说明：**随页签走**的一句话。
@@ -127,105 +159,38 @@ const TABS: { id: TabId; label: string }[] = [
  * 写法要求：一句人话 + 什么时候该来这（先有它 / 待办在左边 / 做完的在右边）。
  */
 const TAB_DESC: Record<TabId, string> = {
+  // 合并后的说明 = 原「产品」+「映射与关联」两句的**一句话版**：左边建档、右边认货，
+  // 并且点出分栏独有的那一步（左栏选一款 → 右栏直接关联过去），否则用户不会知道两栏是联动的。
+  workbench: '左边给自己的款和 SKU 建档，右边把店铺商品认到款上 —— 左栏选一款，右栏就能直接关联过去。',
   products: '自己的款和 SKU 在这里建档 —— 先有它，订单 / 采购 / 成本才挂得上这行货。',
   'shop-products': '从订单里认出来的店铺商品，看它们各自认到了哪个款、卖了多少行。',
   mappings: '把店铺商品认到自己的款上。左边是待办队列，右边是已经认完的。',
   suppliers: '拿货的供应商（厂）主数据 —— 产品建档与采购单据都引它。',
 };
 
-const loading = ref(false);
 const error = ref('');
-const tab = ref<TabId>('products');
-
-const stats = ref({
-  products: 0,
-  variants: 0,
-  missingWeight: 0,
-  noSupplier: 0,
-  mapped: 0,
-  /** 待关联商品数（由「映射与关联」页算完回报 —— 它本来就要扫一次队列，别在这再扫一遍订单） */
-  mappedQueue: 0,
-});
+// 默认页签跟着形态走：工作台形态下 `'products'` 这个值根本不在 TABS 里（渲染出来会是
+// 一个高亮不上的页签 + 走 `v-else` 兜底渲染错组件），必须用两侧都存在的那一个。
+const tab = ref<TabId>(GOODS_LAYOUT === 'workbench' ? 'workbench' : 'products');
 
 /**
- * 给「产品」页签的筛选意图。
- * `nonce` 必须每次自增 —— 否则"连点两次同一个指标"只有第一次生效（watch 看不到变化）。
+ * 页级「刷新」按钮的信号（自增 nonce，用法见下方 `refresh()`）。
  */
-const productIntent = ref<{ key: ProductIntentKey; nonce: number }>({
-  key: 'all',
-  nonce: 0,
-});
-type ProductIntentKey = 'all' | 'missingWeight' | 'noSupplier';
-
-const badgeOf = (id: TabId): number => {
-  if (id === 'products') return stats.value.missingWeight;
-  if (id === 'mappings') return stats.value.mappedQueue;
-  return 0;
-};
+const refreshNonce = ref(0);
 
 function goTab(id: TabId): void {
   tab.value = id;
 }
 
-function goProducts(key: ProductIntentKey): void {
-  productIntent.value = { key, nonce: productIntent.value.nonce + 1 };
-  tab.value = 'products';
-}
-
 /**
- * 页级指标。
- * ⚠️ SKU / 缺克重必须把**每款的 SKU 都拉下来数**（`productSummary` 只给产品数与供应商分布）——
- *    列表一次拉到 500 上限，超过的部分数不到；这是个已知取舍：指标条用来"发现有没有问题"，
- *    真要数准得回产品页看总数。宁可少算也不假装算准。
+ * 页级「刷新」。
+ *
+ * 外壳自己**不再取任何数**（指标条撤了），所以它只能"戳一下"当前挂着的那个视图：
+ * 值一变，左栏（或 `'tabs'` 回退形态的产品列表）就把自己那份数据重拉一遍。
+ * 用自增的 nonce 而不是布尔 —— 连点两次也要各生效一次（布尔第二次看不到变化）。
  */
-async function loadStats(): Promise<void> {
-  loading.value = true;
-  error.value = '';
-  try {
-    const [listRes, skuSummary] = await Promise.all([
-      api.list({ limit: 500, offset: 0, status: '', supplierId: 0, search: '' }),
-      api.skuSummary().catch(() => null),
-    ]);
-    const products = listRes?.rows ?? [];
-
-    let variants: { weightG: number }[] = [];
-    if (products.length) {
-      const vr = await api.variantList(products.map((p) => p.id));
-      variants = vr?.rows ?? [];
-    }
-
-    stats.value = {
-      products: listRes?.total ?? products.length,
-      variants: variants.length,
-      missingWeight: variants.filter((v) => !(Number(v.weightG) > 0)).length,
-      noSupplier: products.filter((p) => !p.supplierId).length,
-      mapped: skuSummary?.total ?? 0,
-      // 待关联数由「映射与关联」页自己算并回报（它已经拉过队列，别在这再扫一次订单）
-      mappedQueue: stats.value.mappedQueue,
-    };
-  } catch (e: unknown) {
-    error.value = `读取失败：${e instanceof Error ? e.message : '未知错误'}`;
-    toast(error.value, 'error');
-  } finally {
-    loading.value = false;
-  }
-}
-
 function refresh(): void {
-  void loadStats();
-  productIntent.value = { key: productIntent.value.key, nonce: productIntent.value.nonce + 1 };
-}
-
-/**
- * 「映射与关联」页回报待关联数。
- * 队列是**实时聚合**订单算出来的，只有那一页拉得到 —— 外壳不重复扫一遍订单，
- * 而是拿它报上来的数字刷新页签徽标（这正是"只有一个数据源"的落地方式）。
- */
-function onMappingChanged(payload?: { unmapped?: number }): void {
-  if (typeof payload?.unmapped === 'number') {
-    stats.value = { ...stats.value, mappedQueue: payload.unmapped };
-  }
-  void loadStats();
+  refreshNonce.value += 1;
 }
 
 onMounted(async () => {
@@ -236,40 +201,14 @@ onMounted(async () => {
     await api.ensure();
   } catch (e: unknown) {
     error.value = `初始化失败：${e instanceof Error ? e.message : '未知错误'}`;
-    return;
   }
-  await loadStats();
 });
 </script>
 
 <style scoped>
 /* 页面外壳（内边距 / 栅格 / 滚动）由全局 .wb-page 提供。 */
 
-/* 指标格由 <span> 变成 <button>（可点）—— 剥掉按钮默认外观，其余沿用 .wb-metric */
-.gd-metric {
-  border: 0;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color 0.12s ease;
-}
-.gd-metric:hover {
-  background: var(--wb-hover);
-}
-
-/* 只读事实格：不带 hover、不带指针 —— 它没有目的地，就不该长得像能点。
-   （此前「产品 / SKU」两格是按钮，点了只是回到"全部"，属于假动作。） */
-.gd-metric--fact {
-  cursor: default;
-  gap: 8px;
-}
-.gd-metric--fact:hover {
-  background: transparent;
-}
-.gd-metric__sep {
-  color: var(--wb-text-muted);
-}
-
+/* 页签：紧贴主体（`margin-bottom` 的负值把下面那层间隙吃掉）。 */
 .gd-tabs {
   display: flex;
   gap: 2px;
@@ -297,23 +236,6 @@ onMounted(async () => {
   color: var(--wb-text);
   font-weight: 600;
   border-bottom-color: var(--wb-primary);
-}
-.gd-tab__badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--wb-surface-2);
-  color: var(--wb-text-muted);
-}
-.gd-tab__badge.is-warn {
-  background: var(--wb-warning-soft);
-  color: var(--wb-warning);
 }
 
 /* 页签面板：撑满剩余高度，内部各自滚动 */

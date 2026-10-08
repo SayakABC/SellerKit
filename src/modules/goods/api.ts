@@ -14,6 +14,7 @@
 import * as ipc from '@/core/services/ipc';
 import { unwrapAsync } from './unwrapApi';
 import type {
+  ImageDataUrl,
   ItemImagePoolEntry,
   ProductBatchUpdateInput,
   ProductListItem,
@@ -105,6 +106,8 @@ export const skuList = (payload?: {
   search?: string;
   status?: SkuMapStatus | '';
   shopId?: number;
+  /** 反向过滤：只看某一款关联了哪些店铺商品（产品侧「已关联商品」）。0/缺省 = 不过滤 */
+  productId?: number;
   offset?: number;
   limit?: number;
 }): Promise<{ rows: ShopSkuRow[]; total: number }> => unwrap(ipc.productSkuList(payload));
@@ -120,13 +123,15 @@ export const skuQueue = (payload?: {
   maxRows?: number;
 }): Promise<{ rows: SkuQueueRow[]; stats: SkuQueueStats }> => unwrap(ipc.productSkuQueue(payload));
 
-/** 批量关联 / 改绑（一次一批，单事务；行级失败逐行回来） */
+/** 批量关联 / 改绑（一次一批，单事务；行级失败逐行回来）
+ *  `adopted` = 认款顺手把订单图采纳为**款主图**的张数（只补空，已有主图的款不动） */
 export const skuMap = (payload: {
   rows: SkuMapInputPayload[];
 }): Promise<{
   created: number;
   updated: number;
   reassigned: number;
+  adopted: number;
   failed: { itemId: string; message: string }[];
 }> => unwrap(ipc.productSkuMap(payload));
 
@@ -167,6 +172,18 @@ export const itemImagePool = (
 export const imageThumbBatch = (
   items: { localPath: string; maxEdge?: number }[]
 ): Promise<{ dataUrls: (string | null)[] }> => unwrap(ipc.orderImageThumbBatch(items));
+
+/**
+ * 读**原图**（不缩放）—— 「点开看大图」专用。
+ *
+ * 为什么不复用 `imageThumbBatch`：那条通道的 `maxEdge` 在主进程被夹到 **256**（表格展示级），
+ * 而认款要看清印花/领型/颜色，256 不够。`order-read-image` 走的是**同一套**目录白名单
+ * （`order-images` / `product-images` + 扩展名 + realpath 归一），安全边界一致，只是不缩放。
+ *
+ * 代价是整张原图（可至 MB 级）过 IPC —— 故**只在"用户点开某一张"时调**，不要批量预取。
+ */
+export const readImage = (localPath: string): Promise<ImageDataUrl> =>
+  unwrap(ipc.orderReadImage(localPath));
 
 /* ============================================================================
    供应商主数据

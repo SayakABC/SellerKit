@@ -119,6 +119,14 @@ const NOTE_INDEX_FILES = [
  */
 const DELIBERATELY_MISSING = new Map([
   [
+    'src/modules/goods/flow.ts',
+    '2026-10-08 撤掉「货与成本」的步骤条引导后，该纯函数**与其单测一并删除**；CHANGELOG / GOODS_WORKBENCH_PLAN / 那条引导笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
+  ],
+  [
+    'tests/goodsFlow.spec.ts',
+    '同上（同次一起删的；笔记与计划里"9 条断言"记的是当时实跑结果）',
+  ],
+  [
     'src/stores/app.ts',
     '陈述"重构前是单体"，该文件已拆除；改指现存文件则句子不成立',
   ],

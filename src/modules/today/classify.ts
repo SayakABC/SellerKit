@@ -26,7 +26,7 @@ import { ipc, type ApiResult } from '@/core/services/ipc';
 import { useModuleStorage } from '@/core/services/storage';
 import { classifyResult } from '@/lib/orderClassifier';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
+import type { OrderRecord, OrderSkuRollup, SkuBackfillOutcome, StyleRecord } from '@/types';
 
 /** 取单个值：失败抛错 */
 async function need<T>(p: Promise<ApiResult<T>>): Promise<T> {
@@ -111,6 +111,26 @@ export async function listStyles(): Promise<StyleRecord[]> {
   const r = await ipc.orderStyleList();
   if (!r.success) throw new Error(r.error || '读取识别库失败');
   return r.data ?? [];
+}
+
+/**
+ * ⭐ **本页汇总**（指标条的产品维度）：这一页的活最终落在「货与成本」里的哪些产品、几家供应商。
+ *
+ * 入参是**订单行原文**（店铺名 + 商品ID，都还没归一）—— 归一与匹配统一在主进程做
+ * （`electron/product-db.ts` 的 `resolveOrderSkuRollup`）。渲染层**刻意不自己推**："哪个商品
+ * 属于哪个产品"要经 `pl_shop_sku` 且要先按人工归一规则把店铺原文变成店铺实体，那套规则
+ * 落库/回流/待关联队列三处已经在用；在渲染层再写一份的下场是"队列说这家店已归一、
+ * 这一页却统计不出来"，且两边分别看都正常（本仓最忌的两块口径打架）。
+ *
+ * 只发**有商品ID** 的行：没有商品ID 的行在这条链路上无从查起（主进程也会跳过，
+ * 但让它们出现在请求里会让冒烟看不出"到底发了哪些"。代价是一次往返里少几个元素）。
+ */
+export async function skuRollup(
+  rows: { shop: string; itemId: string }[],
+): Promise<OrderSkuRollup> {
+  const r = await ipc.orderSkuRollup(rows);
+  if (!r.success) throw new Error(r.error || '读取本页产品维度失败');
+  return { products: Number(r.data?.products ?? 0), suppliers: Number(r.data?.suppliers ?? 0) };
 }
 
 export interface PendingCounts {

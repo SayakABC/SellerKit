@@ -136,6 +136,7 @@
                 </th>
                 <th>店铺</th>
                 <th>平台</th>
+                <th class="gd-c-img">图</th>
                 <th>商品ID</th>
                 <th>商品标题</th>
                 <th class="wb-num">订单行</th>
@@ -169,6 +170,28 @@
                   <span v-if="r.platform" class="wb-tag">{{ r.platform }}</span>
                   <span v-else class="wb-muted">—</span>
                 </td>
+                <!-- 认款只能靠肉眼比图（订单里没有任何字段能推出"这是哪一款"），
+                     所以这一列不是装饰：没有它，用户只能对着一个 16 位商品ID 猜。
+                     图来自订单（`itemImagePool` 的第 ② 层），不用另准备任何文件。 -->
+                <td class="gd-c-img">
+                  <button
+                    v-if="queueImgs.get(r.itemKey)"
+                    class="gd-thumb-btn"
+                    type="button"
+                    data-act="q-thumb"
+                    :data-thumb-key="r.itemKey"
+                    :title="`${queueImgs.get(r.itemKey)?.source || '商品图'} · 点击看大图`"
+                    @click="openImage(r)"
+                  >
+                    <img :src="queueImgs.get(r.itemKey)?.dataUrl || ''" class="wb-thumb" alt="" />
+                  </button>
+                  <span
+                    v-else
+                    class="wb-thumb wb-thumb--empty"
+                    data-act="q-thumb-empty"
+                    title="这个商品在订单里没有图"
+                  ></span>
+                </td>
                 <td class="wb-mono">{{ r.itemId }}</td>
                 <td :class="{ 'wb-muted': !r.title }">{{ r.title || '—' }}</td>
                 <td class="wb-num">{{ r.orderCount }}</td>
@@ -183,6 +206,16 @@
                   <template v-if="r.status === 'unmapped'">
                     <button class="wb-link" type="button" data-act="row-relate" :disabled="busy" @click="openRowPicker(r)">
                       关联…
+                    </button>
+                    <button
+                      class="wb-link"
+                      type="button"
+                      data-act="row-compare"
+                      :disabled="busy"
+                      title="把这个商品与候选产品并排放大（← / → 换候选，空格 关联）"
+                      @click="openCompare(r)"
+                    >
+                      对比
                     </button>
                   </template>
                   <template v-else>
@@ -199,7 +232,7 @@
                 </td>
               </tr>
               <tr v-if="!queueRows.length && !loading">
-                <td colspan="8" class="gd-panel__empty">
+                <td colspan="9" class="gd-panel__empty">
                   <div class="wb-empty">
                     <div class="wb-empty__icon" aria-hidden="true">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -207,15 +240,30 @@
                       </svg>
                     </div>
                     <p class="wb-empty__title">
-                      {{ qStats?.groups ? '这一批待处理项都已关联完' : '队列是空的' }}
+                      {{ qStats?.groups ? '这一批待处理项都已关联完' : '还没有要认的商品' }}
                     </p>
+                    <!-- 空态是**入口**不是提示：原先这里只有一句"导入订单后…"，但用户真要
+                         去导入时得自己找「今天」在哪 —— 而队列本来就是那一页导进来之后才有的。
+                         同文件下面「还没有任何映射」的空态早就这么做了（一个可点的下一步），
+                         这里补齐同一形态。（`.wb-empty__desc` 里**不要再写 markdown 星号**：
+                         它是纯文本节点，`**实时**` 会原样显示成四个星号。） -->
                     <p class="wb-empty__desc">
                       {{
                         qStats?.groups
                           ? '还有更多组没列出来时，点上面的「显示更多」继续。'
-                          : '队列不是缓存表，而是**实时**从订单里聚出来的：导入订单后，出现过的「店铺 × 商品ID」会在这里等着确认。'
+                          : '队列不是缓存表，而是实时从订单里聚出来的：在「今天」页导入订单后，出现过的「店铺 × 商品ID」会在这里等着确认。'
                       }}
                     </p>
+                    <div v-if="!qStats?.groups" class="wb-empty__actions">
+                      <button
+                        class="wb-btn wb-btn--primary"
+                        type="button"
+                        data-act="go-today"
+                        @click="goToday"
+                      >
+                        去「今天」导入订单
+                      </button>
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -404,6 +452,16 @@
       @pick="applyPick"
     />
 
+    <!-- 对比认款：左 = 候选产品（独立取图），右 = 这个商品的订单图。
+         整宽形态没有左栏「当前款」，初始候选交给弹层自己取第一行（不传 initial-product-id）。 -->
+    <CompareModal
+      v-if="compare"
+      :item="compare.row"
+      :item-image="compareItemImage"
+      @close="compare = null"
+      @confirm="confirmCompare"
+    />
+
     <!-- 标失效确认 -->
     <ConfirmDialog
       v-if="pendingInvalidate"
@@ -423,13 +481,37 @@
         操作 —— 直接删掉会让关联率莫名回落且查不出原因。
       </p>
     </ConfirmDialog>
+
+    <!-- 看图（队列 / 已配映射共用）：缩略图只有 160px 边，认款要看清印花、领型、颜色，
+         "能点开看原图"才是这一列真正有用的前提。点遮罩或「关闭」退出。 -->
+    <div v-if="viewer" class="wb-mask" data-act="img-viewer" @click.self="viewer = null">
+      <div class="wb-dialog gd-viewer" role="dialog" aria-modal="true" aria-label="查看商品图">
+        <div class="wb-dialog__head">
+          <span class="wb-mono">{{ viewer.itemId }}</span>
+          <span v-if="viewer.source" class="wb-muted gd-viewer__src">{{ viewer.source }}</span>
+        </div>
+        <div class="wb-dialog__body gd-viewer__body">
+          <img v-if="viewer.src" :src="viewer.src" class="gd-viewer__img" alt="" />
+          <p v-else class="wb-muted">这张图读不出来 —— 文件可能已被移动或删除。</p>
+        </div>
+        <div class="wb-dialog__foot">
+          <button class="wb-btn" type="button" data-act="viewer-close" @click="viewer = null">
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 // 「映射与关联」页签：店铺商品ID → 产品 的**待关联队列**与**已建立映射**维护。
 //
-// 三条口径由主进程裁定，界面只呈现、不自己算（迁移时一条都没动）：
+// 逻辑见 `../useSkuPool`（与本页两栏工作台右栏 `PoolPane.vue` **共用同一份**）——
+// 本文件是 `GOODS_LAYOUT='tabs'` 的**回退渲染形态**：模板与样式自 2026-10 重构起一字未动，
+// 脚本换成调用该 composable（回退时"逻辑"不再独立，但 DOM 逐字是旧的）。
+//
+// 三条口径由主进程裁定，界面只呈现、不自己算（迁移时一条都没动，详见 useSkuPool 顶部注释）：
 //   1. 队列是**实时聚合** `oi_orders` 的商品ID 再减去已生效映射，不是缓存表 ——
 //      所以每次写入完成后都要重新拉队列，「关联完就从队列里消失」才是真实状态。
 //   2. `店铺未归一` 的行**不给**关联按钮：订单里没有平台字段，平台只能从店铺实体取，
@@ -437,421 +519,82 @@
 //   3. 批量关联**一次提交整批**（主进程单事务 + 行级失败逐行回来），不做逐条调用 ——
 //      首次导入 500 行未命中是常态，逐条会把 IPC 往返变成瓶颈。
 //
-// 迁移时的界面改动：
+// 迁移时的界面改动（2026-10-01，仅界面层）：
 //   · 顶部统计从「好几句 inline 文字」收成一条 `.wb-metabar`（标签 + 数字），扫描更快；
 //   · 子视图切换从胶囊页签换成**分段控件**（它们是同一份数据的两面，不是两个页面）；
 //   · 提示语从一行小灰字升级成 `.wb-notice`（「订单丢行」「店铺未归一」都是会让数字
 //     看起来"完成了"的假象，必须显眼）；每类提示**只在真的命中时**才占位。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import * as api from '../api';
-import { pickImage } from '../productIo';
-import { toast } from '@/core/services/toast';
+import {
+  useSkuPool,
+  SKU_STATUS_LABEL as STATUS_LABEL,
+  SKU_STATUS_CLASS as STATUS_CLASS,
+  SKU_SOURCE_LABEL as SOURCE_LABEL,
+} from '../useSkuPool';
 import ProductPicker from './ProductPicker.vue';
+import CompareModal from './CompareModal.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
-import type { ItemImagePoolEntry, ShopSkuRow, SkuQueueRow, SkuQueueStats, SkuMapSummary } from '@/types';
 
-const emit = defineEmits<{ changed: [payload?: { unmapped?: number }] }>();
-
-const MAPPED_PAGE_SIZE = 50;
-/** 队列首屏组数；「显示更多」每次追加这么多（主进程单次上限 1000） */
-const QUEUE_STEP = 200;
-const QUEUE_MAX = 1000;
-
-const STATUS_LABEL: Record<string, string> = { confirmed: '已确认', pending: '待确认', invalid: '已失效' };
-const STATUS_CLASS: Record<string, string> = { confirmed: 'is-on', pending: 'is-warn', invalid: '' };
-const SOURCE_LABEL: Record<string, string> = { manual: '手工', import: '导入', ai_suggest: '智能建议' };
-
-const sub = ref<'queue' | 'mapped'>('queue');
-const loading = ref(false);
-const busy = ref(false);
-const error = ref('');
-const failures = ref<{ itemId: string; message: string }[]>([]);
-
-// ---- 队列 ----
-const queueRows = ref<SkuQueueRow[]>([]);
-const qStats = ref<SkuQueueStats | null>(null);
-const queueLimit = ref(QUEUE_STEP);
-const selectedKeys = ref<Set<string>>(new Set());
-
-// ---- 映射表 ----
-const mappedRows = ref<ShopSkuRow[]>([]);
-const mappedTotal = ref(0);
-const mPage = ref(1);
-const mSummary = ref<SkuMapSummary | null>(null);
-const mSearchInput = ref('');
-const mSearch = ref('');
-const mStatus = ref('');
-const mShop = ref('');
-
-const picker = ref<{ mode: 'queue'; queue: SkuQueueRow[] } | { mode: 'rebind'; row: ShopSkuRow } | null>(null);
-const pendingInvalidate = ref<ShopSkuRow | null>(null);
-
-const unresolvedShops = computed(() => qStats.value?.unresolvedShops ?? []);
-const shopOptions = computed(() => mSummary.value?.byShop ?? []);
-const hasQueueHints = computed(
-  () => unresolvedShops.value.length > 0 || !!qStats.value?.truncated || (qStats.value?.withoutItemId ?? 0) > 0
-);
-
-const selectableQueue = computed(() => queueRows.value.filter((r) => r.status === 'unmapped'));
-const allQueueChecked = computed(
-  () =>
-    selectableQueue.value.length > 0 &&
-    selectableQueue.value.every((r) => selectedKeys.value.has(queueKey(r)))
-);
-const someQueueChecked = computed(
-  () => !allQueueChecked.value && selectableQueue.value.some((r) => selectedKeys.value.has(queueKey(r)))
-);
-const selectedUnmapped = computed(() =>
-  selectableQueue.value.filter((r) => selectedKeys.value.has(queueKey(r)))
-);
-
-const mappedPages = computed(() => Math.max(1, Math.ceil(mappedTotal.value / MAPPED_PAGE_SIZE)));
-const mappedFiltered = computed(() => !!mSearch.value || !!mStatus.value || !!mShop.value);
-
-/**
- * 关联率 = 已关联组数 / 全部组数。
- * 分母用 `groups`（主进程保证 = 已关联 + 待关联 + 店铺未归一）而不是"已确认映射条数"：
- * 后者会算进**已经没有订单**的历史映射，比率会虚高到看不出问题。
- */
-const rateText = computed(() => {
-  const g = qStats.value?.groups ?? 0;
-  if (!g) return '—';
-  const m = qStats.value?.mapped ?? 0;
-  return `${Math.round((m / g) * 100)}%（${m}/${g}）`;
-});
-
-/** 队列行的稳定键（主进程按 `(店铺归一键, 商品ID)` 聚合，这里用同一对） */
-function queueKey(r: SkuQueueRow): string {
-  return `${r.shopKey}\u0000${r.itemId}`;
-}
-
-const pickerTitle = computed(() =>
-  picker.value?.mode === 'queue' ? `批量关联 ${picker.value.queue.length} 项到产品` : '改绑到产品'
-);
-const pickerConfirm = computed(() =>
-  picker.value?.mode === 'queue' ? `关联这 ${picker.value.queue.length} 项` : '改绑'
-);
-/** 改绑时预填原色（`spec` 即颜色，`'*'`/空 = 未指定）—— 不预填会把人配好的颜色冲成"未指定" */
-const pickerInitialColor = computed(() => {
-  const t = picker.value;
-  if (!t || t.mode !== 'rebind') return '';
-  const s = String(t.row.spec ?? '').trim();
-  return s && s !== '*' ? s : '';
-});
-
-let searchTimer: ReturnType<typeof setTimeout> | null = null;
-watch(mSearchInput, (v) => {
-  if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    mSearch.value = v.trim();
-    mPage.value = 1;
-    void loadMapped();
-  }, 300);
-});
-onBeforeUnmount(() => {
-  if (searchTimer) clearTimeout(searchTimer);
-});
-watch([mStatus, mShop], () => {
-  mPage.value = 1;
-  void loadMapped();
-});
-/** 切回队列视图时重拉一次：停在映射页期间别处可能改了店铺归一，表单锚点会失效 */
-watch(sub, (v) => {
-  if (v === 'queue') void loadQueue();
-});
-
-async function loadQueue(): Promise<void> {
-  loading.value = true;
-  error.value = '';
-  try {
-    const res = await api.skuQueue({ limit: queueLimit.value });
-    queueRows.value = res?.rows ?? [];
-    qStats.value = res?.stats ?? null;
-    // 每次重拉都清空选择：行会整批消失（刚关联完），留着旧键会指向不存在的行
-    selectedKeys.value = new Set();
-    // 外壳的页签徽标要的是「待关联数」，只有这一页拉得到队列 —— 由这里回报，外壳不重复扫订单
-    emit('changed', { unmapped: qStats.value?.unmapped ?? 0 });
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function loadMapped(): Promise<void> {
-  loading.value = true;
-  error.value = '';
-  try {
-    const [list, sum] = await Promise.all([
-      api.skuList({
-        offset: (mPage.value - 1) * MAPPED_PAGE_SIZE,
-        limit: MAPPED_PAGE_SIZE,
-        search: mSearch.value,
-        status: mStatus.value as '' | 'confirmed' | 'pending' | 'invalid',
-        shopId: Number(mShop.value) || 0,
-      }),
-      api.skuSummary(),
-    ]);
-    mappedRows.value = list?.rows ?? [];
-    mappedTotal.value = list?.total ?? 0;
-    mSummary.value = sum ?? null;
-    if (!mappedRows.value.length && mPage.value > 1) {
-      mPage.value = Math.max(1, mPage.value - 1);
-      await loadMapped();
-      return;
-    }
-    void loadItemThumbs();
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-// ---- 映射列表的商品ID图片（三层回落：手动覆盖图 → 订单识别图 → 款主图）----
-// 主进程一次算好回落结果（`itemImagePool`），这里只挑"首选"那张并合批取缩略图。
-const itemThumbs = ref(new Map<string, string>());
-/** 有手动覆盖图的商品ID集合（显示「换图 / 清除」而不是「设图」） */
-const itemOverrides = ref(new Set<string>());
-/** 缩略图 title 里的来源说明 */
-const itemThumbSource = ref(new Map<string, string>());
-const imgBusy = ref(false);
-
-function pickFirst(entry: ItemImagePoolEntry | undefined): { localPath: string; source: string } | null {
-  if (!entry) return null;
-  if (entry.override) return { localPath: entry.override.localPath, source: '手动上传的覆盖图' };
-  if (entry.order?.length) return { localPath: entry.order[0].localPath, source: '订单识别图（自动）' };
-  if (entry.product) return { localPath: entry.product.localPath, source: '产品主图' };
-  return null;
-}
-
-async function loadItemThumbs(): Promise<void> {
-  const ids = [...new Set(mappedRows.value.map((r) => r.itemId).filter(Boolean))];
-  const thumbs = new Map<string, string>();
-  const overrides = new Set<string>();
-  const sources = new Map<string, string>();
-  if (ids.length) {
-    try {
-      const pool = (await api.itemImagePool(ids))?.pool ?? {};
-      const chosen = ids
-        .map((id) => ({ id, hit: pickFirst(pool[id]) }))
-        .filter((x): x is { id: string; hit: { localPath: string; source: string } } => !!x.hit);
-      for (const { id, hit } of chosen) sources.set(id, hit.source);
-      for (const [id, entry] of Object.entries(pool)) {
-        if (entry?.override) overrides.add(id);
-      }
-      if (chosen.length) {
-        // 合批取缩略图：dataUrls 顺序与请求 items 一致，单项失败为 null（界面显示空占位）
-        const r = await api.imageThumbBatch(chosen.map(({ hit }) => ({ localPath: hit.localPath })));
-        (r?.dataUrls ?? []).forEach((url, i) => {
-          if (url) thumbs.set(chosen[i].id, url);
-        });
-      }
-    } catch {
-      // 取图失败不挡映射列表：空占位展示
-    }
-  }
-  itemThumbs.value = thumbs;
-  itemOverrides.value = overrides;
-  itemThumbSource.value = sources;
-}
-
-async function pickItemThumb(itemId: string): Promise<void> {
-  if (imgBusy.value) return;
-  let srcPath: string | null = null;
-  try {
-    srcPath = await pickImage();
-  } catch (e: unknown) {
-    toast(e instanceof Error ? e.message : String(e), 'error');
-    return;
-  }
-  if (!srcPath) return; // 用户取消
-  imgBusy.value = true;
-  try {
-    await api.itemImageSet(itemId, srcPath);
-    toast(`已为 ${itemId} 设置覆盖图`, 'success');
-    await loadItemThumbs();
-  } catch (e: unknown) {
-    toast(e instanceof Error ? e.message : String(e), 'error');
-  } finally {
-    imgBusy.value = false;
-  }
-}
-
-async function clearItemThumb(itemId: string): Promise<void> {
-  if (imgBusy.value) return;
-  imgBusy.value = true;
-  try {
-    await api.itemImageClear(itemId);
-    toast(`已清除 ${itemId} 的覆盖图（回到自动图）`, 'success');
-    await loadItemThumbs();
-  } catch (e: unknown) {
-    toast(e instanceof Error ? e.message : String(e), 'error');
-  } finally {
-    imgBusy.value = false;
-  }
-}
-
-async function refreshAll(): Promise<void> {
-  await Promise.all([loadQueue(), loadMapped()]);
-}
-
-/**
- * 工具栏「刷新」：先清掉上一次的行级失败提示再重拉。
- *
- * ⚠️ 清 `failures` 的动作**不能**放进 `refreshAll()`：写入完成后是"先记失败、再重拉列表"，
- * 重拉顺手清空会把刚拿到的失败清单抹掉 —— 表现为"有行没写进去，界面却一声不响"。
- */
-function manualRefresh(): void {
-  failures.value = [];
-  void refreshAll();
-}
-
-function gotoMapped(p: number): void {
-  mPage.value = Math.min(Math.max(1, p), mappedPages.value);
-  void loadMapped();
-}
-
-function showMore(): void {
-  queueLimit.value = Math.min(QUEUE_MAX, queueLimit.value + QUEUE_STEP);
-  void loadQueue();
-}
-
-function toggleQueueAll(e: Event): void {
-  const next = new Set(selectedKeys.value);
-  if ((e.target as HTMLInputElement).checked) selectableQueue.value.forEach((r) => next.add(queueKey(r)));
-  else selectableQueue.value.forEach((r) => next.delete(queueKey(r)));
-  selectedKeys.value = next;
-}
-
-function toggleQueueOne(r: SkuQueueRow): void {
-  const next = new Set(selectedKeys.value);
-  const k = queueKey(r);
-  if (next.has(k)) next.delete(k);
-  else next.add(k);
-  selectedKeys.value = next;
-}
-
-function clearSelection(): void {
-  selectedKeys.value = new Set();
-}
-
-function openBatchPicker(): void {
-  const target = selectedUnmapped.value;
-  if (!target.length) return;
-  picker.value = { mode: 'queue', queue: target };
-}
-
-function openRowPicker(r: SkuQueueRow): void {
-  picker.value = { mode: 'queue', queue: [r] };
-}
-
-function openRebindPicker(r: ShopSkuRow): void {
-  picker.value = { mode: 'rebind', row: r };
-}
-
-/** 弹层回传选中的产品 → 组出写入行 → **一次 op** 提交整批 */
-async function applyPick(product: { id: number; color?: string }): Promise<void> {
-  const target = picker.value;
-  if (!target) return;
-  busy.value = true;
-  failures.value = [];
-  try {
-    // 颜色落在映射的 `spec` 上（D4）：空 = `'*'`（未指定），与一期行为等价
-    const pickedColor = String(product.color ?? '').trim();
-    const rows =
-      target.mode === 'queue'
-        ? target.queue.map((r) => ({
-            platform: r.platform,
-            shopId: r.shopId,
-            itemId: r.itemId,
-            spec: pickedColor || '*',
-            productId: product.id,
-            status: 'confirmed' as const,
-          }))
-        : [
-            {
-              platform: target.row.platform,
-              shopId: target.row.shopId,
-              itemId: target.row.itemId,
-              // 改绑：选了新色就换，没选则**保留原色**（否则一次改绑把配好的颜色冲掉）
-              spec: pickedColor || target.row.spec || '*',
-              note: target.row.note,
-              productId: product.id,
-              // 改绑顺带把失效的映射拉回已确认 —— 用户点「改绑」就是想让它重新生效
-              status: 'confirmed' as const,
-            },
-          ];
-
-    const res = await api.skuMap({ rows });
-    failures.value = res?.failed ?? [];
-    picker.value = null;
-    const created = res?.created ?? 0;
-    const updated = res?.updated ?? 0;
-    const reassigned = res?.reassigned ?? 0;
-    const failed = failures.value.length;
-    // 回填报出来 —— 否则"配完映射，订单页悄悄变了"是查不出的（人不知道归款是写时触发的）
-    const tail = reassigned ? `，已自动关联 ${reassigned} 行存量订单` : '';
-    const head = `新增 ${created} 条、更新 ${updated} 条${pickedColor ? `（颜色「${pickedColor}」）` : ''}${tail}`;
-    if (failed) toast(`${head}，${failed} 条失败`, 'error');
-    else toast(head, 'success');
-    await refreshAll();
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
-    picker.value = null;
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function confirmInvalidate(): Promise<void> {
-  const row = pendingInvalidate.value;
-  if (!row) return;
-  busy.value = true;
-  failures.value = [];
-  try {
-    const res = await api.skuInvalidate(row.id);
-    if (res?.changed) toast(`已标记「${row.itemId}」为失效`, 'success');
-    else toast('这条映射已经不在了，列表已刷新', 'error');
-    pendingInvalidate.value = null;
-    await refreshAll();
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-/** 恢复：把失效的行重新标回已确认（商品ID 改回来 / 误标失效时用） */
-async function restore(r: ShopSkuRow): Promise<void> {
-  busy.value = true;
-  failures.value = [];
-  try {
-    const res = await api.skuMap({
-      rows: [
-        {
-          platform: r.platform,
-          shopId: r.shopId,
-          itemId: r.itemId,
-          spec: r.spec,
-          note: r.note,
-          productId: r.productId,
-          status: 'confirmed',
-        },
-      ],
-    });
-    failures.value = res?.failed ?? [];
-    if (failures.value.length) toast('恢复失败', 'error');
-    else toast(`已恢复「${r.itemId}」`, 'success');
-    await refreshAll();
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-onMounted(() => void refreshAll());
+// ⚠️ 2026-10-08：原先这里还 emit `changed`（把「待关联数」报给外壳的页签徽标）。
+//    指标条与徽标一起撤掉后它已**零消费者**，于是整条删掉（不留"转发了没人听"的空管道）。
+const {
+  sub,
+  loading,
+  busy,
+  error,
+  failures,
+  queueRows,
+  qStats,
+  selectedKeys,
+  mappedRows,
+  mappedTotal,
+  mPage,
+  mSummary,
+  mSearchInput,
+  mStatus,
+  mShop,
+  picker,
+  pendingInvalidate,
+  compare,
+  viewer,
+  queueImgs,
+  itemThumbs,
+  itemOverrides,
+  itemThumbSource,
+  imgBusy,
+  compareItemImage,
+  unresolvedShops,
+  shopOptions,
+  hasQueueHints,
+  selectableQueue,
+  allQueueChecked,
+  someQueueChecked,
+  selectedUnmapped,
+  mappedPages,
+  mappedFiltered,
+  rateText,
+  pickerTitle,
+  pickerConfirm,
+  pickerInitialColor,
+  queueKey,
+  openImage,
+  pickItemThumb,
+  clearItemThumb,
+  manualRefresh,
+  goToday,
+  gotoMapped,
+  showMore,
+  toggleQueueAll,
+  toggleQueueOne,
+  clearSelection,
+  openBatchPicker,
+  openRowPicker,
+  openRebindPicker,
+  openCompare,
+  confirmCompare,
+  applyPick,
+  confirmInvalidate,
+  restore,
+} = useSkuPool();
 </script>
 
 <style scoped>
@@ -915,8 +658,18 @@ onMounted(() => void refreshAll());
 .gd-c-img {
   width: 56px;
 }
+/* 队列的缩略图包一层按钮（点开看原图）—— 剥掉按钮默认外观，只留"可点开"的光标 */
+.gd-thumb-btn {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  line-height: 0;
+  cursor: zoom-in;
+}
 .gd-c-ops {
-  width: 128px;
+  /* 「关联…」+「对比」两个行内动作 —— 原 128px 只放得下一个 */
+  width: 150px;
   white-space: nowrap;
 }
 .gd-nowrap {
@@ -943,5 +696,29 @@ tr.is-blocked :deep(td) {
 .gd-imgops .wb-link {
   font-size: 11px;
   padding: 0 2px;
+}
+
+/* ---- 看图弹层（队列 / 映射列表共用）---- */
+.gd-viewer {
+  max-width: min(78vw, 900px);
+}
+.gd-viewer__src {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+}
+.gd-viewer__body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  max-height: 72vh;
+  overflow: auto;
+}
+.gd-viewer__img {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 4px;
 }
 </style>

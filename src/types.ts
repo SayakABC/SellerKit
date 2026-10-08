@@ -47,6 +47,13 @@ export interface ElectronAPI {
     search?: string;
   }) => Promise<APIResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear: () => Promise<APIResult<void>>;
+  /**
+   * 本页汇总（「归类核对」页指标条的产品维度）：这批订单行已配到哪些产品 / 几家供应商。
+   *
+   * 入参是**订单行原文**（`shop` 是报表里的店铺名，不是归一后的店铺实体）—— 归一与匹配都在主进程做，
+   * 渲染层只交出它手上有的东西。数据层实现见 `electron/product-db.ts` 的 `resolveOrderSkuRollup`。
+   */
+  orderSkuRollup: (rows: { shop: string; itemId: string }[]) => Promise<APIResult<OrderSkuRollup>>;
   /** 把若干订单号归属到某店铺（写 `oi_orders.shop` 原文；AE 导出按店铺、无店铺列，故由人指定） */
   orderAssignShop: (payload: {
     orderNos: string[];
@@ -414,7 +421,8 @@ export interface ElectronAPI {
     maxRows?: number;
   }) => Promise<APIResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>>;
   /** 批量关联 / 改绑（单事务；行级失败逐行报回，不做整批回滚）
-   *  `reassigned` = 顺带回填的**存量订单行数**（映射写入后重跑确定性归款） */
+   *  `reassigned` = 顺带回填的**存量订单行数**（映射写入后重跑确定性归款）
+   *  `adopted` = 顺手把订单图采纳为**款主图**的张数（只补空、已有主图的款不动） */
   productSkuMap: (payload: {
     rows: SkuMapInputPayload[];
   }) => Promise<
@@ -422,6 +430,7 @@ export interface ElectronAPI {
       created: number;
       updated: number;
       reassigned: number;
+      adopted: number;
       failed: { itemId: string; message: string }[];
     }>
   >;
@@ -1576,11 +1585,30 @@ export interface SkuBackfillOutcome {
   conflictCode: string;
 }
 
+/**
+ * 「本页汇总」结果（「归类核对」页指标条的产品维度）：这一页的商品已配到哪些产品 / 几家供应商。
+ *
+ * 与主进程 `electron/product-db.ts` 的 `OrderSkuRollup` 结构一致（两端各自声明，
+ * 主进程不 import 渲染层）。
+ *
+ * ⚠️ `products === 0` 的正确读法是「**本页商品还没配过映射**」——它是一个待办，
+ * 不是"这份数据没有产品维度"（对照 `OrderRecord.itemId` 为空时「本页 N 个商品」整格不显示）。
+ */
+export interface OrderSkuRollup {
+  /** 本页商品已配到的**去重产品**数 */
+  products: number;
+  /** 这些产品涉及的**去重供应商**数（`supplier_id = 0` 的"未关联厂家"不计家数） */
+  suppliers: number;
+}
+
 /** 待关联队列的一行（`status='shopUnresolved'` 时**不允许**写映射：不拿空平台硬塞） */
 export interface SkuQueueRow {
   shopKey: string;
   shopRaw: string;
   itemId: string;
+  /** 归一后的商品ID（与 `itemImagePool` 的池键同口径）—— 查图用它，**别用 `itemId`**：
+   *  那是订单原文（可能带空格），池的键是归一的，拿原文查必然落空且不报错 */
+  itemKey: string;
   /** 展示用商品标题（不参与匹配） */
   title: string;
   orderCount: number;

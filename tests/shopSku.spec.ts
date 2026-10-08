@@ -109,6 +109,15 @@ describe('aggregateQueue：按 (店铺, 商品ID) 聚合', () => {
     expect(r.withoutItemId).toBe(0);
   });
 
+  it('itemKey 是**归一后**的商品ID，itemId 保留原文 —— 查图必须用前者', () => {
+    // 为什么这条要单独守：队列的图走 `itemImagePool`，而它的池键是**归一后**的商品ID。
+    // 这两个字段在界面上长得几乎一样（全角空格肉眼不可辨），一旦图那侧误用 `itemId`，
+    // 症状是"整列的图都不见了"却**不报错** —— 看起来像订单里本来就没有图。
+    const r = aggregateQueue([row('店A', { 商品ID: 'B0X1\u3000\u3000A' })]);
+    expect(r.groups[0].itemId).toBe('B0X1\u3000\u3000A'); // 原文（只去了首尾空白）
+    expect(r.groups[0].itemKey).toBe('B0X1 A'); // 归一：全角空格折叠成半角单空格
+  });
+
   it('店铺不同 / 商品ID 不同 → 分组不同（不跨店合并）', () => {
     const r = aggregateQueue([
       row('店A', { 商品ID: 'X1' }),
@@ -198,6 +207,18 @@ describe('buildQueueView：归类与已关联剔除', () => {
       autoShopId: 0,
     });
     expect(r.stats.unmapped).toBe(1);
+  });
+
+  it('itemKey 一路透传到队列行 —— 界面拿它查图（拿 itemId 会静默查不到）', () => {
+    const r = buildQueueView({
+      orders: [row('店A', { 商品ID: 'B0X1\u3000A' })],
+      manualShopIdByKey: new Map([['店A', 3]]),
+      autoShopByKey: new Map(),
+      shopsById,
+      mappedKeys: new Set(),
+    });
+    expect(r.rows[0].itemId).toBe('B0X1\u3000A'); // 原文（界面展示用）
+    expect(r.rows[0].itemKey).toBe('B0X1 A'); // 归一键（查图用）
   });
 
   it('店铺尚未归一 → shopUnresolved，**不允许**写映射（不拿空平台硬塞）', () => {

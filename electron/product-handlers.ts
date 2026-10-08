@@ -44,6 +44,7 @@ import {
   clearItemImage,
   detachProductImage,
   itemImagePool,
+  pendingProductImages,
   setItemImage,
   upsertImageRecord,
   variantDelete,
@@ -229,6 +230,8 @@ handle('product-sku-list', (payload: any) => {
     search: str(payload?.search, MAX.search).trim(),
     status: (SKU_MAP_STATUSES as readonly string[]).includes(status) ? status : '',
     shopId: toId(payload?.shopId),
+    // 反向过滤（产品侧「已关联商品」）：0 = 不过滤
+    productId: toId(payload?.productId),
   });
 });
 
@@ -266,6 +269,13 @@ handle('product-sku-map', (payload: any) => {
     out.reassigned = reassignOrdersByItemIds([...written]);
   } catch {
     out.reassigned = 0;
+  }
+  // 认款**顺手**把订单图采纳为款主图（只补空 / 不覆盖；失败不外抛 —— 见 `adoptOrderImages`）。
+  // 放在回填之后：两件事都以"映射已写入"为前提，互不依赖。
+  try {
+    out.adopted = adoptOrderImages(rows, new Set(out.failed.map((f) => f.itemId)));
+  } catch {
+    out.adopted = 0;
   }
   return out;
 });
@@ -313,7 +323,10 @@ const PRODUCT_IMAGE_DIR = () => path.join(app.getPath('userData'), 'product-imag
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /** 把用户选中的图片复制进 product-images 缓存（内容 SHA-256 命名去重），返回登记后的图 */
-function importImageFile(srcPath: unknown): { imageId: number; localPath: string; reused: boolean } {
+function importImageFile(
+  srcPath: unknown,
+  source = 'upload',
+): { imageId: number; localPath: string; reused: boolean } {
   if (typeof srcPath !== 'string' || !srcPath.trim()) throw new Error('缺少图片文件路径');
   const src = path.resolve(srcPath.trim());
   const stat = fs.statSync(src); // 不存在会抛 ENOENT，handle 层转 error
@@ -331,8 +344,39 @@ function importImageFile(srcPath: unknown): { imageId: number; localPath: string
   fs.mkdirSync(dir, { recursive: true });
   const finalPath = path.join(dir, fingerprint + IMG_EXT_BY_FORMAT[fmt]);
   if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
-  const rec = upsertImageRecord({ fingerprint, localPath: finalPath, source: 'upload' });
+  const rec = upsertImageRecord({ fingerprint, localPath: finalPath, source });
   return { imageId: rec.imageId, localPath: finalPath, reused: rec.reused };
+}
+
+/**
+ * 认款时**顺手**把订单图采纳为款主图（对本次写入映射的每一行看一次）。
+ *
+ * 为什么挂在 `product-sku-map` 里、而不是单独做个按钮：用户此刻的注意力就在"这个商品=哪个款"，
+ * 而订单图就在旁边（队列的「图」列）。顺手落下来之后，款侧就不再是"一张图都没有"——
+ * 下次这个款出现在选款列表里就有图可比，形成「认款 → 有图 → 更好认款」的正循环。
+ *
+ * 三条边界：
+ *   ① **只补空、不覆盖** —— 判定在 `pendingProductImages`（`pl_products.image_id = 0` 才采纳）；
+ *   ② **失败不外抛** —— 映射已经写进去了，采纳只是附加动作，坏一张图不能让用户以为"没关联上"；
+ *   ③ **只对写入成功的行** —— 失败的 itemId 跳过，免得给一个根本没配上的商品改了款图。
+ */
+function adoptOrderImages(rows: readonly SkuMapInput[], failedItemIds: ReadonlySet<string>): number {
+  const pairs = rows
+    .filter((r) => !!r.productId && !!r.itemId && !failedItemIds.has(r.itemId))
+    .filter((r) => (r.status ?? 'confirmed') === 'confirmed')
+    .map((r) => ({ productId: r.productId, itemId: r.itemId }));
+  if (!pairs.length) return 0;
+  let adopted = 0;
+  for (const c of pendingProductImages(pairs)) {
+    try {
+      const img = importImageFile(c.localPath, c.source);
+      attachProductImage(c.productId, img.imageId);
+      adopted += 1;
+    } catch {
+      // 单张失败不影响其余（也不影响"映射已写入"）：这个款留空图，下次认款会再试
+    }
+  }
+  return adopted;
 }
 
 handle('product-image-attach', (payload: any) => {

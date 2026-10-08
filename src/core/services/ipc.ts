@@ -71,6 +71,7 @@ import type {
   UnmappedShopRow,
   NameMapKind,
   SkuBackfillOutcome,
+  OrderSkuRollup,
   SkuMapStatus,
   ShopSkuRow,
   SkuMapInputPayload,
@@ -161,6 +162,11 @@ export interface ElectronApi {
     search?: string;
   }): Promise<ApiResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear(): Promise<ApiResult<unknown>>;
+  /**
+   * 本页汇总（「归类核对」页指标条的产品维度）：这批订单行已配到哪些产品 / 几家供应商。
+   * 入参是**订单行原文**（`shop` 未归一）—— 归一与匹配都在主进程，渲染层不自己推。
+   */
+  orderSkuRollup(rows: { shop: string; itemId: string }[]): Promise<ApiResult<OrderSkuRollup>>;
   /** 运费原始行（oi_orders 最小投影，只读；供按订单算运费的宿主 op 提取） */
   orderAssignShop(payload: { orderNos: string[]; shopName: string }): Promise<
     ApiResult<{ updated: number }>
@@ -464,6 +470,8 @@ export interface ElectronApi {
     search?: string;
     status?: SkuMapStatus | '';
     shopId?: number;
+    /** 反向过滤：只看某一款关联了哪些店铺商品（产品侧「已关联商品」）。0/缺省 = 不过滤 */
+    productId?: number;
     offset?: number;
     limit?: number;
   }): Promise<ApiResult<{ rows: ShopSkuRow[]; total: number }>>;
@@ -479,6 +487,7 @@ export interface ElectronApi {
       created: number;
       updated: number;
       reassigned: number;
+      adopted: number; // 认款顺手采纳为款主图的张数（只补空，已有主图的款不动）
       failed: { itemId: string; message: string }[];
     }>
   >;
@@ -1155,11 +1164,13 @@ export function productExport(payload: {
   return ipc.productExport(payload);
 }
 
-/** 映射列表（店铺商品ID → 产品；关键字 / 状态 / 店铺过滤 + 分页） */
+/** 映射列表（店铺商品ID → 产品；关键字 / 状态 / 店铺 / 款 过滤 + 分页） */
 export function productSkuList(payload?: {
   search?: string;
   status?: SkuMapStatus | '';
   shopId?: number;
+  /** 反向过滤：只看某一款关联了哪些店铺商品（产品侧「已关联商品」）。0/缺省 = 不过滤 */
+  productId?: number;
   offset?: number;
   limit?: number;
 }): Promise<ApiResult<{ rows: ShopSkuRow[]; total: number }>> {
@@ -1187,6 +1198,7 @@ export function productSkuMap(payload: {
     created: number;
     updated: number;
     reassigned: number;
+    adopted: number;
     failed: { itemId: string; message: string }[];
   }>
 > {
@@ -1458,6 +1470,19 @@ export async function orderImageThumbBatch(
     }
   }
   return { success: true, data: { dataUrls } };
+}
+
+/**
+ * 读**原图**（不缩放）—— 走与缩略图**同一套**目录白名单（`order-images` / `product-images`
+ * + 扩展名 + realpath 归一），只差"不缩放"。需要看清细节时用它：缩略图通道的 `maxEdge`
+ * 在主进程被夹到 256，认印花/领型/颜色时不够。
+ *
+ * 之前只有 `ElectronApi` 上的声明、没有导出包装（与 `orderImageThumbBatch` 同款缺口）。
+ *
+ * ⚠️ 返回整张原图的 base64（可至 MB 级）—— 只在用户**点开某一张**时调，别批量预取。
+ */
+export function orderReadImage(localPath: string): Promise<ApiResult<ImageDataUrl>> {
+  return ipc.orderReadImage(localPath);
 }
 
 /** 导出 xlsx（弹保存框；buffer 由渲染层用 xlsx 生成） */

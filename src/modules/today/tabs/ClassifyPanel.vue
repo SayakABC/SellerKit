@@ -14,6 +14,22 @@
       <span v-if="distinctProducts" class="wb-metric" data-act="cl-metric-products">
         本页 <b>{{ distinctProducts }}</b> 个商品
       </span>
+      <!-- 产品维度：本页商品在「货与成本」里已配到哪些产品、涉及几家供应商。
+           这一格存在的理由是让**配映射的收益在界面上显形**：配一条，「同一商品」的后续订单就直接
+           归类、不再进这一页（比提升识别准确率见效快得多 —— 结论与真库取证见
+           docs/notes/2026-10-05-classify-auto-pipeline.md §七）。
+           ⚠️ 与上一格刻意不同：**没有商品ID 时整格不显示**（维度不存在），
+           而**有商品ID 但一个都没配上时显示 0 并说明缘故**（那是一个明确的待办，不是数据坏了）。 -->
+      <span
+        v-if="rollup"
+        class="wb-metric"
+        :class="{ 'is-warn': rollup.products === 0 }"
+        data-act="cl-metric-product"
+        :title="rollupTitle"
+      >
+        已配产品 <b>{{ rollup.products }}</b> 个 · 供应商 <b>{{ rollup.suppliers }}</b> 家
+        <span v-if="rollup.products === 0" class="wb-muted">（本页商品还没配映射）</span>
+      </span>
     </div>
 
     <!-- 工具条：查询 + 刷新。本页**只剩逐行动作** —— 原「识别未归类」批量按钮已于 2026-10-05
@@ -244,7 +260,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
 import { CATEGORY_WHITELIST, COLOR_WHITELIST } from '@/lib/orderClassifier';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
+import type { OrderRecord, OrderSkuRollup, SkuBackfillOutcome, StyleRecord } from '@/types';
 import { useShipping } from '../flowCtx';
 import {
   PAGE_SIZE,
@@ -253,6 +269,7 @@ import {
   markCorrected,
   pendingCounts,
   saveCorrection,
+  skuRollup,
 } from '../classify';
 
 const { token, go, bump } = useShipping();
@@ -357,6 +374,49 @@ function sameCount(o: OrderRecord): number {
 /** 本页覆盖多少个商品（0 ⇒ 这份报表没有商品ID 列，指标格整格不显示） */
 const distinctProducts = computed(() => productRows.value.size);
 
+// ───────────────────────────────────────── 产品维度（本页的活落在哪些产品 / 几家供应商）
+
+/**
+ * 本页汇总（产品维度）。**`null` 与 `{ products: 0 }` 是两件事，别合并**：
+ *   · `{ products: 0 }` = 主进程真查过，本页商品一个都没配上映射（一个**待办**，界面要说清缘故）；
+ *   · `null` = 没取到（通道不可用 / 产品域还没建）⇒ 那一格**整格不显示**。
+ *     显示 0 会把"没取到"说成"一件都没配"，而这两件事的下一步动作完全不同。
+ */
+const rollup = ref<OrderSkuRollup | null>(null);
+
+/** 鼠标停在指标格上时的解释（把这一格的来历与下一步说全；数字本身放不下这么多字） */
+const rollupTitle = computed(() => {
+  const r = rollup.value;
+  if (!r) return '';
+  if (r.products === 0) {
+    return '本页商品还没在「货与成本」里配过产品映射。配一条，同一商品以后再导入的订单会自动归类。'
+      + '同类映射维护在「货与成本」的映射清单里。';
+  }
+  return `本页商品在「货与成本」里已配到 ${r.products} 个产品、${r.suppliers} 家供应商；`
+    + '配上映射的商品，以后再导入的订单会自动归类、不再进这一页。';
+});
+
+/**
+ * 取本页的产品维度。**失败不拦页面**：这是附加信息，核对列表本身照常可用。
+ *
+ * ⚠️ 只发**有商品ID** 的行 —— 没有商品ID 的行在这条链路上无从查起（主进程也会跳过它，
+ * 但把空键发出去会让"到底发了哪些键"这件事在请求里看不出来）。
+ */
+async function loadRollup(): Promise<void> {
+  const keys = rows.value
+    .map((o) => ({ shop: String(o.shop ?? ''), itemId: String(o.itemId ?? '').trim() }))
+    .filter((k) => k.itemId);
+  if (!keys.length) {
+    rollup.value = null; // 这份报表没有商品ID ⇒ 这个维度本就不存在（与「本页 N 个商品」同规则）
+    return;
+  }
+  try {
+    rollup.value = await skuRollup(keys);
+  } catch {
+    rollup.value = null;
+  }
+}
+
 // ───────────────────────────────────────── 键盘流（回车＝保存并往下走）
 
 /** 下一次取数完成后要把焦点送到的**行下标**；-1 = 不送 */
@@ -454,7 +514,8 @@ async function load(): Promise<void> {
     // 草稿按行重建：主进程回来的才是真值，旧的编辑态一律作废
     for (const k of Object.keys(drafts)) delete drafts[Number(k)];
     for (const o of rows.value) draftOf(o);
-    await loadThumbs();
+    // 产品维度与缩略图都跟着**本页**走（各自失败都不影响核对本身）
+    await Promise.all([loadThumbs(), loadRollup()]);
     // 键盘流：保存后（或按回车往下走）把焦点送回目标行 —— 必须在**取数之后**做，
     // 否则元素还是上一批的老 DOM（保存会把那一行移走、后面的行整体上移）
     await applyFocus();

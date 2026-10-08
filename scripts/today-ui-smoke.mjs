@@ -348,6 +348,17 @@ const FAKE_BRIDGE = `<script>
       if (Array.isArray(p)) p.forEach(markCorrectedIfEmulating);
       return { success: true, data: { updated: Array.isArray(p) ? p.length : 2 } };
     },
+    // ⭐ 本页产品维度（指标条）：宿主拿（店铺原文, 商品ID）查 pl_shop_sku 得出。
+    //    夹具刻意让**产品数 ≠ 供应商数**（2 个产品 / 1 家供应商）—— 两个数相等时，
+    //    "把产品数当供应商数画出来"这种错法照样全绿（本仓同类教训不止一次）。
+    //    两个开关各打一种**与"0"不同**的状态：__noSkuRollup = 查过了、一个都没配上；
+    //    __skuRollupFails = 压根没取到（那一格必须整格不显示，不能画成 0）。
+    'orderSkuRollup': function (p) {
+      rec('orderSkuRollup', p);
+      if (window.__skuRollupFails) return { success: false, error: '产品域不可用' };
+      if (window.__noSkuRollup) return { success: true, data: { products: 0, suppliers: 0 } };
+      return { success: true, data: { products: 2, suppliers: 1 } };
+    },
     'orderImageThumbBatch': function (p) {
       rec('orderImageThumbBatch', p);
       // ⚠️ 载荷是**裸数组**（orderImageThumbBatch(items)，见 src/types.ts 声明）；
@@ -1126,7 +1137,7 @@ async function main() {
       return !!card('classify-panel') && flat(card('cl-stats')).indexOf('待核对') >= 0 && !!card('cl-table');
     }, 10000);
 
-    report('归类指标条：四格都是真取数（待核对 4 / 未归类 3 / 识别库 2 款 / 本页 2 个商品）',
+    report('归类指标条：四个计数格都是真取数（待核对 4 / 未归类 3 / 识别库 2 款 / 本页 2 个商品）',
       flat(card('cl-stats')).indexOf('待核对 4') >= 0 &&
         flat(card('cl-stats')).indexOf('未归类 3') >= 0 &&
         flat(card('cl-stats')).indexOf('识别库 2 款') >= 0 &&
@@ -1134,6 +1145,29 @@ async function main() {
         //  P-43 没有商品ID ⇒ 不计入）。它把"这一页其实只有两件事要定"说出来。
         flat(card('cl-stats')).indexOf('本页 2 个商品') >= 0,
       flat(card('cl-stats')));
+
+    // ---- ⭐ 产品维度：这一页的活落在「货与成本」里的哪些产品 / 几家供应商 ----
+    // 这一格存在的理由是让**配映射的收益显形**（配一条，同一商品的后续订单就直接归类）。
+    // 两条断言各管一件事，**不能合并**：
+    //   ① 请求真的带上了本页商品的键 —— 传空数组会"成功但空"，格子恒显示 0 而一条报错都没有
+    //      （先例见 docs/notes/2026-10-04-preload-payload-shape.md），所以判据钉在**载荷形状**上；
+    //      ⚠️ 假桥替的是 preload **上面**那一层 ⇒ 这里收到的是**裸数组**（包装成 {rows} 在 preload 里，
+    //         它由 ipc:shape:smoke 守，不在本脚本的覆盖范围内）。
+    //   ② 格子画的是宿主回来的数（2 个产品 / 1 家供应商 —— 两个数刻意不等，防"拿产品数当供应商数"）。
+    var rollupCalls = calls('orderSkuRollup') || [];
+    report('产品维度取数只带**有商品ID** 的行（P-41/P-42 是同一商品的 2 行 + P-44；无商品ID 的 P-43 不进请求）',
+      (function () {
+        var rows = rollupCalls[rollupCalls.length - 1];
+        return Array.isArray(rows) && rows.length === 3 &&
+          rows[0].shop === '店A' && rows[0].itemId === 'IT-A' &&
+          rows[1].shop === '店A' && rows[1].itemId === 'IT-A' &&
+          rows[2].shop === '店B' && rows[2].itemId === 'IT-B';
+      })(),
+      JSON.stringify(rollupCalls[rollupCalls.length - 1] || null));
+    report('指标条多一格产品维度，画的是宿主回来的数（已配产品 2 个 · 供应商 1 家）',
+      !!card('cl-metric-product') &&
+        flat(card('cl-metric-product')).indexOf('已配产品 2 个 · 供应商 1 家') >= 0,
+      card('cl-metric-product') ? flat(card('cl-metric-product')) : '没有这一格');
     report('待核对四条都在（P-41 / P-42 / P-43 / P-44），店铺逐格对',
       (function () {
         var t = flat(card('cl-table'));
@@ -1382,6 +1416,34 @@ async function main() {
     var okClBack = true;
     try { await waitFor(function () { return !!card('cl-table'); }, 8000); } catch (e) { okClBack = false; }
     report('数据回来后表格跟着回来（刷新作废面板缓存，不是一次性的）', okClBack, '');
+
+    // ---- ⭐ 产品维度：显示 0 与 整格隐藏 必须长得不一样 ----
+    // 这一格是**附加信息**，但"0"不能乱说：主进程真查过而一个都没配上，是一个**明确的待办**
+    // （界面要说清缘故，否则单看 0 会被读成"数据坏了 / 这一页没有产品"）；
+    // 通道没取到则是"不知道"，那一格**整格不显示**。两种状态的下一步动作完全不同。
+    window.__noSkuRollup = true;
+    await clickRefresh();
+    var okRollupZero = true;
+    try {
+      await waitFor(function () {
+        var el = card('cl-metric-product');
+        return !!el && flat(el).indexOf('已配产品 0 个') >= 0;
+      }, 6000);
+    } catch (e) { okRollupZero = false; }
+    report('本页商品一个都没配上时：显示 0 并**说明缘故**（"本页商品还没配映射"），不是把 0 丢在那里',
+      okRollupZero && flat(card('cl-metric-product')).indexOf('本页商品还没配映射') >= 0,
+      card('cl-metric-product') ? flat(card('cl-metric-product')) : '整格不见了（错）');
+    window.__noSkuRollup = false;
+    window.__skuRollupFails = true;
+    await clickRefresh();
+    var okRollupGone = true;
+    try { await waitFor(function () { return !card('cl-metric-product'); }, 6000); }
+    catch (e) { okRollupGone = false; }
+    report('取不到产品维度时：那一格整格不显示（"没取到"不许画成 0），且核对列表照常可用',
+      okRollupGone && !!card('cl-table'),
+      '格=' + (card('cl-metric-product') ? '仍在（错）' : '已隐藏') +
+        ' 表=' + (card('cl-table') ? '在' : '没了'));
+    window.__skuRollupFails = false;
 
     step('recon');
     // 「结算对账」页签（2026-10-05 内建）。数字全在主进程算好（purchase-db），界面只展示 ——

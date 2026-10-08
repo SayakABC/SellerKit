@@ -644,6 +644,12 @@ export interface SkuMapQuery {
   search: string;
   status: string;
   shopId: number;
+  /**
+   * 反向过滤：只看**某一款**关联了哪些店铺商品（产品侧「已关联商品」用）。
+   * `0` = 不过滤（与其它过滤项同口径：0 是"没指定"，不是"id 为 0 的行"）。
+   * 走既有索引 `idx_pl_shop_sku_product`，不新增表、不新增通道。
+   */
+  productId: number;
 }
 
 /** 一条待写入的映射（批量关联 / 改绑共用） */
@@ -665,6 +671,9 @@ export interface SkuMapOutcome {
   /** 顺带回填的**存量订单行数**（映射写入后重跑确定性归款的结果）。
    *  由 handler 层填（本层不 import 订单域，避免 `order-db → product-db` 成环）。 */
   reassigned: number;
+  /** 顺带把订单图采纳为**款主图**的张数（认款那一刻顺手做，见 `pendingProductImages`）。
+   *  由 handler 层填：本层只挑"该采纳哪张给哪个款"，复制文件与登记图行走 handler。 */
+  adopted: number;
   /** 只有库层才拦得住的失败行（编码/店铺不存在、商品ID 为空…） */
   failed: { itemId: string; message: string }[];
 }
@@ -837,11 +846,17 @@ function safeParseJson(txt: unknown): Record<string, string> {
   }
 }
 
-/** `product_id` → (编码, 名称)，供映射表与队列展示 */
-function productLabelMap(): Map<number, { code: string; name: string }> {
-  const m = new Map<number, { code: string; name: string }>();
-  for (const r of dbQuery<Record<string, unknown>>(`SELECT id, code, name FROM pl_products`)) {
-    m.set(num(r.id), { code: String(r.code ?? ''), name: String(r.name ?? '') });
+/** `product_id` → (编码, 名称, 供应商 id)，供映射表与队列展示、以及本页汇总按供应商去重 */
+function productLabelMap(): Map<number, { code: string; name: string; supplierId: number }> {
+  const m = new Map<number, { code: string; name: string; supplierId: number }>();
+  for (const r of dbQuery<Record<string, unknown>>(
+    `SELECT id, code, name, supplier_id FROM pl_products`,
+  )) {
+    m.set(num(r.id), {
+      code: String(r.code ?? ''),
+      name: String(r.name ?? ''),
+      supplierId: num(r.supplier_id),
+    });
   }
   return m;
 }
@@ -925,12 +940,13 @@ function mapSkuRow(
   };
 }
 
-/** 映射列表（关键字 / 状态 / 店铺过滤 + 分页；按更新时间倒序，最近动的在最上面） */
+/** 映射列表（关键字 / 状态 / 店铺 / 款 过滤 + 分页；按更新时间倒序，最近动的在最上面） */
 export function listSkuMappings(payload: SkuMapQuery): { rows: ShopSkuRow[]; total: number } {
   ensureSkuSchema();
   const search = str(payload?.search, MAX.search);
   const status = str(payload?.status, MAX.status);
   const shopId = toId(payload?.shopId);
+  const productId = toId(payload?.productId);
 
   const where: string[] = [skuMappingSql()];
   const params: (string | number)[] = [];
@@ -946,6 +962,12 @@ export function listSkuMappings(payload: SkuMapQuery): { rows: ShopSkuRow[]; tot
   if (shopId) {
     where.push(`shop_id = ?`);
     params.push(shopId);
+  }
+  // 反向：某款关联了哪些店铺商品。`status` 由调用方按语义给（产品侧"已关联"只算 confirmed，
+  // 失效单列 —— 把 invalid 混进来会让用户以为那个商品还在用）。
+  if (productId) {
+    where.push(`product_id = ?`);
+    params.push(productId);
   }
   const whereSql = `WHERE ${where.join(' AND ')}`;
   const offset = Math.max(0, Math.floor(Number(payload?.offset) || 0));
@@ -1195,6 +1217,81 @@ export function resolveShopRef(shop: unknown): { shopId: number; platform: strin
   return { shopId, platform: shopLabelMap().get(shopId)?.platform ?? '' };
 }
 
+// ---- 本页汇总（核对页指标条：这一页的活最终落在哪些产品 / 几家供应商上）----
+
+/** 单次汇总的行数上限（核对页一页 30 行；这是防呆上限，不是业务上限） */
+const MAX_ROLLUP_ROWS = 500;
+
+/** 本页涉及的产品 / 供应商（`supplier_id = 0` 的"未关联厂家"不计家数） */
+export interface OrderSkuRollup {
+  /** 本页商品已配到的**去重产品**数（0 = 一个都没配上，不是"这份数据没有这个维度"） */
+  products: number;
+  /** 这些产品涉及的**去重供应商**数 */
+  suppliers: number;
+}
+
+/**
+ * ⭐ **本页**汇总：一批订单行（店铺**原文** + 商品ID）→ 已配到的产品数 / 供应商数。
+ *
+ * **为什么在数据层而不是渲染层算**：判"这个商品属于哪个产品"要经 `pl_shop_sku` 的
+ * `(平台, 店铺, 商品ID)` 且必须**先按人工归一规则把店铺原文变成店铺实体** —— 这套规则
+ * 落库（`autoAssignByMap`）、回流（`skuBackfillFromOrder`）、待关联队列三处已经在用，
+ * 渲染层再写一份的下场是"队列说这家店已归一、这一页却统计不出来"，且两边分别看都正常。
+ *
+ * **为什么入参是订单原文的店铺名而不是店铺 id**：调用方是核对页，它手上只有订单行
+ * （`OrderRecord.shop` 是报表原文），没有归一后的实体 —— 这与 `resolveOrderSku` 的处境相同。
+ *
+ * **刻意复用而不是新写匹配**（本仓最忌两块口径打架）：
+ *   · 店铺原文 → (店铺 id, 平台)  走 `resolveShopRef`；
+ *   · (平台, 店铺 id, 商品ID) → 产品  走 `resolveSkuBatch`（**一次算完一批**，不逐行查）。
+ * 本函数只做"去重 + 计数 + 两条与 `resolveOrderSku` 对齐的跳过规则"。
+ *
+ * 两条跳过规则（都对 **少算** 的方向，不会把两件商品混成一件）：
+ *   · 店铺没归一 / 没有商品ID ⇒ 这一行**无从查起**，不是"没配上"；
+ *   · 映射指向的产品已删（悬空指针）⇒ 按未命中 —— 与 `resolveOrderSku` 同一支。
+ *     两处不一致的症状是"这一页说配了 3 个产品、真去拿货只有 2 个"。
+ *
+ * ⚠️ 已知**欠算**：本页若把同一件商品拆成两种店铺写法（多一个空格 / 零宽字符），
+ * 店铺原文去重算两次、`resolveShopRef` 都会命中同一家店 ⇒ 产品/供应商仍然各只算一次
+ * （这两个数是**产品级**的，不受行数影响）。分子分母不在这里暴露，故不会出现"本页 2 个商品、
+ * 3 个已配"这种自相矛盾的读数。
+ */
+export function resolveOrderSkuRollup(rows: { shop?: unknown; itemId?: unknown }[]): OrderSkuRollup {
+  const out: OrderSkuRollup = { products: 0, suppliers: 0 };
+  const list = Array.isArray(rows) ? rows.slice(0, MAX_ROLLUP_ROWS) : [];
+  // 产品域还没建（老库还没跑交接）时**不报错**：本页就是"一个都没配上"，
+  // 界面据此提示"还没配映射"，而不是弹一条用户看不懂的技术原因。
+  if (!list.length || !productSchemaReady()) return out;
+
+  // 店铺原文 → 实体：原文先去重再查（一页里同一家店会重复出现很多次，别查 N 遍）
+  const refs = new Map<string, { platform: string; shopId: number }>();
+  for (const r of list) {
+    const key = toNameKey(r?.shop);
+    if (key && !refs.has(key)) refs.set(key, resolveShopRef(r?.shop));
+  }
+  const keys = list.map((r) => {
+    const ref = refs.get(toNameKey(r?.shop));
+    return { platform: ref?.platform ?? '', shopId: ref?.shopId ?? 0, itemId: toSkuKey(r?.itemId) };
+  });
+  const hits = resolveSkuBatch(keys);
+  const labels = productLabelMap();
+
+  const pids = new Set<number>();
+  const supplierIds = new Set<number>();
+  keys.forEach((k, i) => {
+    if (!k.shopId || !k.itemId) return;
+    const pid = num(hits[i]?.productId);
+    const label = pid ? labels.get(pid) : undefined;
+    if (!label) return;
+    pids.add(pid);
+    // `supplier_id = 0` = 还没关联厂家：把它算成"一家供应商"会让这个数虚高
+    if (label.supplierId > 0) supplierIds.add(label.supplierId);
+  });
+  out.products = pids.size;
+  out.suppliers = supplierIds.size;
+  return out;
+}
+
 /**
  * 款编码 → 产品库 id。`pl_products.code` 是订单域（`oi_styles.code`）与产品域之间**唯一**的锚点
  * （ADR-002 D1），映射行存的 `product_id` 必须是它 —— 拿 `oi_styles.id` 去填会指向别的产品，
@@ -1322,7 +1419,7 @@ function variantIdByColor(productId: number, color: string): number {
 export function upsertSkuMappings(rows: SkuMapInput[]): SkuMapOutcome {
   ensureSkuSchema();
   const list = Array.isArray(rows) ? rows : [];
-  const out: SkuMapOutcome = { created: 0, updated: 0, reassigned: 0, failed: [] };
+  const out: SkuMapOutcome = { created: 0, updated: 0, reassigned: 0, adopted: 0, failed: [] };
 
   dbTransaction(() => {
     for (const r of list) {
@@ -1818,5 +1915,82 @@ function orderImagePath(imageId: number): string {
     imageId,
   ]);
   return row ? String(row.local_path ?? '') : '';
+}
+
+// ---- 认款时顺手采纳：订单图 → 款主图 ----
+
+/** 一条「该把哪张图采纳给哪个款」的待办（本层只挑，落库在 handler 层） */
+export interface ProductImageAdoption {
+  productId: number;
+  /** 归一后的商品ID（池键口径，回查/日志用） */
+  itemId: string;
+  /** **首选图**的缓存路径（与界面里显示给用户的是同一张） */
+  localPath: string;
+  /** 来源（人话）：覆盖图 = 人手工设过的；订单图 = 订单报表自带的 */
+  source: string;
+}
+
+/**
+ * 挑出「认款那一刻该顺手采纳的订单图」：入参是本次写入的 (productId, itemId) 对，出参是待办列表。
+ *
+ * 三条规则都是「不做多余的事」：
+ *   ① **只补空**：`pl_products.image_id = 0`（还没主图）才采纳 —— 已有主图的款一律不动
+ *      （主图是人的决定，程序不该悄悄换掉它）；
+ *   ② **取与界面同一张**：用 `itemImagePool` 的**首选**（覆盖图 → 订单识别图），这样"你刚才
+ *      看着的那张图"就是被采纳的那张；款主图那层此刻必为空（见 ①），跳过；
+ *   ③ **确定性**：同一个款被多个商品ID 映射时取 `productId` 升序 + `itemKey` 升序的第一个 ——
+ *      不依赖 Map 插入顺序 / SQL 返回顺序（否则同一次操作两次跑出不同的图）。
+ *
+ * ⚠️ 本层**不碰文件**：只回路径。复制文件、算指纹、登记 `pl_images`、写 `pl_products.image_id`
+ * 全在 handler 层（与 `product-image-attach` 同一套实现，口径只此一份）。
+ */
+export function pendingProductImages(
+  pairs: readonly { productId?: unknown; itemId?: unknown }[],
+): ProductImageAdoption[] {
+  ensureVariantSchema();
+  const list: { productId: number; itemKey: string }[] = [];
+  for (const p of Array.isArray(pairs) ? pairs : []) {
+    const pid = toId(p?.productId);
+    const key = toSkuKey(p?.itemId);
+    if (!pid || !key) continue;
+    list.push({ productId: pid, itemKey: key });
+  }
+  if (!list.length) return [];
+  list.sort(
+    (a, b) =>
+      a.productId - b.productId || (a.itemKey < b.itemKey ? -1 : a.itemKey > b.itemKey ? 1 : 0),
+  );
+
+  // 一个款只采纳一张：同款被多个商品映射时，取排序后的第一个（确定性）
+  const firstItemByProduct = new Map<number, string>();
+  for (const r of list) {
+    if (!firstItemByProduct.has(r.productId)) firstItemByProduct.set(r.productId, r.itemKey);
+  }
+
+  const need: { productId: number; itemKey: string }[] = [];
+  for (const [productId, itemKey] of firstItemByProduct) {
+    const row = dbGet<{ image_id: number }>(`SELECT image_id FROM pl_products WHERE id = ?`, [
+      productId,
+    ]);
+    if (!row) continue; // 产品不存在：映射那步已经报过失败，这里静默跳过
+    if (num(row.image_id)) continue; // ① 已有主图 → 只补空、不覆盖
+    need.push({ productId, itemKey });
+  }
+  if (!need.length) return [];
+
+  const pool = itemImagePool(need.map((x) => x.itemKey));
+  const out: ProductImageAdoption[] = [];
+  for (const n of need) {
+    const e = pool.get(n.itemKey);
+    const hit = e?.override ?? e?.order?.[0] ?? null; // ② 与界面首选同口径
+    if (!hit || !hit.localPath) continue; // 这个商品在订单里也没有图 → 没什么可采纳的
+    out.push({
+      productId: n.productId,
+      itemId: n.itemKey,
+      localPath: hit.localPath,
+      source: e?.override ? 'item-override' : 'order-image',
+    });
+  }
+  return out;
 }
 

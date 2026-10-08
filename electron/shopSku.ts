@@ -88,6 +88,14 @@ export interface QueueGroup {
   /** 展示用店铺原文（同键取最短形态，结果不依赖 SQL 返回顺序） */
   shopRaw: string;
   itemId: string;
+  /**
+   * **归一后**的商品ID（`toSkuKey`）—— 与 `itemImagePool()` 的池键同口径。
+   *
+   * 为什么必须单独带一个：`itemId` 是**订单原文**（`extractSkuFields` 直出，可能带空格/不可见字符），
+   * 而图池的键是归一的 —— 拿原文去查池**必然落空**且不报错（界面表现为"这批商品一张图都没有"）。
+   * 已配映射那半没这个问题，因为 `pl_shop_sku.item_id` 本来就是归一存储的。
+   */
+  itemKey: string;
   /** 展示用标题（同组取最长的一条 —— 越长的越可能是完整标题；都没有则空串） */
   title: string;
   /** 该组覆盖的订单行数 */
@@ -139,6 +147,7 @@ export function aggregateQueue(rows: readonly SkuOrderRow[], maxRows = 50000): A
         shopKey,
         shopRaw: typeof r?.shop === 'string' ? r.shop : '',
         itemId,
+        itemKey: sku,
         title,
         orderCount: 1,
       });
@@ -171,6 +180,8 @@ export interface QueueRow {
   shopKey: string;
   shopRaw: string;
   itemId: string;
+  /** 归一后的商品ID —— 界面拿它查图（`itemId` 是订单原文，查不到见 `QueueGroup.itemKey`） */
+  itemKey: string;
   title: string;
   orderCount: number;
   /** 已归一的店铺（`sk_name_map.ref_id`）；`shopUnresolved` 时为 0 */
@@ -243,6 +254,7 @@ export function buildQueueView(input: BuildQueueInput): { rows: QueueRow[]; stat
       shopKey: g.shopKey,
       shopRaw: g.shopRaw,
       itemId: g.itemId,
+      itemKey: g.itemKey,
       title: g.title,
       orderCount: g.orderCount,
       shopId,

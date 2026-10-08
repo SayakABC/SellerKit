@@ -79,6 +79,27 @@
             </div>
           </div>
         </div>
+        <!-- ⭐ 简洁模式开关（2026-10-08 报告 P1-1 / 待拍板 UX-G2）。
+             默认**开**：不渲染左栏勾选框 + 批量条、右栏统计条（理由与边界写在 `./simple.ts` 顶部）。
+             ⚠️ 只在工作台形态下渲染 —— 回退形态那两个组件的契约是"与重构前逐字一致"，
+             给它一个按下去什么都不变的按钮就是本仓最反对的**假动作**（宁可不给）。
+             形态名挂在按钮上而不是藏在 title 里：用户要能一眼看出"我现在看到的是精简过的"。 -->
+        <button
+          v-if="GOODS_LAYOUT === 'workbench'"
+          class="wb-btn"
+          type="button"
+          data-act="simple-toggle"
+          :class="{ 'is-on': goodsSimple }"
+          :aria-pressed="goodsSimple"
+          :title="
+            goodsSimple
+              ? '当前是简洁模式：已收起勾选框、批量条与统计条 —— 点一下全部显示'
+              : '当前是完整模式：点一下收起勾选框、批量条与统计条'
+          "
+          @click="toggleSimple"
+        >
+          简洁模式
+        </button>
         <!-- 页级不再自己取数，所以这里没有"读取中…"可报（那是各视图自己的状态，
              它们在各自的工具栏里显示）。按钮只负责发一个刷新信号。 -->
         <button class="wb-btn" data-act="refresh" @click="refresh">刷新</button>
@@ -169,6 +190,7 @@ import SupplierView from './components/SupplierView.vue';
 import { GOODS_TAB_LABEL, GOODS_TAB_REGISTRY, type GoodsTabId } from './tabs';
 import { gloss } from './glossary';
 import { FIRST_RUN_STEPS } from './firstRun';
+import { goodsSimple, setGoodsSimple } from './simple';
 import { switchModule } from '@/core/services/shell';
 
 type TabId = GoodsTabId;
@@ -296,6 +318,19 @@ function goImportOrders(): void {
 function goRegistry(): void {
   helpOpen.value = false;
   goTab(GOODS_TAB_REGISTRY);
+}
+
+/**
+ * 简洁模式开关。**只有这一个控件**（刻意没在左栏再放一个「批量…」按钮）。
+ *
+ * 报告原文建议"批量操作收进一个「批量…」按钮里再展开"—— 这里不做，两个理由：
+ *   ① 那会是**同一个布尔值的第二个控件**（本仓 2026-10-03 记过的"同一状态两套控件"：
+ *      两处各能改、两处各能显，用户永远说不清"我现在到底在哪个模式"）；
+ *   ② "点『批量…』其实是关掉简洁模式"本身就是个说不清的按钮 —— 它承诺的是展开一堆批量操作，
+ *      实际做的是换一整套形态。按钮上写不清的事，就不该是一个按钮。
+ */
+function toggleSimple(): void {
+  setGoodsSimple(!goodsSimple.value);
 }
 
 /**

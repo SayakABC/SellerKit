@@ -55,8 +55,10 @@
 
     <!-- 统计条：**0 不占位、全零说一句人话**（W2/全零，2026-10-08 R2）。
          规则（含"`null` 不是空"、关联率 `—` 不渲染）全部在 `PoolMetrics.vue` 里写了一遍 ——
-         整宽回落形态 `SkuMappingView` 用的是同一个组件，所以不存在"只改了一处"。 -->
-    <PoolMetrics :stats="qStats" :summary="mSummary" :rate-text="rateText" />
+         整宽回落形态 `SkuMappingView` 用的是同一个组件，所以不存在"只改了一处"。
+         ⚠️ 简洁模式下整条不渲染（报告 P1-1）：这一排是给"要盯指标"的人看的，
+         新手看到的是"五项 0 和 —，这页是不是坏了"。判据在 `../simple`。 -->
+    <PoolMetrics v-if="!goodsSimple" :stats="qStats" :summary="mSummary" :rate-text="rateText" />
 
     <p v-if="error" class="wb-notice wb-notice--error">{{ error }}</p>
 
@@ -201,13 +203,21 @@
                     @click="openImage(r)"
                   >
                     <img :src="queueImgs.get(r.itemKey)?.dataUrl || ''" class="wb-thumb" alt="" />
+                    <!-- 「点它看大图」原先只在 title 里（触屏 / 不会悬停的人永远看不到）⇒
+                         常显一个角标，让"这张图能点"不依赖鼠标。 -->
+                    <span class="gd-thumb-btn__zoom" aria-hidden="true">⤢</span>
                   </button>
                   <span
                     v-else
                     class="wb-thumb wb-thumb--empty"
                     data-act="q-thumb-empty"
-                    title="这个商品在订单里没有图"
                   ></span>
+                  <!-- 常显图注（报告 P2-1）：没有图时**这行就是唯一说明** ——
+                       "图是认款的主要依据"，那么"这个商品没有图"必须一眼看得见，
+                       而不是等鼠标悬停 1 秒才浮出来。 -->
+                  <span class="gd-imgcap" data-act="q-thumb-src">
+                    {{ queueImgs.get(r.itemKey) ? srcShort(queueImgs.get(r.itemKey)?.source) : '没有图' }}
+                  </span>
                 </td>
                 <!-- 商品ID 格 —— 这一行**只剩「图」和它两样要看的**（2026-10-08 精简）。
                      原先「店铺 / 商品标题 / 订单行」各占一整列，7 列在**默认 1200×800 窗口**下
@@ -327,7 +337,14 @@
           placeholder="搜索商品ID / 平台 / 备注…"
           aria-label="搜索映射"
         />
-        <select v-model="mStatus" class="wb-input gd-toolbar__select" aria-label="状态筛选">
+        <!-- `data-act` 是给断言用的稳定锚点：本页有**两个**叫「状态筛选」的下拉
+             （左栏产品状态、这里映射状态），按 aria-label 找会撞名。 -->
+        <select
+          v-model="mStatus"
+          class="wb-input gd-toolbar__select"
+          data-act="mapped-status"
+          aria-label="映射状态筛选"
+        >
           <option value="">全部状态</option>
           <option value="confirmed">已确认</option>
           <option value="pending">待确认</option>
@@ -339,6 +356,27 @@
             {{ s.shopName || `#${s.shopId}（店铺已删）` }}（{{ s.count }}）
           </option>
         </select>
+        <!-- ⭐ 失效汇总入口（报告 P1-4 / D-2）。原先要看失效的那几条，得**先自己想到**去
+             「状态筛选」里选「已失效」—— 而"还有几条失效没处理"这件事界面上没有任何地方说。
+             现在它自己带着数字成为入口（有 N 条 → 只看它们）。
+             ⚠️ 它不是"同一状态的第二个控件"：它只在**非失效视图且有失效行**时出现，
+             按下去就消失（改成显示"正在只看已失效"），选择器照旧是那个状态显示。 -->
+        <button
+          v-if="invalidCount > 0 && mStatus !== 'invalid'"
+          class="wb-btn wb-btn--sm gd-toolbar__warn"
+          type="button"
+          data-act="mapped-invalid-only"
+          @click="mStatus = 'invalid'"
+        >
+          有 {{ invalidCount }} 条已失效 → 只看它们
+        </button>
+        <span
+          v-else-if="mStatus === 'invalid'"
+          class="wb-muted gd-toolbar__hint"
+          data-act="mapped-invalid-on"
+        >
+          正在只看已失效（要恢复某条，点行内的「恢复」）
+        </span>
         <span v-if="loading" class="wb-muted gd-toolbar__hint">读取中…</span>
       </div>
 
@@ -354,15 +392,15 @@
               </tr>
             </thead>
             <tbody>
-              <!-- 来源 / 更新时间折进行 `title`：它们只回答"这条为什么变了"，不该常驻占宽。
-                   店铺折进「商品ID」第二行、状态折进「关联产品」格：列数 6 → 4，
-                   理由同队列表（默认窗口下右栏只有 ~500px，6 列必然横向溢出）。 -->
+              <!-- 来源折进行内的常显小字（报告 P2-1）、更新时间仍在 title：
+                   来源回答"这图是哪来的、这条凭什么信"（短、每行都要看），
+                   更新时间只在"它最近动过吗"时才用（长，常显会把每行撑高）。 -->
               <tr
                 v-for="r in mappedRows"
                 :key="r.id"
                 :data-item-id="r.itemId"
                 :data-map-id="r.id"
-                :title="`来源：${SOURCE_LABEL[r.source] || r.source} · 更新：${r.updatedAt}`"
+                :title="`更新：${r.updatedAt}`"
               >
                 <td class="gd-c-img">
                   <img
@@ -372,7 +410,10 @@
                     :title="itemThumbSource.get(r.itemId) || ''"
                     alt=""
                   />
-                  <span v-else class="wb-thumb wb-thumb--empty" title="暂无图片"></span>
+                  <span v-else class="wb-thumb wb-thumb--empty"></span>
+                  <span class="gd-imgcap" data-act="m-thumb-src">
+                    {{ itemThumbs.get(r.itemId) ? srcShort(itemThumbSource.get(r.itemId)) : '没有图' }}
+                  </span>
                   <span class="gd-imgops">
                     <button
                       class="wb-link"
@@ -401,6 +442,12 @@
                   <span class="gd-item__sub">
                     <span :class="{ 'wb-muted': !r.shopName }">{{ r.shopName || `#${r.shopId}（店铺已删）` }}</span>
                     <span v-if="r.platform" class="wb-tag gd-shop__plat">{{ r.platform }}</span>
+                    <!-- 来源常显（报告 P2-1）：它回答"这条凭什么信 / 是谁写的"，
+                         而原先只在行的 title 里 —— 触屏与不会悬停的人拿不到。
+                         更新时间仍留在 title（见行上方那句注释）。 -->
+                    <span class="wb-muted gd-note" data-act="m-source">
+                      · {{ SOURCE_LABEL[r.source] || r.source }}
+                    </span>
                   </span>
                 </td>
                 <td class="gd-c-product">
@@ -560,7 +607,7 @@
 //
 // 左栏的「当前款」（`product`）也接进来 → 换来队列工具栏那个「关联到 `<款编码>`」直连入口，
 // 以及对比弹层的初始候选。它由外壳转一手（两个子组件互不认识，见 `GoodsWorkbenchView`）。
-import { watch } from 'vue';
+import { computed, watch } from 'vue';
 import { useSkuPool, SKU_STATUS_LABEL as STATUS_LABEL, SKU_STATUS_CLASS as STATUS_CLASS, SKU_SOURCE_LABEL as SOURCE_LABEL } from '../useSkuPool';
 import ProductPicker from './ProductPicker.vue';
 import PoolMetrics from './PoolMetrics.vue';
@@ -568,6 +615,7 @@ import CompareModal from './CompareModal.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 import type { GoodsTabId } from '../tabs';
 import { GOODS_TAB_REGISTRY } from '../tabs';
+import { goodsSimple } from '../simple';
 
 const props = defineProps<{
   /** 页级「刷新」信号：值一变就重拉 */
@@ -678,6 +726,32 @@ const {
 });
 
 /**
+ * 失效条数（报告 P1-4）。
+ *
+ * 取自 `skuSummary()` 的 `byStatus` —— 它是**全库**汇总（不带筛选），所以这个数字
+ * 与当前筛选无关，任何时候都表示"一共有几条失效还没处理"。
+ * `null`（汇总还没到）算 0 ⇒ 入口不渲染：宁可晚一拍出现，也不要先亮一个不知道真假的数字。
+ */
+const invalidCount = computed(
+  () => mSummary.value?.byStatus.find((s) => s.status === 'invalid')?.count ?? 0
+);
+
+/**
+ * 图片来源的**短标**（报告 P2-1）。
+ *
+ * 完整说法（"订单识别图（自动）"/"手动上传的覆盖图"）只适合放 `title`；常显的图注
+ * 只有几十像素宽，写全了会把「图」这一列顶宽、把右边的按钮挤出去。
+ * 认不出来就回落一个"图"——**不猜**（猜错等于给用户一个假的出处）。
+ */
+function srcShort(s?: string): string {
+  if (!s) return '';
+  if (s.indexOf('手动') >= 0) return '手动图';
+  if (s.indexOf('订单') >= 0) return '订单图';
+  if (s.indexOf('产品') >= 0) return '产品图';
+  return '图';
+}
+
+/**
  * 勾选数上报（→ 外壳 → 左栏展开区那个「认到本款」按钮的亮/灭）。
  *
  * 只报一个数字：勾选状态本身住在 `useSkuPool` 里，谁都不该在别处重建一份。
@@ -783,6 +857,17 @@ watch(() => qStats.value?.groups ?? null, (n) => emit('queue-groups', n), { imme
    它是这一列的主要依据，不是装饰。 */
 .gd-c-img {
   width: 64px;
+  text-align: center;
+}
+/* 图注（报告 P2-1）：常显一行小字 —— "这图是从哪来的 / 这里根本没有图"原先只在 title 里，
+   触屏与不会悬停的人拿不到。而图是认款的**主要依据**，它有没有、从哪来必须一眼看得见。 */
+.gd-imgcap {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--wb-text-muted);
+  white-space: nowrap;
 }
 .gd-queue .wb-thumb {
   width: 52px;
@@ -818,12 +903,31 @@ watch(() => qStats.value?.groups ?? null, (n) => emit('queue-groups', n), { imme
 }
 /* 队列的缩略图包一层按钮（点开看原图）—— 剥掉按钮默认外观，只留"可点开"的光标 */
 .gd-thumb-btn {
+  position: relative;
   display: inline-flex;
   padding: 0;
   border: 0;
   background: none;
   line-height: 0;
   cursor: zoom-in;
+}
+/* 「这张图能点开看大图」常显角标（原先只在 title 里）—— 不依赖悬停，触屏也看得见 */
+.gd-thumb-btn__zoom {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--wb-overlay);
+  color: var(--wb-on-accent);
+  font-size: 9px;
+  line-height: 1.4;
+}
+/* 「有 N 条已失效 → 只看它们」：这是一条**待办**入口（有东西没处理完），不是普通按钮 */
+.gd-toolbar__warn {
+  border-color: var(--wb-warning);
+  background: var(--wb-warning-soft);
+  color: var(--wb-warning);
 }
 .gd-c-ops {
   /* 「关联…」+「对比」两个行内动作 —— 原 128px 只放得下一个 */

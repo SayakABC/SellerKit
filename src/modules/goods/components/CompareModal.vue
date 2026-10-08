@@ -56,7 +56,10 @@
         <button class="wb-btn" type="button" data-act="compare-next" :disabled="products.length < 2" @click="next">
           下一款 →
         </button>
-        <span class="wb-muted gd-cmp__tip">← / → 换候选 · 空格 关联 · Esc 关闭</span>
+        <!-- 键盘提示**降级为次要小字**（报告 P2-3）：同屏已有「← 上一款 / 下一款 → / 关联到 xx /
+             关闭」四个真按钮，键盘只是加速器。原先那句裸放着，新手会以为"必须用键盘"。
+             所以加了"也可以"的措辞 —— 它说明的是**捷径**，不是**门槛**。 -->
+        <span class="wb-muted gd-cmp__tip">也可以只用键盘：← / → 换候选 · 空格 关联 · Esc 关闭</span>
         <button class="wb-btn" type="button" data-act="compare-close" @click="$emit('close')">关闭</button>
         <button
           class="wb-btn wb-btn--primary"
@@ -265,9 +268,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
   flex-wrap: wrap;
   gap: 8px;
 }
-/* 键盘提示推到右半边（它是一句说明，不是按钮），别夹在两个按钮中间 */
+/* 键盘提示推到右半边（它是一句说明，不是按钮），别夹在两个按钮中间。
+   报告 P2-3 要求**降级**：字号再小一档、透明度压下去 —— 它是快捷键的说明，
+   不该与「关联到 xx」抢视觉重量。 */
 .gd-cmp__tip {
   margin-left: auto;
-  font-size: 12px;
+  font-size: 11px;
+  opacity: 0.75;
 }
 </style>

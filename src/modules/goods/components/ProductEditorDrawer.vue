@@ -121,8 +121,8 @@
                   {{ c }} ×
                 </button>
               </div>
-              <div class="ed-gen__label">尺码（点击选中；按住拖动可连选 / 连消）</div>
-              <div v-for="g in sizeGroups" :key="g.name" class="ed-chips">
+              <div class="ed-gen__label">尺码（点击选中；按住拖动可连选 / 连消；键盘用回车切换）</div>
+              <div v-for="g in sizeGroups" :key="g.name" class="ed-chips" :data-size-group="g.name">
                 <span class="ed-chips__name">{{ g.name }}</span>
                 <button
                   v-for="s in g.items"
@@ -134,8 +134,31 @@
                   @mousedown.prevent="sizePress(s)"
                   @mouseenter="sizeEnter(s)"
                   @mouseup="sizeLeave()"
+                  @keydown.enter.prevent="sizeToggle(s)"
+                  @keydown.space.prevent="sizeToggle(s)"
                 >
                   {{ s }}
+                </button>
+                <!-- 「全选本组 / 清空本组」（报告 P2-2）：一整排码逐个点太费劲，
+                     而拖选是**纯鼠标约定**（触屏没有 mouseenter、键盘走不到）。
+                     两个按钮把"整组"这件事变成一次点击 —— 键盘也够得着。 -->
+                <button
+                  class="wb-link ed-chips__bulk"
+                  type="button"
+                  data-act="size-all"
+                  :data-size-group="g.name"
+                  @click="setGroupAll(g.items, true)"
+                >
+                  全选本组
+                </button>
+                <button
+                  class="wb-link ed-chips__bulk"
+                  type="button"
+                  data-act="size-none"
+                  :data-size-group="g.name"
+                  @click="setGroupAll(g.items, false)"
+                >
+                  清空本组
                 </button>
               </div>
               <div class="ed-gen__line">
@@ -726,6 +749,24 @@ function sizeLeave(): void {
   dragMode.value = null;
 }
 
+/**
+ * 键盘切换单个尺码（报告 P2-2 的"键盘可达"）。
+ *
+ * ⚠️ 刻意**不复用** `sizePress`：那个顺手把 `dragMode` 设成 add/remove，而键盘没有
+ * "mouseup" 来收尾 —— 残留的 dragMode 会让**下一次鼠标划过的那个码**被莫名其妙地改动
+ * （拖动连选本来是加速器，留个脏状态就变成了 bug）。键盘只做"切换这一个"。
+ */
+function sizeToggle(s: string): void {
+  selSizes.value[s] = !selSizes.value[s];
+  dragMode.value = null;
+}
+
+/** 整组全选 / 清空。只碰这一组里的码，不动别组与自定义码。 */
+function setGroupAll(items: readonly string[], on: boolean): void {
+  for (const s of items) selSizes.value[s] = on;
+  dragMode.value = null;
+}
+
 function generate(): void {
   const sizes = Object.keys(selSizes.value).filter((k) => selSizes.value[k]);
   if (!genColors.value.length || !sizes.length) return;
@@ -921,6 +962,17 @@ onUnmounted(() => {
   flex: 0 0 44px;
   font-size: 11px;
   color: var(--wb-text-muted);
+}
+/* 「全选本组 / 清空本组」：一组里的**批动作**，与一个个码区分开 ——
+   推到该组末尾并压小一号。
+   ⚠️ 不能用 `:first-of-type`：组里那些尺码码也是 `<button>`，`:first-of-type` 命中的
+   是**第一个尺码**（不是第一个批动作按钮），于是「全选本组」会被推到第二行去。
+   按 `data-act` 选就没有这个歧义。 */
+.ed-chips__bulk {
+  font-size: 11px;
+}
+.ed-chips__bulk[data-act='size-all'] {
+  margin-left: auto;
 }
 .ed-chip {
   padding: 2px 8px;

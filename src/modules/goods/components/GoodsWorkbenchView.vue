@@ -30,8 +30,10 @@
         <ProductPane
           :refresh-nonce="refreshNonce"
           :relate-count="relateCount"
+          :queue-empty="queueEmpty"
           @select-product="currentProduct = $event"
           @relate-request="relateNonce += 1"
+          @import-orders="goImportOrders"
           @styles-total="stylesTotal = $event"
         />
       </section>
@@ -128,6 +130,17 @@ const queueGroups = ref<number | null>(null);
 
 const showFirstRun = computed(() =>
   shouldShowFirstRunCard({ stylesTotal: stylesTotal.value, queueGroups: queueGroups.value })
+);
+
+/**
+ * 队列是不是**已拉过且为空**（`null` = 还没拉过）。只给左栏空态排"先做哪个"的顺序用。
+ *
+ * 这里**不是**把 `queueGroups === 0` 直接写进模板：模板里那三个分支（true / false / null）
+ * 各自对应一句不同的话，把判据摊在模板里迟早会写成 `!queueGroups` —— 那句会把
+ * "还没拉过"当成"没有待办"，正是本文件上面反复记过的那条现行犯。
+ */
+const queueEmpty = computed<boolean | null>(() =>
+  queueGroups.value === null ? null : queueGroups.value === 0
 );
 
 /**

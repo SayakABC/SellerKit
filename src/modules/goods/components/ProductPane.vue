@@ -127,7 +127,10 @@
       </button>
     </div>
 
-    <div v-if="selectedIds.size" class="gd-selbar" data-act="selection-bar">
+    <!-- 批量条：简洁模式下整条不渲染（连同每行的勾选框一列）—— 判据与理由见 `../simple`。
+         ⚠️ 隐藏的是**整组**（勾选框列 + 批量条），不是只藏条子：留着勾选框而不给批量动作，
+         用户勾了半天找不到下一步，比没有勾选框更差。 -->
+    <div v-if="!goodsSimple && selectedIds.size" class="gd-selbar" data-act="selection-bar">
       <span>已选 <b>{{ selectedIds.size }}</b> 个款</span>
       <button class="wb-btn wb-btn--sm" type="button" :disabled="busy" @click="openBatchEdit">
         批量编辑
@@ -159,7 +162,9 @@
           <thead>
             <tr>
               <th class="gd-c-exp"><span class="wb-muted" aria-hidden="true">▸</span></th>
-              <th class="gd-c-check">
+              <!-- 勾选框这一列整体受简洁模式控制（连同下面的每行勾选框与批量条）——
+                   `colspan` 也跟着一起变，否则空态与展开行会少一格（见 `gdColspan`）。 -->
+              <th v-if="!goodsSimple" class="gd-c-check">
                 <input
                   type="checkbox"
                   :checked="allChecked"
@@ -195,7 +200,7 @@
                     {{ p.id === expandedId ? '▾' : '▸' }}
                   </button>
                 </td>
-                <td class="gd-c-check" @click.stop>
+                <td v-if="!goodsSimple" class="gd-c-check" @click.stop>
                   <input
                     type="checkbox"
                     :checked="selectedIds.has(p.id)"
@@ -236,7 +241,7 @@
                    ⚠️ 这一行**不带** `data-product-id` —— 它是那一行的附属信息，不是又一条产品；
                    带上的话 `[data-act="product-table"] tbody tr[data-product-id]` 会把款数算多半行。 -->
               <tr v-if="p.id === expandedId" class="gd-pane__drow" data-act="row-detail">
-                <td :colspan="7">
+                <td :colspan="gdColspan">
                   <div class="gd-detail">
                     <!-- ⭐ 认款入口（2026-10-08 R2 · W3）：「动线终点必须在视线焦点上」。
                          右栏工具栏那个「关联到 S2」离"刚展开的这一行"隔了一个栏宽 ——
@@ -373,7 +378,7 @@
               </tr>
             </template>
             <tr v-if="!rows.length && !loading">
-              <td colspan="7" class="gd-list__empty">
+              <td :colspan="gdColspan" class="gd-list__empty">
                 <div class="wb-empty">
                   <div class="wb-empty__icon" aria-hidden="true">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -382,11 +387,18 @@
                     </svg>
                   </div>
                   <p class="wb-empty__title">{{ filtered ? '没有符合条件的款' : '还没有产品' }}</p>
+                  <!-- ⭐ 空态要说清"先做哪个"（P0-5 左半）。真实顺序是**先有订单才有队列**：
+                       队列不是缓存表，是从订单里实时聚出来的。所以队列已拉过且为空时，
+                       领头那句和领头那个按钮都换成「去「今天」导订单」。
+                       ⚠️ 判据是 `queueEmpty === true`（不是 `!queueEmpty`）：`null` = 队列还没拉过，
+                       那时我们并不知道顺序该不该翻 —— 按默认顺序说，并保留那句稳妥的原理说明。 -->
                   <p class="wb-empty__desc">
                     {{
                       filtered
                         ? '换个关键字，或把上面的筛选条件清掉再试。'
-                        : '产品库是订单 / 采购 / 成本三域的关联锚点 —— 先建档，后面才有得算。'
+                        : queueEmpty === true
+                          ? '右边那些待认的商品不是导入进来的，是从订单里长出来的 —— 先在「今天」页把订单导进来，这里才有款可配。'
+                          : '产品库是订单 / 采购 / 成本三域的关联锚点 —— 先建档，后面才有得算。'
                     }}
                   </p>
                   <div class="wb-empty__actions">
@@ -394,10 +406,30 @@
                       清空筛选
                     </button>
                     <template v-else>
-                      <button class="wb-btn" type="button" @click="importOpen = true">
+                      <!-- 队列也空：把「去「今天」导订单」放到**第一位**并做成主按钮（顺序即答案） -->
+                      <button
+                        v-if="queueEmpty === true"
+                        class="wb-btn wb-btn--primary"
+                        type="button"
+                        data-act="empty-go-today"
+                        @click="emit('import-orders')"
+                      >
+                        去「今天」导入订单
+                      </button>
+                      <button
+                        class="wb-btn"
+                        :class="{ 'wb-btn--primary': queueEmpty !== true }"
+                        type="button"
+                        @click="importOpen = true"
+                      >
                         导入 Excel
                       </button>
-                      <button class="wb-btn wb-btn--primary" type="button" @click="openEditor(null)">
+                      <button
+                        class="wb-btn"
+                        :class="{ 'wb-btn--primary': queueEmpty !== true }"
+                        type="button"
+                        @click="openEditor(null)"
+                      >
                         新增产品
                       </button>
                     </template>
@@ -407,6 +439,14 @@
             </tr>
           </tbody>
         </table>
+        <!-- ⭐ 「行可以点开」原先**只存在于行首那个 ▸ 小三角**（要鼠标悬停才发现，触屏根本没有）。
+             一行常显提示把它说出来 —— 展开区里装着供应商 / 类目 / 规格 / 已认的商品，
+             不知道有展开区的人等于看不到这些东西。
+             ⚠️ 只在**真有行**时渲染：空态时多这一行会把空态的按钮往下推，
+             而窄窗口下那正是 B3（按钮溢出容器、点不到）的成因。 -->
+        <p v-if="rows.length" class="wb-muted gd-list__hint" data-act="expand-hint">
+          点任意一行可展开，看它的规格与已认的商品
+        </p>
       </div>
 
       <div v-if="totalPages > 1" class="wb-panel__foot gd-list__foot">
@@ -528,12 +568,13 @@
 //   ② `detail-links` 的取数 —— 按款反查该款关联了哪些店铺商品（`skuList({productId})`），
 //      按需拉取 + 缓存（展开才拉；同一行反复展开不重复打）；
 //   ③ 把"当前款"报给外壳（`select-product`）—— 跨栏通信只能经外壳，两个子组件互不认识。
-import { reactive, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { useProductList } from '../useProductList';
 import * as api from '../api';
 import type { ShopSkuRow, VariantRow } from '@/types';
 import ProductEditorDrawer from './ProductEditorDrawer.vue';
 import { gloss } from '../glossary';
+import { goodsSimple } from '../simple';
 import ProductImportDialog from './ProductImportDialog.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 
@@ -548,6 +589,14 @@ const props = defineProps<{
    * 见展开区那个「认到本款」按钮上的注释。
    */
   relateCount: number;
+  /**
+   * 待关联队列是不是**已经拉过、而且真的是空的**（`null` = 还没拉过）。
+   *
+   * 只用于一处：空态里"先做哪个"的顺序（P0-5 左半）。判据必须保留 `null`：
+   * "还没拉过"不是"没有待办"，拿它当空会给出一句界面并不知道的结论
+   * （见 `docs/notes/2026-10-08-goods-page-entry-guide.md` 第 4 条）。
+   */
+  queueEmpty: boolean | null;
 }>();
 
 /**
@@ -576,6 +625,13 @@ const emit = defineEmits<{
    * 写完必须重拉队列）。本栏再写一条就多出一套失败语义，而且它连队列数据都没有。
    */
   'relate-request': [];
+  /**
+   * 空态里那个「去「今天」导入订单」按下了（只发信号）。
+   *
+   * 跨模块跳转由外壳做（`GoodsWorkbenchView.goImportOrders`）：本组件不认识模块表，
+   * 也不该认识 —— 同 `relate-request` 的分工。
+   */
+  'import-orders': [];
 }>();
 
 const {
@@ -638,6 +694,23 @@ const {
  * 就只能等下一次变化才传出去（那时用户已经看到界面停在空态上了）。
  */
 watch(() => stylesTotal.value, (n) => emit('styles-total', n), { immediate: true });
+
+/**
+ * 表格的列数。**必须跟着「简洁模式」变** —— 空态与展开行都是跨全表的单元格，
+ * 写死 `colspan="7"` 的话，简洁模式少一列时它们会各短一格（右边留一条空白，
+ * 越宽的窗口越显眼，但**不会报错** —— 属于"看着就是不对、查起来没头绪"那一类）。
+ */
+const gdColspan = computed(() => (goodsSimple.value ? 6 : 7));
+
+/**
+ * 切成简洁模式时把"已选"清空。
+ *
+ * 不清的后果是一个**隐形状态**：勾选框那一列不渲染了，但 `selectedIds` 还留着，
+ * 用户看不见自己勾了什么、也不知道下次切回来会重新冒出来。可见的操作配可见的状态。
+ */
+watch(goodsSimple, (on) => {
+  if (on) clearSelection();
+});
 
 /** 当前展开的款（同时是"当前款"—— 展开就是选中，避免"高亮一行、展开另一行"两套状态） */
 const expandedId = ref(0);
@@ -825,6 +898,12 @@ watch(
 }
 .gd-list__empty {
   padding: 0;
+}
+/* 「点任意一行可展开」那行常显提示。它自己**不是**一行表格行 —— 放在表体末尾，
+   所以要有左右内边距，否则文字会贴着列的边界。 */
+.gd-list__hint {
+  padding: 8px 4px 2px;
+  font-size: 12px;
 }
 
 .gd-pane__table {

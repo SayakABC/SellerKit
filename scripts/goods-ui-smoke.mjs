@@ -30,6 +30,14 @@ if (!existsSync(CHROME)) {
 }
 
 const FAKE_BRIDGE = `<script>
+/* 形态偏好（「简洁模式」）必须在**应用脚本之前**清掉。
+   这一段是经典内联脚本，在解析到 </head> 时就执行；应用的入口是 <script type="module">（延迟执行），
+   于是它读到的就是"从没存过偏好"= 全新安装那一态。
+   为什么必须这么做：headless 三遍共用一个浏览器 profile，而切换形态会把 '0'/'1' 写进 localStorage ⇒
+   不加这一步，"默认是简洁模式"那条断言会**看上一次跑剩下的值**（第一次全绿、第二次全红）。
+   ⚠️ 不要改用 --user-data-dir 隔离：实测这台机器上带它的 headless Chrome 会**直接挂住不退出**
+   （2026-10-08 踩到，见 docs/notes/2026-10-08-goods-ux-refactor-r0-r3.md 或者本次的收尾笔记）。 */
+try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
 (function () {
   var calls = {};
   window.__smokeCalls = calls;
@@ -82,6 +90,25 @@ const FAKE_BRIDGE = `<script>
     { itemId: 'SKU-A1', shopId: 11, shopName: 'HK 优品店', imageUrl: '', importedAt: 1759219200000, relationCount: 1 },
     { itemId: 'B0XYZ1234', shopId: 12, shopName: 'Aurora Store', imageUrl: '', importedAt: 1759219200000, relationCount: 0 },
   ];
+
+  /**
+   * 夹具里**当前可见**的映射行。多一个开关 window.__smokeNoInvalid：
+   * 打开时整个库里**一条失效都没有**（失效行按已确认出现，行数不变）。
+   *
+   * 为什么需要它：「有 N 条已失效 → 只看它们」那条汇总入口的**反向守卫**（0 时不许渲染）
+   * 靠它才有意义 —— 种子数据里本来就有一条失效行，入口永远有正数可显示 ⇒
+   * "把条数守卫去掉"这个错在夹具里**恒绿**（2026-10-08 变异复核实测：M6 第一次没变红）。
+   */
+  function visibleMapped() {
+    if (!window.__smokeNoInvalid) return MAPPED;
+    return MAPPED.map(function (r) {
+      if ((r.status || 'confirmed') !== 'invalid') return r;
+      var copy = {};
+      for (var k in r) copy[k] = r[k];
+      copy.status = 'confirmed';
+      return copy;
+    });
+  }
 
   /** 商品ID → 关联的产品（一对多） */
   var RELATIONS = [
@@ -228,14 +255,27 @@ const FAKE_BRIDGE = `<script>
     // 两边都从 productSkuSummary 取，所以只要这一处口径对，指标条与映射列表就不会各说各话）
     'productSkuSummary': function () {
       rec('productSkuSummary', {});
+      var rows = visibleMapped();
       var byShop = [];
-      for (var i = 0; i < MAPPED.length; i++) {
-        var r = MAPPED[i], hit = null;
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i], hit = null;
         for (var j = 0; j < byShop.length; j++) if (byShop[j].shopId === r.shopId) hit = byShop[j];
         if (hit) hit.count++;
         else byShop.push({ shopId: r.shopId, shopName: r.shopId === 11 ? 'HK 优品店' : 'Aurora Store', platform: r.platform, count: 1 });
       }
-      return { success: true, data: { total: MAPPED.length, byStatus: [], byPlatform: [], byShop: byShop } };
+      // ⚠️ byStatus 必须**按夹具真实算**，不能给个空数组：
+      //    「有 N 条已失效 → 只看它们」那条汇总入口的条数是它算出来的，
+      //    桩写死空数组 ⇒ 那条断言永远拿不到按钮（恒红），
+      //    而如果反过来把断言放宽成"按钮在不在都行"，就是一条恒绿的空断言。
+      //    真进程的 productSkuSummary 也是按状态聚合的，桩要复刻的是**结构**不是内容。
+      var byStatus = [];
+      for (var bi = 0; bi < rows.length; bi++) {
+        var st = rows[bi].status || 'confirmed', hitSt = null;
+        for (var bj = 0; bj < byStatus.length; bj++) if (byStatus[bj].status === st) hitSt = byStatus[bj];
+        if (hitSt) hitSt.count++;
+        else byStatus.push({ status: st, count: 1 });
+      }
+      return { success: true, data: { total: rows.length, byStatus: byStatus, byPlatform: [], byShop: byShop } };
     },
     'productVariantUpsert': function (p) { rec('productVariantUpsert', p); return { success: true, data: { id: p.id, created: false } }; },
     'productDbEnsure': function () { return { success: true, data: { ok: true } }; },
@@ -353,7 +393,7 @@ const FAKE_BRIDGE = `<script>
       // ⚠️ 桩必须**真的按 productId 过滤** —— 否则"展开哪个款都显示全部映射"这个静默错误
       // 在夹具里恒绿（界面拿到的永远是同一份 4 条），而线上每一款点开都会串。
       var pid = Number((p && p.productId) || 0);
-      var list = MAPPED.filter(function (r) {
+      var list = visibleMapped().filter(function (r) {
         if (pid && r.productId !== pid) return false;
         if (st && r.status !== st) return false;
         if (sid && r.shopId !== sid) return false;
@@ -790,6 +830,13 @@ async function narrowViewportChecks() {
   report('窄窗口下左栏空态渲染出来了（零款样本：造不出零款这条守卫就恒绿）',
     !!document.querySelector('.gd-list__empty .wb-empty__actions button'),
     'empty=' + !!document.querySelector('.gd-list__empty'));
+  // 空态那一格必须横跨**全部列**。这一遍是"简洁模式（默认）"——左栏没有勾选框那一列 ⇒
+  // 正确的 colspan 是 6 而不是 7。写死 7 的症状是"右边缺一块"，不报错、不抛异常，只有看出来。
+  var emptyCell = document.querySelector('.gd-list__empty');
+  var thCount = all('[data-act="product-table"] thead th').length;
+  report('空态那一格横跨**全部列**（简洁模式少一列，colspan 必须跟着变，否则右边缺一块）',
+    !!emptyCell && emptyCell.colSpan === thCount,
+    'colspan=' + (emptyCell ? emptyCell.colSpan : 'missing') + ' 表头=' + thCount);
   // 反向守卫（首次动线 R3）：这一遍是"零款 + **队列非空**" —— 引导卡不该出现。
   // 这是与 empty-entry 那一条**不同的组合**（那条是"有款 + 空队列"），两条合起来才说明
   // 判据真的是"两端同时为零"，而不是跟着其中一个开关走。
@@ -803,6 +850,30 @@ async function narrowViewportChecks() {
     '.gd-list__empty .wb-empty__actions button:first-child');
   reportReachable('窄窗口下空态「新增产品」可达（第一印象按钮，点不到等于这页没用）',
     '.gd-list__empty .wb-empty__actions button:last-child');
+
+  // ── 两个空态要说清"先做哪个"（报告 P0-5 左半）──────────────────────
+  // 队列是**从订单里长出来的**（不是一张导入进来的表），所以全新安装上正确的第一步是
+  // "先在「今天」导订单"。原先左右两个空态各指一个方向（左边说"建款"、右边说"导订单"），
+  // 页面没说先做哪个 —— 新手只能瞎点。
+  // ⚠️ 这一条的判据是**顺序**（第一个按钮就是它），不是"那个按钮在不在"：
+  //    放在第三位照样能点，但那时"顺序"这个答案就没给出来。
+  //    同时它必须**跟着状态走** —— 上面那两组（队列非空）断的是原位，两组合起来才说明
+  //    顺序是算出来的，不是把两个按钮的写法调了个头。
+  step('viewport-narrow-empty-order');
+  window.__smokeEmptyQueue = true;
+  await clickText('[data-act="refresh"]', '刷新');
+  await settle(function () { return !!document.querySelector('[data-act="empty-go-today"]'); }, 8000);
+  var eqActs = all('.gd-list__empty .wb-empty__actions button');
+  report('零款 + 队列也空 → 左栏空态把「去「今天」导入订单」放在**第一位**（顺序本身就是一个答案）',
+    eqActs.length >= 1 && flat(eqActs[0]).indexOf('今天') >= 0,
+    eqActs.map(flat).join(' / '));
+  report('那个按钮是**主按钮**（此刻该做的事，不是三个并列选项里的一个）',
+    eqActs.length >= 1 && flat(eqActs[0]).indexOf('今天') >= 0 &&
+      eqActs[0].className.indexOf('wb-btn--primary') >= 0,
+    eqActs.length ? eqActs[0].className : 'missing');
+  report('空态说明点出"商品是从订单里长出来的"（别让用户猜右边为什么空着）',
+    flat(document.querySelector('.gd-list__empty .wb-empty__desc')).indexOf('订单') >= 0,
+    flat(document.querySelector('.gd-list__empty .wb-empty__desc')));
 }
 
 /**
@@ -920,6 +991,52 @@ async function main() {
     report('宽视口两栏并排（grid 两列；不是某一栏被挤没、也不是叠成上下）',
       wbCols.split(' ').filter(function (s) { return s.length; }).length === 2,
       'cols=' + wbCols);
+
+    // ── 简洁模式（2026-10-08 报告 P1-1 / 待拍板 UX-G2）──────────────────
+    // 默认**开**：不渲染左栏勾选框列 + 批量条、右栏统计条（理由与边界见 src/modules/goods/simple.ts）。
+    // 这一组守三件事，缺一条就退化成"装了个没用的开关"：
+    //   ① 默认真的是简洁（不是"开关在、默认还是铺满"）；
+    //   ② 两个方向都真（关掉 → 那些控件回来；再打开 → 又消失）；
+    //   ③ 后面几十条断言长在被藏起来的那些控件上 ⇒ 结尾必须**切回完整形态**，
+    //      否则它们会集体失败，而失败原因看起来像"功能坏了"，不是"夹具没还原"。
+    // ⚠️ 每条断言都先等"渲染到位"再判，不等就断言会把"还没重排完"读成"开关没生效"。
+    step('simple-mode');
+    var simpleBtn = document.querySelector('[data-act="simple-toggle"]');
+    report('页头有「简洁模式」开关', !!simpleBtn, simpleBtn ? flat(simpleBtn) : 'missing');
+    report('默认就是简洁模式（开关自己说得出当前状态，不靠用户猜）',
+      !!simpleBtn && simpleBtn.getAttribute('aria-pressed') === 'true',
+      simpleBtn ? 'aria-pressed=' + simpleBtn.getAttribute('aria-pressed') : 'missing');
+    report('简洁模式下左栏**一列勾选框都没有**（连表头全选也没有 —— 批量条与整列是一组）',
+      all('[data-act="product-table"] input[type="checkbox"]').length === 0,
+      'boxes=' + all('[data-act="product-table"] input[type="checkbox"]').length);
+    report('简洁模式下右栏**没有统计条**（"五项 0 和关联率 —"是新手最容易被吓退的一屏）',
+      !document.querySelector('[data-act="map-stats"]'));
+    report('简洁模式**没有**顺手把「问题件」也藏掉（它是缺克重 / 未关联供应商的唯一入口，藏了就是死能力）',
+      !!document.querySelector('[data-act="filter-issue"]'));
+    if (simpleBtn) simpleBtn.click();
+    await settle(function () { return !!document.querySelector('[data-act="map-stats"]'); }, 4000);
+    report('关掉简洁模式 → 勾选框列与统计条都回来（开关真的接在渲染上，不是个装饰按钮）',
+      all('[data-act="product-table"] input[type="checkbox"]').length >= 2 &&
+        !!document.querySelector('[data-act="map-stats"]') &&
+        simpleBtn.getAttribute('aria-pressed') === 'false',
+      'boxes=' + all('[data-act="product-table"] input[type="checkbox"]').length +
+        ' bar=' + !!document.querySelector('[data-act="map-stats"]'));
+    if (simpleBtn) simpleBtn.click();
+    await settle(function () { return !document.querySelector('[data-act="map-stats"]'); }, 4000);
+    report('再打开 → 两样**又消失**（两个方向都真，不是"关得掉、开不回来"）',
+      all('[data-act="product-table"] input[type="checkbox"]').length === 0 &&
+        !document.querySelector('[data-act="map-stats"]'));
+    // 夹具复原：切回完整形态（后续断言长在被藏起来的控件上）
+    if (simpleBtn) simpleBtn.click();
+    await settle(function () { return !!document.querySelector('[data-act="map-stats"]'); }, 4000);
+    report('夹具复原：切回完整形态（后面的批量条 / 选中计数 / 关联率 / 全零那句话都长在它上面）',
+      !!document.querySelector('[data-act="map-stats"]') &&
+        simpleBtn.getAttribute('aria-pressed') === 'false');
+    // 行展开的可发现性（报告 P1-2）：原先"这一行能点开"只存在于行首那个 ▸ 小三角里 ——
+    // 不悬停发现不了，触屏根本没有悬停。展开区里装着供应商 / 类目 / 规格 / 已认的商品。
+    report('左栏给出「点行展开」的常显提示（原先只有那个 ▸ 小三角）',
+      !!document.querySelector('[data-act="expand-hint"]'),
+      flat(document.querySelector('[data-act="expand-hint"]')));
 
     // ── 页首两层已撤（2026-10-08）—— 反向守卫 ────────────────────────────
     // "删掉的能力"必须留一条"不再有它"的断言：指标条与引导条是**整块撤掉**，不是被替换。
@@ -1320,12 +1437,21 @@ async function main() {
     report('缩略图真的装了订单图（不是挂个空 src 占位）',
       !!b0Thumb && b0Thumb.querySelector('img').getAttribute('src') === SMOKE_IMG.thumb,
       b0Thumb ? String(b0Thumb.querySelector('img').getAttribute('src')).slice(0, 40) : 'missing');
-    report('图注标出来源（认款时要能知道这张图是哪来的）',
-      !!b0Thumb && String(b0Thumb.getAttribute('title')).indexOf('订单') >= 0,
-      b0Thumb ? b0Thumb.getAttribute('title') : 'missing');
+    // ⚠️ 这一条原先只断言 title 里写着来源 —— 而 title 要鼠标悬停约 1 秒才浮出来，
+    //    触屏与不熟鼠标的人**永远拿不到**（报告 P2-1 / C-3）。现在同时断言**常显图注**：
+    //    判据从"DOM 里有这句"升级为"这句在屏幕上一直看得见"。
+    report('缩略图的来源写在**常显图注**上（不是只躺在 title 里 —— 悬停信息触屏拿不到）',
+      !!b0Thumb && flat(b0Thumb.parentNode.querySelector('[data-act="q-thumb-src"]')).indexOf('订单') >= 0,
+      b0Thumb ? flat(b0Thumb.parentNode.querySelector('[data-act="q-thumb-src"]')) : 'missing');
+    report('「这张图能点开看大图」有常显角标（原先是 title 里的一句话）',
+      !!b0Thumb && !!b0Thumb.querySelector('.gd-thumb-btn__zoom'));
     report('订单里没图的商品显示空占位，不是破图（有图 / 没图要能分开看）',
       !!queueRow('SKU-A1').querySelector('[data-act="q-thumb-empty"]') &&
         !queueRow('SKU-A1').querySelector('[data-act="q-thumb"]'));
+    // "没有图"必须是**看得见的一句话**：图是认款的主要依据，没有图这件事不能只挂在 title 上
+    report('没图那一行的图注直接写「没有图」（用户不必靠悬停去猜为什么这里是空的）',
+      flat(queueRow('SKU-A1').querySelector('[data-act="q-thumb-src"]')).indexOf('没有图') >= 0,
+      flat(queueRow('SKU-A1').querySelector('[data-act="q-thumb-src"]')));
 
     // 点开看大图：缩略图只有 160px 边，认印花 / 领型 / 颜色必须能看原图
     step('queue-viewer');
@@ -1654,6 +1780,55 @@ async function main() {
     }, 5000);
     report('行状态变为已失效且出现「恢复」入口', true, flat(mappedRow('SKU-A1')));
 
+    // ── 失效汇总入口（报告 P1-4 / D-2）──────────────────────────────────
+    // 原先要处理失效的行，得**先自己想到**去「状态筛选」里选「已失效」——
+    // 而"还有几条失效没处理"这件事界面上没有任何地方说（「恢复」也只长在失效行身上）。
+    // 这一组守四件事，缺一条就会退化成"多了个按钮"：
+    //   ① 它带着**正数**出现（0 时不许渲染 —— 否则就是 R2 刚删掉的那种"0 占位"）；
+    //   ② 按下去**真的筛**（发出去的 status = 'invalid'，不是界面自己过滤）；
+    //   ③ 筛完它自己让位给一句状态说明（不留一个按下去没反应的按钮）；
+    //   ④ 把筛选放回「全部状态」后它回来（两个方向都真）。
+    step('mapped-invalid-entry');
+    var invBtn = document.querySelector('[data-act="mapped-invalid-only"]');
+    report('有失效行时给出「有 N 条已失效 → 只看它们」的汇总入口',
+      !!invBtn && /[1-9][0-9]* 条已失效/.test(flat(invBtn)),
+      invBtn ? flat(invBtn) : 'missing');
+    if (invBtn) invBtn.click();
+    await settle(function () { return !!document.querySelector('[data-act="mapped-invalid-on"]'); }, 4000);
+    report('按下去真的只筛失效（筛选参数发给主进程，不是界面自己过滤）',
+      calls('productSkuList').length >= 1 &&
+        calls('productSkuList').slice(-1)[0].status === 'invalid' &&
+        !!document.querySelector('[data-act="mapped-invalid-on"]'),
+      JSON.stringify(calls('productSkuList').slice(-1)[0]));
+    report('筛完那个按钮自己让位（不留一个按下去没反应的按钮）',
+      !document.querySelector('[data-act="mapped-invalid-only"]'));
+    setVal(document.querySelector('[data-act="mapped-status"]'), '');
+    await settle(function () { return !document.querySelector('[data-act="mapped-invalid-on"]'); }, 4000);
+    report('状态筛选放回「全部状态」后汇总入口回来（两个方向都真）',
+      !!document.querySelector('[data-act="mapped-invalid-only"]'),
+      flat(document.querySelector('[data-act="mapped-invalid-only"]')));
+    // 反向：库里**一条失效都没有**时，这个入口不许出现。
+    // 少了这一条，上面那几条只证明"它有正数时会出现"——**"0 也渲染"这个错照样全绿**
+    // （2026-10-08 变异复核实测：M6 只改掉条数守卫时一条都没红，就是缺了这一步）。
+    window.__smokeNoInvalid = true;
+    await clickText('[data-act="refresh"]', '刷新');
+    // 等到"入口从条上消失"为止：**有界 8s、超时不抛**，判定在下面那条 report 里。
+    // ⚠️ 不能改成"等表格有行"或"等汇总被多取一次"这类**中性**信号：
+    //    上一步 setVal 触发的重拉可能刚好晚一拍落地，中性信号会被**上一次**请求满足
+    //    ⇒ 断言读到的是刷新前那份汇总（2026-10-08 实测：先出现 rows=6 btn=true，
+    //    改成数汇总次数后仍出现 btn=true 且"汇总重取=1" —— 就是被上一条请求喂饱的）。
+    await settle(function () { return !document.querySelector('[data-act="mapped-invalid-only"]'); }, 8000);
+    report('库里一条失效都没有时，汇总入口**不出现**（不许渲染"有 0 条已失效"这种 0 占位）',
+      !document.querySelector('[data-act="mapped-invalid-only"]') &&
+        !document.querySelector('[data-act="mapped-invalid-on"]'),
+      'rows=' + all('[data-act="mapped-table"] tbody tr[data-item-id]').length +
+        ' btn=' + !!document.querySelector('[data-act="mapped-invalid-only"]'));
+    window.__smokeNoInvalid = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !!document.querySelector('[data-act="mapped-invalid-only"]'); }, 8000);
+    report('把失效行放回去 → 入口回来（不是"检查过一次就再也不出现"）',
+      !!document.querySelector('[data-act="mapped-invalid-only"]'));
+
     step('rebind');
     // 先等"这一笔写完"（行内动作恢复可点）再点。
     // ⚠️ 不能在读完表格就立刻点：列表内容先刷新、「写入中」标记后置回 false，
@@ -1701,6 +1876,19 @@ async function main() {
       rebindToast.indexOf('款主图') < 0, rebindToast);
     await waitFor(function () { return flat(mappedRow('SKU-A1')).indexOf('已确认') >= 0; }, 5000);
     report('改绑结果落到列表（已确认）', true, flat(mappedRow('SKU-A1')));
+
+    // ── 悬停信息改常显（报告 P2-1 / C-3）────────────────────────────────
+    // 原先「来源 / 更新时间」整行折进 title —— 悬停约 1 秒才浮出来，触屏拿不到，
+    // 不熟鼠标的人根本发现不了。现在：**来源**改成行内常显小字（它回答"这条凭什么信"，
+    // 每条都要看），**更新时间**仍留 title（它只在"最近动过吗"时才用，常显会把每行撑长）。
+    var srcCells = all('[data-act="mapped-table"] [data-act="m-source"]');
+    report('已映射行的**来源**常显（原先只在行 title 里，触屏与不熟鼠标的人拿不到）',
+      srcCells.length >= 1 && srcCells.every(function (e) { return /手工|导入|智能建议/.test(flat(e)); }),
+      srcCells.length + ' 行：' + srcCells.map(flat).join(' / '));
+    var mImgCaps = all('[data-act="mapped-table"] [data-act="m-thumb-src"]');
+    report('已映射行的图注也常显（有图写来源 / 没图写「没有图」，一句话都不靠悬停）',
+      mImgCaps.length >= 1 && mImgCaps.every(function (e) { return flat(e).length > 0; }),
+      mImgCaps.length + ' 行：' + mImgCaps.map(flat).join(' / '));
 
     // ── 供应商主数据──────────────────────────────────────────
     step('suppliers-tab');

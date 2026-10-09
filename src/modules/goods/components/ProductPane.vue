@@ -948,10 +948,15 @@ watch(
   color: var(--wb-warning);
 }
 
-/* 展开区所在行：不随 hover 高亮（它是详情不是可点行），底色与主行区分 */
+/* 展开区所在行：不随 hover 高亮（它是详情不是可点行），底色与主行区分。
+   ⚠️ 必须恢复 white-space: normal —— 展开区住在 .wb-table 的 td 里，而基座给 td 定了
+   nowrap（styles/index.css），不恢复的话展开区里所有长文案（认款提示 / 克重说明 / 元信息）
+   一行顶出去，横穿网格列压住右边的内容（2026-10-09 实测：hint 325px 顶进 217px 的列）。
+   SKU 子表自己的 td 仍按 .wb-table td 的 nowrap 走（直接命中优先于继承，不受影响）。 */
 .gd-pane__drow > td {
   padding: 0;
   background: var(--wb-surface-2);
+  white-space: normal;
 }
 .gd-detail {
   display: grid;
@@ -963,6 +968,19 @@ watch(
   .gd-detail {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+/* 认款动作条：横跨两列。挤在左列里时提示语只能在 ~217px 里折行，
+   视觉上是"左边一块细长条、右边一块"两堆没关系的内容。 */
+.gd-detail__relate {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.gd-detail__relate-hint {
+  font-size: 12px;
+  min-width: 0;
 }
 .gd-detail__block {
   min-width: 0;
@@ -991,6 +1009,11 @@ watch(
   text-align: center;
   white-space: normal;
   color: var(--wb-text-muted);
+  font-size: 12px;
+}
+/* 术语说明是 <p>：不给 margin 的话浏览器默认 1em 上下距会在标题和表格之间撑出一截 */
+.gd-detail__note {
+  margin: 0 0 6px;
   font-size: 12px;
 }
 .gd-detail__saved {

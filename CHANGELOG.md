@@ -13,6 +13,12 @@
 
 ## [Unreleased]
 
+### Fixed · 「货与成本」产品列表**展开区样式**：文字横穿网格列压住右列标题（2026-10-09 续十三）
+
+- **根因**：展开区（`row-detail`）住在 `.wb-table` 的 `<td>` 里，而样式基座给 td 定了 `white-space: nowrap`（`styles/index.css`）—— 展开区里的长文案**整体继承 nowrap**：认款提示一行 325px 顶进 ~217px 的网格列、横穿压住右列「SKU 克重」标题；克重说明溢出被面板裁掉。`.gd-detail__empty` 早已单独补过 `white-space: normal` —— 说明这个坑早已存在，只是当年只修了那一个格子。另：`.gd-detail__relate` / `__relate-hint` / `__note` 三个类**从来没有样式定义**（认款动作条挤在左列里折成细长条、`<p>` 默认 margin 撑出怪空隙）。
+- **修复**：`.gd-pane__drow > td` 恢复 `white-space: normal`（SKU 子表自己的 td 仍按 `.wb-table td` 的 nowrap 走，直接命中优先于继承）；认款动作条 `grid-column: 1 / -1` 横跨全宽 + flex；提示语与克重说明补字号 / margin。修后布局：动作条整条在最上，SKU 克重与已关联商品并排，元信息与编辑/删除同排（左右各占其位）。
+- **守卫**：`goods:ui` **223 → 226**（新 `row-detail-layout` 步：用 `scrollWidth vs clientWidth` 判"文字在自己的格子里放得下"nowrap 一回归立刻红；动作条横跨全宽）。变异复核：nowrap 回归 → `note=301/213` 红；去掉 `grid-column` → `relate=213/467` 红，各自可读、不超时。
+
 ### Changed · 产品导入模板改列：去「类目」，加「图片 / 颜色 / 尺码 / 克重」（2026-10-09 续十二）
 
 模板与导出**共用同一份表头**（`PRODUCT_EXPORT_HEADERS`）：`款编码 | 款式名 | 供应商 | 图片 | 颜色 | 尺码 | 克重 | 状态 | 备注`。一行一个款；「尺码 / 克重」可多值（逗号分隔）**按顺序一一对应**，个数不等 → error（回 Excel 改）；同款多行 = **合并 SKU**（不报错剔行，产品字段取先出现者）。

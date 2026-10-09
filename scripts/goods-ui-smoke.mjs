@@ -1193,6 +1193,26 @@ async function main() {
       variantRows().length === 2 && flat(variantRows()[0]).indexOf('黑 L') >= 0,
       Array.prototype.map.call(variantRows(), flat).join(' / '));
 
+    // ── 展开区布局（2026-10-09 修的样式缺陷）────────────────────────────
+    // 背景：展开区住在 .wb-table 的 td 里，基座给 td 定了 white-space:nowrap ——
+    // 不恢复 normal，长文案一行顶出网格列、横穿压住右列标题（实测 hint 325px 顶进 217px 列）。
+    // 判据用 scrollWidth vs clientWidth：nowrap 一回来，文字溢出自己的格子，这两条立刻红。
+    step('row-detail-layout');
+    var dl = detail();
+    var noteEl = dl.querySelector('.gd-detail__note');
+    report('展开区文案可换行：克重说明在自己的列里放得下（nowrap 回来会横穿到列外）',
+      !!noteEl && noteEl.scrollWidth <= noteEl.clientWidth + 1,
+      'note=' + (noteEl ? noteEl.scrollWidth + '/' + noteEl.clientWidth : 'missing'));
+    var relEl = dl.querySelector('.gd-detail__relate');
+    var dlRect = dl.getBoundingClientRect();
+    var relRect = relEl ? relEl.getBoundingClientRect() : null;
+    report('认款动作条横跨展开区全宽（挤在单列里提示语会折成细长条）',
+      !!relRect && relRect.width >= dlRect.width - 30,
+      'relate=' + (relRect ? Math.round(relRect.width) : 'missing') + '/' + Math.round(dlRect.width));
+    report('动作条内部不溢出（提示语在其宽度内放得下）',
+      !!relEl && relEl.scrollWidth <= relEl.clientWidth + 1,
+      'relate-scroll=' + (relEl ? relEl.scrollWidth + '/' + relEl.clientWidth : 'missing'));
+
     // ── 已关联商品：按款**反查**（只读）────────────────────────────────
     // 这是"数据模型里产品挂在商品上"这件事第一次在**产品侧**有入口。两条口径必须同时钉：
     //   ① 反查必须带 productId（不带 = 每一款点开都显示全库映射，且不报错）；

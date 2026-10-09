@@ -45,3 +45,9 @@
 ## 七、门禁（逐条单看退出码）
 
 `tsc -p tsconfig.electron.json` 0 · `vue-tsc` 0 · `verify` 0（**188/184，+1 = `product-extract-images`**）· `verify:docs` 0 · `build` 0 · `vitest` 36 文件 / 626 用例 · `product:smoke` 0 · `product:xlsx:smoke` 0 · `goods:ui` **223 = 201 + 11 + 11** 三遍 ALL PASS · `today:ui` 0 · `plugins:island:smoke` 4/4。
+
+## 八、展开区重设计（同日第三笔，提交见 git log）
+
+上一轮只修了 nowrap 横穿，用户仍嫌"乱"——根因不是溢出，是**四块内容平铺在 surface-2 井底上没有分组**：认款条/SKU 表/关联列表/元信息+按钮视觉重量相同，元信息挤左下、按钮悬右下互不相干。重设计三层：认款条升带主色浅底的主动作条（页内唯一色块）→ 元信息+编辑/删除合并成一条横带 → 两个内容块改白底卡片（surface+边框，从井底浮起一级）、块头加下沿分隔线。
+
+要点：**`data-act` 契约一字不动** ⇒ `goods:ui` 226 项原样全绿（`row-detail-layout` 的 scrollWidth/全宽断言天然复检新布局，无需新增断言）；`linksHead` 断言钉的是 `detail-links` **父块**里的 `.gd-detail__head` ⇒ 重排时两个内容块必须保持"头+内容同 parent"。窄视口 grid 收一列自动堆叠。截图取证：`npm run goods:shot`（宽）+ `W=1000`（窄）。

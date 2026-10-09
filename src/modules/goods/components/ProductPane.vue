@@ -275,6 +275,28 @@
                       </span>
                     </div>
 
+                    <!-- 元信息带：供应商/类目/创建/备注 是"这款是谁"的档案，横排一行放在
+                         动作条之下、内容卡片之上；「编辑/删除」跟着档案走（操作的对象就是这份档案），
+                         不再单独沉底 —— 旧版元信息挤左下、按钮悬右下，两块互不相干还高低不齐。 -->
+                    <div class="gd-detail__meta">
+                      <p><span class="wb-muted">供应商</span><span :class="{ 'wb-muted': !p.supplierId }" data-act="p-supplier">{{ p.supplierName || '(未关联)' }}</span></p>
+                      <p><span class="wb-muted">类目</span><span :class="{ 'wb-muted': !p.category }" data-act="p-category">{{ p.category || '—' }}</span></p>
+                      <p v-if="p.note" class="gd-detail__meta-note"><span class="wb-muted">备注</span>{{ p.note }}</p>
+                      <p><span class="wb-muted">创建</span>{{ p.createdAt || '—' }}</p>
+                      <div class="gd-detail__ops">
+                        <button class="wb-btn wb-btn--sm" type="button" data-act="edit-product" @click="openEditor(p)">
+                          编辑
+                        </button>
+                        <button
+                          class="wb-btn wb-btn--sm wb-btn--danger"
+                          type="button"
+                          @click="pendingDelete = { ids: [p.id], one: p }"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+
                     <!-- SKU 子表：改克重走与整宽形态**同一个**保存路径（全量提交，带全部现有字段） -->
                     <div class="gd-detail__block">
                       <div class="gd-detail__head">
@@ -358,26 +380,6 @@
                       >
                         另有 {{ deadLinksOf(p.id).length }} 条已失效（店铺商品ID 变了，不再计入关联）
                       </p>
-                    </div>
-
-                    <div class="gd-detail__block gd-detail__meta">
-                      <p><span class="wb-muted">供应商</span> <span :class="{ 'wb-muted': !p.supplierId }" data-act="p-supplier">{{ p.supplierName || '(未关联)' }}</span></p>
-                      <p><span class="wb-muted">类目</span> <span :class="{ 'wb-muted': !p.category }" data-act="p-category">{{ p.category || '—' }}</span></p>
-                      <p v-if="p.note"><span class="wb-muted">备注</span> {{ p.note }}</p>
-                      <p><span class="wb-muted">创建</span> {{ p.createdAt || '—' }}</p>
-                    </div>
-
-                    <div class="gd-detail__ops">
-                      <button class="wb-btn wb-btn--sm" type="button" data-act="edit-product" @click="openEditor(p)">
-                        编辑
-                      </button>
-                      <button
-                        class="wb-btn wb-btn--sm wb-btn--danger"
-                        type="button"
-                        @click="pendingDelete = { ids: [p.id], one: p }"
-                      >
-                        删除
-                      </button>
                     </div>
                   </div>
                 </td>
@@ -958,10 +960,15 @@ watch(
   background: var(--wb-surface-2);
   white-space: normal;
 }
+/* ── 展开区（2026-10-09 重设计）────────────────────────────────────
+   旧版四块内容（认款条 / SKU 表 / 关联列表 / 元信息+按钮）全部平铺在 surface-2 上，
+   视觉重量相同、没有分组边界，元信息挤左下、按钮悬右下 —— "看着乱"的根源。
+   新结构三层：① 认款条（全宽、带主色浅底 —— 页内唯一带色块，主动作一眼可见）；
+   ② 元信息带（档案 + 编辑/删除 同一行）；③ 两张白底内容卡片（surface-2 上浮起）。 */
 .gd-detail {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px 16px;
+  gap: 10px 12px;
   padding: 12px;
 }
 @media (max-width: 1180px) {
@@ -975,22 +982,34 @@ watch(
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--wb-primary-soft);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-primary-soft);
 }
 .gd-detail__relate-hint {
   font-size: 12px;
   min-width: 0;
 }
+/* 内容卡片：从 surface-2 的井里浮起一级，块与块的边界不再靠猜 */
 .gd-detail__block {
   min-width: 0;
+  padding: 10px 12px;
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-md);
 }
 .gd-detail__head {
   display: flex;
   align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
-  margin-bottom: 6px;
-  font-size: 12px;
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--wb-border);
+  font-size: 13px;
   font-weight: 600;
   color: var(--wb-text);
 }
@@ -1013,13 +1032,35 @@ watch(
 }
 /* 术语说明是 <p>：不给 margin 的话浏览器默认 1em 上下距会在标题和表格之间撑出一截 */
 .gd-detail__note {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   font-size: 12px;
 }
 .gd-detail__saved {
   margin: 6px 0 0;
   font-size: 12px;
   color: var(--wb-success);
+}
+
+/* 元信息带：label·值 横排一组一组；「编辑/删除」靠右跟档案同一行。
+   备注可能很长 —— 允许它占满一整行（flex-basis:100%），别的项保持紧凑。 */
+.gd-detail__meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  padding: 0 2px;
+  font-size: 12px;
+}
+.gd-detail__meta p {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.gd-detail__meta-note {
+  flex-basis: 100%;
 }
 
 .gd-links {
@@ -1034,31 +1075,25 @@ watch(
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 3px 0;
+  padding: 4px 0;
   border-bottom: 1px dashed var(--wb-border);
+}
+.gd-links__row:last-child {
+  border-bottom: none;
 }
 .gd-links__plat {
   margin-left: auto;
 }
 .gd-links__dead {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   font-size: 12px;
   color: var(--wb-warning);
 }
 
-.gd-detail__meta {
-  font-size: 12px;
-}
-.gd-detail__meta p {
-  margin: 0 0 4px;
-  display: flex;
-  gap: 8px;
-}
 .gd-detail__ops {
+  margin-left: auto;
   display: flex;
   gap: 8px;
-  align-items: flex-start;
-  justify-content: flex-end;
 }
 
 .gd-batch {

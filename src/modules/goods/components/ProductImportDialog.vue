@@ -25,13 +25,25 @@
       <div v-if="step === 'pick'" class="wb-dialog__body im-body">
         <p class="im-lead">
           支持 Excel（.xlsx / .xls）。表头需含<b>款编码</b>与<b>款式名</b>两列，其余列可缺省；<br />
-          列名同义写法都会自动识别（如 产品编码 / 商品名称 / 供应商 / 品类）。表头不在第一行也能找到。
+          列名同义写法都会自动识别（如 产品编码 / 商品名称 / 供应商 / 主图）。表头不在第一行也能找到。
         </p>
         <ul class="im-tips">
+          <li>
+            <b>一行一个款</b>：<b>颜色</b>一格填一个；<b>尺码</b>可以填多格（逗号隔开，如
+            <span class="wb-mono">M,L,XL</span>），<b>克重</b>按同样顺序一一对应（
+            <span class="wb-mono">120,130,140</span>）；两列个数不一样会标红，不会去猜。
+          </li>
+          <li>
+            <b>图片</b>：把图<b>插入</b>到「图片」那一格里（在 Excel 里就是"在单元格里插图片"）。
+            那一格里写的文字地址会被忽略 —— 图按它所在的行归位。
+          </li>
           <li>
             供应商列填<b>「供应商」页签里的名称</b>即为关联；填了但对不上会按「未关联」导入并提示，不会去猜。
           </li>
           <li>状态列可填 启用 / 停用 / active / archived，留空按「启用」。</li>
+          <li>
+            这份模板<b>没有「类目」列</b>：导入不会改动库里已有的类目（老文件里的「类目」列也会被忽略）。
+          </li>
           <li>整批在<b>一个事务</b>里落库；个别行不合格不影响其余行入库。</li>
         </ul>
         <p class="im-lead im-lead--last">
@@ -51,6 +63,9 @@
             有问题 <b>{{ errorRows.length }}</b>
           </span>
           <span v-if="warnCount" class="is-warn">提示 <b>{{ warnCount }}</b></span>
+          <span v-if="imagesFound" class="im-imgs" data-act="import-images">
+            图片 <b>{{ imagesLocated }}</b>/{{ imagesFound }} 张归位
+          </span>
           <span class="im-origin">
             来自「{{ origin?.pickedSheet || '—' }}」第 {{ origin?.headerRow || '—' }} 行表头<template
               v-if="origin?.blankRows"
@@ -61,6 +76,11 @@
             </template>
           </span>
         </div>
+
+        <!-- 归不了位的图必须说出来：「导入成功但图一张没进来」不报的话，用户只会怀疑自己的 Excel -->
+        <ul v-if="looseNotes.length" class="im-loose" data-act="import-notes">
+          <li v-for="(x, i) in looseNotes" :key="i">{{ x.message }}</li>
+        </ul>
 
         <div class="im-bar">
           <span class="im-bar__label">已存在的编码</span>
@@ -108,7 +128,7 @@
         </p>
 
         <div class="im-tablewrap">
-          <table class="wb-table im-table">
+          <table class="wb-table im-table" data-act="import-table">
             <thead>
               <tr>
                 <th class="im-c-no">行</th>
@@ -116,7 +136,10 @@
                 <th>款编码</th>
                 <th>款式名</th>
                 <th>供应商</th>
-                <th>类目</th>
+                <th class="im-c-img">图片</th>
+                <th>颜色</th>
+                <th>尺码</th>
+                <th>克重</th>
                 <th>状态</th>
                 <th class="im-c-msg">说明</th>
               </tr>
@@ -146,12 +169,23 @@
                 <td :class="{ 'wb-muted': !r.supplierId }">
                   {{ r.supplierId ? supplierName(r.supplierId) : r.supplierRaw || '未关联' }}
                 </td>
-                <td>{{ r.category || '—' }}</td>
+                <td
+                  class="im-c-img"
+                  data-act="row-image"
+                  :data-has-image="r.imageId ? '1' : '0'"
+                  :title="r.imageId ? '这一行插了图片，导入后会成为该款主图' : '这一行没有图'"
+                >
+                  <span v-if="r.imageId" class="wb-tag is-on">有图</span>
+                  <span v-else class="wb-muted">—</span>
+                </td>
+                <td>{{ colorsOf(r) || '—' }}</td>
+                <td>{{ skuCell(r, 'size') || '—' }}</td>
+                <td>{{ skuCell(r, 'weight') || '—' }}</td>
                 <td>{{ r.status === 'archived' ? '停用' : '启用' }}</td>
                 <td class="im-msg">{{ issueOf(r.rowNo) }}</td>
               </tr>
               <tr v-if="!visibleRows.length">
-                <td colspan="8" class="wb-muted im-none">没有可显示的行</td>
+                <td colspan="11" class="wb-muted im-none">没有可显示的行</td>
               </tr>
             </tbody>
           </table>
@@ -167,7 +201,11 @@
       <div v-else class="wb-dialog__body im-body">
         <p class="im-result">
           新增 <b class="is-ok">{{ result.created }}</b> 条，更新
-          <b class="is-ok">{{ result.updated }}</b> 条<template v-if="result.failed.length">
+          <b class="is-ok">{{ result.updated }}</b> 条<template v-if="result.skusWritten">
+            ，写入 SKU <b class="is-ok">{{ result.skusWritten }}</b> 个</template
+          ><template v-if="result.imagesAttached">
+            ，设为款主图 <b class="is-ok">{{ result.imagesAttached }}</b> 张</template
+          ><template v-if="result.failed.length">
             ，因编码冲突跳过 <b class="is-err">{{ result.failed.length }}</b> 条</template
           >。
         </p>
@@ -232,8 +270,15 @@
 //      等提交才知道改对了没有。本地判定**只用于即时反馈**，放行仍以库层校验为准。
 //
 // 判定分两层且顺序不能反：
-//   · 本地可判定的（编码非空、同批不重复）在这里算；
+//   · 本地可判定的（编码非空、SKU 单元格没报错）在这里算；
 //   · 其余（超长、供应商对不上、编码已存在）以宿主 / 库层为准，结果回到「说明」列。
+//
+// ---- 2026-10-08 随模板改列一起动过的三处 ----
+//   ① 「类目」列没了（模板与导出都不再带它，导入也不覆盖库里已有的类目）；
+//      换成「图片 / 颜色 / 尺码 / 克重」四列 —— 用户最关心的"图进来了没有"就在表上。
+//   ② 本地"重复编码算错"的判定**删掉**了：同编码的行现在会**合并**成一个款
+//      （见 `validateImportRows`），继续标红会把导出文件自己判成错的。
+//   ③ 新增「图片归位 N/M」与文件级提示：抽图失败、图落在表头/空行上，都要看得见。
 import { computed, reactive, ref } from 'vue';
 import { previewProductImport, commitProductImport, pickExcel } from '../productIo';
 import type { ProductImportOrigin } from '../productIo';
@@ -263,31 +308,33 @@ const issues = ref<ProductImportIssue[]>([]);
 const rows = ref<ProductImportRowResult[]>([]);
 const mode = ref<'upsert' | 'insertOnly'>('upsert');
 const onlyProblems = ref(false);
-const result = reactive<{ created: number; updated: number; failed: { rowNo: number; code: string; message: string }[] }>({
+const imagesFound = ref(0);
+const imagesLocated = ref(0);
+const result = reactive<{
+  created: number;
+  updated: number;
+  skusWritten: number;
+  imagesAttached: number;
+  failed: { rowNo: number; code: string; message: string }[];
+}>({
   created: 0,
   updated: 0,
+  skusWritten: 0,
+  imagesAttached: 0,
   failed: [],
 });
 
 const suppliers = ref(new Map<number, string>());
 
-/** 同一编码出现两次时，后出现的那行会被库层拦下 —— 本地先标出来，用户不必等提交才知道 */
-const dupCodes = computed(() => {
-  const seen = new Set<string>();
-  const dup = new Set<string>();
-  for (const r of rows.value) {
-    const c = String(r.code || '').trim();
-    if (!c) continue;
-    if (seen.has(c)) dup.add(c);
-    else seen.add(c);
-  }
-  return dup;
-});
-
-/** 本地可判定的合格性：编码非空且不重复。其余（超长、供应商对不上）以库层校验为准 */
+/**
+ * 本地可判定的合格性：**款编码非空** 且 **SKU 单元格没有解析错误**。
+ *
+ * 为什么把 `skuErrors` 也算进来：预览表里能改的只有款编码和款式名，尺码/克重个数对不上
+ * 这类问题只能回 Excel 改。把这种行标成"待导入"，用户提交后才发现被跳过，等于白等一次。
+ * 其余（超长、供应商对不上、编码已存在）以库层校验为准。
+ */
 function rowOk(r: ProductImportRowResult): boolean {
-  const c = String(r.code || '').trim();
-  return !!c && !dupCodes.value.has(c);
+  return String(r.code || '').trim() !== '' && r.skuErrors.length === 0;
 }
 
 const importable = computed(() => rows.value.filter(rowOk));
@@ -299,11 +346,50 @@ const problemRows = computed(() => rows.value.filter((r) => !rowOk(r) || issueOf
 const visibleRows = computed(() => (onlyProblems.value ? problemRows.value : rows.value));
 const hiddenCount = computed(() => rows.value.length - visibleRows.value.length);
 
+/**
+ * 挂在**不存在的行**上的提示（抽图失败、"第 N 行插了图但那里不是数据行"…）。
+ * 这些消息如果只留在 issues 里，界面上一条都看不到 —— 而被它们描述的现象
+ * （"导入成功但图没进来"）恰恰是最需要被说出来的。
+ */
+const looseNotes = computed(() =>
+  issues.value.filter((x) => !rows.value.some((r) => r.rowNo === x.rowNo))
+);
+
 function issueOf(rowNo: number): string {
   return issues.value
     .filter((x) => x.rowNo === rowNo && x.level === 'error')
     .map((x) => x.message)
     .join('；');
+}
+
+/** 「颜色」列：一行一个款，但同款多行会合并 ⇒ 这里可能出现多个颜色 */
+function colorsOf(r: ProductImportRowResult): string {
+  return [...new Set(r.skus.map((s) => s.color))].filter(Boolean).join('、');
+}
+
+/**
+ * 「尺码」「克重」两列：按颜色分段。单个颜色时直接是 `M,L,XL`（与导出的写法一致），
+ * 颜色多于一个时才加前缀 —— 否则"红 M,L / 蓝 S"会被读成同一串尺码。
+ */
+function skuCell(r: ProductImportRowResult, kind: 'size' | 'weight'): string {
+  if (!r.skus.length) return '';
+  const order: string[] = [];
+  const groups = new Map<string, string[]>();
+  for (const s of r.skus) {
+    const c = s.color || '（无颜色）';
+    if (!groups.has(c)) {
+      groups.set(c, []);
+      order.push(c);
+    }
+    groups.get(c)!.push(kind === 'size' ? s.size : s.weightG > 0 ? String(s.weightG) : '');
+  }
+  const multi = order.length > 1;
+  return order
+    .map((c) => {
+      const vals = groups.get(c)!.join(',');
+      return multi ? `${c}：${vals}` : vals;
+    })
+    .join(' · ');
 }
 
 function supplierName(id: number): string {
@@ -342,6 +428,8 @@ async function pickFile(): Promise<void> {
     rows.value = preview.rows.map((x) => ({ ...x }));
     issues.value = preview.issues;
     origin.value = preview.origin;
+    imagesFound.value = preview.imagesFound;
+    imagesLocated.value = preview.imagesLocated;
     await afterPreview();
     step.value = 'preview';
     if (!rows.value.length) error.value = '这份文件里没有读到任何产品行。';
@@ -363,6 +451,8 @@ async function commit(): Promise<void> {
     issues.value = r.issues;
     result.created = r.created;
     result.updated = r.updated;
+    result.skusWritten = r.skusWritten;
+    result.imagesAttached = r.imagesAttached;
     result.failed = r.failed;
     onlyProblems.value = false;
     step.value = 'done';
@@ -384,7 +474,7 @@ const remaining = computed(() => {
 
 const remainingReasons = computed(() => {
   const parts: string[] = [];
-  if (errorRows.value.length) parts.push(`${errorRows.value.length} 行编码有空缺或重复`);
+  if (errorRows.value.length) parts.push(`${errorRows.value.length} 行编码为空，或尺码/克重对不上`);
   if (result.failed.length) parts.push(`${result.failed.length} 行编码已存在且选择了「跳过不覆盖」`);
   return parts.join('，') || '原因见预览';
 });
@@ -396,6 +486,8 @@ function backToPick(): void {
 function backToPreview(): void {
   result.created = 0;
   result.updated = 0;
+  result.skusWritten = 0;
+  result.imagesAttached = 0;
   result.failed = [];
   onlyProblems.value = problemRows.value.length > 0;
   step.value = 'preview';
@@ -552,6 +644,20 @@ function close(): void {
 .im-note {
   margin: 10px 16px 0;
 }
+/* 文件级提示（抽图失败 / 图没归位）：容易被当成"又是那些小字"忽略掉，所以给它一条竖线 */
+.im-loose {
+  flex-shrink: 0;
+  margin: 8px 16px 0;
+  padding-left: 14px;
+  border-left: 2px solid var(--wb-warning);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--wb-text-muted);
+  list-style: none;
+}
+.im-imgs {
+  color: var(--wb-text);
+}
 .im-tablewrap {
   flex: 1;
   min-height: 0;
@@ -569,6 +675,11 @@ function close(): void {
 }
 .im-c-st {
   width: 74px;
+}
+.im-c-img {
+  width: 68px;
+  text-align: center;
+  white-space: nowrap;
 }
 .im-c-msg {
   min-width: 210px;

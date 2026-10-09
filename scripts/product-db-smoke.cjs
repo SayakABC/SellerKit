@@ -574,6 +574,121 @@ check('SKU 克重仍按款色码可读写（唯一来源没受影响）', () => 
   assert.strictEqual(Number(rows[0].weightG), 320);
 });
 
+// ---- 导入的列变了（2026-10-08）：类目保留 / 写 SKU / 有图才设主图 ----
+// 模板去掉了「类目」、加了「图片 / 颜色 / 尺码 / 克重」。这几条钉的是**改了列之后最容易出的
+// 静默事故**：少一列就清空一列、每导一次多一组 SKU、空克重把已有克重清零。
+console.log('\n[O] 导入列变更（2026-10-08）');
+
+/** 一行导入（新口径：没有 category，带 skus / imageId） */
+const iRow = (over = {}) => ({
+  rowNo: 1,
+  code: '',
+  name: '',
+  supplierId: 0,
+  status: 'active',
+  note: '',
+  skus: [],
+  imageId: 0,
+  ...over,
+});
+
+/** 按编码取该款（`query` 只回列表行，够用） */
+const byCode = (code) => query({ search: code }).rows.find((r) => r.code === code);
+
+check('⭐ 导入不覆盖类目：已存在的款，类目原样保留（模板已没有这一列）', () => {
+  cleanVariants();
+  pdb.upsertProduct(input({ code: 'C-1', name: '旧名', note: '旧注', category: '家居' }));
+  const out = pdb.importProducts([iRow({ code: 'C-1', name: '新名', note: '新注' })], 'upsert');
+  assert.strictEqual(out.updated, 1);
+  const row = byCode('C-1');
+  assert.strictEqual(row.name, '新名', '其余字段该更新的还是要更新');
+  assert.strictEqual(row.note, '新注');
+  assert.strictEqual(row.category, '家居', '导入把类目清空了 —— 这是本轮最贵的数据事故（导回一次全灭）');
+});
+
+check('新建的款类目为空（模板里没有这一列，不该凭空猜一个）', () => {
+  cleanVariants();
+  const out = pdb.importProducts([iRow({ code: 'C-2', name: '新件' })], 'upsert');
+  assert.strictEqual(out.created, 1);
+  assert.strictEqual(byCode('C-2').category, '');
+});
+
+check('导入写 SKU：颜色/尺码/克重落到 pl_variants，按 (颜色,尺码) upsert 不重复', () => {
+  cleanVariants();
+  const r1 = pdb.importProducts(
+    [
+      iRow({
+        code: 'S-1',
+        name: '款S1',
+        skus: [
+          { color: '红', size: 'M', weightG: 120 },
+          { color: '红', size: 'L', weightG: 130 },
+        ],
+      }),
+    ],
+    'upsert',
+  );
+  assert.strictEqual(r1.skusWritten, 2);
+  const pid = byCode('S-1').id;
+  assert.deepStrictEqual(
+    pdb.variantList([pid]).map((v) => [v.color, v.size, v.weightG]),
+    [
+      ['红', 'M', 120],
+      ['红', 'L', 130],
+    ],
+  );
+  // 再导一次同款、只改 M 的克重 → 仍是 2 条（不是 3 条），M 被更新
+  const r2 = pdb.importProducts(
+    [iRow({ code: 'S-1', name: '款S1', skus: [{ color: '红', size: 'M', weightG: 125 }] })],
+    'upsert',
+  );
+  assert.strictEqual(r2.skusWritten, 1);
+  const vs = pdb.variantList([pid]);
+  assert.strictEqual(vs.length, 2, '每导一次就多一组 SKU —— (颜色,尺码) 的 upsert 没生效');
+  assert.strictEqual(vs.find((v) => v.size === 'M').weightG, 125);
+});
+
+check('⭐ 克重 0 = 这行没写 ⇒ 不覆盖已有克重（静默清零会让成本算错且无痕）', () => {
+  cleanVariants();
+  pdb.importProducts(
+    [iRow({ code: 'S-2', skus: [{ color: '蓝', size: 'M', weightG: 200 }] })],
+    'upsert',
+  );
+  const pid = byCode('S-2').id;
+  pdb.importProducts([iRow({ code: 'S-2', skus: [{ color: '蓝', size: 'M', weightG: 0 }] })], 'upsert');
+  assert.strictEqual(pdb.variantList([pid])[0].weightG, 200, '这一行没写克重，却把已有的 200 写成了 0');
+});
+
+check('skus 为空数组 = 这行没说 SKU，不动该款已有的 SKU（不是"全删掉"）', () => {
+  cleanVariants();
+  pdb.importProducts([iRow({ code: 'S-3', skus: [{ color: '绿', size: 'S', weightG: 90 }] })], 'upsert');
+  const pid = byCode('S-3').id;
+  pdb.importProducts([iRow({ code: 'S-3', name: '改个名', skus: [] })], 'upsert');
+  assert.strictEqual(pdb.variantList([pid]).length, 1, '空 skus 被当成了"清空 SKU"');
+});
+
+check('有图才设主图：这一行带了图 ⇒ 成为款主图并计入 imagesAttached', () => {
+  cleanVariants();
+  const img = pdb.upsertImageRecord({ fingerprint: 'fp-i1', localPath: '/cache/i1.jpg' }).imageId;
+  const out = pdb.importProducts([iRow({ code: 'I-1', imageId: img })], 'upsert');
+  assert.strictEqual(out.imagesAttached, 1);
+  assert.strictEqual(pdb.getProduct(byCode('I-1').id).imageId, img);
+});
+
+check('这行没图 ⇒ 不动已有主图；imageId 指向不存在的图 ⇒ 跳过而不是写野值', () => {
+  cleanVariants();
+  const img = pdb.upsertImageRecord({ fingerprint: 'fp-i2', localPath: '/cache/i2.jpg' }).imageId;
+  pdb.importProducts([iRow({ code: 'I-2', imageId: img })], 'upsert');
+  const pid = byCode('I-2').id;
+  // ① 不带图再导一次 → 主图还在
+  pdb.importProducts([iRow({ code: 'I-2', name: '改名' })], 'upsert');
+  assert.strictEqual(pdb.getProduct(pid).imageId, img, '没带图的那一次把主图抹掉了');
+  // ② 带一个不存在的 imageId → 跳过，主图不变
+  const out = pdb.importProducts([iRow({ code: 'I-2', imageId: 999999 })], 'upsert');
+  assert.strictEqual(out.imagesAttached, 0);
+  assert.strictEqual(pdb.getProduct(pid).imageId, img);
+});
+
 // ---- 收尾 ----
 closeDb();
 fs.rmSync(dir, { recursive: true, force: true });

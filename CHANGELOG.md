@@ -13,6 +13,27 @@
 
 ## [Unreleased]
 
+### Changed · 产品导入模板改列：去「类目」，加「图片 / 颜色 / 尺码 / 克重」（2026-10-09 续十二）
+
+模板与导出**共用同一份表头**（`PRODUCT_EXPORT_HEADERS`）：`款编码 | 款式名 | 供应商 | 图片 | 颜色 | 尺码 | 克重 | 状态 | 备注`。一行一个款；「尺码 / 克重」可多值（逗号分隔）**按顺序一一对应**，个数不等 → error（回 Excel 改）；同款多行 = **合并 SKU**（不报错剔行，产品字段取先出现者）。
+
+- **「类目」退出模板与导入**：导入不解析不提交该列，库层对已存在的款**原样保留** `category` —— 防"导出 → 改 → 导回"把已有类目清空（全量提交语义下，表里没这列会写成空串）。
+- **「图片」列两端都能用**：导出由主进程用 exceljs **嵌入真图**（`electron/xlsx-image.ts` 的唯一实现，"图给人看"），同时该列文本填**本机缓存路径**（"路径给机器读"，同机导出 → 改 → 导回离线可用，不新增数据库列）；导入读 xlsx **嵌入图**按**锚点行**归位，落盘 `userData/product-images/`（SHA-256 去重）→ 写 `pl_products.image_id`。归不了位的图（表头以上 / 空行 / 一行多图）逐条报 warning，不静默错位。
+- **导出改由主进程生成 xlsx**（渲染层只算"每格写什么"的纯函数）：嵌图要写 `xl/drawings` + 关系 + 内容类型，渲染层的 SheetJS 写不了这套。分工 = 渲染层算内容（有单测），主进程只写格子 + 嵌图（`electron/product-xlsx.ts`）。
+- **克重随 SKU 落库**：导入按行写 `pl_variants`（颜色 × 尺码 + 克重，upsert 语义）；导出从 `product-variant-list` 批量取回拼格。
+- **IPC +1**：`product-extract-images`（渲染层传 xlsx buffer + 表名 + 表头行号，主进程抽图落盘返回 行→imageId 映射）。
+
+#### 修一个真 bug：提交路径把「规格对不上」的行放行了
+
+预览时 `parseProductRows` 把 SKU 单元格错误记进行结果的 `skuErrors` 字段、行标「跳过」；但提交前 `validateImportRows` **二次校验只认解析中间态的 `cellErrors`** —— 回传行结果上的 `skuErrors` 被丢，于是预览标了跳过的行**带着空 SKU 照样落库**（goods:ui 实测抓到：IMP-3 规格对不上却出现在 items 里）。修法：校验器两个来源都认（两套字段名各有各的路径）；单测用**只有提交路径才有**的形状（只给 `skuErrors`）钉住，变异复核确认单测与冒烟同时变红。
+
+#### 守卫与门禁
+
+- `tests/productImport.spec.ts` 按新口径重写（表头族 / 顺序对应 / 合并 / 抽图归位 / 提交路径），`tests/uxEntryNames.spec.ts` 登记「图片」（列名）。
+- `scripts/product-db-smoke.cjs` 加导入落库用例（SKU 写入 / 类目保留 / imageId 防野值）；新增 `scripts/product-xlsx-smoke.cjs`（`product:xlsx:smoke`）：导出 ↔ 导入**往返** + 嵌图真读回（zip 层验 `xl/media`）。
+- `goods:ui` **203 → 223**（导出新形状 / 预览列 / 抽图归位 / 提交剔除等 20 条；含把预览切回「全部行」再断言——预览默认只看有问题的行）。
+- 门禁全绿：`tsc -p tsconfig.electron.json` / `vue-tsc` / `verify` / `verify:docs` / `build` / `vitest`（36 文件 / 626 用例）/ `product:smoke` / `product:xlsx:smoke` / `goods:ui`（三遍）/ `today:ui` / `plugins:island:smoke`（4/4）。
+
 ### Added · 「货与成本」**简洁模式**（默认开，页头一键关）（2026-10-08 续十一）
 
 给"第一次用"的人一层减法：页头加一个开关（`data-act="simple-toggle"`，`aria-pressed` 同步），默认**开**。唯一真源是 `src/modules/goods/simple.ts` 里一个**共享 `ref`**，落 `localStorage['sk.goods.simple']`；关掉即恢复完整形态。

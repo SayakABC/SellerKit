@@ -10,7 +10,13 @@
 // `parseProductRows` / `validateImportRows` / `buildProductSheet`）—— 宿主侧的 `DB_OPS` 桥
 // 随岛一起删了，但 `product-import` / `product-export` 两个 IPC 通道仍在，主进程那侧只负责
 // "收已校验好的行落库"与"弹框写文件"，解析口径依旧唯一且可被 vitest 覆盖。
-import { parseProductRows, validateImportRows, buildProductSheet } from '@/lib/productImport';
+import {
+  attachExtractedImages,
+  buildProductSheetLayout,
+  parseProductRows,
+  PRODUCT_EXPORT_HEADERS,
+  validateImportRows,
+} from '@/lib/productImport';
 import type {
   ProductExportRow,
   ProductImportIssue,
@@ -69,6 +75,9 @@ export interface ProductImportPreview {
   /** error 级 issue 数（warning 不计） */
   errors: number;
   warnings: number;
+  /** 文件里一共抽到几张嵌入图 / 其中几张归到了数据行 */
+  imagesFound: number;
+  imagesLocated: number;
 }
 
 export interface ProductImportCommitResult {
@@ -78,6 +87,10 @@ export interface ProductImportCommitResult {
   warnings: number;
   created: number;
   updated: number;
+  /** 本次写库的 SKU 条数 */
+  skusWritten: number;
+  /** 本次设为款主图的张数 */
+  imagesAttached: number;
   /** 库层才拦得住的失败行（如 insertOnly 下编码已存在） */
   failed: { rowNo: number; code: string; message: string }[];
 }
@@ -152,10 +165,16 @@ async function readProductSheet(
 }
 
 /**
- * 第一遍：读 Excel、逐张体检、列名匹配、逐行校验。**不落库**。
+ * 第一遍：读 Excel、逐张体检、列名匹配、逐行校验、**抽嵌入图**。**不落库**。
  *
  * 为什么必须有这一遍：导入的既定形态是"逐行校验、错误行可在界面修正后重试"。
  * 直接落库的话，不合格行只能靠事后比对去找，用户拿不到改的机会。
+ *
+ * 图的抽取**排在解析之后**、且**失败不算导入失败**：
+ *   · 排后面：浮动图的锚点要跟"数据行从第几行开始"比，而"哪张表是产品表、表头在第几行"
+ *     只有解析完才知道（表头允许不在第一行，工作表也可能是第二张）；
+ *   · 不算失败：图是附加信息，产品字段该进的还是要进。但**必须留下一句话** ——
+ *     "导入成功了但一张图都没有"如果不报，用户只会以为是自己 Excel 里没贴图。
  */
 export async function previewProductImport(file: ExcelFilePayload): Promise<ProductImportPreview> {
   const res = await readProductSheet(file.data);
@@ -164,13 +183,46 @@ export async function previewProductImport(file: ExcelFilePayload): Promise<Prod
       `Excel 内没有可识别的产品表（逐张体检：${res.scanned.join('；') || '无工作表'}）`
     );
   }
-  const errors = res.read.issues.filter((x) => x.level === 'error').length;
+
+  let rows = res.read.rows;
+  let issues = res.read.issues;
+  let imagesFound = 0;
+  let imagesLocated = 0;
+  try {
+    const ex = unwrapApi(
+      await ipc.productExtractImages({
+        buffer: file.data,
+        sheetName: res.read.origin.pickedSheet,
+        headerRow: res.read.origin.headerRow,
+      })
+    );
+    const merged = attachExtractedImages(rows, ex?.byRow, ex?.skips);
+    rows = merged.rows;
+    issues = [...issues, ...merged.issues];
+    imagesFound = Number(ex?.total) || 0;
+    imagesLocated = Object.keys(ex?.byRow ?? {}).length;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    issues = [
+      ...issues,
+      {
+        rowNo: 0,
+        code: '',
+        level: 'warning',
+        message: `没能从文件里读取图片：${msg} —— 产品信息照常导入，图片需要导入后在界面上补`,
+      },
+    ];
+  }
+
+  const errors = issues.filter((x) => x.level === 'error').length;
   return {
-    rows: res.read.rows,
-    issues: res.read.issues,
+    rows,
+    issues,
     origin: res.read.origin,
     errors,
-    warnings: res.read.issues.length - errors,
+    warnings: issues.length - errors,
+    imagesFound,
+    imagesLocated,
   };
 }
 
@@ -198,14 +250,17 @@ export async function commitProductImport(
             code: x.code,
             name: x.name,
             supplierId: x.supplierId,
-            category: x.category,
             status: x.status,
             note: x.note,
+            // SKU 与图都在这一层带走：`imageId` 是抽图那步贴到行上的，
+            // `skus` 是解析（或界面回改）后的归一形态 —— 库层不再认识"单元格"这种东西。
+            skus: x.skus.map((s) => ({ color: s.color, size: s.size, weightG: s.weightG })),
+            imageId: x.imageId,
           })),
           mode,
         })
       )
-    : { created: 0, updated: 0, failed: [] };
+    : { created: 0, updated: 0, skusWritten: 0, imagesAttached: 0, failed: [] };
 
   return {
     rows: v.rows,
@@ -214,6 +269,8 @@ export async function commitProductImport(
     warnings: v.issues.length - errors,
     created: save?.created ?? 0,
     updated: save?.updated ?? 0,
+    skusWritten: save?.skusWritten ?? 0,
+    imagesAttached: save?.imagesAttached ?? 0,
     failed: save?.failed ?? [],
   };
 }
@@ -222,17 +279,24 @@ export async function commitProductImport(
  * 导出产品表 / 生成导入模板（`template: true` 只出表头）。
  *
  * 默认导出**当前筛选下的全部行**，不是界面这一页 —— 分页是展示需要，导出要完整数据。
- * 与宿主落库侧的 `product-export` 通道同一套口径（都在 `@/lib/productImport` 里取表头与行，
- * 含同样的翻页护栏）。
+ *
+ * 分工（2026-10-08 改）：本函数只算**每格写什么**（`buildProductSheetLayout`，纯函数、有单测），
+ * xlsx 由**主进程**用 exceljs 生成 —— 因为「图片」列里要嵌真图，而嵌入图是浮动对象
+ * （`xl/drawings` + 关系 + 内容类型），渲染层用的 SheetJS 写不了。
+ * 于是"导出 → 改 → 导回"的闭环里，图和文字都是同一份口径出来的。
+ *
+ * `template: true` 时**不拉数据**：模板只有表头，拉两万行只为丢掉是白费功夫。
  */
 export async function exportProducts(opts: {
   template?: boolean;
   search?: string;
   status?: 'active' | 'archived' | '';
   supplierId?: number;
-}): Promise<{ filePath: string }> {
+}): Promise<{ filePath: string; embedded: number; imagesFailed: number }> {
   const template = opts.template === true;
   const rows: ProductExportRow[] = [];
+  /** 款编码 → 产品 id（补 SKU 那一步要用；编码 UNIQUE，用 Map 不会撞） */
+  const idByCode = new Map<string, number>();
 
   if (!template) {
     for (let page = 0; page < EXPORT_MAX_PAGES; page++) {
@@ -250,30 +314,73 @@ export async function exportProducts(opts: {
           code: r.code,
           name: r.name,
           supplierName: r.supplierName,
-          category: r.category,
+          // 主图的**本地缓存路径**：主进程按它嵌图（不新增"原始网址"列 —— 同机往返离线可用）
+          imagePath: r.imagePath ?? '',
           status: r.status,
           note: r.note,
+          skus: [],
         });
+        idByCode.set(r.code, r.id);
       }
       if (rows.length >= (res?.total ?? 0) || !(res?.rows ?? []).length) break;
     }
+    await fillExportSkus(rows, idByCode);
   }
 
-  const XLSX = await import('xlsx');
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.aoa_to_sheet(buildProductSheet(rows, template)),
-    template ? '导入模板' : '产品库'
-  );
-  const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+  const layout = buildProductSheetLayout(rows, template);
+  const headers = layout.length ? layout[0].cells : [];
+  const body = layout.slice(1).map((r) => ({ cells: r.cells, imagePath: r.imagePath }));
+  const imageColumn = PRODUCT_EXPORT_HEADERS.indexOf('图片');
+
   const stamp = new Date().toISOString().slice(0, 10);
   return unwrapApi(
     await ipc.productExport({
-      buffer,
+      sheetName: template ? '导入模板' : '产品库',
+      headers,
+      rows: body,
+      imageColumn: imageColumn === -1 ? 0 : imageColumn,
       defaultName: template ? '产品库导入模板.xlsx' : `产品库_${stamp}.xlsx`,
     })
   );
+}
+
+/** 一次批量取 SKU 的产品数上限（`product-variant-list` 自身的护栏是 5000） */
+const EXPORT_SKU_BATCH = 1000;
+
+/**
+ * 给导出行补上各自的 SKU（颜色/尺码/克重）。
+ *
+ * 为什么是**分批一次取**而不是逐款取：导出 2000 款就是 2000 次 IPC，界面会长时间无响应；
+ * 而 `product-variant-list` 本来就收 `productIds[]`（编辑抽屉也是这么用的）。
+ * 取不到时**不报错** —— 那一列空着比"导出整个失败"更接近事实（款确实在，只是还没维护 SKU）。
+ */
+async function fillExportSkus(
+  rows: ProductExportRow[],
+  idByCode: ReadonlyMap<string, number>
+): Promise<void> {
+  const byCode = new Map(rows.map((r) => [r.code, r]));
+  const entries = [...idByCode.entries()];
+  for (let i = 0; i < entries.length; i += EXPORT_SKU_BATCH) {
+    const slice = entries.slice(i, i + EXPORT_SKU_BATCH);
+    let got: { productId: number; color: string; size: string; weightG: number }[] = [];
+    try {
+      const res = unwrapApi(await ipc.productVariantList(slice.map(([, id]) => id)));
+      got = (res?.rows ?? []).map((v) => ({
+        productId: v.productId,
+        color: v.color,
+        size: v.size,
+        weightG: v.weightG,
+      }));
+    } catch {
+      continue; // 这一批没拿到 → 这些款的 SKU 列空着，其余照常
+    }
+    const codeById = new Map(slice.map(([code, id]) => [id, code]));
+    for (const v of got) {
+      const code = codeById.get(v.productId);
+      if (!code) continue;
+      byCode.get(code)?.skus.push({ color: v.color, size: v.size, weightG: v.weightG });
+    }
+  }
 }
 
 /**

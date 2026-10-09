@@ -11,7 +11,8 @@
 //   product-batch-update 批量编辑（部分 patch：厂家/类目/状态/备注，undefined = 不修改）
 //   product-summary    汇总（总数 / 按状态 / 厂家分布 + 全量厂家下拉）
 //   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验）
-//   product-export     导出/模板：保存渲染层生成的 xlsx（弹保存框）
+//   product-export     导出/模板：主进程用 exceljs 生成 xlsx（按行嵌图）并弹保存框
+//   product-extract-images 从导入的 xlsx 里抽**嵌入图片**，落盘登记后按锚点行报回
 //   product-sku-list   映射列表（店铺商品ID → 产品；筛选 + 分页）
 //   product-sku-summary 映射汇总（不扫订单）
 //   product-sku-queue  待关联队列（实时聚合 oi_orders 的商品ID，减去已有生效映射）
@@ -56,6 +57,9 @@ import {
   type SkuMapInput,
 } from './product-db';
 import { handle, IMG_EXT_BY_FORMAT, sniffImageFormat } from './ipc-util';
+// 产品表 xlsx 的生成与抽图（表头/行列宽/锚点归位都在这份里；"图真的嵌进去了没有"与
+// "图归到了哪一行"由 `scripts/product-xlsx-smoke.cjs` 单独钉住）
+import { buildProductWorkbook, extractEmbeddedImages } from './product-xlsx';
 // 映射写入后回填存量订单 —— 只有 handler 层能同时看到两个域（product-db 不得 import order-db，会成环）
 import { reassignOrdersByItemIds } from './order-db';
 
@@ -162,9 +166,20 @@ handle('product-summary', () => {
 // 分工：**解析与校验在渲染层**（`src/lib/productImport.ts` + `src/modules/goods/productIo.ts`），
 // 主进程只收「已经一行行校验过的结构」落库。这样口径只有一份，
 // 且校验逻辑能被 vitest 覆盖（主进程这层因 better-sqlite3 的 Electron ABI 测不了）。
+//
+// **唯一的例外是"图"**：Excel 的嵌入图是**浮动对象**，既不在单元格里，渲染层也读不到
+// （SheetJS 不解析 `xl/drawings`）—— 只有主进程的 exceljs 能。于是图按方向各占一个通道：
+//   读进来：`product-extract-images` —— xlsx → 落盘 + 登记 `pl_images` → **按锚点行**报回
+//   写出去：`product-export`         —— 渲染层给"每格写什么"+"每行的图路径"，主进程生成并嵌图
 
 /** 单次导入上限（与 order 域的导入量级对齐；速卖通万级商品之内） */
 const MAX_IMPORT_ROWS = 20000;
+/** 单行的 SKU 上限（颜色一格一个 × 尺码若干；防一个坏文件把变体表撑爆） */
+const MAX_ROW_SKUS = 500;
+/** 单次抽图上限（防一份被误塞了几万张图的文件把 IPC 拖死） */
+const MAX_EXTRACT_IMAGES = 3000;
+/** 单次导出上限（与渲染层的翻页护栏同量级：40 页 × 500 行） */
+const MAX_EXPORT_ROWS = 20000;
 
 handle('product-import', (payload: any) => {
   const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -176,24 +191,90 @@ handle('product-import', (payload: any) => {
     code: str(r?.code, MAX.code).trim(),
     name: str(r?.name, MAX.name).trim(),
     supplierId: toId(r?.supplierId),
-    category: str(r?.category, MAX.category).trim(),
+    // 类目**不再从导入侧来**（模板与导出都没有这一列）：库层对已存在的产品原样保留，
+    // 见 `importProducts` 的文件注释 —— 这里保留字段会造成"少一列就清空一列"。
     status: coerceStatus(r?.status),
     note: str(r?.note, MAX.note),
+    skus: (Array.isArray(r?.skus) ? r.skus : []).slice(0, MAX_ROW_SKUS).map((s: any) => ({
+      color: str(s?.color, 40).trim(),
+      size: str(s?.size, 40).trim(),
+      weightG: Math.round(Number(s?.weightG)) || 0,
+    })),
+    imageId: toId(r?.imageId),
   }));
   return importProducts(rows, payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert');
 });
 
-// 导出 xlsx：**buffer 由渲染层用 xlsx 生成**（与 order-insight 的 exportWorkbook 同构），
-// 本通道只负责弹保存框并写文件 —— 主进程不引 xlsx，避免多一份解析/生成实现。
-//
-// ⚠️ 这一条必须是**裸 `ipcMain.handle`**：保存对话框要挂到发起窗口上（用 `event.sender`
-//    反查 BrowserWindow），而 `ipc-util` 的 register/handle 只把 payload 传给 handler。
-//    先例：`electron/order-handlers.ts` 的 `order-export-excel`（同理由，未纳入 ipc-util）。
+/**
+ * 抽「导入文件里的嵌入图」：xlsx → 落盘 + 登记 `pl_images` → **按锚点行号**报回。
+ *
+ * 为什么要单独一步、且在**解析之后**才调：
+ *   ① "哪张表是产品表"由渲染层逐张体检得出（`readProductSheet`），所以必须先解析、
+ *      再把选中的表名传进来 —— 主进程自己去猜表，等于把"读错对象"再实现一遍；
+ *   ② 锚点要跟"数据行从第几行开始"比，而表头在第几行也是解析才知道的（表头允许不在第一行）。
+ *
+ * ⚠️ **只认锚点行，不按顺序配**：浮动图会随用户插行/删行漂移。按顺序配会把错位
+ *    全部吃掉且不报错（表现为"图进来了但配错了款"），所以宁可报"没归位"。
+ *
+ * **不抛**单张图的错（格式不认识 / 超过 10MB / 内容是空的）：其余行照常导入，
+ * 这一行只是没图 —— 一张坏图不该让整批导入失败。
+ */
+handle('product-extract-images', async (payload: any) => {
+  const buffer = payload?.buffer;
+  if (!(buffer instanceof ArrayBuffer)) throw new Error('缺少 Excel 内容');
+  const sheetName = str(payload?.sheetName, 120).trim();
+  if (!sheetName) throw new Error('缺少工作表名');
+  /** 表头所在行（1-based；由渲染层解析得出） */
+  const headerRow = Math.max(0, Math.floor(Number(payload?.headerRow) || 0));
+
+  // 抽图与"归到哪一行"的判定都在 `product-xlsx.ts`（能被 scripts/product-xlsx-smoke.cjs
+  // 单独验）；本层只负责"抽出来的字节往哪落、登记成哪个 imageId"。
+  return extractEmbeddedImages(buffer, {
+    sheetName,
+    headerRow,
+    max: MAX_EXTRACT_IMAGES,
+    land: (bytes) => landImageBuffer(bytes, 'import'),
+  });
+});
+
+/**
+ * 导出 / 下载模板：**主进程生成 xlsx**（exceljs）。
+ *
+ * 为什么改掉了「渲染层生成 buffer、主进程只写文件」的旧分工（2026-10-08）：**为了嵌图**。
+ * 嵌入图要写 `xl/drawings` + 关系 + 内容类型几处对齐（少写一处的症状见 `xlsx-image.ts` 文件头），
+ * 而渲染层用的 SheetJS 写不了这套东西。分工改成 ——
+ * **渲染层算"每格写什么"（纯函数、有单测），主进程只做"把格子写上 + 把图嵌上"**：
+ * 表头与行的口径仍然只有一份，主进程这一层没有任何业务判断。
+ *
+ * ⚠️ 这一条必须是**裸 `ipcMain.handle`**：保存对话框要挂到发起窗口上（用 `event.sender`
+ *    反查 BrowserWindow），而 `ipc-util` 的 register/handle 只把 payload 传给 handler。
+ *    先例：`electron/order-handlers.ts` 的 `order-export-excel`（同理由，未纳入 ipc-util）。
+ *
+ * 返回里带 `embedded` / `imagesFailed`：导出的图**没进去**时用户是看不见的（文件照样打开），
+ * 只有把这两个数带回界面才可能被说出来。
+ */
 ipcMain.handle('product-export', async (event: any, payload: any) => {
   try {
-    if (!payload || !(payload.buffer instanceof ArrayBuffer)) {
-      return { success: false, error: 'invalid payload' };
+    const headers: string[] = Array.isArray(payload?.headers)
+      ? payload.headers.map((h: unknown) => String(h ?? ''))
+      : [];
+    const bodyRows = Array.isArray(payload?.rows) ? payload.rows : [];
+    if (!headers.length) return { success: false, error: 'invalid payload' };
+    if (bodyRows.length > MAX_EXPORT_ROWS) {
+      return { success: false, error: `单次最多导出 ${MAX_EXPORT_ROWS} 行（收到 ${bodyRows.length}）` };
     }
+
+    // 生成在 `product-xlsx.ts`（"图真的嵌进去了没有"由 product-xlsx-smoke 单独钉住）
+    const built = await buildProductWorkbook({
+      sheetName: String(payload?.sheetName ?? ''),
+      headers,
+      rows: bodyRows.map((r: any) => ({
+        cells: Array.isArray(r?.cells) ? r.cells.map((c: unknown) => String(c ?? '')) : [],
+        imagePath: typeof r?.imagePath === 'string' ? r.imagePath : '',
+      })),
+      imageColumn: Math.max(0, Math.floor(Number(payload?.imageColumn) || 0)),
+    });
+
     const win = event?.sender ? BrowserWindow.fromWebContents(event.sender) : null;
     const result = await dialog.showSaveDialog(win, {
       title: '导出产品库',
@@ -204,8 +285,15 @@ ipcMain.handle('product-export', async (event: any, payload: any) => {
       filters: [{ name: 'Excel', extensions: ['xlsx'] }],
     });
     if (result.canceled || !result.filePath) return { success: false, error: 'User canceled' };
-    fs.writeFileSync(result.filePath, Buffer.from(payload.buffer));
-    return { success: true, data: { filePath: result.filePath } };
+    fs.writeFileSync(result.filePath, built.buffer);
+    return {
+      success: true,
+      data: {
+        filePath: result.filePath,
+        embedded: built.embedded,
+        imagesFailed: built.imagesFailed,
+      },
+    };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Unknown error' };
   }
@@ -322,6 +410,31 @@ const PRODUCT_IMAGE_DIR = () => path.join(app.getPath('userData'), 'product-imag
 /** 单张图片上限（与 order-read-local-image 的 10MB 对齐） */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+/**
+ * 把一段图片字节落进 product-images 缓存并登记 `pl_images`（内容 SHA-256 命名去重）。
+ *
+ * 与 `importImageFile` 的分工：那个先做"这是不是一个用户选中的本地文件"的信任判定，
+ * 再交给这里落盘。**只此一份**落盘/去重逻辑，两条来源（用户选文件 / Excel 嵌入图）共用 ——
+ * 否则"同一张图两种去重口径"会让缓存里出现两份，且占用统计对不上。
+ */
+function landImageBuffer(
+  buf: Buffer,
+  source = 'upload',
+): { imageId: number; localPath: string; reused: boolean } {
+  if (!buf || !buf.length) throw new Error('图片内容为空');
+  if (buf.length > MAX_IMAGE_BYTES) throw new Error('图片超过 10MB 上限');
+  // 按**内容**判格式（不按扩展名）：项目里真实存在"内容是 WebP、文件名是 .jpg"的存量图
+  const fmt = sniffImageFormat(buf);
+  if (!fmt) throw new Error('文件内容不是受支持的图片格式（按文件头判断，不只看扩展名）');
+  const fingerprint = createHash('sha256').update(buf).digest('hex');
+  const dir = PRODUCT_IMAGE_DIR();
+  fs.mkdirSync(dir, { recursive: true });
+  const finalPath = path.join(dir, fingerprint + IMG_EXT_BY_FORMAT[fmt]);
+  if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
+  const rec = upsertImageRecord({ fingerprint, localPath: finalPath, source });
+  return { imageId: rec.imageId, localPath: finalPath, reused: rec.reused };
+}
+
 /** 把用户选中的图片复制进 product-images 缓存（内容 SHA-256 命名去重），返回登记后的图 */
 function importImageFile(
   srcPath: unknown,
@@ -336,16 +449,7 @@ function importImageFile(
   if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
     throw new Error('仅支持 jpg / png / webp 图片');
   }
-  const buf = fs.readFileSync(src);
-  const fmt = sniffImageFormat(buf);
-  if (!fmt) throw new Error('文件内容不是受支持的图片格式（按文件头判断，不只看扩展名）');
-  const fingerprint = createHash('sha256').update(buf).digest('hex');
-  const dir = PRODUCT_IMAGE_DIR();
-  fs.mkdirSync(dir, { recursive: true });
-  const finalPath = path.join(dir, fingerprint + IMG_EXT_BY_FORMAT[fmt]);
-  if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
-  const rec = upsertImageRecord({ fingerprint, localPath: finalPath, source });
-  return { imageId: rec.imageId, localPath: finalPath, reused: rec.reused };
+  return landImageBuffer(fs.readFileSync(src), source);
 }
 
 /**

@@ -62,3 +62,4 @@ market-out/
 
 # AI 工具本机记忆（软链到 .workbuddy/memory/MEMORY.md，不入库）
 AGENTS.local.md
+.cache/

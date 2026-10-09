@@ -6,6 +6,8 @@
 > ⚠️ **2026-10-08 起界面是三个页签**：产品 / 映射与关联 / 供应商 —— 「商品清单」在界面上**收起**
 > （判据：它写的池行没有下游消费者，见 [`2026-10-08-goods-page-entry-guide.md`](../notes/2026-10-08-goods-page-entry-guide.md)），
 > 但**数据层与 IPC 一行未删**，本文 §1–§3、§5.1、§5.2、§6.2 对它的描述仍然准确。
+> ⚠️ **2026-10-09 导入模板改列**：表头改为 `款编码|款式名|供应商|图片|颜色|尺码|克重|状态|备注`（**去「类目」**——导入不解析不提交，库层原样保留；**加图片/颜色/尺码/克重**——导出嵌真图 + 路径文本列，导入读嵌入图按锚点行归位、克重随 SKU 落 `pl_variants`）。
+> 本文 §7.2 验收表写的「导入/导出」行为以该次改列为准（`src/lib/productImport.ts` **已大改**，§0-A 表里"纯函数未动"的说法随之过期）；细节见 [`2026-10-09-product-template-rework.md`](../notes/2026-10-09-product-template-rework.md) 与 `CHANGELOG.md` 续十二。
 > **前置阅读**：`docs/decisions/ADR-002-master-data-layer.md`（**已 Accepted，本文须服从其 C1–C4**）、`docs/plans/DOMAIN_INTEGRATION_PLAN.md`（S1–S4）、`AGENTS.md`（§1.2 / §1.9 / §6.2；红线 3、23）
 
 ---

@@ -398,11 +398,37 @@ export interface ElectronAPI {
     items: ProductImportRowInput[];
     mode?: 'upsert' | 'insertOnly';
   }) => Promise<APIResult<ProductImportOutcome>>;
-  /** 保存渲染层生成的 xlsx（弹保存框）；buffer 无效时主进程返回 success=false */
+  /**
+   * 导出 / 下载模板：渲染层给「每格写什么 + 每行的图路径」，**主进程**用 exceljs 生成并嵌图。
+   * 空表头 = invalid payload。
+   */
   productExport: (payload: {
-    buffer: ArrayBuffer;
+    sheetName: string;
+    headers: string[];
+    /** 数据行（不含表头）；`cells` 长度与 `headers` 对齐 */
+    rows: { cells: string[]; imagePath?: string }[];
+    /** 「图片」列的 0 基下标（图就嵌在这一列上） */
+    imageColumn: number;
     defaultName?: string;
-  }) => Promise<APIResult<{ filePath: string }>>;
+  }) => Promise<APIResult<{ filePath: string; embedded: number; imagesFailed: number }>>;
+  /**
+   * 从导入的 xlsx 里抽**嵌入图片**：落盘 + 登记 `pl_images` → 按**锚点行号**报回。
+   * `sheetName` / `headerRow` 由渲染层解析得出（只有它知道哪张表是产品表）。
+   */
+  productExtractImages: (payload: {
+    buffer: ArrayBuffer;
+    sheetName: string;
+    /** 表头所在行（1-based） */
+    headerRow: number;
+  }) => Promise<
+    APIResult<{
+      /** 行号（字符串键，1-based Excel 行）→ 图 */
+      byRow: Record<string, { imageId: number; localPath: string }>;
+      /** 没能归位的图（表头以上 / 该行已有图 / 格式不认识…） */
+      skips: { rowNo: number; reason: string }[];
+      total: number;
+    }>
+  >;
   // ---- 店铺商品ID → 产品映射（P3；pl_shop_sku）----
   // 与 sk_name_map 的分工：那张表归**人写的文本**（店名/款名），这张表归**平台商品ID**（稳定标识）。
   /** 映射列表（关键字 / 状态 / 店铺过滤 + 分页；按更新时间倒序） */
@@ -1461,15 +1487,22 @@ export interface ProductImportRowInput {
   code: string;
   name: string;
   supplierId: number;
-  category: string;
   status: string;
   note: string;
+  /** 该行声明的 SKU；空数组 = 这行没说 SKU（不是"删掉该款现有 SKU"） */
+  skus: { color: string; size: string; weightG: number }[];
+  /** 该行 Excel 里那张图（`product-extract-images` 的产物）；0 = 没图，不覆盖款上已有主图 */
+  imageId: number;
 }
 
 /** 批量导入结果（`failed` 为库层才拦得住的失败行，如 insertOnly 模式下编码已存在） */
 export interface ProductImportOutcome {
   created: number;
   updated: number;
+  /** 本次真正写库的 SKU 条数（新增 + 更新） */
+  skusWritten: number;
+  /** 本次设为款主图的张数 */
+  imagesAttached: number;
   failed: { rowNo: number; code: string; message: string }[];
 }
 

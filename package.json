@@ -22,6 +22,7 @@
     "mail:body:smoke": "tsc -p tsconfig.electron.json && electron scripts/mail-body-protocol-smoke.cjs",
     "ipc:shape:smoke": "tsc -p tsconfig.electron.json && electron scripts/preload-ipc-shape-smoke.cjs",
     "product:smoke": "tsc -p tsconfig.electron.json && electron scripts/product-db-smoke.cjs",
+    "product:xlsx:smoke": "tsc -p tsconfig.electron.json && electron scripts/product-xlsx-smoke.cjs",
     "shop:smoke": "tsc -p tsconfig.electron.json && electron scripts/shop-db-smoke.cjs",
     "product:sku:smoke": "tsc -p tsconfig.electron.json && electron scripts/product-sku-smoke.cjs",
     "style:smoke": "tsc -p tsconfig.electron.json && electron scripts/style-authority-smoke.cjs",
@@ -57,6 +58,7 @@
     "picking:ui": "node --check scripts/picking-ui-smoke.mjs && node scripts/picking-ui-smoke.mjs",
     "today:ui": "node --check scripts/today-ui-smoke.mjs && node scripts/today-ui-smoke.mjs",
     "goods:ui": "node --check scripts/goods-ui-smoke.mjs && node scripts/goods-ui-smoke.mjs",
+    "goods:shot": "node --check scripts/goods-shot.mjs && node scripts/goods-shot.mjs",
     "shipping-rate:ui": "node --check scripts/shipping-rate-ui-smoke.mjs && node scripts/shipping-rate-ui-smoke.mjs"
   },
   "dependencies": {

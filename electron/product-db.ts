@@ -519,14 +519,27 @@ export interface ProductImportRow {
   code: string;
   name: string;
   supplierId: number;
-  category: string;
   status: string;
   note: string;
+  /**
+   * 该行声明的 SKU（颜色 + 尺码 + 克重）。
+   * 空数组 = 这行没说 SKU（只导产品本身），**不是**"把这个款现有的 SKU 都删掉"。
+   */
+  skus: { color: string; size: string; weightG: number }[];
+  /**
+   * 该行 Excel 里那张图（已由 `product-extract-images` 落盘并登记 `pl_images`）；
+   * 0 = 这行没图（**不覆盖**款上已有的主图）。
+   */
+  imageId: number;
 }
 
 export interface ProductImportOutcome {
   created: number;
   updated: number;
+  /** 本次真正写库的 SKU 条数（新增 + 更新） */
+  skusWritten: number;
+  /** 本次设为款主图的张数 */
+  imagesAttached: number;
   /** 只有库层才拦得住的失败行（如 `insertOnly` 模式下编码已存在） */
   failed: { rowNo: number; code: string; message: string }[];
 }
@@ -539,16 +552,35 @@ export interface ProductImportOutcome {
  * 若改成"有一行错就整批回滚"，用户拿到一份 500 行的表里有 1 个空编码时会**一行都进不去**，
  * 而 P2 验收要求的正是「490 入库、10 行可在界面重试」。
  *
+ * ---- 三处与"全量提交"不同调的取舍（2026-10-08，模板改列时一并裁定）----
+ *
+ * ① **类目保留**：模板与导出都不再有「类目」列 ⇒ 这里对**已存在的产品原样保留** `category`。
+ *    若照 `upsertProduct` 的全量提交语义写空串，用户"导出→改几行→导回"一次，**所有款的类目
+ *    就全没了**，而且不报错、界面上也看不出是哪一步弄丢的。少一列就清空一列，是这张表最贵的坑。
+ * ② **SKU 按（颜色, 尺码）upsert**：同款的重复行在渲染层已合并成一行多 SKU，这里只负责落库。
+ *    克重 **0 = 这行没写 ⇒ 不覆盖已有值** —— 克重是算运费的输入，静默清零会让成本算错且无痕。
+ *    想清掉某个 SKU 的克重请走界面（那里改完立刻看得见）。
+ * ③ **有图才设主图**：这一行插了图 ⇒ 覆盖设为款主图（用户把图放进去就是要换它）；
+ *    这行没图 ⇒ **不动**已有主图（"导出→改→导回"时导出的文件自带图，空着说明用户删了它，
+ *    但删图的意图不如"没带图"这个事实明确，宁可不覆盖）。
+ *
  * @param mode `upsert`（默认）= 编码已存在则更新该行；`insertOnly` = 编码已存在则记为该行失败
- * @returns 新增 / 更新 / 失败行的计数与明细
+ * @returns 新增 / 更新 / SKU / 图 / 失败行的计数与明细
  */
 export function importProducts(
   rows: ProductImportRow[],
   mode: 'upsert' | 'insertOnly' = 'upsert',
 ): ProductImportOutcome {
   ensureProductSchema();
+  ensureVariantSchema();
   const list = Array.isArray(rows) ? rows : [];
-  const out: ProductImportOutcome = { created: 0, updated: 0, failed: [] };
+  const out: ProductImportOutcome = {
+    created: 0,
+    updated: 0,
+    skusWritten: 0,
+    imagesAttached: 0,
+    failed: [],
+  };
 
   dbTransaction(() => {
     for (const r of list) {
@@ -556,21 +588,63 @@ export function importProducts(
       const code = str(r?.code, MAX.code);
       try {
         if (!code) throw new Error('款编码为空');
-        const existing = dbGet<{ id: number }>(`SELECT id FROM pl_products WHERE code = ?`, [code]);
+        const existing = dbGet<{ id: number; category: string }>(
+          `SELECT id, category FROM pl_products WHERE code = ?`,
+          [code],
+        );
         if (existing && mode === 'insertOnly') {
           throw new Error(`款编码已存在：${code}`);
         }
-        upsertProduct({
+        const saved = upsertProduct({
           id: existing ? num(existing.id) : 0,
           code,
           name: str(r?.name, MAX.name),
           supplierId: toId(r?.supplierId),
-          category: str(r?.category, MAX.category),
+          // ① 保留类目：新行无类目（空串），已有行原样带回来
+          category: existing ? str(existing.category, MAX.category) : '',
           status: (PRODUCT_STATUSES as readonly string[]).includes(str(r?.status, MAX.status))
             ? (str(r?.status, MAX.status) as ProductStatus)
             : 'active',
           note: str(r?.note, MAX.note),
         });
+
+        // ② SKU
+        for (const s of Array.isArray(r?.skus) ? r.skus : []) {
+          const color = str(s?.color, VARIANT_MAX.color);
+          const size = str(s?.size, VARIANT_MAX.size);
+          // 解析侧已保证颜色/尺码成对；这里只兜底（不成对就跳过，不猜一个补上）
+          if (!color || !size) continue;
+          const name = `${color} ${size}`;
+          const cur = dbGet<{ id: number; weight_g: number }>(
+            `SELECT id, weight_g FROM pl_variants WHERE product_id = ? AND name = ?`,
+            [saved.id, name],
+          );
+          const g = Math.round(Number(s?.weightG));
+          const asked = Number.isFinite(g) && g > 0 ? g : 0;
+          variantUpsert({
+            id: cur ? num(cur.id) : 0,
+            productId: saved.id,
+            code: '',
+            name,
+            color,
+            size,
+            // 没写克重时不覆盖已有值（见上方 ②）
+            weightG: asked > 0 ? asked : cur ? num(cur.weight_g) : 0,
+            status: 'active',
+          });
+          out.skusWritten++;
+        }
+
+        // ③ 图
+        const imageId = toId(r?.imageId);
+        if (
+          imageId &&
+          dbGet<{ id: number }>(`SELECT id FROM pl_images WHERE id = ?`, [imageId])
+        ) {
+          attachProductImage(saved.id, imageId);
+          out.imagesAttached++;
+        }
+
         if (existing) out.updated++;
         else out.created++;
       } catch (e) {

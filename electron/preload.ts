@@ -909,18 +909,59 @@ contextBridge.exposeInMainWorld('electronAPI', {
             code: typeof r?.code === 'string' ? r.code.slice(0, 64) : '',
             name: typeof r?.name === 'string' ? r.name.slice(0, 200) : '',
             supplierId: typeof r?.supplierId === 'number' ? r.supplierId : 0,
-            category: typeof r?.category === 'string' ? r.category.slice(0, 60) : '',
+            // 类目**不在这里**：模板与导出都没有这一列，库层对已存在的产品原样保留（见 product-db）。
             status: typeof r?.status === 'string' ? r.status.slice(0, 20) : 'active',
             note: typeof r?.note === 'string' ? r.note.slice(0, 2000) : '',
+            skus: Array.isArray(r?.skus)
+              ? r.skus.slice(0, 500).map((s: any) => ({
+                  color: typeof s?.color === 'string' ? s.color.slice(0, 40) : '',
+                  size: typeof s?.size === 'string' ? s.size.slice(0, 40) : '',
+                  weightG:
+                    typeof s?.weightG === 'number' && Number.isFinite(s.weightG)
+                      ? Math.round(s.weightG)
+                      : 0,
+                }))
+              : [],
+            imageId:
+              typeof r?.imageId === 'number' && Number.isInteger(r.imageId) && r.imageId > 0
+                ? r.imageId
+                : 0,
           }))
         : [],
       mode: payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert',
     }),
-  // buffer 有意**不做类型兜底**：无效就原样传过去，由主进程判 `instanceof ArrayBuffer`
-  // 并返回 `{success:false, error}`。在这里塞一个空 buffer 会让"传错了"变成"导出了个空文件"。
+  // 导入侧：抽 xlsx 里的**嵌入图**（渲染层的 SheetJS 读不到浮动图，只能主进程用 exceljs）
+  productExtractImages: (payload: any) =>
+    ipcRenderer.invoke('product-extract-images', {
+      buffer: payload?.buffer,
+      sheetName: typeof payload?.sheetName === 'string' ? payload.sheetName.slice(0, 120) : '',
+      headerRow:
+        typeof payload?.headerRow === 'number' && Number.isFinite(payload.headerRow)
+          ? Math.max(0, Math.floor(payload.headerRow))
+          : 0,
+    }),
+  // 导出侧：**不再传 buffer** —— 渲染层给"每格写什么 + 每行的图路径"，主进程用 exceljs
+  // 生成并嵌图（嵌入图要写 xl/drawings + 关系 + 内容类型，SheetJS 写不了）。
+  // `headers` 空 = 无效载荷，由主进程返回 `{success:false}`（这里不塞默认表头，否则
+  // "传错了"会变成一个"表头是空的、但导出成功"的文件）。
   productExport: (payload: any) =>
     ipcRenderer.invoke('product-export', {
-      buffer: payload?.buffer,
+      sheetName: typeof payload?.sheetName === 'string' ? payload.sheetName.slice(0, 31) : '',
+      headers: Array.isArray(payload?.headers)
+        ? payload.headers.slice(0, 64).map((h: any) => (typeof h === 'string' ? h.slice(0, 60) : ''))
+        : [],
+      rows: Array.isArray(payload?.rows)
+        ? payload.rows.slice(0, 20000).map((r: any) => ({
+            cells: Array.isArray(r?.cells)
+              ? r.cells.slice(0, 64).map((c: any) => (typeof c === 'string' ? c : String(c ?? '')))
+              : [],
+            imagePath: typeof r?.imagePath === 'string' ? r.imagePath.slice(0, 1024) : '',
+          }))
+        : [],
+      imageColumn:
+        typeof payload?.imageColumn === 'number' && Number.isFinite(payload.imageColumn)
+          ? Math.max(0, Math.floor(payload.imageColumn))
+          : 0,
       defaultName:
         typeof payload?.defaultName === 'string' && payload.defaultName
           ? payload.defaultName.slice(0, 128)

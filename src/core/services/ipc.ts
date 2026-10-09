@@ -461,10 +461,26 @@ export interface ElectronApi {
     items: ProductImportRowInput[];
     mode?: 'upsert' | 'insertOnly';
   }): Promise<ApiResult<ProductImportOutcome>>;
+  /** 导出 / 模板：渲染层给「每格写什么 + 每行的图路径」，主进程用 exceljs 生成并嵌图 */
   productExport(payload: {
-    buffer: ArrayBuffer;
+    sheetName: string;
+    headers: string[];
+    rows: { cells: string[]; imagePath?: string }[];
+    imageColumn: number;
     defaultName?: string;
-  }): Promise<ApiResult<{ filePath: string }>>;
+  }): Promise<ApiResult<{ filePath: string; embedded: number; imagesFailed: number }>>;
+  /** 抽 xlsx 里的**嵌入图**（浮动对象；SheetJS 读不到，只有主进程 exceljs 能） */
+  productExtractImages(payload: {
+    buffer: ArrayBuffer;
+    sheetName: string;
+    headerRow: number;
+  }): Promise<
+    ApiResult<{
+      byRow: Record<string, { imageId: number; localPath: string }>;
+      skips: { rowNo: number; reason: string }[];
+      total: number;
+    }>
+  >;
   // ---- 店铺商品ID → 产品映射（P3；pl_shop_sku）----
   productSkuList(payload?: {
     search?: string;
@@ -1156,12 +1172,30 @@ export function productImport(payload: {
   return ipc.productImport(payload);
 }
 
-/** 保存渲染层生成的 xlsx（弹保存框） */
+/** 保存导出的 xlsx（主进程生成并嵌图，弹保存框）；返回内嵌图张数与失败张数 */
 export function productExport(payload: {
-  buffer: ArrayBuffer;
+  sheetName: string;
+  headers: string[];
+  rows: { cells: string[]; imagePath?: string }[];
+  imageColumn: number;
   defaultName?: string;
-}): Promise<ApiResult<{ filePath: string }>> {
+}): Promise<ApiResult<{ filePath: string; embedded: number; imagesFailed: number }>> {
   return ipc.productExport(payload);
+}
+
+/** 抽导入文件里的嵌入图（落盘 + 登记 `pl_images`，按锚点行报回） */
+export function productExtractImages(payload: {
+  buffer: ArrayBuffer;
+  sheetName: string;
+  headerRow: number;
+}): Promise<
+  ApiResult<{
+    byRow: Record<string, { imageId: number; localPath: string }>;
+    skips: { rowNo: number; reason: string }[];
+    total: number;
+  }>
+> {
+  return ipc.productExtractImages(payload);
 }
 
 /** 映射列表（店铺商品ID → 产品；关键字 / 状态 / 店铺 / 款 过滤 + 分页） */

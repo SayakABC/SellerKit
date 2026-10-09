@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,6 +48,9 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
   // 「有图 / 无图」两个样本都必须有：弹层与对比模式里"取图失败渲染空占位、而不是整列空掉"
   // 这条只有在同一屏里同时存在两种行时才抓得到（全是图的样本恒绿）。
   var PRODUCT_IMG = '/tmp/smoke-product-images/s1.webp';
+  // 断言脚本是**另一段 script**（与假桥不同作用域），要通过 window 转手。
+  // 导出闭环那条断言要拿它比对"导出的图路径 == 库里主图的路径"—— 写死字面量两边就会各改各的。
+  window.__smokeProductImg = PRODUCT_IMG;
   var PRODUCTS = [
     { id: 1, code: 'S1', name: '款一', supplierId: 7, supplierName: '厂A', category: '衣服', status: 'active', note: '', imageId: 1, imagePath: PRODUCT_IMG, createdAt: '', updatedAt: '' },
     { id: 2, code: 'S2', name: '款二', supplierId: 0, supplierName: '', category: '衣服', status: 'active', note: '', imageId: 0, imagePath: '', createdAt: '', updatedAt: '' },
@@ -322,6 +326,54 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
         }
       }
       return { success: true, data: { updated: ids.length } };
+    },
+
+    /* ---- Excel 导入 / 导出（2026-10-08 模板改列后补的桩）----
+       ⚠️ 这两个桩**忠实于新形状**，不"贴心地"补默认值：
+         · productImport 的 items 里**不该有 category**（模板已无这一列，库层对已存在的款
+           原样保留）——夹具若自己补一个空 category，那条坑就永远抓不到；
+         · productExport 收到的是**每格文本 + 每行的图路径**（不是 buffer）：表头/行由渲染层算，
+           主进程只写格子 + 嵌图（electron/product-xlsx.ts）。
+       抽图那一步（product-extract-images）由假桥给**固定答案**：真抽取（锚点归位、
+       图真的进了 zip）由 scripts/product-xlsx-smoke.cjs 单独钉住，两段各管一头。 */
+    'selectExcel': function () {
+      rec('selectExcel', {});
+      return { success: true, data: { filePath: '/tmp/smoke-import.xlsx', data: window.__smokeXlsxBuffer() } };
+    },
+    'productExtractImages': function (p) {
+      rec('productExtractImages', { sheetName: p && p.sheetName, headerRow: p && p.headerRow, hasBuffer: !!(p && p.buffer) });
+      return { success: true, data: {
+        // 两张图、两种命运：第 2 行（合格）的图提交后成为款主图；第 4 行刻意给**规格对不上**
+        // 的行 —— 验"图不改变合格性"（照旧标跳过），且提交被剔除时图跟着行一起不进来
+        //（结果页的主图数只算第 2 行那张）。
+        byRow: {
+          '2': { imageId: 55, localPath: '/tmp/smoke-product-images/imported.png' },
+          '4': { imageId: 56, localPath: '/tmp/smoke-product-images/imported2.png' },
+        },
+        // 第 9 行是空行 ⇒ 图归不了位，必须被说出来（否则就是"导入成功但图没进来"）
+        skips: [{ rowNo: 9, reason: '第 9 行插了图片，但那一行没有对应的导入行（表头以上 / 空行 / 与上一行同款已合并），这张图没有归位' }],
+        total: 3,
+      } };
+    },
+    'productImport': function (p) {
+      rec('productImport', p);
+      var items = (p && p.items) || [];
+      return { success: true, data: {
+        created: items.length,
+        updated: 0,
+        skusWritten: items.reduce(function (n, r) { return n + (((r && r.skus) || []).length); }, 0),
+        imagesAttached: items.filter(function (r) { return r && r.imageId > 0; }).length,
+        failed: [],
+      } };
+    },
+    'productExport': function (p) {
+      rec('productExport', { sheetName: p && p.sheetName, headers: p && p.headers, imageColumn: p && p.imageColumn, rows: p && p.rows, defaultName: p && p.defaultName });
+      var rows = (p && p.rows) || [];
+      return { success: true, data: {
+        filePath: '/tmp/smoke-out.xlsx',
+        embedded: rows.filter(function (r) { return r && r.imagePath; }).length,
+        imagesFailed: 0,
+      } };
     },
 
     /* ---- 待关联队列（实时聚合：QUEUE − 本会话已生效的映射）---- */
@@ -2201,6 +2253,143 @@ async function main() {
         !document.querySelector('[data-act="help-panel"]'),
       'active=' + flat(document.querySelector('.gd-tabs .gd-tab.is-active')));
 
+    /* -------------------------------------------------------------------------
+       Excel 导入 / 导出：模板改列（去「类目」、加「图片 / 颜色 / 尺码 / 克重」）之后，
+       这条链在**四个地方**各有一份实现，任何一处没跟上都是静默错误：
+         ① 渲染层算表头与行（纯函数，vitest 覆盖）
+         ② 主进程写 xlsx 与嵌图（product-xlsx-smoke 覆盖）
+         ③ 库层落 SKU / 保留类目（product-db-smoke 覆盖）
+         ④ **界面**：预览表渲染哪几列、发出去的 items 长什么样（这一条只有本段能测）
+       本段的两个"最值钱"的断言：
+         · ⭐ 发出去的 items **没有 category** —— 有它就会把已存在的款的类目清空；
+         · ⭐ 图贴给的是**抽图报的那一行**（第 4 行），不是"顺位第一个有数据的行"。
+       ------------------------------------------------------------------------- */
+    step('import-export');
+    await clickText('.gd-tabs .gd-tab', '建档与关联');
+    await settle(function () { return !!document.querySelector('[data-act="import-excel"]'); }, 8000);
+    report('左栏工具栏：导出 / 导入 Excel 都是真按钮',
+      !!document.querySelector('[data-act="export-products"]') &&
+        !!document.querySelector('[data-act="import-excel"]'));
+
+    // ── 导出：渲染层给"每格写什么 + 每行的图路径"，主进程只写格子 + 嵌图 ──
+    var exBefore = calls('productExport').length;
+    var exBtn = document.querySelector('[data-act="export-products"]');
+    if (exBtn) exBtn.click();
+    await settle(function () { return calls('productExport').length > exBefore; }, 8000);
+    var exPayload = calls('productExport')[calls('productExport').length - 1] || {};
+    var exHeads = exPayload.headers || [];
+    report('导出换成新形状：给的是 headers / rows / imageColumn（不再是渲染层生成的 buffer）',
+      Array.isArray(exPayload.headers) && Array.isArray(exPayload.rows) &&
+        typeof exPayload.imageColumn === 'number',
+      JSON.stringify({ heads: exHeads.length, rows: (exPayload.rows || []).length, col: exPayload.imageColumn }));
+    report('导出表头去掉「类目」、加上「图片 / 颜色 / 尺码 / 克重」',
+      exHeads.indexOf('类目') < 0 && exHeads.indexOf('图片') >= 0 && exHeads.indexOf('颜色') >= 0 &&
+        exHeads.indexOf('尺码') >= 0 && exHeads.indexOf('克重') >= 0,
+      exHeads.join('/'));
+    report('imageColumn 指向的正是「图片」那一列（指错 = 所有图嵌到别的列上）',
+      exHeads[exPayload.imageColumn] === '图片',
+      'col=' + exPayload.imageColumn + ' -> ' + exHeads[exPayload.imageColumn]);
+    report('导出把主图路径按行带上（"导出→改→导回"闭环里图跟着回来）',
+      (exPayload.rows || []).some(function (r) {
+        return r && r.imagePath === window.__smokeProductImg;
+      }),
+      JSON.stringify((exPayload.rows || []).map(function (r) { return (r && r.imagePath) || ''; })));
+    report('导出的 SKU 列来自 pl_variants（尺码/克重按颜色拼成一格）',
+      (exPayload.rows || []).some(function (r) {
+        // 克重期望 '320,275' 而不是夹具初值 '320,'：上面的 save 步已把黑 M 改成 275，
+        // 导出读的是**库里的当下值** —— 导出真带出旧值反而说明读取链路是死的。
+        return r && r.cells && r.cells[5] === 'L,M' && r.cells[6] === '320,275';
+      }),
+      JSON.stringify((exPayload.rows || []).map(function (r) { return r && r.cells && r.cells.slice(4, 7); })));
+    report('图只挂在每个款的**第一行**（同一张图不重复嵌 N 遍）',
+      (exPayload.rows || []).filter(function (r) { return r && r.imagePath; }).length === 1,
+      String((exPayload.rows || []).filter(function (r) { return r && r.imagePath; }).length));
+
+    // ── 导入：真 xlsx（Node 侧造的）→ 逐张体检 → 抽图 → 预览 → 提交 ──
+    document.querySelector('[data-act="import-excel"]').click();
+    await settle(function () { return !!document.querySelector('[data-act="pick-file"]'); }, 8000);
+    document.querySelector('[data-act="pick-file"]').click();
+    await settle(function () { return !!document.querySelector('[data-act="import-table"]'); }, 10000);
+    var impHeads = all('[data-act="import-table"] thead th').map(flat);
+    report('预览表头：没有「类目」，有「图片 / 颜色 / 尺码 / 克重」',
+      impHeads.indexOf('类目') < 0 && impHeads.indexOf('图片') >= 0 && impHeads.indexOf('颜色') >= 0 &&
+        impHeads.indexOf('尺码') >= 0 && impHeads.indexOf('克重') >= 0,
+      impHeads.join('/'));
+    // 预览默认「只看有问题的行」（有问题行存在时）—— 下面几条断言要**通读所有行**，
+    // 先把开关切回「全部」。判定开关当前态用 aria-pressed（点了没反应时会在这条上红）。
+    var opBtn = document.querySelector('[data-act="only-problems"]');
+    if (opBtn && opBtn.getAttribute('aria-pressed') === 'true') opBtn.click();
+    await settle(function () {
+      return document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no]').length >= 3;
+    }, 6000);
+    var imgCells = all('[data-act="row-image"]');
+    report('「图片」列按行显示有没有图（3 行里 2 行有：第 2、4 行）',
+      imgCells.length === 3 &&
+        imgCells.filter(function (e) { return e.getAttribute('data-has-image') === '1'; }).length === 2,
+      imgCells.map(function (e) { return e.getAttribute('data-has-image'); }).join(','));
+    report('⭐ 图贴给的是**抽图报的那一行**（第 4 行），不是第一个有数据的行',
+      (function () {
+        var r = document.querySelector('[data-act="import-table"] tbody tr[data-row-no="4"]');
+        return !!r && r.querySelector('[data-act="row-image"]').getAttribute('data-has-image') === '1';
+      })(),
+      all('[data-act="import-table"] tbody tr[data-row-no]').map(function (tr) {
+        return tr.getAttribute('data-row-no') + ':' +
+          (tr.querySelector('[data-act="row-image"]') || { getAttribute: function () { return '?'; } }).getAttribute('data-has-image');
+      }).join(' '));
+    report('汇总里报出「图片 N/M 张归位」（图没进来的事必须看得见）',
+      flat(document.querySelector('[data-act="import-images"]')).indexOf('2/3') >= 0,
+      flat(document.querySelector('[data-act="import-images"]')));
+    report('归不了位的那张图有单独一行说明（第 9 行是空行）',
+      !!document.querySelector('[data-act="import-notes"]') &&
+        flat(document.querySelector('[data-act="import-notes"]')).indexOf('第 9 行') >= 0,
+      flat(document.querySelector('[data-act="import-notes"]')));
+    report('尺码/克重按顺序对应渲染：第 2 行 尺码=M,L、克重=120,',
+      (function () {
+        var tds = document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no="2"] td');
+        return tds.length > 8 && flat(tds[7]) === 'M,L' && flat(tds[8]) === '120,';
+      })(),
+      (function () {
+        var tds = document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no="2"] td');
+        return tds.length > 8 ? flat(tds[7]) + ' / ' + flat(tds[8]) : 'tds=' + tds.length;
+      })());
+    report('⭐ 规格对不上的第 4 行标成「跳过」，而它**仍带着图**（图不改变合格性）',
+      (function () {
+        var r = document.querySelector('[data-act="import-table"] tbody tr[data-row-no="4"]');
+        return !!r && flat(r).indexOf('跳过') >= 0 &&
+          r.querySelector('[data-act="row-image"]').getAttribute('data-has-image') === '1';
+      })(),
+      flat(document.querySelector('[data-act="import-table"] tbody tr[data-row-no="4"]')).slice(0, 60));
+
+    var impBefore = calls('productImport').length;
+    document.querySelector('[data-act="commit-import"]').click();
+    await settle(function () { return calls('productImport').length > impBefore; }, 10000);
+    var items = (calls('productImport')[impBefore] || {}).items || [];
+    report('只提交能导入的行：规格对不上的 IMP-3 不在 items 里',
+      items.length === 2 && !items.some(function (x) { return x.code === 'IMP-3'; }),
+      JSON.stringify(items.map(function (x) { return x.code; })));
+    report('⭐ items 里**没有** category 字段（模板去列 ⇒ 库层对已存在的款原样保留类目）',
+      items.length > 0 && items.every(function (x) { return !('category' in x); }),
+      items.length ? JSON.stringify(Object.keys(items[0])) : 'empty');
+    report('SKU 随行带上（IMP-1 = 红 M 120 克 + 红 L 未填=0）',
+      (function () {
+        var r = items.filter(function (x) { return x.code === 'IMP-1'; })[0];
+        return !!r && JSON.stringify(r.skus) ===
+          JSON.stringify([{ color: '红', size: 'M', weightG: 120 }, { color: '红', size: 'L', weightG: 0 }]);
+      })(),
+      JSON.stringify((items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).skus));
+    report('抽到图的行把 imageId 带上（图跟着合格行走，进库即成主图）',
+      (items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).imageId === 55,
+      String((items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).imageId));
+    report('没图的行走 imageId=0（进库后不该把已有的款主图清掉）',
+      (items.filter(function (x) { return x.code === 'IMP-2'; })[0] || {}).imageId === 0,
+      String((items.filter(function (x) { return x.code === 'IMP-2'; })[0] || {}).imageId));
+    report('结果页报出写入的 SKU 数与主图数（这两件事没做成时用户看不见）',
+      (function () {
+        var t = flat(document.querySelector('.im-result'));
+        return t.indexOf('SKU') >= 0 && t.indexOf('主图') >= 0;
+      })(),
+      flat(document.querySelector('.im-result')).slice(0, 80));
+
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));
   } catch (e) {
@@ -2211,13 +2400,47 @@ async function main() {
 main();
 </script>`;
 
+// ── 导入夹具：一份**真的 xlsx**（列与新版模板一致），注入页面给「选择 Excel 文件」用 ──
+//
+// 为什么要在 Node 侧先造出真文件、再 base64 塞进页面：导入弹层的第一件事就是
+// `XLSX.read(buffer)` 逐张体检 + 列名匹配 —— 用假的二维数组喂不进去（那是单测的活），
+// 而这里要验的正是"**真文件**读出来的列与界面渲染的列一致、发出去的 items 形状对"。
+//
+// 三行的用意（每一行挡一类错）：
+//   IMP-1  尺码 2 个 / 克重写 `120,`（第二个留空）—— 顺序对应 + "空格位是有意义的位置"这条
+//   IMP-2  只填尺码不填克重 —— 合法（0 = 没填），不该被当成错误
+//   IMP-3  尺码 2 个 / 克重 1 个 —— 对不上，必须标成"跳过"且**不**发去落库
+//
+// ⚠️ 不在这份夹具里放图：嵌入图走的是主进程 exceljs（假桥 stub 了 `product-extract-images`），
+//    真抽取由 `scripts/product-xlsx-smoke.cjs` 单独钉住。两段各管一头，各自可单独跑。
+const XLSX_REQUIRE = createRequire(import.meta.url);
+const XLSX_LIB = XLSX_REQUIRE(path.join(ROOT, 'node_modules', 'xlsx'));
+const IMPORT_FIXTURE_AOA = [
+  ['款编码', '款式名', '供应商', '图片', '颜色', '尺码', '克重', '状态', '备注'],
+  ['IMP-1', '导入款一', '厂A', '', '红', 'M,L', '120,', '启用', ''],
+  ['IMP-2', '导入款二', '厂A', '', '蓝', 'S', '', '启用', ''],
+  ['IMP-3', '导入款三', '厂A', '', '白', 'S,T', '110', '启用', ''],
+];
+const IMPORT_XLSX_B64 = (() => {
+  const wb = XLSX_LIB.utils.book_new();
+  XLSX_LIB.utils.book_append_sheet(wb, XLSX_LIB.utils.aoa_to_sheet(IMPORT_FIXTURE_AOA), '产品库');
+  return XLSX_LIB.write(wb, { bookType: 'xlsx', type: 'base64' });
+})();
+// ⚠️ 这段是**普通字符串拼接**，不是模板字面量：`FAKE_BRIDGE` 那个模板串里不能出现反引号，
+//    而 base64 里可能出现任何字符，用 JSON.stringify 转义最稳。
+const XLSX_FIXTURE_SCRIPT =
+  '<script>window.__smokeXlsxB64=' +
+  JSON.stringify(IMPORT_XLSX_B64) +
+  ';window.__smokeXlsxBuffer=function(){var s=window.__smokeXlsxB64||"";var b=atob(s);' +
+  'var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;};</script>';
+
 rmSync(WORK, { recursive: true, force: true });
 mkdirSync(WORK, { recursive: true });
 cpSync(DIST, WORK, { recursive: true });
 const indexPath = path.join(WORK, 'index.html');
 let html = readFileSync(indexPath, 'utf8');
 html = html.replace(/<meta\s+http-equiv="Content-Security-Policy"[^>]*>/i, '');
-html = html.replace('</head>', () => FAKE_BRIDGE + '</head>');
+html = html.replace('</head>', () => XLSX_FIXTURE_SCRIPT + FAKE_BRIDGE + '</head>');
 html = html.replace('</body>', () => ASSERT_SCRIPT + '</body>');
 writeFileSync(indexPath, html);
 

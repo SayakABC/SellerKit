@@ -53,8 +53,14 @@
       <span v-if="loading" class="wb-muted gd-toolbar__hint">读取中…</span>
 
       <div class="gd-toolbar__actions">
-        <button class="wb-btn" type="button" :disabled="busy" @click="doExport">导出</button>
-        <button class="wb-btn" type="button" :disabled="busy" @click="importOpen = true">
+        <button class="wb-btn" type="button" data-act="export-products" :disabled="busy" @click="doExport">导出</button>
+        <button
+          class="wb-btn"
+          type="button"
+          data-act="import-excel"
+          :disabled="busy"
+          @click="importOpen = true"
+        >
           导入 Excel
         </button>
         <button

@@ -11,14 +11,23 @@ const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
 const orderDb = require('./order-db');
-// 「本页汇总」（order-sku-rollup）的实现住在产品域：那里是 `pl_shop_sku` 匹配规则的唯一出处
-// （`resolveShopRef` + `resolveSkuBatch`），本文件只接线，不复制规则。
-const productDb = require('./product-db') as typeof import('./product-db');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
 const { isUserFileAllowed } = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
 /** 主图缓存目录：userData/order-images/ */
 const IMAGE_DIR = () => path.join(app.getPath('userData'), 'order-images');
+
+/**
+ * 「导入日」过滤参数（`yyyy-mm-dd`，本地时区）—— **只放行这个形状**，其余一律当"不筛"。
+ *
+ * 为什么不透传给 SQL 一个任意字符串：这个值会进 `date(o.created_at) = ?` 的参数位，
+ * 形状不收窄的话，一个 `'` 或者半截日期会变成"永远匹配不上"（= 静默空列表，
+ * 用户读成"今天没导东西"）。宁可退化成全库，也不给一个看起来生效、其实筛空的过滤。
+ */
+function sanitizeImportDate(v: unknown): string | undefined {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
+}
 
 // ---- 识别引擎 API Key 安全存储（P2）----
 // 目标：API Key 是敏感凭据，不应随 config 以明文落 electron-store。
@@ -152,31 +161,16 @@ register('order-list', async (payload) => {
   const corrected =
     payload?.corrected === true || payload?.corrected === false ? !!payload.corrected : undefined;
   const search = typeof payload?.search === 'string' ? payload.search.slice(0, 100) : undefined;
-  return { success: true, data: orderDb.listOrdersPage({ offset, limit, corrected, search }) };
+  return {
+    success: true,
+    data: orderDb.listOrdersPage({ offset, limit, corrected, search, importDate: sanitizeImportDate(payload?.importDate) }),
+  };
 });
 
 // 清空订单与识别缓存
 register('order-clear', async () => {
   orderDb.clearAll();
   return { success: true };
-});
-
-// ⭐ 本页汇总（核对页指标条）：这批订单行（店铺**原文** + 商品ID）已配到哪些产品 / 几家供应商。
-//   为什么走主进程：判"这个商品属于哪个产品"要先按**人工归一规则**把店铺原文变成店铺实体，
-//   再查 `pl_shop_sku` —— 这套规则在落库/回流/待关联队列三处已经在用，渲染层再写一份必然分叉
-//   （症状：队列说这家店已归一、核对页却统计不出来，两边分别看都正常）。实现见
-//   `product-db.resolveOrderSkuRollup`（本文件只是薄接线 + 入参二次校验）。
-register('order-sku-rollup', async (payload) => {
-  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  return {
-    success: true,
-    data: productDb.resolveOrderSkuRollup(
-      rows.slice(0, 500).map((r: any) => ({
-        shop: typeof r?.shop === 'string' ? r.shop.slice(0, 200) : '',
-        itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
-      })),
-    ),
-  };
 });
 
 // 订单原始行（最小投影：id/order_no/raw_fields + shop/order_time/style_code/style_color；只读）——
@@ -198,7 +192,10 @@ register('order-shipping-rows', async (payload) => {
   orderDb.ensureOrderSchema();
   const limit = typeof payload?.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 1), 2000) : 500;
   const src = payload?.source === 'import' || payload?.source === 'collect' ? payload.source : 'all';
-  return { success: true, data: orderDb.shippingRows(limit, { source: src }) };
+  return {
+    success: true,
+    data: orderDb.shippingRows(limit, { source: src, importDate: sanitizeImportDate(payload?.importDate) }),
+  };
 });
 
 // ---- 待识别队列（oi_queue）：导入行整批落库；失败/缺图重启不丢、可增量重试 ----
@@ -361,7 +358,8 @@ register('order-style-resolve', async (payload) => {
   return { success: true, data: { styleCode: res.styleCode, styleColorCode: res.styleColorCode } };
 });
 
-// 产品库列表（款编码/款色/统计）
+// 款选项列表（「归属款」下拉的数据源）：**产品库驱动的全集**（含还没进识别链的手工新建款），
+// 每项带可选颜色（产品库 SKU 颜色 + 识别链款色）。详见 `order-db.listStyles` 的注释。
 register('order-style-list', async () => {
   orderDb.ensureOrderSchema();
   return { success: true, data: orderDb.listStyles() };
@@ -379,13 +377,17 @@ register('order-style-delete', async (payload) => {
 
 // 手动归并款式：把订单图片挂到指定款编码的对应款色，并把订单指纹记入该款式的附加指纹表
 // （解决同款衣服识别漂移产生多个款编码：归并后后续自动识别也能命中目标款编码）
-// payload { orderId, styleId, color, fingerprint? }
+// payload { orderId, styleCode, color, fingerprint? }（也接受老形状 { styleId } —— 宿主冒烟仍在用）
+// ⭐ 款**按编码**认，不按 id：下拉的数据源是产品库（`listStyles`），手工新建、还没出过订单的款
+//    在识别池里没有行，主进程要用 `ensureStyleByCode` 给它补一行占位款（见该函数注释）。
 register('order-style-assign', async (payload) => {
   if (!isPlainObject(payload) || typeof payload.orderId !== 'number' || payload.orderId <= 0) {
     return { success: false, error: 'invalid orderId' };
   }
-  if (typeof payload.styleId !== 'number' || payload.styleId <= 0) {
-    return { success: false, error: 'invalid styleId' };
+  const styleId = typeof payload.styleId === 'number' && payload.styleId > 0 ? payload.styleId : 0;
+  const styleCode = typeof payload.styleCode === 'string' ? payload.styleCode.slice(0, 64) : '';
+  if (!styleId && !styleCode) {
+    return { success: false, error: 'invalid styleCode' };
   }
   const color = typeof payload.color === 'string' ? payload.color.slice(0, 50) : '';
   const fingerprint = typeof payload.fingerprint === 'string' ? payload.fingerprint.slice(0, 512) : '';
@@ -393,7 +395,8 @@ register('order-style-assign', async (payload) => {
   try {
     const res = orderDb.assignOrderStyle({
       orderId: payload.orderId,
-      styleId: payload.styleId,
+      styleId,
+      styleCode,
       color,
       fingerprint: fingerprint || undefined,
     });
@@ -508,6 +511,25 @@ register('order-mark-corrected', async (payload) => {
     .slice(0, 10000);
   if (!ids.length) return { success: false, error: 'empty ids' };
   const updated = orderDb.markOrdersCorrected(ids);
+  return { success: true, data: { updated } };
+});
+
+// 退回待核对（归类核对页「已核对」范围里的行内动作）：payload { ids: number[] }
+// 与 order-mark-corrected 互为**镜像**（那边置 corrected=1，这边置 0），但**只有点名这一条路**：
+// 没有 `{ all: true }` 分支 —— 一次退回整批已核对的行不可逆，且用户看不出退回了多少
+// （口径见 order-db.ts 的 reopenOrdersCorrected 注释）。
+// 校验与 mark-corrected 的同段代码**刻意各写一遍**而不是抽公共函数：两边过滤规则相同是巧合，
+// 而"哪天退回要收窄适用范围（比如只允许退今天的行）"时，共享实现会把两件事绑在一起。
+register('order-reopen-corrected', async (payload) => {
+  orderDb.ensureOrderSchema();
+  if (!isPlainObject(payload) || !Array.isArray(payload.ids)) {
+    return { success: false, error: 'invalid payload' };
+  }
+  const ids = payload.ids
+    .filter((n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n > 0)
+    .slice(0, 10000);
+  if (!ids.length) return { success: false, error: 'empty ids' };
+  const updated = orderDb.reopenOrdersCorrected(ids);
   return { success: true, data: { updated } };
 });
 

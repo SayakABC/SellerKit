@@ -277,6 +277,103 @@ check('空店铺名 / 空订单号 → 0 且不动数据', () => {
   assert.strictEqual(odb.assignShopToOrders([], '店Y').updated, 0);
 });
 
+console.log('\n[6.5] 核对状态（确认无误 / 全部确认 / **退回待核对**）');
+// 「归类核对」页那一对动作的数据层守卫：
+//   · 「确认无误 / 全部确认无误」= corrected 置 1（行**离开**待核对列表）；
+//   · 「退回待核对」= corrected 置 0（行**回到**待核对列表，2026-10-12 新增）。
+// ⚠️ 退回这一支**只有这里能验**：`today:ui` 跑的是假桥（渲染层），碰不到这两条 SQL；
+//    而"退回把字段一起改了"这种错在界面上完全看不出来（行照样回到待核对列表）。
+// ⚠️ 本节的判据都要**逐行可观测**（读回那一行的列），不能只断言汇总数 ——
+//    对称地把两个状态位换来换去，汇总数照样对得上（本仓踩过）。
+check('「确认无误」只动点名的那一行（其余行不受影响）', () => {
+  const pendBefore = odb.listOrdersPage({ corrected: false });
+  assert.ok(pendBefore.total > 0, '前置：这一节开始时应当还有待核对的行');
+  const one = pendBefore.rows[0].id;
+  assert.strictEqual(odb.markOrdersCorrected([one]), 1);
+  const pendAfter = odb.listOrdersPage({ corrected: false });
+  assert.strictEqual(pendAfter.total, pendBefore.total - 1, '待核对应当少一行');
+  assert.ok(!pendAfter.rows.some((o) => o.id === one), '被确认的那一行不该还在待核对里');
+  assert.ok(
+    odb.listOrdersPage({ corrected: true }).rows.some((o) => o.id === one),
+    '它应当出现在已核对里',
+  );
+});
+check('corrected 过滤三态：false 只出待核对 / true 只出已核对 / 不传 = 不过滤（全表）', () => {
+  const pend = odb.listOrdersPage({ corrected: false });
+  const corr = odb.listOrdersPage({ corrected: true });
+  const all = odb.listOrdersPage({});
+  assert.ok(pend.total > 0, '前置：应当还有待核对的行');
+  assert.ok(corr.total > 0, '前置：上一条已确认过一行');
+  assert.strictEqual(all.total, pend.total + corr.total, '不传时必须是不过滤（= 两态之和）');
+  assert.ok(pend.rows.every((o) => o.corrected === false), 'corrected:false 里不该有已核对的行');
+  assert.ok(corr.rows.every((o) => o.corrected === true), 'corrected:true 里不该有待核对的行');
+});
+check('⭐「退回待核对」把它放回待核对，且**不碰**这一行的其它字段', () => {
+  // 先给这一行写上可辨识的字段值 —— `updateOrder` 自己会把行置为已核对，
+  // 那正是"被确认掉"的形状（真库现场：23 行 corrected=1 而 color 全空）。
+  const one = odb.listOrdersPage({ corrected: true }).rows[0].id;
+  odb.updateOrder({ id: one, category: 'T恤', color: '藏青', logo: 'LOGO-X' });
+  const before = dbGet(`SELECT category, color, logo FROM oi_orders WHERE id = ?`, [one]);
+
+  assert.strictEqual(odb.reopenOrdersCorrected([one]), 1, '应当更新 1 行');
+  const after = dbGet(`SELECT category, color, logo, corrected FROM oi_orders WHERE id = ?`, [one]);
+  // ① 状态位真的落下去了（不是"函数返回值对、库没动"）
+  assert.strictEqual(Number(after.corrected), 0, 'corrected 必须回到 0');
+  // ② 其它字段**一个都不要动**：退回是"把这一行放回去重做"，不是"把它清空"。
+  //    把字段一起重写（哪怕写成同样的值）都是错的 —— 那意味着退回用的是界面那一刻的草稿。
+  assert.deepStrictEqual(
+    { category: after.category, color: after.color, logo: after.logo },
+    { category: before.category, color: before.color, logo: before.logo },
+    '退回不许改 category / color / logo',
+  );
+  // ③ 回到待核对列表（这是"退回"的目的，不是"从已核对里挪走"）
+  assert.ok(
+    odb.listOrdersPage({ corrected: false }).rows.some((o) => o.id === one),
+    '退回后它必须出现在待核对列表里',
+  );
+  assert.ok(
+    !odb.listOrdersPage({ corrected: true }).rows.some((o) => o.id === one),
+    '退回后它不该还在已核对列表里',
+  );
+});
+check('退回与确认**互为镜像**：都按点名的 id 直接写目标值（不额外要求"原状态不是它"）', () => {
+  const one = odb.listOrdersPage({ corrected: false }).rows[0].id;
+  // ⚠️ 对一行**本来就待核对**的行再"退回"，changes 仍是 1（不是 0）—— 这是**刻意与
+  //    `markOrdersCorrected` 对齐**的：那个函数同样不校验"原来是不是已核对"，点名即写。
+  //    两个方向互为镜像 ⇒ 别顺手给退回加 `AND corrected = 1`：那会让两个函数的"影响行数"
+  //    含义分叉，而界面上根本分不出来（「退回」的入口只出现在**已核对**的行上）。
+  assert.strictEqual(odb.reopenOrdersCorrected([one]), 1, '点名即写 0（与 mark 同款语义）');
+  assert.strictEqual(
+    Number(dbGet(`SELECT corrected FROM oi_orders WHERE id = ?`, [one]).corrected),
+    0,
+  );
+  // 反过来：确认 → 退回 → 再确认，状态位来回都能落下去（两个方向都不是单向门）
+  assert.strictEqual(odb.markOrdersCorrected([one]), 1);
+  assert.strictEqual(odb.reopenOrdersCorrected([one]), 1);
+  assert.strictEqual(
+    Number(dbGet(`SELECT corrected FROM oi_orders WHERE id = ?`, [one]).corrected),
+    0,
+  );
+});
+check('退回的入参边界：空数组 / 不存在的 id → 0，且不误伤别的行', () => {
+  const before = dbQuery(`SELECT id FROM oi_orders WHERE corrected = 0`).length;
+  assert.strictEqual(odb.reopenOrdersCorrected([]), 0);
+  assert.strictEqual(odb.reopenOrdersCorrected([999999]), 0, '不存在的 id 不该命中任何行');
+  assert.strictEqual(odb.reopenOrdersCorrected([0, -1, 1.5]), 0, '非正整数一律过滤掉');
+  assert.strictEqual(
+    dbQuery(`SELECT id FROM oi_orders WHERE corrected = 0`).length,
+    before,
+    '这几种入参都不该改动任何行',
+  );
+});
+check('「全部确认无误」一次把剩下的待核对全部置 1', () => {
+  const before = odb.listOrdersPage({ corrected: false }).total;
+  const n = odb.markAllOrdersCorrected();
+  assert.strictEqual(n, before, '返回值 = 本次真的影响的行数');
+  assert.strictEqual(odb.listOrdersPage({ corrected: false }).total, 0, '待核对应当清零');
+  assert.strictEqual(odb.markAllOrdersCorrected(), 0, '再跑一次是 0（幂等）');
+});
+
 console.log('\n[7] 清空');
 check('clearAll 清掉订单（识别缓存同清）', () => {
   odb.clearAll();

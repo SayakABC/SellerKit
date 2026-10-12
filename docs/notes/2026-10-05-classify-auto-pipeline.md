@@ -43,6 +43,14 @@
 写的是**指纹 → 款**；它**从不写 `productSkuMap`**。而 `productSkuMap` 的渲染层调用方只有
 「货与成本」的 `src/modules/goods/api.ts`。
 
+> ⚠️ **2026-10-11 修掉的坑（读本节前必看）**：`saveCorrection` 原先是 `if (named && fingerprint)` ——
+> **点名了款、但指纹是空串时不挂款**。而 `buildStyleFingerprint(category, features)` 在两者都空时返回
+> `''`（`filter(Boolean)` 把空项筛掉），生产数据恰是这个形状（真库 `oi_orders.category` 非空 **0/23 行**、
+> `oi_images.result_json` 全 `null` ⇒ VLM 从没跑过）⇒ **整条挂款 / 颜色记忆 / 回流一次都不跑**，
+> 而界面一切正常、`toast` 还说"已保存"。现已是 `if (named)`（宿主 `assignOrderStyle` 的
+> `fingerprint` 本来就是可选参数 —— 拦住它的是渲染层自己那道门）。详见
+> [`2026-10-11-classify-color-not-effective.md`](2026-10-11-classify-color-not-effective.md)。
+
 后果：用户在核对页把某商品判对了 10 次，第 11 条订单照样进待核对队列 ——
 **人工工作量不随时间递减**，而这正是"更方便归类"要解的那件事。
 
@@ -264,7 +272,16 @@
 店铺实体 ⇒ 同一家店写法不同会**少算**（刻意不修：修就得把店铺归一下沉到渲染层，必与 `sk_name_map` 分叉）。
 两处都只会**少算**、不会把两件商品混成一件 —— 这个方向是刻意的（少算只是多核对一次，错并要回溯全部历史）。
 
-## 八、核对页的**产品维度**指标条（2026-10-05 深夜续四，已落地）
+## 八、核对页的**产品维度**指标条（2026-10-05 深夜续四，已落地 —— **2026-10-10 已整条拆除**）
+
+> ⚠️ **本章所述的东西已于 2026-10-10 全部拆除**：用户对页头那排「待核对 / 未归类 / 识别库 / 已配产品」
+> 指标条的原话是「我看不太懂，用户肯定也会很懵」⇒ 整条撤掉，连带 `orderSkuRollup` 通道退场
+> （`electron/product-db.ts` 的 `resolveOrderSkuRollup` / `MAX_ROLLUP_ROWS` / `OrderSkuRollup`、
+> `order-handlers.ts` 的 `order-sku-rollup`、preload 暴露键、`src/types.ts` 与 `src/core/services/ipc.ts`
+> 的声明、两处冒烟里的断言）。**下面这一章保留作历史记录**，它记录的判断（口径与归款同源、
+> 三种状态分开、守卫分三段）在别处仍然成立；但其中提到的 `cl-metric-product` 三态、
+> `today:ui` 的四条断言、`ipc:shape:smoke` 的 §⑥ **都已不存在**，别再照它去改代码。
+> 拆除的判据与替代守卫见 [`2026-10-10-classify-panel-rework.md`](2026-10-10-classify-panel-rework.md) §二。
 
 §7.4 的结论是"只差配映射这一步"，而**配映射的收益在界面上看不见** —— 于是本轮给「归类核对」
 （发货台第 2 步）的指标条补一格产品维度。这一格不是"再放一个数字"，它的作用是**让配映射的收益显形**：

@@ -120,31 +120,28 @@ export interface GroupStat {
   count: number;
 }
 
-/** 款色（款式 × 颜色） */
-export interface StyleColorRecord {
-  id: number;
-  styleId: number;
-  color: string;
-  code: string;
-  /** 归属该款色的图片数（列表统计用） */
-  imageCount: number;
-  /** 代表图路径（最新一张，产品库展示用） */
-  imagePath?: string;
-}
-
-/** 款编码（产品库主数据） */
+/**
+ * 款选项 —— 给「归类核对」页的「归属款」下拉用（一个产品一行）。
+ *
+ * ⚠️ **数据源是 `pl_products`（产品库），不是 `oi_styles`（识别池）**。2026-10-10 用户口径：
+ * 「归属款的选项应该来源于货与成本中的产品库，当前数据展示不全」—— 根因就是旧实现按
+ * `oi_styles` 驱动，而只有**进过识别链路**的款才在识别池里：在「货与成本」手工新建、
+ * 还没出过订单的产品一个都不会出现在下拉里（用户看着就是"展示不全"，且无从察觉为什么）。
+ * 产品库才是主数据（D1 权威交接：`oi_styles.code` ≡ `pl_products.code` 同一编码池）。
+ *
+ * 下面的 `colors` 给「选完款再选颜色」用（2026-10-10 用户口径）：
+ * **产品库 SKU 的颜色在前**（主数据），**识别链已学到的款色在后**（历史结论，别丢），去重。
+ * 两者都空 ⇒ 这一个款没有可选颜色，界面必须回落成"自己填"，不能给一个空下拉。
+ */
 export interface StyleRecord {
-  id: number;
+  /** 产品编码（`pl_products.code`，与 `oi_styles.code` 同一锚点） */
   code: string;
+  /** 展示名（唯一权威在 `pl_products.name`） */
   name: string;
-  fingerprint: string;
-  colorCount: number;
-  imageCount: number;
-  orderCount: number;
-  /** 封面图路径（最新一张，产品库展示用） */
-  coverPath?: string;
-  colors: StyleColorRecord[];
-  createdAt?: string;
+  /** `active` / `archived`（停用款仍要能选：历史订单可能正指向它） */
+  status: string;
+  /** 可选颜色（产品库 SKU 颜色 + 识别链款色，去重，主数据在前） */
+  colors: string[];
 }
 
 /** 订单字段纠正入参（数据纠正步骤） */
@@ -765,10 +762,23 @@ function mergeOrphanStyle(fromStyleId: number | undefined, toStyleId: number): v
  * 使后续自动识别也能命中目标款编码（解决同款衣服识别漂移产生多个款编码的问题）。
  * 不改动目标款式的既有主指纹；指纹已被其他款式占用时附加指纹静默忽略（图片归属仍生效）。
  * 归并后原款若因此变空壳，会把其指纹迁入目标款并删除（见 mergeOrphanStyle）。
+ *
+ * ⭐ **颜色是"以图为准"的记忆落点**（2026-10-10 用户口径：记住订单里的产品图片地址对应的颜色）：
+ * 这里写的 `oi_images.style_color_id` 就是那份记忆 —— 图片行按内容/URL 指纹去重，同一张图
+ * 反复出现时**还是同一行**，于是"下次遇到同样的地址"读到的就是这次写下的颜色
+ * （订单列表把 `sc.color` 联表出来给核对页当默认值）。所以颜色只在这里落一次，不要另建一张记忆表。
+ *
+ * 定位目标款有两种入参，**`styleId` 优先**（老调用方/宿主冒烟仍按 id 走）：
+ *   · `styleId > 0` —— 直连识别池的行；
+ *   · 否则按 `styleCode` 走 `ensureStyleByCode`（产品库里手工新建的款在识别池里没有行，
+ *     点名它时必须补一行占位款，否则会抛「款式不存在」而用户只看到"保存失败"）。
  */
 export function assignOrderStyle(input: {
   orderId: number;
-  styleId: number;
+  /** 直连识别池行时给 id（老调用方/宿主冒烟按 id 走）；给 0/缺省则按 styleCode 解析 */
+  styleId?: number;
+  /** 目标款编码（`oi_styles.code` / `pl_products.code` 同一锚点） */
+  styleCode?: string;
   color: string;
   fingerprint?: string;
 }): { styleCode: string; styleColorCode: string; skuBackfill: SkuBackfillOutcome } {
@@ -779,10 +789,16 @@ export function assignOrderStyle(input: {
       | { image_id: number }
       | undefined;
     if (!order) throw new Error(`订单不存在: id=${input.orderId}`);
-    const style = d.prepare(`SELECT id, code FROM oi_styles WHERE id = ?`).get(input.styleId) as
-      | { id: number; code: string }
-      | undefined;
-    if (!style) throw new Error(`款式不存在: id=${input.styleId}`);
+    const wantId = Number(input.styleId ?? 0);
+    let style: { id: number; code: string } | undefined;
+    if (wantId > 0) {
+      style = d.prepare(`SELECT id, code FROM oi_styles WHERE id = ?`).get(wantId) as
+        | { id: number; code: string }
+        | undefined;
+      if (!style) throw new Error(`款式不存在: id=${input.styleId}`);
+    } else {
+      style = ensureStyleByCode(String(input.styleCode ?? ''));
+    }
     let sc = d.prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`).get(style.id, color) as
       | { id: number; code: string }
       | undefined;
@@ -847,8 +863,24 @@ export function renameStyle(code: string, name: string): void {
   }
 }
 
-/** 按 款编码+款色 取一张已下载的代表图（本地路径），供拿货单 Excel 导出嵌入图片；查不到返回 null */
-export function findStyleColorImagePath(styleCode: string, color: string): string | null {
+/**
+ * 按 款编码+款色（+尺码）取一张已下载的代表图（本地路径），供拿货单编辑器/Excel 导出嵌图；查不到返回 null。
+ *
+ * ⚠️ `size` 不是装饰，**调用方应当传**（2026-10-11 用户报"拿货单明细的图片都是一样的"）：
+ *   · 明细行的粒度是「款色 × 尺码」（`outstanding()` 的聚合键 = `purchase_items` 唯一键），
+ *     而订单 Excel 解析出来的图挂在**订单行**上（`oi_orders.image_id` → 那一件商品自己的图）。
+ *   · 只按款色取 ⇒ `ORDER BY i.id DESC LIMIT 1` 永远挑"该款色最新那张"——同一款的多行
+ *     （不同尺码、各来自不同商品）会**全显示同一张图**，且多数行显示的还不是自己那件的图。
+ *     真库实测（SUST-006·未分类 下挂 4 张不同商品的图）：5 行明细全落到 id 最大那张，**4/5 行是错的**。
+ *   · 传了 `size` 就**先**挑「该尺码的订单行用过的那张图」（`EXISTS` 子查询，不是 JOIN ——
+ *     JOIN 会让一张图按引用它的订单行数放大，`LIMIT 1` 取到谁就变得不确定）；
+ *     该尺码下压根没有订单行（手工加的行 / 订单还没导入）才回落到款色级最新图 ——
+ *     **有图仍优于缺图**，回落只是兜底，不改变"优先本行对应图"的口径。
+ */
+export function findStyleColorImagePath(styleCode: string, color: string, size = ''): string | null {
+  const code = String(styleCode ?? '').trim();
+  const clr = String(color ?? '').trim();
+  const sz = String(size ?? '').trim();
   const row = dbGet<{ local_path: string }>(
     `SELECT i.local_path
      FROM oi_styles s
@@ -856,8 +888,13 @@ export function findStyleColorImagePath(styleCode: string, color: string): strin
      JOIN oi_images i ON i.style_color_id = sc.id
      WHERE s.code = ? AND sc.color = ?
        AND i.local_path IS NOT NULL AND i.local_path <> ''
-     ORDER BY i.id DESC LIMIT 1`,
-    [String(styleCode ?? '').trim(), String(color ?? '').trim()],
+     ORDER BY
+       CASE WHEN ? <> '' AND EXISTS (
+         SELECT 1 FROM oi_orders o WHERE o.image_id = i.id AND o.size = ?
+       ) THEN 0 ELSE 1 END,
+       i.id DESC
+     LIMIT 1`,
+    [code, clr, sz, sz],
   );
   return row?.local_path ?? null;
 }
@@ -1001,49 +1038,119 @@ function styleNameJoin(): { join: string; name: string } {
     : { join: '', name: `''` };
 }
 
-/** 产品库列表：款编码 + 款色数/图片数/订单数 + 款色明细（含图片数） */
+/** 一列去重（保序、去空白） */
+function uniqColor(list: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of list) {
+    const v = String(c ?? '').trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+/** `product_id → 颜色[]`（产品库 SKU 那一侧；表还没建时给空 Map，别把"没这张表"报成"没有颜色"） */
+function productColorMap(): Map<number, string[]> {
+  const m = new Map<number, string[]>();
+  if (!tableExists('pl_variants')) return m;
+  for (const r of dbQuery<{ product_id: number; color: string }>(
+    `SELECT product_id, color FROM pl_variants WHERE color <> '' ORDER BY product_id, id`,
+  )) {
+    const pid = Number(r.product_id);
+    if (!m.has(pid)) m.set(pid, []);
+    m.get(pid)!.push(String(r.color ?? ''));
+  }
+  return m;
+}
+
+/** `style_id → 颜色[]`（识别链已学到的款色那一侧） */
+function styleColorMap(): Map<number, string[]> {
+  const m = new Map<number, string[]>();
+  for (const r of dbQuery<{ style_id: number; color: string }>(
+    `SELECT style_id, color FROM oi_style_colors WHERE color <> '' ORDER BY style_id, id`,
+  )) {
+    const sid = Number(r.style_id);
+    if (!m.has(sid)) m.set(sid, []);
+    m.get(sid)!.push(String(r.color ?? ''));
+  }
+  return m;
+}
+
+/**
+ * **款选项列表**（「归类核对」页「归属款」下拉的数据源，也供其它域查款）。
+ *
+ * 驱动表是 `pl_products`（产品库）—— **不是** `oi_styles`。旧实现按识别池驱动，于是
+ * 「货与成本」里手工新建、还没出过订单的产品**一个都不出现**，界面上无从察觉
+ * （2026-10-10 用户报的「当前数据展示不全」就是这个）。两处 `LEFT`/补充串接的边界：
+ *   · 产品库有、识别池没有（手工新建的款）⇒ 照样列出（`styleId` 概念已从本结构移除，
+ *     点名时才由 `ensureStyleByCode` 补一行识别池占位款）；
+ *   · 识别池有、产品库没有（历史库还没跑交接 / 产品被删）⇒ 也要能选 —— 少一行比多一行难查得多；
+ *   · 产品表**整张不存在**（产品域还没建）⇒ 退回识别池，而不是抛 `no such table` 把
+ *     「产品域还没建」报成「订单域坏了」（排查方向整个反掉）。
+ */
 export function listStyles(): StyleRecord[] {
-  const n = styleNameJoin();
-  const rows = dbQuery<Record<string, unknown>>(
-    `SELECT s.id, s.code, ${n.name} AS name, s.fingerprint, s.created_at,
-       (SELECT COUNT(*) FROM oi_style_colors sc WHERE sc.style_id = s.id) AS color_count,
-       (SELECT COUNT(*) FROM oi_images i JOIN oi_style_colors sc ON i.style_color_id = sc.id
-         WHERE sc.style_id = s.id) AS image_count,
-       (SELECT COUNT(*) FROM oi_orders o JOIN oi_images i ON o.image_id = i.id
-         JOIN oi_style_colors sc ON i.style_color_id = sc.id WHERE sc.style_id = s.id) AS order_count,
-       (SELECT i.local_path FROM oi_images i JOIN oi_style_colors sc ON i.style_color_id = sc.id
-         WHERE sc.style_id = s.id ORDER BY i.id DESC LIMIT 1) AS cover_path
-     FROM oi_styles s ${n.join} ORDER BY s.id`,
-  );
-  return rows.map((r) => {
-    const styleId = Number(r.id);
-    const colors = dbQuery<Record<string, unknown>>(
-      `SELECT sc.id, sc.style_id, sc.color, sc.code,
-         (SELECT COUNT(*) FROM oi_images i WHERE i.style_color_id = sc.id) AS image_count,
-         (SELECT i.local_path FROM oi_images i WHERE i.style_color_id = sc.id ORDER BY i.id DESC LIMIT 1) AS image_path
-       FROM oi_style_colors sc WHERE sc.style_id = ? ORDER BY sc.id`,
-      [styleId],
-    ).map((c) => ({
-      id: Number(c.id),
-      styleId: Number(c.style_id),
-      color: String(c.color ?? ''),
-      code: String(c.code ?? ''),
-      imageCount: Number(c.image_count ?? 0),
-      imagePath: c.image_path !== undefined && c.image_path !== null ? String(c.image_path) : undefined,
-    }));
-    return {
-      id: styleId,
+  const prodColors = productColorMap();
+  const learnColors = styleColorMap();
+
+  if (!productSchemaReady()) {
+    return dbQuery<{ style_id: number; code: string }>(
+      `SELECT id AS style_id, code FROM oi_styles WHERE code <> '' ORDER BY code`,
+    ).map((r) => ({
       code: String(r.code ?? ''),
-      name: String(r.name ?? ''),
-      fingerprint: String(r.fingerprint ?? ''),
-      colorCount: Number(r.color_count ?? 0),
-      imageCount: Number(r.image_count ?? 0),
-      orderCount: Number(r.order_count ?? 0),
-      coverPath: r.cover_path !== undefined && r.cover_path !== null ? String(r.cover_path) : undefined,
-      colors,
-      createdAt: r.created_at !== undefined && r.created_at !== null ? String(r.created_at) : undefined,
-    };
+      name: '',
+      status: 'active',
+      colors: uniqColor(learnColors.get(Number(r.style_id)) ?? []),
+    }));
+  }
+
+  const rows = dbQuery<{
+    product_id: number;
+    code: string;
+    name: string;
+    status: string;
+    style_id: number | null;
+  }>(
+    `SELECT p.id AS product_id, p.code AS code, p.name AS name, p.status AS status, s.id AS style_id
+     FROM pl_products p LEFT JOIN oi_styles s ON s.code = p.code
+     WHERE p.code <> ''
+     ORDER BY p.code`,
+  );
+  const seen = new Set(rows.map((r) => String(r.code ?? '')));
+  // 识别池有、产品库没有的行（历史库 / 产品被删）—— 补在末尾，别让它们从下拉里消失
+  const ghosts = dbQuery<{ style_id: number; code: string }>(
+    `SELECT id AS style_id, code FROM oi_styles WHERE code <> '' ORDER BY code`,
+  ).filter((r) => !seen.has(String(r.code ?? '')));
+
+  const toOption = (
+    code: string,
+    name: string,
+    status: string,
+    productId: number,
+    styleId: number,
+  ): StyleRecord => ({
+    code,
+    name,
+    status,
+    colors: uniqColor([
+      ...(productId ? (prodColors.get(productId) ?? []) : []),
+      ...(styleId ? (learnColors.get(styleId) ?? []) : []),
+    ]),
   });
+
+  return [
+    ...rows.map((r) =>
+      toOption(
+        String(r.code ?? ''),
+        String(r.name ?? ''),
+        String(r.status ?? 'active'),
+        Number(r.product_id),
+        Number(r.style_id ?? 0),
+      ),
+    ),
+    ...ghosts.map((r) => toOption(String(r.code ?? ''), '', 'active', 0, Number(r.style_id))),
+  ];
 }
 
 /** 更新识别结果（done / error） */
@@ -1072,6 +1179,39 @@ const MAPPED_FP_PREFIX = 'mapped:';
 const MAPPED_FALLBACK_COLOR = '未分类';
 
 /**
+ * 按**款编码**取识别池里的行，没有就补一行占位款。
+ *
+ * 为什么必须有它：点名归款（`assignOrderStyle`）的入口是「归属款」下拉，而下拉的数据源是
+ * **产品库**（`listStyles`，2026-10-10 起）—— 产品库里手工新建、还没出过订单的款，
+ * 识别池里**没有行**，`oi_styles.fingerprint` 又是 `NOT NULL UNIQUE`（没有指纹就落不下一行），
+ * 归款结论只能挂在款色上（`oi_style_colors.style_id`）⇒ 不补这一行，"点名一个产品库里的新款"
+ * 会直接抛「款式不存在」，而用户看到的只是"选了这个款却保存失败"。
+ *
+ * 占位指纹前缀见 `MAPPED_FP_PREFIX` 的说明（`mapped:` 不可能与 AI 内容指纹相撞）。
+ * 同一个 code 只建一次（`INSERT OR IGNORE` + 唯一索引），并与 `autoAssignByMap` 共用本函数，
+ * 避免"两处各建一次占位款、指纹前缀写歪"。
+ */
+function ensureStyleByCode(code: string): { id: number; code: string } {
+  const c = String(code ?? '').trim();
+  if (!c) throw new Error('款编码不能为空');
+  const d = getDb();
+  let row = d.prepare(`SELECT id, code FROM oi_styles WHERE code = ?`).get(c) as
+    | { id: number; code: string }
+    | undefined;
+  if (!row) {
+    d.prepare(`INSERT OR IGNORE INTO oi_styles (code, fingerprint) VALUES (?, ?)`).run(
+      c,
+      `${MAPPED_FP_PREFIX}${c}`,
+    );
+    row = d.prepare(`SELECT id, code FROM oi_styles WHERE code = ?`).get(c) as
+      | { id: number; code: string }
+      | undefined;
+  }
+  if (!row) throw new Error(`款式不存在: code=${c}`);
+  return { id: Number(row.id), code: String(row.code) };
+}
+
+/**
  * 订单落库时的**确定性归款**（P3 业务链路「先查 `pl_shop_sku`，查不到才走 AI 兜底」的落点）。
  *
  * 只认 `status='confirmed'` 的映射（`resolveOrderSku` 内部保证）：`pending`/`invalid` 不得替人下结论。
@@ -1092,20 +1232,8 @@ function autoAssignByMap(
   if (!itemId) return; // 订单没有商品ID → 这条链路无从查起（不是错误）
   const hit = resolveOrderSku({ shop: rec.shop, itemId });
   if (!hit) return;
-  const d = getDb();
-  let style = d.prepare(`SELECT id FROM oi_styles WHERE code = ?`).get(hit.productCode) as
-    | { id: number }
-    | undefined;
-  if (!style) {
-    d.prepare(`INSERT OR IGNORE INTO oi_styles (code, fingerprint) VALUES (?, ?)`).run(
-      hit.productCode,
-      `${MAPPED_FP_PREFIX}${hit.productCode}`,
-    );
-    style = d.prepare(`SELECT id FROM oi_styles WHERE code = ?`).get(hit.productCode) as
-      | { id: number }
-      | undefined;
-  }
-  if (!style) return;
+  // 产品库里手工新建的款在识别池里没有行 ⇒ 补一行占位款（与「点名归款」共用同一个实现）
+  const style = ensureStyleByCode(hit.productCode);
   // 颜色权威来源（D4）：**映射里配的颜色** > 订单自身字段 > 兜底。
   // 顺序不能反 —— 订单侧的颜色在真实数据里几乎不可用（芒果待发货单该列恒空；采集帧里
   // 39% 是 `Picture color` 这类"以图为准"的占位），"每单看一眼图"就是这么来的。
@@ -1118,18 +1246,25 @@ function autoAssignByMap(
 }
 
 /**
- * 映射新增/变更后，对**存量未归款订单**重跑确定性归款。
+ * 映射新增/变更后，对**存量订单**重跑确定性归款 —— 覆盖两类"还没配好色的图"：
+ *
+ *   · **未归款**（`style_color_id IS NULL`）：先导订单、后配映射时的常规回填；
+ *   · 归在**占位色**（`未分类`，见 `MAPPED_FALLBACK_COLOR`）上：配映射时没有色可配，
+ *     被兜底名顶了位置；现在补上真实颜色，这些存量订单要跟着改到该色
+ *     （否则"补色"只在库里改了映射，订单们还挂着"未分类" —— 用户看不出发生过什么）。
  *
  * 为什么必须有：归款是**写时触发**的（订单落库那一刻跑一次），而真实操作顺序常常反着来 ——
  * 先导订单、后配映射。没有这个回填，用户配完映射**看不到任何变化**，只能把 Excel 重导一遍
  *（同类先例：`syncPurchaseCosts` 上线前的拿货单没进 `ae_cost_map`，见 `purchase-cost-sync.ts`）。
  *
  * 三条边界（都为了"不覆盖人的结论"）：
- *   · 只碰 `oi_images.style_color_id IS NULL` 的图 —— 已归款的（人工纠正 / AI 识别）一律不动；
+ *   · **挂在真实颜色上的图一律不动**（人工纠正 / 识别结论 / 上次补的色都算数）——
+ *     只认占位色这一种"色还没定"的状态，改一次映射色不会把历史订单全改判；
  *   · 只处理传入 `itemIds` 命中的行 —— 配了哪个商品就只回填那个商品，不顺手全库重算；
  *   · `autoAssignByMap` 自身未命中就什么都不做（保持原状），所以这里不需要额外判空。
  *
- * @returns 本次**新归款成功**的行数（调用方据此在回执里说清"顺带关联了几行"）
+ * @returns 本次**实际发生变化**的行数（新归款 + 补色都算；值没变的行不计 ——
+ *          回执里报出的数必须是"真的动了这几行"，而不是"扫过这几行"）
  */
 export function reassignOrdersByItemIds(itemIds: string[]): number {
   if (!productSchemaReady()) return 0;
@@ -1138,10 +1273,20 @@ export function reassignOrdersByItemIds(itemIds: string[]): number {
   );
   if (!want.size) return 0;
 
-  const rows = dbQuery<{ image_id: number; shop: string; color: string; raw_fields: string }>(
-    `SELECT o.image_id, o.shop, o.color, o.raw_fields
-       FROM oi_orders o JOIN oi_images i ON o.image_id = i.id
-      WHERE o.image_id IS NOT NULL AND i.style_color_id IS NULL`,
+  const rows = dbQuery<{
+    image_id: number;
+    shop: string;
+    color: string;
+    raw_fields: string;
+    cur_id: number | null;
+  }>(
+    `SELECT o.image_id, o.shop, o.color, o.raw_fields, i.style_color_id AS cur_id
+       FROM oi_orders o
+       JOIN oi_images i ON o.image_id = i.id
+       LEFT JOIN oi_style_colors sc ON sc.id = i.style_color_id
+      WHERE o.image_id IS NOT NULL
+        AND (i.style_color_id IS NULL OR sc.color = ?)`,
+    [MAPPED_FALLBACK_COLOR],
   );
   const d = getDb();
   let n = 0;
@@ -1156,6 +1301,7 @@ export function reassignOrdersByItemIds(itemIds: string[]): number {
     const { itemId } = extractSkuFields(rawFields);
     if (!itemId || !want.has(itemId)) continue;
     const imageId = Number(r.image_id);
+    const beforeId = Number(r.cur_id) || 0;
     autoAssignByMap({
       imageId,
       shop: String(r.shop ?? ''),
@@ -1165,7 +1311,9 @@ export function reassignOrdersByItemIds(itemIds: string[]): number {
     const after = d.prepare(`SELECT style_color_id FROM oi_images WHERE id = ?`).get(imageId) as
       | { style_color_id: number | null }
       | undefined;
-    if (after?.style_color_id) n += 1;
+    const afterId = Number(after?.style_color_id) || 0;
+    // 判据是**换没换**而不是"有没有值"：补色前的占位色也有 id，拿"非空"计数会把没动的行也报成处理过
+    if (afterId && afterId !== beforeId) n += 1;
   }
   return n;
 }
@@ -1193,7 +1341,7 @@ export type SkuBackfillStatus =
 
 export interface SkuBackfillOutcome {
   status: SkuBackfillStatus;
-  /** 本次顺带自动归款的**存量**订单行数（不含刚点名的那一单） */
+  /** 本次顺带处理的**存量**订单行数（新归款 + 补色都算；不含刚点名的那一单） */
   reassigned: number;
   /** 真正写进映射的颜色；`''` = 只记到款级（没有可信的颜色可用） */
   spec: string;
@@ -1222,8 +1370,9 @@ export interface SkuBackfillOutcome {
  *   · **失败不外抛**：这是"顺手记住"的附加动作，绝不能让它把**已经提交**的"归属已改"
  *     报成失败 ⇒ 整段吞异常，调用方看到 `status: 'failed'`，归属照常生效。
  *
- * 写入成功后**顺带回填存量**（`reassignOrdersByItemIds`）：同一商品的历史未归款订单当场一起归到位
- * —— 没有这一步，"已经记住了"在界面上看不出任何变化，用户不会信它真的发生了。
+ * 写入成功后**顺带回填存量**（`reassignOrdersByItemIds`）：同一商品的历史订单（还没归款的、
+ * 以及还挂在「未分类」占位色上的）当场一起归到位 —— 没有这一步，"已经记住了"在界面上看不出
+ * 任何变化，用户不会信它真的发生了。
  *
  * @returns 见 `SkuBackfillOutcome`；**任何分支都不抛**
  */
@@ -1452,10 +1601,14 @@ export function listOrders(limit = 500): OrderRecord[] {
  *  - 另带 `shop` / `order_time` / `style_code` / `style_color`（2026-09-29 加）：
  *    前两者是"按店铺/按日"聚合的维度，后两者是**成本侧**的键（款级成本 `ae_cost_map`）；
  *  - 仍**只回最小列**（不含订单明细的大字段），提取结果（国家/商品ID/克重/成本）收敛后再回渲染层，大载荷不过岛；
- *  - 只读，不暴露任何写能力。 */
+ *  - 只读，不暴露任何写能力。
+ *
+ * ⚠️ `opts.importDate`（`yyyy-mm-dd`，本地时区）是**「发货台」的每日口径**：一天一导（导出
+ *    "昨天 → 导出时点"的全部订单，中间追加的也算同一天），故按**导入日**筛，而不是按 `order_time`
+ *    （下单日）—— 用户关心的是"今天我导进来的这一批"，昨天下的单今天导也该在今天这批里。 */
 export function shippingRows(
   limit = 500,
-  opts: { source?: 'all' | 'import' | 'collect' } = {},
+  opts: { source?: 'all' | 'import' | 'collect'; importDate?: string } = {},
 ): {
   id: number;
   orderNo: string;
@@ -1491,6 +1644,16 @@ export function shippingRows(
   if (want !== 'all') {
     conds.push(`o.source = ?`);
     args.push(want);
+  }
+  // 「导入日」过滤（`yyyy-mm-dd`，本地时区）：`created_at` 存的是 `datetime('now','localtime')`
+  // ⇒ 取日期部分与传入的那天比。形状在主进程 handler 已收窄，这里再兜一次（直调本函数的老路径）。
+  const importDate =
+    typeof opts?.importDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(opts.importDate)
+      ? opts.importDate
+      : '';
+  if (importDate) {
+    conds.push(`date(o.created_at) = ?`);
+    args.push(importDate);
   }
   args.push(n);
   // 款编码走**识别链** `oi_images.style_color_id → oi_style_colors → oi_styles`（与
@@ -1549,7 +1712,7 @@ export function shippingRows(
  *  - 返回 { rows, total } 供渲染层同步总数/分页；
  *  - search 匹配 单号/店铺/分类/颜色/logo/款编码/款名/款色，供纠正页/明细页服务端搜索。 */
 export function listOrdersPage(
-  opts: { offset?: number; limit?: number; corrected?: boolean; search?: string } = {},
+  opts: { offset?: number; limit?: number; corrected?: boolean; search?: string; importDate?: string } = {},
 ): {
   rows: OrderRecord[];
   total: number;
@@ -1564,6 +1727,15 @@ export function listOrdersPage(
     conds.push('o.corrected = 1');
   } else {
     conds.push('o.corrected = 0');
+  }
+  // 「导入日」过滤（与 `shippingRows` 同口径）：`created_at` 是 `datetime('now','localtime')`
+  const importDate =
+    typeof opts.importDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(opts.importDate)
+      ? opts.importDate
+      : '';
+  if (importDate) {
+    conds.push(`date(o.created_at) = ?`);
+    params.push(importDate);
   }
   const search = typeof opts.search === 'string' ? opts.search.trim().slice(0, 100) : '';
   // D1：款名的搜索目标随权威表一起换到 pl_products（搜索走的是展示名，不是遗留列）
@@ -1692,6 +1864,31 @@ export function markOrdersCorrected(ids: number[]): number {
  * 一次 UPDATE 完成，避免大批量下把数万 id 经 IPC 传回主进程再拼 IN(...)。 */
 export function markAllOrdersCorrected(): number {
   const r = dbRun(`UPDATE oi_orders SET corrected = 1 WHERE corrected = 0`);
+  return Number(r.changes);
+}
+
+/**
+ * 退回待核对（`corrected = 0`）：把**已核对**的行重新放回待核对队列
+ * （归类核对页的「退回待核对」—— 核对过之后发现定错了款/色的唯一回头路）。
+ *
+ * 与 `markOrdersCorrected` 是**镜像**：那边置 1 让行离开待核对列表，这边置 0 让它回来。
+ * 只动 `corrected` 这一个位：**不改** category/color/logo，也不碰图片的款色归属 ——
+ * 上一轮核对留下的结论原样保留（用户是"要重做这一行"，不是"把这一行清空"），
+ * 重做时界面上不带出任何被清空的字段，也就不存在"退回把数据弄没了"。
+ *
+ * ⚠️ **刻意没有 `all` 分支**（有 `markAllOrdersCorrected` 那样的镜像就太顺手了）：
+ *    一次把整批已核对的行全退回，用户既看不出退回了多少、也记不住哪些本来是核对好的，
+ *    而退回是不可逆的"状态回滚"（没有任何地方记着"它原来是不是核对过的"）。
+ *    ⇒ 退回一律**点名**，一行一个动作（2026-10-12 与用户确认过的口径）。
+ */
+export function reopenOrdersCorrected(ids: number[]): number {
+  const list = [...new Set(ids)].filter((n): n is number => Number.isInteger(n) && n > 0);
+  if (!list.length) return 0;
+  const d = getDb();
+  const placeholders = list.map(() => '?').join(',');
+  const r = d
+    .prepare(`UPDATE oi_orders SET corrected = 0 WHERE id IN (${placeholders})`)
+    .run(...list);
   return Number(r.changes);
 }
 

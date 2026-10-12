@@ -365,13 +365,26 @@ check('B6 产品库 Excel 导入（显式写入语义）允许覆盖名字', () 
   assert.strictEqual(legacyName(res.styleCode), '');
 });
 
-check('B7 删款编码（识别池）不删产品库主数据', () => {
+check('B7 删款编码（识别池）不删产品库主数据 —— 且它**仍在款式列表里**', () => {
   reset();
   const res = odb.resolveStyle({ fingerprint: 'FP-A', category: '家居', features: [], color: '红色' });
   const id = Number(dbGet(`SELECT id FROM oi_styles WHERE code = ?`, [res.styleCode]).id);
   odb.deleteStyle(id);
-  assert.strictEqual(odb.listStyles().length, 0, '款编码池的行没被删掉');
+  // 前提：识别池那一行真的没了（否则下面测的是别的事）
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_styles WHERE code = ?`, [res.styleCode]).n),
+    0,
+    '夹具前提：识别池的行没被删掉',
+  );
   assert.ok(productByCode(res.styleCode), '删订单空壳款把产品主数据一起删了');
+  // ⭐ 2026-10-10 起「款式列表」由**产品库**驱动（`pl_products LEFT JOIN oi_styles`）：
+  //    识别池删了行、产品库还在 ⇒ 它必须**仍然在列表里**。这条同时也是用户报的
+  //    "归属款展示不全"的正解 —— 手工新建、没出过订单的产品也在同一个列表里。
+  //    ⚠️ 旧版断言是 `listStyles().length === 0`（那时列表挂在识别池上）。**别改回它** ——
+  //    那会要求"产品库还有这个款、列表里却没有"，正是要修的毛病。
+  const s = odb.listStyles().find((x) => x.code === res.styleCode);
+  assert.ok(s, '产品库还有这个款、列表里却没了（说明列表还挂在识别池上）');
+  assert.strictEqual(s.name, String(productByCode(res.styleCode).name ?? ''), '名字没跟着产品库走');
 });
 
 // ---- C. 读侧：五处出口全部派生 ----

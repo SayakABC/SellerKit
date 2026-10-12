@@ -101,6 +101,9 @@ function fakeSk(legacyJson) {
       rec('shipping-rate.quoteProducts', p);
       return { rows: [], summary: { total: 0, ok: 0, weightless: 0, unknownCountry: 0, noPrice: 0, refused: 0 } };
     },
+    // ⚠️ **已删通道的绊线**：productWeightStats / importProductWeights（商品ID → 克重，pl_item_weights）
+    //    随 2026-10-01 的领域裁定整条退场（克重是 SKU 属性），表已被 product.sku v3 迁移 DROP。
+    //    桩**故意留着**：岛若又去调它，calls 里就会留下记录，断言段要求次数为 0（读一张已不存在的表）。
     'shipping-rate.productWeightStats': function (p) {
       rec('shipping-rate.productWeightStats', p);
       return { imported: 0, total: 0, updatedAt: '' };
@@ -257,6 +260,11 @@ async function main() {
       step(PASS + '/errors');
       report(PASS + ' 无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));
     }
+    // 绊线：已删的通道一次都不许调（调了说明岛又回去读那张已 DROP 的表）
+    step(PASS + '/removed-ops');
+    report(PASS + ' 不碰已删通道 productWeightStats / importProductWeights（商品ID 克重那条链已整条退场）',
+      dbCalls('shipping-rate.productWeightStats').length === 0 && dbCalls('shipping-rate.importProductWeights').length === 0,
+      'stats=' + dbCalls('shipping-rate.productWeightStats').length + ' import=' + dbCalls('shipping-rate.importProductWeights').length);
   } catch (e) {
     lines.push('SMOKE: FAILED at [' + STEP + '] - ' + (e && e.message ? e.message : String(e)));
   }

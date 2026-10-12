@@ -28,9 +28,6 @@ function rateTable(): RateTable {
   );
 }
 
-// ─────────────────────────────────────────────────────────── parseWeightSheet
-
-
 // ─────────────────────────────────────────────────────────── resolveCountry
 
 describe('resolveCountry · 订单国名 → 运价表国家行', () => {
@@ -207,13 +204,20 @@ describe('quoteOrders · 逐单计价与拒算分类', () => {
     expect(rows[0].fee).toBeCloseTo(80 * (10 / 1000) + 8, 2);
   });
 
-  it('缺重量（商品ID 没入库 / 无商品ID）单独成类，不冒充"无价"', () => {
+  it('缺克重单独成类，不冒充"无价"（与商品ID 无关：克重在 SKU 上、按款色码取）', () => {
     const { rows, summary } = quoteOrders(tinyTable(), [
-      row({ itemId: '9999', weightG: null }),
-      row({ itemId: '', weightG: null, orderNo: 'SO-2' }),
+      row({ weightG: null }),
+      row({ weightG: null, orderNo: 'SO-2' }),
     ]);
     expect(summary.noWeight).toBe(2);
-    expect(rows.every((x) => x.reason.includes('重量') || x.reason.includes('商品ID'))).toBe(true);
+    expect(rows.every((x) => x.reason.includes('克重'))).toBe(true);
+  });
+
+  it('有克重但没商品ID 仍照常计价（克重不从商品ID 取，缺ID 不该拦）', () => {
+    const { rows, summary } = quoteOrders(tinyTable(), [row({ itemId: '' })]);
+    expect(summary.ok).toBe(1);
+    // 80 元/KG × 500g + 挂号 8 = 48
+    expect(rows[0].fee).toBe(48);
   });
 
   it('无国家 / 表没该国 分开计数，且 reasonClass 与行一一绑定', () => {
@@ -242,8 +246,8 @@ describe('quoteOrders · 逐单计价与拒算分类', () => {
 
   it('缺重量的 reasonClass = noWeight（不冒充"无价"）', () => {
     const { rows } = quoteOrders(tinyTable(), [
-      row({ itemId: '9999', weightG: null }),
-      row({ itemId: '', weightG: null, orderNo: 'SO-2' }),
+      row({ weightG: null }),
+      row({ weightG: null, orderNo: 'SO-2' }),
     ]);
     expect(rows[0].reasonClass).toBe('noWeight');
     expect(rows[1].reasonClass).toBe('noWeight');
@@ -252,7 +256,7 @@ describe('quoteOrders · 逐单计价与拒算分类', () => {
   it('混合批次：summary 各类互斥且 Σ = total', () => {
     const { summary } = quoteOrders(tinyTable(), [
       row({}),
-      row({ itemId: '9999', weightG: null }),
+      row({ weightG: null }),
       row({ country: '' }),
       row({ country: '火星' }),
       row({ country: 'US', weightG: 999999 }),

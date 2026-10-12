@@ -60,7 +60,7 @@ function resultsPanel() {
   <div class="panel">
     <div class="panel-title">
       按订单试算
-      <span class="muted small">逐单取「收货国家 + 商品ID」，联商品重量表后按运价表计价；数量暂按 1 件/单计</span>
+      <span class="muted small">逐单取「收货国家 + 款色码」，联产品库 SKU 克重后按运价表计价；数量暂按 1 件/单计</span>
     </div>
     <div class="bar">
       <button class="btn btn-primary" data-act="quoteOrders"${s.busy ? ' disabled' : ''}>试算最近 ${s.limit} 单</button>

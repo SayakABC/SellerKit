@@ -10,7 +10,8 @@
 //   · 目的地在 oi_orders.raw_fields 的「收货国家」（速卖通导出为英文名），
 //     而运价表的国家行自带 中文名/英文名/ISO code —— 所以**映射可以直接对运价表做**，
 //     不需要单独维护一张国名表；别名只补「同一国家的不同拼写」（USA/UK/Viet Nam…）。
-//   · 克重来自「商品信息」导入的 pl_item_weights（商品ID → 克），由宿主 op 联好再进来；
+//   · 克重来自产品库 SKU 表（`pl_variants.weight_g`，按款×色×码取 —— **全应用唯一来源**，
+//     2026-10-01 领域裁定：克重是 SKU 属性，商品ID 上没有克重），由宿主 op 联好再进来；
 //     本文件不管重量缺失的补救，只负责**明确拒算并给出原因**。
 
 import type { CountryRate, RateTable, Rounding } from './shipRate';
@@ -24,7 +25,7 @@ export interface OrderShippingRow {
   country: string;
   /** raw_fields 里的商品ID（可能为空） */
   itemId: string;
-  /** pl_item_weights 查到的单件克重；null = 该商品ID没导入重量 */
+  /** 单件克重（产品库 SKU 表按款×色×码取）；null = 认不出款色码、或该 SKU 没维护克重 */
   weightG: number | null;
 }
 
@@ -36,7 +37,7 @@ export interface OrderQuoteRow {
   nameCn: string;
   countryRaw: string;
   itemId: string;
-  /** 单件克重（未导入重量为 0） */
+  /** 单件克重（缺克重为 0） */
   weightG: number;
   ok: boolean;
   reason: string;
@@ -49,7 +50,7 @@ export interface OrderQuoteRow {
 export interface OrderQuoteSummary {
   total: number;
   ok: number;
-  /** 未导入重量（商品信息没这份商品ID） */
+  /** 缺克重（没识别出款色码、或该 SKU 没维护克重） */
   noWeight: number;
   /** 订单没有收货国家 */
   noCountry: number;
@@ -204,11 +205,10 @@ export function quoteOrders(
       });
     };
 
-    if (!itemId || !Number.isFinite(weightG) || weightG <= 0) {
-      fail(
-        itemId ? `商品 ${itemId} 未导入重量（商品信息表没有该ID）` : '订单未标注商品ID，无法取重量',
-        'noWeight'
-      );
+    // 缺克重与商品ID 无关：克重按款色码取自产品库 SKU 表（商品ID 上没有克重）——
+    // 认不出款色码、或该 SKU 没维护克重，才是这一类的成因。
+    if (!Number.isFinite(weightG) || weightG <= 0) {
+      fail('缺克重（没识别出款色码，或该款 SKU 没维护克重）', 'noWeight');
       continue;
     }
     if (!countryRaw) {

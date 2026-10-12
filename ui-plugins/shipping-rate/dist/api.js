@@ -79,8 +79,8 @@ export const quote = (grams, opts = {}) =>
   });
 
 /**
- * 按订单批量试算：宿主自取最近订单（最小投影）→ 提取收货国家/商品ID → 联重量 → 逐单计价。
- * 运价表同样由宿主自取（岛不传表）。
+ * 按订单批量试算：宿主自取最近订单（最小投影）→ 提取收货国家 + 款色码 →
+ * 联产品库 SKU 克重 → 逐单计价。运价表同样由宿主自取（岛不传表）。
  * @param {{limit?:number, rounding?:string}} [opts]
  * @returns {Promise<{rows:Array, summary:{total,ok,noWeight,noCountry,unknownCountry,noPrice,refused}}>}
  */
@@ -92,7 +92,7 @@ export const quoteOrders = (opts = {}) =>
 
 /**
  * 按产品批量试算：宿主自取产品库（pl_products + pl_variants 克重）× 点名目的国 → 逐 SKU 运费。
- * 重量锚点是产品库 SKU 子表（与按订单侧的速卖通商品ID重量表是两条独立数据源，不混用）。
+ * 重量锚点同为产品库 SKU 子表 —— 与「按订单试算」读**同一份克重**（不再有第二条重量链）。
  * 运价表同样由宿主自取（岛不传表）。
  * @param {string} country 目的国（运价表国家下拉里点名的中文名/英文名/ISO 均可）
  * @param {{limit?:number, rounding?:string}} [opts]

@@ -3,7 +3,7 @@
 导入物流报价单 Excel，输入实际克重 → 算出到每个国家的实际运费。
 
 - **形态**：手写 ESM、**无构建步骤**（`dist/` 即源码，`manifest.entry = ./dist/index.html`）
-- **能力域**：`db` 域 `shipping-rate`（`parseRateSheet` / **`rateCurrent`** / **`rateAdopt`** / `quote` / `importProductWeights` / `productWeightStats` / `quoteOrders` / `quoteProducts`）；存储走自身命名空间 `modules.shipping-rate`（**只存界面状态，不存运价表** —— 见 §2）
+- **能力域**：`db` 域 `shipping-rate`（`parseRateSheet` / **`rateCurrent`** / **`rateAdopt`** / `quote` / `quoteOrders` / `quoteProducts`）；存储走自身命名空间 `modules.shipping-rate`（**只存界面状态，不存运价表** —— 见 §2）
 - **规则源头**：`AGENTS.md` 红线 16–25；接入步骤见 `docs/architecture/UI_ISLAND_INTAKE_CHECKLIST.md`
 - **设计说明**：`docs/plans/SHIPPING_RATE_ISLAND_PLAN.md`
 - **自动化**：`npm run shipping-rate:ui`（假桥无头冒烟，两个来回：冷启动空态 / 旧表迁移；含"计价 payload 里不许有 table"这条核心断言）
@@ -13,6 +13,15 @@
 > 由宿主自取"当前那份"；岛改用 `rateCurrent` 取**只读副本**仅为渲染。升级后首启会把旧的岛内表
 > **一次性迁移**（`rateAdopt`，宿主按内容 sha256 去重）并抹掉本地副本。「清空运价表」随之下线
 > （历史快照是「算钱」按订单日期复算的依据，不该被一次抹掉；错表重导正确的那张即可）。
+
+> **1.3.1 克重链收口（2026-10-10）**：克重是 **SKU 属性**（款 × 色 × 码），唯一来源 = 宿主产品库
+> `pl_variants.weight_g`（在「货与成本」维护）。原先「导入商品信息 Excel → 商品ID 克重」那条链
+> （`importProductWeights` / `productWeightStats` 两个 op + `pl_item_weights` 表）已**整条删除** ——
+> 「按订单试算」改为按款色码取 SKU 克重，缺克重的原因文案同步改准（与商品ID 无关）。
+> ⚠️ **时间线（别再踩"改完仓库 = 改完了"）**：宿主侧 2026-10-01 删链，本岛代码随后在仓库里也删净
+> （`0dee5ff`，2026-10-05 —— 死导入按钮与旧页头文案都删了），但 **`manifest.json` 的版本号没升
+> ⇒ 那批清理从未发布**：市场上与用户机器里一直是 10-01 那版 1.3.0（**按钮还在、点它调的是已删 op**）。
+> **1.3.1 是第一次把"链已删"的岛真正发出去**的版本。
 
 ---
 
@@ -24,28 +33,26 @@
         宿主：读字节 → xlsx 读工作簿 → **逐个 sheet 体检** → 自动挑出报价单所在的那张
               → src/lib/shipRate.ts#normalizeRateSheet → 运价表
         返回：{ sheetNames, sheetName, picked, table, candidates }
-   └─ 岛把自己的配置（modules.shipping-rate）里的运价表换成新表
+   └─ 宿主留档为快照；岛调 db.rateCurrent() 取回"当前那份"渲染（**岛内不存表**，1.3.0 起）
 
 输入克重
-   └─ db.quote(table, grams, { category, variant, rounding })
+   └─ db.quote(grams, { category, variant, rounding })
         宿主：src/lib/shipRateQuote.ts#quoteAll → 逐国运费
    └─ 岛只渲染返回值
 
-按订单试算（1.1.0 起）
-   └─ db.importProductWeights(filePath)
-        宿主：读「商品信息」Excel → src/lib/productWeight.ts#parseWeightSheet
-              → pl_item_weights（商品ID → 克，kg 自动换算）
-   └─ db.quoteOrders(table, { limit })
+按订单试算（1.1.0 起；1.3.1 起按款色码取 SKU 克重）
+   └─ db.quoteOrders({ limit })
         宿主：order-shipping-rows（oi_orders 最小投影）→ src/lib/shipRateOrders.ts
-              提取 收货国家/商品ID → 联重量 → 逐单计价（拒算逐单给原因 + reasonClass）
+              提取 收货国家 → 按款色码（`resolveWeightG`）联产品库 SKU 克重
+              → 逐单计价（拒算逐单给原因 + reasonClass）
    └─ 岛只渲染返回值（订单原始行的大载荷到宿主为止，不过岛）
 
 按产品试算（1.2.0 起）
-   └─ db.quoteProducts(table, country, { limit })
+   └─ db.quoteProducts(country, { limit })
         宿主：pl_products 分页拉全 + pl_variants 联 SKU 克重 → src/lib/shipRateProducts.ts
               目的国按点名解析一次 → 逐 SKU 计价（缺克重/无价/拒算逐行给原因 + reasonClass）
-   └─ 重量锚点是**产品库 SKU 子表**（编辑产品时维护的克重），与订单侧的
-      pl_item_weights（速卖通商品ID）是两条独立数据源，不混用
+   └─ 重量锚点是**产品库 SKU 子表**（编辑产品时维护的克重）——与「按订单试算」读的是
+      **同一份**克重（2026-10-01 前订单侧另有「商品ID 重量表」，那条链已删）
    └─ 岛只渲染返回值
 ```
 
@@ -179,8 +186,7 @@
 | 视图里用了未定义的类名 | 新加的提示条（如 `.notice`）在 `styles.css` 里不存在 → 渲染成无样式裸文本，不报错 | 加新 `class` 必须同步补 `dist/styles.css`（本仓已踩：`dist/views/quote.js` 的 `currencyNotice()`） |
 | `dist/` 被 `.gitignore` 吞掉 | 本地能跑、门禁能过，但 `git ls-files` 里没源码，一次 `git clean -fdx` 即永久丢失 | `.gitignore` 必须有 `!ui-plugins/shipping-rate/dist/`（由 `tests/pluginTriage.spec.ts` 钉住） |
 | 同版本重装 | 市场安装失败（zip 的 sha256 与 catalog 不符） | 改内容必须升 `manifest.json` 的 `version`（本岛无 `package.json`，只改 manifest） |
-| **重量单位只看数字不看列名** | 「*物流重量 0.35」是 kg —— 直接当 350g 无影响，当 0.35g 则整批重量缩水 1000 倍、大量订单"该重量段无价" | 单位按**列名文本**判（含 kg/公斤/千克 → ×1000；标注"克/g" → 直读；缺省 kg）；`tests/shipRateOrders.spec.ts` §parseWeightSheet 钉住 |
-| **商品信息表"取第一张 sheet"** | 多 sheet 导出首张可能是说明页，硬猜第一张=读错对象被伪装成对象有问题 | `parseWeightSheet` 逐张语义探测（返回 null = 不是商品信息表），宿主 op 取**条数最多**的一张 |
+| ~~重量单位只看数字不看列名~~ / ~~商品信息表"取第一张 sheet"~~ | （**删除记录，不是活引用**）这两条坑位属「导入商品信息 Excel → 商品ID 克重」链（`src/lib/productWeight.ts#parseWeightSheet` + `pl_item_weights`）——该链与解析器已于 2026-10-01 随领域裁定（克重只属于 SKU）**整条删除**，仅存档于 git 历史与 `docs/plans/SHIPPING_RATE_ISLAND_PLAN.md` §8 | — |
 | **订单「数量」列直接当件数** | 多产品订单拆行后每行仍带原始数量值 → 3 件拆 3 行每行按 3 件算 = 9 倍重量 | 恒按 **1 件/行** 计（`extractShipping` 注释）；数量 >1 的合并计费留待 UI 明确选择后再做 |
 | **国名解析别名乱加** | 错误别名把 A 国订单算成 B 国运费且无告警 | 别名值以**运价表实际写法**为准（Korea / Russian Federation / United States）；加别名前先查表，变异测试钉住 alias / 前缀包含两条独立路径 |
 | **拒算分类只断言汇总计数** | 对称交换两个计数器（noCountry ↔ unknownCountry）汇总不变、用例照绿 | 分类必须**逐行可观测**：`OrderQuoteRow.reasonClass` 与行绑定，断言钉在行上（变异测试 §④⑤ 现形后补的） |
@@ -247,9 +253,10 @@ unzip -l market-out/shipping-rate-<版本>.zip          # 应只有 manifest.jso
 shasum -a 256 market-out/shipping-rate-<版本>.zip     # 与 catalog.json 里的 sha256 逐位一致
 ```
 
-当前已发布：`shipping-rate-1.2.0.zip`（zip 内仅 `manifest.json` + `dist/**`），catalog 第 5 条（base = `http://127.0.0.1:8000`）。
-历次版本都是**原地替换**（catalog 是 upsert 语义）：1.0.0 → 1.0.1 → 1.0.2 → 1.1.0 → 1.2.0；
-`market-out/` 里仅最新一条有引用，旧 zip（`shipping-rate-1.0.0/1.0.1.zip`）可删。
+当前线上：`shipping-rate-1.3.0.zip`（**含旧「商品ID 克重」链**，2026-10-01 00:04 推送）；工作区已备好
+**1.3.1**（克重链收口，见文首 1.3.1 blockquote）**待发布** —— 同版本换内容会被 `publish-plugin.js` 硬拦（exit 1），
+故必须升版本号。
+历次版本都是**原地替换**（catalog 是 upsert 语义），`market-out/` 里仅最新一条有引用，旧 zip 可删。
 
 ⚠️ **改完内容要两条都走**：① 升 `manifest.json` 的 `version`；② 重跑上面的 `publish-plugin.js`。
 只改仓库不重新打包 → 「插件中心 → 市场」装到的还是旧行为；只打包不重建运行时目录 →

@@ -1,6 +1,6 @@
 <template>
   <div class="wb-page td-view">
-    <!-- 发货主线：把「导入 → 归类 → 拣货 → 算钱 → 拿货 → 对账」六步串成一条线，回答三个问题 ——
+    <!-- 发货主线：把「导入 → 归类 → 算钱 → 拿货 → 对账」五步串成一条线，回答三个问题 ——
          **我在哪一步 / 下一步做什么 / 这件事在哪个页签做**。
          改造后点任一步是**切页签**（`go(s.tab)`），不再跳走。
          状态只用容器那份汇总推导，**不在这里另取数**。
@@ -36,7 +36,7 @@
           {{ flowNow.act }}
         </button>
       </div>
-      <!-- 六步**全部**在本页页签里（2026-10-05 归位：原先这里挂着一句"后两步还在插件里"+
+      <!-- 五步**全部**在本页页签里（2026-10-05 归位：原先这里挂着一句"后两步还在插件里"+
            一个跳去「订单归类」的按钮 —— 现在没有"在别处"的步骤了，那段话与那个按钮一并撤掉）。
            这里刻意**不再**给"去插件"的入口：留一个"要不要用插件"的岔路，和"一步都不跳"的诉求相抵。 -->
     </section>
@@ -47,6 +47,11 @@
         <div class="td-card__head">
           <span class="td-card__ico" v-html="ICON.orders"></span>
           <span class="td-card__title">订单</span>
+          <!-- 口径标签（2026-10-11）：这张卡只数**今天导进来**的那批，不是全库。
+               不写出来的话下面那个数字会被读成"库里一共这么多" —— 而全库的数在
+               「导入订单」页签的库内现状条上（那里才是问"库里有几行"的地方）。
+               ⚠️ 只在有数据时出现：空态那句「今天还没有导入订单」自己已经交代了范围。 -->
+          <span v-if="orders.total" class="td-card__scope" data-act="orders-scope">今天导入</span>
         </div>
 
         <template v-if="orders.total">
@@ -62,7 +67,12 @@
         </template>
 
         <template v-else>
-          <div class="td-value td-value--empty">还没有订单数据</div>
+          <!-- ⚠️ 措辞是「今天还没有导入订单」而不是「还没有订单数据」（2026-10-11）：
+               发货台只数**今天导入**的那批 ⇒ 库里可能明明有前几天的单，说"还没有订单数据"
+               就成了假话（用户会以为数据丢了 —— 这正是本轮要治的那类困惑）。
+               真正"一行都没有"与"今天还没导"在界面上本来就该长得不一样：前者的下一步是导入，
+               后者也是导入，但要说清"是今天这一批空着"。 -->
+          <div class="td-value td-value--empty">今天还没有导入订单</div>
           <div class="td-facts td-facts--stack">
             <span>来源①：浏览器采集（自带推送）</span>
             <span
@@ -99,8 +109,13 @@
             <span>范围：未发货 · 近 {{ picking.days }} 天</span>
             <span v-if="picking.missing" class="td-warn">缺数据 {{ picking.missing }} 处</span>
           </div>
-          <button class="wb-btn wb-btn--primary td-cta" data-act="go-picking" @click="go('picking')">
-            生成待拣清单
+          <!-- 2026-10-10：拣货清单并进「拿货」⇒ 这个按钮**就地切到「拿货」页签**
+               （`data-act` 名保留 `go-picking`：它指的仍是"去看待拣的货"这件事，
+               换名只会让既有断言白红一轮，而语义没变）。
+               文案从「生成待拣清单」改成「去看要拿什么」：进那个页签**清单已经自动出好了**
+               （`PickingView` 的 `auto`），"生成"这个词会让人以为还要再点一下。 -->
+          <button class="wb-btn wb-btn--primary td-cta" data-act="go-picking" @click="go('purchase')">
+            去看要拿什么
           </button>
           <!-- 刚导完订单时把这张卡点亮：导入后的下一步就是它，但三张卡并列时用户得自己找
                （**只做引导不重复入口** —— 动作仍是上面那个按钮，这里不给第二个按钮） -->
@@ -166,7 +181,7 @@
 <script setup lang="ts">
 // 「总览」页签：一眼看到"现在该干什么"，每块给一个可点的下一步。
 //
-// 与改造前的关系：内容基本照搬原「今天」页（流程卡 + 三张卡），两处改动 ——
+// 与改造前的关系：内容基本照搬原「发货台」页（流程卡 + 三张卡），两处改动 ——
 //   ① 点步骤/按钮改成**切页签**（`go(tabId)`），不再 `switchModule` 跳走；
 //   ② 数据全部从容器注入（`useShipping()`），本面板**自己一个 ipc 都不调**
 //      （"这页说缺多少行、那页说不缺"这类缝，根因就是各页各取一份数）。
@@ -365,6 +380,20 @@ const ICON = {
   font-size: 13px;
   font-weight: 600;
   color: var(--wb-text);
+}
+
+/* 口径标签（"今天导入"）——**贴在卡片标题行右端**：它是这个数字的作用域，
+   跟数字分开读就会变成"库里一共这么多"。做成药丸状与 `.td-facts` 的纯文字区分开。 */
+.td-card__scope {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid var(--wb-border);
+  border-radius: 999px;
+  background: var(--wb-surface-2);
+  color: var(--wb-text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.6;
 }
 
 /* 主数值：22px 等宽数字。与正文拉开三档（12 说明 / 13 标题 / 22 数值），

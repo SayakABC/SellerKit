@@ -3,7 +3,7 @@
 //
 // 为什么放在 core/services：它是**数据摄取能力**（解析 + 落库路由），跟 `excel.ts`（解析 Excel）同一层；
 // 业务口径一律留给 `src/lib/*` 的纯函数。**实现只有这一份** —— 宿主插件 op（`DB_OPS['shipping-rate']`
-// 的 `parseRateSheet` / `importProductWeights`）与内建页面都调它，避免同一件事两套实现漂移。
+// 的 `parseRateSheet`）与内建页面都调它，避免同一件事两套实现漂移。
 //
 // 四类可自动落库（各自复用既有解析器与通道，**零新表零新通道**）：
 //   · 结算明细 → `ae_settle_lines`（算钱页的"精准轨"数据源）
@@ -272,6 +272,7 @@ export async function importRateSheet(
  * 三处细节都刻意：
  *   · 只给**人话名**（「订单」「结算明细」），不给物理表名（`oi_orders` 这类是开发者视角，用户可见处不该出现）；
  *   · `views` 每一项都是**用户真的能点到的页面名**，与 `tests/uxEntryNames.spec.ts` 的入口名守卫同口径（写错会红）；
+ *     不写「本页」前缀 —— 回执卡渲染时统一补一个（落点目前全在「发货台」页内）；
  *   · 落点是**能力域**级（订单/结算/报价），不是"这张 sheet 的第 N 行" —— 后者用户没法用。
  */
 export interface ImportLanding {
@@ -284,8 +285,17 @@ export interface ImportLanding {
 /** 「接下来做什么」—— 导入后真正该点的那一两步（在界面上就是按钮，点了切到对应模块） */
 export interface ImportNextStep {
   label: string;
-  /** 目标模块 id —— **必须是 `modules.config.json` 里 enabledModules 的成员**（写错 = 按钮点了没反应） */
-  moduleId: string;
+  /**
+   * 目标模块 id —— **必须是 `modules.config.json` 里 enabledModules 的成员**（写错 = 按钮点了没反应）。
+   * 与 `tab` **二选一**：目标在「发货台」页里就写 `tab`，真跳别的模块（如「货与成本」）才写它。
+   */
+  moduleId?: string;
+  /**
+   * 目标是「发货台」页里的哪个页签（`flowCtx.SHIPPING_TAB_NAMES` 的**键**：`classify` / `purchase` / `cost`…）。
+   * 有它就**就地切页签**（与流程卡、总览卡的"下一步"同一套机制），不跳模块、不丢当前页面。
+   * ⚠️ 值必须是那里真有的键：写错 = 按钮点了没反应，而界面上看不出任何异常。
+   */
+  tab?: string;
   /** 主操作（一条回执最多一个；界面渲成 primary 按钮） */
   primary?: boolean;
 }
@@ -298,12 +308,29 @@ export interface AutoImportResult {
   scanned: string[];
   /** 真的写了库吗（false = 只给指引，没动数据） */
   wrote: boolean;
-  /** 给用户看的一句话（界面直接 toast） */
+  /**
+   * **大字结论**：这次到底发生了什么（一行，界面按最大字号渲染）。
+   *
+   * 为什么与原 `message` 分开（2026-10-11 用户实报"反馈信息模糊、文字太多、完全看不懂"）：
+   * 原来那一整句把**结论**（导了多少行）与**判据**（识别凭什么、拆了几行、主图成没成）
+   * 揉在一起，用户得读完才知道结果。现在拆成两层 —— 结论在这里（大字），判据在 `message`
+   * （折叠在「怎么看出来的」里，出问题时才展开）。
+   */
+  headline: string;
+  /** 排查用的**判据**（识别凭什么这么判、导了多少行…）—— 回执卡里**默认折叠**，别往这里放结论 */
   message: string;
   /** 识别到的人话类型名（回执卡标题；空 = 用 `kind` 的通用名） */
   title: string;
   /** 落到哪去了；`null` = 没写库（没有落点可讲，界面只说"没动数据"） */
   landed: ImportLanding | null;
+  /**
+   * **异常行**：需要用户知道、但**没到报错那一步**的事（跳过几行 / 主图没下下来 / 校验告警…）。
+   *
+   * ⚠️ 与 `message` 的分工：这里是**用户要采取行动**的（"3 行缺订单号"意味着这批单少录了），
+   * 界面上**直接平铺**、不折叠；而 `message` 是排查用的判据，默认折叠在「怎么看出来的」里。
+   * 空数组 = 一切正常，界面一个字都不写（不写"无异常"—— 那种话不携带信息）。
+   */
+  warnings: string[];
   /** 下一步动作（空数组 = 这页没有可点的下一步，界面不渲按钮组） */
   next: ImportNextStep[];
   /** 落库明细（各类型形状不同；界面只展示 message） */
@@ -313,8 +340,9 @@ export interface AutoImportResult {
 /**
  * **统一导入**：判断这份 Excel 是什么，并落到对的表。
  *
- * @returns 识别结论 + 是否落库 + 一句人话。**识别结果永远回传**（判据 `why` 一并给），
- * 于是"导到哪去了"在界面上是可核对的，不是一个黑盒。
+ * @returns 识别结论 + 是否落库 + **两层文案**：`headline`（大字结论，一行说清结果）、
+ * `warnings`（要用户管的异常，没有就是空数组）、`message`（判据，界面折叠）。**识别结果永远回传**
+ * （判据 `why` 一并给），于是"导到哪去了"在界面上是可核对的，不是一个黑盒。
  */
 export async function detectAndImport(src: ImportSource): Promise<AutoImportResult> {
   const { sheetNames, grids } = await readWorkbookSheets(src);
@@ -330,8 +358,14 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
       why: '没有命中任何已知类型',
       scanned: det.scanned,
       wrote: false,
-      title: itemInfo ? '「商品信息」表 —— 这类文件不用导入' : '没认出这份文件',
+      title: itemInfo ? '「商品信息」表' : '没认出这份文件',
+      // 「结论」与「标题」在这两种情况下很容易写成同一句话（都"没动数据"）——
+      // 刻意让它们各司其职：标题回答**这是什么**，结论回答**结果如何**。
+      // 写成两句一样的话（标题「没认出这份文件」+ 结论「没认出这份文件」）会在卡片上
+      // 上下重复一遍，正是用户说的"文字太多"里最没信息量的一种。
+      headline: itemInfo ? '这类文件不用导入' : '这份文件没有导入',
       landed: null,
+      warnings: [],
       next: itemInfo
         ? [{ label: '去「货与成本」维护 SKU 克重', moduleId: 'goods', primary: true }]
         : [],
@@ -349,28 +383,52 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
     const shopNote = r.shops.length
       ? `；店铺已归属：${r.shops.slice(0, 3).join('、')}${r.shops.length > 3 ? ` 等 ${r.shops.length} 家` : ''}`
       : '；店铺未归属 —— 可在「算钱」页一次「归到该店」';
+    /**
+     * **异常行**（只有真的发生才写，界面上直接平铺）。
+     *
+     * 判据（2026-10-11）：一件事进不进来，看**用户要不要为它做点什么**。
+     *   · 「跳过 N 行」要 —— 这批单少录了，用户得回去看报表；
+     *   · 「主图没下来」要 —— 订单进了库但没图，拣货单与导出给厂家的表里这几行没图；
+     *   · 「拆了 N 行」**不要** —— 那是系统的正常动作，用户不需要做任何事（它进 `message`）。
+     * ⚠️ 顺序 = 严重度：先"没进来的"，再"进来了但缺东西的"。
+     */
+    const warnings: string[] = [];
+    if (r.skipped) warnings.push(`${r.skipped} 行没有订单号，已跳过（这几行没进库）`);
+    if (r.imageFailed) warnings.push(`${r.imageFailed} 行主图没下下来（订单进了库，但这几行没有图）`);
     return {
       ...det,
       wrote: r.inserted > 0,
       detail: r,
       title: det.variant || '订单报表',
+      headline: r.inserted > 0 ? `已导入 ${r.inserted} 行订单` : '没有新增订单',
       landed: {
         label: '订单',
-        // 三处都是用户真的点得到的页面（顺序 = 从"刚导完最该看"到"再往后"）
-        // ⚠️ 2026-10-05「发货台」改造后，拣货/算钱是**同一个「今天」页里的页签**，
+        // 三处都是用户真的点得到的页面（顺序 = 从"刚导完最该看"到"再往后"）。
+        // ⚠️ **不写「本页」前缀**：回执卡渲染时统一在前面补一个（`ImportPanel.vue`，三处
+        //    落点目前全在「发货台」页内）。将来若出现不在本页的落点，得把前缀收回每一条里。
+        // ⚠️ 2026-10-05「发货台」改造后，拣货/算钱是**同一个「发货台」页里的页签**，
         //    不再是两个要跳过去的页面 —— 文案跟着改，否则用户会以为还要切走。
-        views: ['本页「订单」卡', '本页「生成拣货单」页签', '本页「算钱」页签'],
+        // 2026-10-10：拣货清单并进「拿货」（第 3 步 → 第 4 步）⇒ 这里的去处名跟着改。
+        // 2026-10-11：**第 2 步「归类核对」排在最前** —— 刚导完的行大概率还没归款，
+        //    那才是"接着该看的那一屏"（这一改动同时修掉了回执主按钮与流程卡第 2 步的矛盾，见下）。
+        views: ['「归类核对」页签', '「拿货」页签', '「算钱」页签'],
       },
-      // 「下一步」按场景给：已归属店铺 → 直接去拣货/看利润；未归属（AE 按店铺导出）→ 第二格换成归属动作。
-      // ⚠️ 这里就是"提示变入口"：`message` 里那句「可在「算钱」页一次「归到该店」」原来只是个说法，现在是个按钮。
+      warnings,
+      // 「下一步」按场景给：主操作**永远是"去核对这些行"**（第 2 步），
+      // ⚠️ 这条在 2026-10-11 前是「去看要拿什么」（第 4 步）—— 与流程卡上"第 2 步才是当前步"
+      //    自相矛盾：卡片让用户去归类，回执却把人直接送到拿货。现在两处一致。
+      // 第二格按场景分叉：店铺已归属 → 看要拿什么（第 4 步）；未归属（AE 按店铺导出）
+      //    → 先去「算钱」把店铺归了（那里才是归属动作所在，见 `message` 的 `shopNote`）。
+      // ⚠️ 用 `tab`（就地切页签）而不是 `moduleId`：这几步都在「发货台」本页里，
+      //    写 `moduleId` 会把人**跳出这个页面**（`picking` / `order-cost` 都是独立模块）。
       next: r.shops.length
         ? [
-            { label: '生成待拣清单', moduleId: 'picking', primary: true },
-            { label: '看订单与利润', moduleId: 'order-cost' },
+            { label: '去核对这些行', tab: 'classify', primary: true },
+            { label: '去看要拿什么', tab: 'purchase' },
           ]
         : [
-            { label: '生成待拣清单', moduleId: 'picking', primary: true },
-            { label: '去「算钱」归店铺', moduleId: 'order-cost' },
+            { label: '去核对这些行', tab: 'classify', primary: true },
+            { label: '去「算钱」归店铺', tab: 'cost' },
           ],
       message:
         `识别为「订单报表」（${det.why}）→ 已导入 ${r.inserted} 行` +
@@ -389,8 +447,13 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
       wrote: true,
       detail: r,
       title: '结算明细',
-      landed: { label: '结算明细', views: ['本页「算钱」页签（结算轨）'] },
-      next: [{ label: '去「算钱」看毛利', moduleId: 'order-cost', primary: true }],
+      headline: `已导入结算明细 · 新增 ${r.created} / 更新 ${r.updated}`,
+      landed: { label: '结算明细', views: ['「算钱」页签（结算轨）'] },
+      warnings: [
+        ...(r.failed.length ? [`${r.failed.length} 行没导进去（订单号对不上，详见技术明细）`] : []),
+        ...(r.issues ? [`${r.issues} 行等式校验没通过（平台口径可能变了）`] : []),
+      ],
+      next: [{ label: '去「算钱」看毛利', tab: 'cost', primary: true }],
       message:
         `识别为「结算明细」（${det.why}）→ 已导入：新增 ${r.created} / 更新 ${r.updated}` +
         (r.failed.length ? `，失败 ${r.failed.length} 行` : '') +
@@ -405,9 +468,11 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
     wrote: kept,
     detail: r,
     title: '报价单（运价表）',
+    headline: kept ? `运价表已留档（快照 #${r.snapshotId}）` : '没挑出一张能用的表',
     // 没挑出可用的表 = 这个字节都没留档 → **不给落点也不给下一步**（免得用户以为"已经进去了"）
-    landed: kept ? { label: '运价表', views: ['「算钱」页按生效日取用'] } : null,
-    next: kept ? [{ label: '去「算钱」核对', moduleId: 'order-cost', primary: true }] : [],
+    landed: kept ? { label: '运价表', views: ['「算钱」页签（按生效日取用）'] } : null,
+    warnings: [],
+    next: kept ? [{ label: '去「算钱」核对', tab: 'cost', primary: true }] : [],
     message:
       `识别为「报价单」（${det.why}）→ 取表「${r.sheetName}」` +
       (kept ? `，已留档（快照 #${r.snapshotId}）` : '，但没挑出一张能用的表（请检查报价单格式）'),

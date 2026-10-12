@@ -1,7 +1,7 @@
 // src/modules/today/flowCtx.ts
 // 「发货台」各 tab 的共享上下文（容器 `provide`，面板 `inject`）。
 //
-// 为什么要有它：把六步收进一页多 tab 之后，"谁取数、谁刷谁"必须有**唯一答案**，
+// 为什么要有它：把五步收进一页多 tab 之后，"谁取数、谁刷谁"必须有**唯一答案**，
 // 否则每个面板各取一份 → 出现"导入 tab 说 9 行、拣货 tab 还说 0 行"这类缝。
 //
 // 分工（**口径唯一**）：
@@ -41,7 +41,7 @@ export interface ShippingSummary {
    * 拿货 / 对账侧（2026-10-05 拿货、结算对账两个页签内建后加）。
    *
    * 前四个是**计数**：`orders` 拿货单张数 / `draft` 草稿 / `gap` 待拿货款色数 / `ignored` 已忽略款色数。
-   * `balance` 是**金额**（分）且**只此一个** —— 它是"第 6 步做完没有"的唯一判据（还欠着钱 = 对账没完）。
+   * `balance` 是**金额**（分）且**只此一个** —— 它是"第 5 步做完没有"的唯一判据（还欠着钱 = 对账没完）。
    * ⚠️ 其余金额一律不进这里：对账页自己的四个数（拿货/已付/已退/欠款）**必须同窗口同源**，
    *    从这里混一个"全部窗口的欠款"进去，就会和对账页切到"本月"时显示的欠款打架。
    */
@@ -50,7 +50,7 @@ export interface ShippingSummary {
 
 export interface ShippingCtx {
   summary: Ref<ShippingSummary>;
-  /** 六步主线（容器算、总览与 tab 标记都读这一份 —— 两处各自推导必然出现"卡上当前步 ≠ tab 上当前步"） */
+  /** 五步主线（容器算、总览与 tab 标记都读这一份 —— 两处各自推导必然出现"卡上当前步 ≠ tab 上当前步"） */
   flow: ComputedRef<FlowStep[]>;
   /** 当前该做的那一步（`now`/`gap` 里第一个；都在 4 个可执行步里选，见容器注释） */
   flowNow: ComputedRef<FlowStep>;
@@ -70,21 +70,33 @@ export interface ShippingCtx {
   /** 导入动作**只有一处实现**（在容器里）：总览空态的「导入 Excel」与导入页签里的大按钮走同一个函数 */
   importing: Ref<boolean>;
   importExcel(): Promise<void>;
+  /**
+   * 把用户**拖进投放区**的文件导入（2026-10-11）。
+   *
+   * 与 `importExcel` 共用容器里的同一条链路（识别 → 落库 → 回执 → `bump`）——
+   * 拖放换的只是"字节从哪来"，识别/落库/回执一律不变。`File.name` 只当展示用的来源名，
+   * **不进库**（落库的 `sourceFile` 由识别层按同一份 src 决定）。
+   */
+  importFile(file: File): Promise<void>;
 }
 
 /**
  * 「发货台」页签的**显示名**（**唯一来源**：`TodayView.vue` 的页签定义按 id 从这里取）。
  *
- * 为什么把它单独拎出来：六步收进一页多页签之后，页签名成了**新的一类入口名** ——
+ * 为什么把它单独拎出来：多步收进一页多页签之后，页签名成了**新的一类入口名** ——
  * 用户真的点得到它，于是文案里写「去「归类核对」页签」和写「去「货与成本」」是一回事，
  * 都得能对上真东西。`tests/uxEntryNames.spec.ts`（悬空入口名守卫）会读这里的名字当合法入口，
  * 所以**改页签名只改这一处**，别在两处各写一遍。
+ *
+ * 2026-10-10：原 `picking: '生成拣货单'` 随第 3 步并进「拿货」一并删掉（六步 → 五步）。
+ * **不是改名而是这个页签没了** —— 留着它会让悬空名守卫把一个点不到的名字当成合法入口。
+ * （拣货清单本身还在，见 `@/modules/picking/PickingView.vue`；它是「拿货」页里的一个视图，
+ * 不是页签，所以不进这里。跨模块入口名由 `src/modules/picking/meta.ts` 的 `name` 兜。）
  */
 export const SHIPPING_TAB_NAMES = {
   overview: '总览',
   import: '导入订单',
   classify: '归类核对',
-  picking: '生成拣货单',
   cost: '算钱',
   purchase: '拿货',
   recon: '结算对账',
@@ -96,11 +108,11 @@ export const SHIPPING_CTX: InjectionKey<ShippingCtx> = Symbol('shippingCtx');
  * 面板侧取上下文。**解构出来的是顶层 ref**，所以在模板里直接写 `flow` / `summary` 即可
  * （Vue 只对顶层 ref 绑定做自动 unwrap；若写成 `ctx.flow` 就得自己 `.value`）。
  *
- * 不做静默兜底：这些面板只可能挂在「今天」页的页签里，取不到就是接线错了，
+ * 不做静默兜底：这些面板只可能挂在「发货台」页的页签里，取不到就是接线错了，
  * 早点报出来比"页签点开一片空白"好排查。
  */
 export function useShipping(): ShippingCtx {
   const c = inject(SHIPPING_CTX);
-  if (!c) throw new Error('ShippingCtx 未提供：该面板只能挂在「今天」页的页签里');
+  if (!c) throw new Error('ShippingCtx 未提供：该面板只能挂在「发货台」页的页签里');
   return c;
 }

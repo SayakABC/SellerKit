@@ -1,13 +1,13 @@
 <template>
   <div class="wb-page td-shell">
     <!-- 页头：标题 + 一句说明 + 刷新。
-         说明从"待办清单"改成"这条流程长什么样" —— 六步现在**都在本页的页签里**，
+         说明从"待办清单"改成"这条流程长什么样" —— 五步现在**都在本页的页签里**，
          用户第一眼要知道的是"不用跳页了"，而不是"今天有几件事"。 -->
     <header class="wb-head">
       <div class="wb-head__main">
-        <h1 class="wb-head__title">今天</h1>
+        <h1 class="wb-head__title">发货台</h1>
         <p class="wb-head__desc">
-          每日发货全流程：导入 → 归类 → 拣货 → 算钱 → 拿货 → 对账，六步都在下面的页签里，点页签就地切换
+          每日发货全流程：导入 → 归类 → 算钱 → 拿货 → 对账，五步都在下面的页签里，点页签就地切换
         </p>
       </div>
       <div class="wb-head__actions">
@@ -17,7 +17,7 @@
       </div>
     </header>
 
-    <!-- 流程页签：把六步摆成一条可点的线（编号 + 名称 + 这一步还有多少活）。
+    <!-- 流程页签：把五步摆成一条可点的线（编号 + 名称 + 这一步还有多少活）。
          ⚠️ 断言钉在 `data-act` 上（`tab-<id>`），不按整段文本匹配。
          ⚠️ 页签上的数字**来自容器统一取的那一份汇总**（`ctx.summary`），不各自取数 ——
             否则会出现"页签说 3 个 SKU、点进去说 0 个"（保活让这份错更隐蔽）。 -->
@@ -61,11 +61,14 @@
 </template>
 
 <script setup lang="ts">
-// 「今天」= **发货台**：把「导入 → 归类 → 拣货 → 算钱 → 拿货 → 对账」六步收进一页多页签。
+// 「今天」= **发货台**：把「导入 → 归类 → 算钱 → 拿货 → 对账」五步收进一页多页签。
 //
 // 为什么这么改（用户 2026-10-05）：原先是四步流程卡，点一步**跳到别的模块**——
 // 跳走以后要回来得再点导航，中间的表单/清单全丢，一天几十单的操作里这很磨人。
-// 现在：六步 = 六个页签，点击就地切换（`KeepAlive` 保活），页面不重建、列表不重取。
+// 现在：五步 = 五个页签，点击就地切换（`KeepAlive` 保活），页面不重建、列表不重取。
+//
+// 2026-10-10：原第 3 步「生成拣货单」并进「拿货」（六步 → 五步）—— 拣货清单就是"要拿什么"，
+// 与拿货是同一件事的两半（理由详见 `tabs/PurchasePanel.vue` 头注释）。步号整体前移一位。
 //
 // **本页只做两件事**：① 汇总指标的取数与分发（`ctx.summary`，各页签徽标与总览卡共用同一份）；
 // ② 页签切换。**业务算法一律不在这页** —— 仍在 `src/lib/picking.ts` / `src/lib/orderCost.ts`
@@ -79,6 +82,7 @@ import { detectAndImport, type AutoImportResult } from '@/core/services/importSh
 import { resolveWeightG } from '@/lib/orderCost';
 import { loadSkuWeights } from '@/core/services/skuWeights';
 import { aggregatePicking, DEFAULT_PICKING_DAYS } from '@/lib/picking';
+import { localDayKey } from '@/lib/localDay';
 import type { UnifiedOrderRow } from '@/types';
 import { purchaseCounts } from './purchase';
 import {
@@ -104,7 +108,7 @@ interface TabDef {
 }
 
 /**
- * 页签定义。顺序 = 流程顺序（与流程卡、与用户说的六步一致）。
+ * 页签定义。顺序 = 流程顺序（与流程卡、与用户说的五步一致）。
  * ⚠️ `defineAsyncComponent` 必须在模块顶层建一次：写进 `computed` 会在每次渲染时新建包装器，
  * 于是 `KeepAlive` 永远认不出"这是同一个组件"，保活失效（切换即重建，等于没做）。
  */
@@ -132,17 +136,9 @@ const TABS: TabDef[] = [
     badge: (s) => (s.gaps.style ? `${s.gaps.style} 未归类` : ''),
   },
   {
-    id: 'picking',
-    name: TN.picking,
-    no: '3',
-    hint: '按未发货订单汇总要拣什么，按厂家分组、可导出带图 xlsx',
-    comp: defineAsyncComponent(() => import('./tabs/PickingPanel.vue')),
-    badge: (s) => (s.picking.sku ? `${s.picking.sku} SKU` : ''),
-  },
-  {
     id: 'cost',
     name: TN.cost,
-    no: '4',
+    no: '3',
     hint: '按订单行算收入/运费/成本/毛利，缺哪环逐行标出',
     comp: defineAsyncComponent(() => import('./tabs/CostPanel.vue')),
     badge: (s) => (s.gapTotal ? `缺 ${s.gapTotal}` : ''),
@@ -150,15 +146,15 @@ const TABS: TabDef[] = [
   {
     id: 'purchase',
     name: TN.purchase,
-    no: '5',
-    hint: '拿货单：从厂家拿了什么、各几件、多少钱',
+    no: '4',
+    hint: '要拿什么（图 + 款色码 + 进价）→ 按厂家生成拿货单 → 拿了什么',
     comp: defineAsyncComponent(() => import('./tabs/PurchasePanel.vue')),
     badge: (s) => (s.purchase.gap ? `${s.purchase.gap} 款色` : ''),
   },
   {
     id: 'recon',
     name: TN.recon,
-    no: '6',
+    no: '5',
     hint: '跟厂家对账（欠款 / 付款）+ 成本按店铺分摊',
     comp: defineAsyncComponent(() => import('./tabs/ReconPanel.vue')),
     badge: (s) => (s.purchase.orders ? `${s.purchase.orders} 单` : ''),
@@ -221,35 +217,42 @@ function bump(): void {
 }
 
 /**
- * 六步主线。**只由 `summary` 推导**，不新增取数：
- *   · 第 1 步看 `orders.total`（有没有订单）
- *   · 第 2 步看 `gaps.style`（还有多少行没识别出款）
- *   · 第 3 步看 `picking.sku`（有没有货要拣）
- *   · 第 4 步看 `gapTotal`（克重/成本/运价齐不齐）
- *   · 第 5 步看 `purchase.gap`（还有多少款色没拿 —— 由订单需求 − 已提交拿货单推出，宿主算好）
- *   · 第 6 步看 `purchase.balance`（还欠厂家多少钱；`0` 才算结清）
+ * ⚠️ 前置口径（2026-10-11，用户拍板）：**第 1–3 步看"今天导入的那批"，第 4–5 步看"未结清"**。
+ *    所以这里的 `orders` / `gaps` 是**今天**的数（`reload()` 按导入日筛，见那里的注释），
+ *    而 `picking` / `purchase` 是跨天的（未发货近 30 天 / 未结清）。这正是"每天上班导一次、
+ *    货和钱跨天结转"的真实工作流；两条口径都在界面上写出来了（订单卡的口径标签、
+ *    待拣卡的「范围」一行），不要把它们合并成一个数。
+ *
+ * 五步主线。**只由 `summary` 推导**，不新增取数：
+ *   · 第 1 步看 `orders.total`（**今天**导进来多少）
+ *   · 第 2 步看 `gaps.style`（今天这批里还有多少行没识别出款）
+ *   · 第 3 步看 `gapTotal`（克重/成本/运价齐不齐）
+ *   · 第 4 步看 `purchase.gap`（还有多少款色没拿 —— 由订单需求 − 已提交拿货单推出，宿主算好）
+ *   · 第 5 步看 `purchase.balance`（还欠厂家多少钱；`0` 才算结清）
  *
  * ⚠️ **串联语义**（2026-10-05 拍图才发现的 bug，别再犯）：前一步没完成时，后面的步骤一律
  *    `todo` + 写明"等第 N 步"，使 `now`+`gap` **恒为 1**。初版各步独立判断 ⇒ 有未识别款时
  *    第 2/3/4 步同时高亮（三块橙边），"当前该做哪一步"这个唯一要回答的问题反而答不出来。
- *    （第 6 步落地后这条约束仍然成立：`wait5` 非空时它必须是 `todo`。）
+ *    （第 5 步落地后这条约束仍然成立：`wait4` 非空时它必须是 `todo`。）
+ *
+ * 2026-10-10：原第 3 步「生成拣货单」并进第 4 步「拿货」（六步 → 五步）—— 拣货清单按
+ *    厂家/款色码/图/进价汇总，而"拿货"要的正是这张单，两步其实是一件连贯的事（详见
+ *    `PurchasePanel.vue` 的头注释）。于是 `picking.sku` **不再是主线的一环**
+ *    （它只是总览卡上的一个数字），后面的步号整体前移一位。
  */
 const flow = computed<FlowStep[]>(() => {
   const o = summary.value.orders;
-  const p = summary.value.picking;
   const g = summary.value.gaps;
   const gt = summary.value.gapTotal;
   const pu = summary.value.purchase;
   const hasOrders = o.total > 0;
   const needClassify = hasOrders && g.style > 0;
-  const needPicking = p.sku > 0;
   const needCost = hasOrders && gt > 0;
   const needPurchase = pu.gap > 0;
   const needRecon = pu.balance !== 0;
   const wait2 = !hasOrders ? '等第 1 步' : needClassify ? '等第 2 步' : '';
-  const wait3 = wait2 || (needPicking ? '等第 3 步' : '');
-  const wait4 = wait3 || (needCost ? '等第 4 步' : '');
-  const wait5 = wait4 || (needPurchase ? '等第 5 步' : '');
+  const wait3 = wait2 || (needCost ? '等第 3 步' : '');
+  const wait4 = wait3 || (needPurchase ? '等第 4 步' : '');
   return [
     {
       no: 1,
@@ -258,7 +261,7 @@ const flow = computed<FlowStep[]>(() => {
       tab: 'import',
       act: '去导入',
       where: '本页「导入订单」',
-      note: hasOrders ? `${o.total} 行在库` : '还没有订单',
+      note: hasOrders ? `今天导入 ${o.total} 行` : '今天还没导入',
       state: hasOrders ? 'done' : 'now',
     },
     {
@@ -273,43 +276,33 @@ const flow = computed<FlowStep[]>(() => {
     },
     {
       no: 3,
-      key: 'picking',
-      name: '生成拣货单',
-      tab: 'picking',
-      act: '去生成',
-      where: '本页「生成拣货单」',
-      note: wait2 || (needPicking ? `${p.sku} 个 SKU · ${p.pieces} 件` : '没有要拣的'),
-      state: wait2 ? 'todo' : needPicking ? 'now' : 'done',
-    },
-    {
-      no: 4,
       key: 'cost',
       name: '算钱',
       tab: 'cost',
       act: '去看利润',
       where: '本页「算钱」',
-      note: wait3 || (needCost ? `还缺 ${gt} 项数据` : '数据齐了'),
-      state: wait3 ? 'todo' : needCost ? 'gap' : 'done',
+      note: wait2 || (needCost ? `还缺 ${gt} 项数据` : '数据齐了'),
+      state: wait2 ? 'todo' : needCost ? 'gap' : 'done',
     },
     {
-      no: 5,
+      no: 4,
       key: 'purchase',
       name: '拿货',
       tab: 'purchase',
       act: '去拿货',
       where: '本页「拿货」',
-      note: wait4 || (needPurchase ? `${pu.gap} 款色还差货` : '该拿的都拿了'),
-      state: wait4 ? 'todo' : needPurchase ? 'now' : 'done',
+      note: wait3 || (needPurchase ? `${pu.gap} 款色还差货` : '该拿的都拿了'),
+      state: wait3 ? 'todo' : needPurchase ? 'now' : 'done',
     },
     {
-      no: 6,
+      no: 5,
       key: 'recon',
       name: '结算对账',
       tab: 'recon',
       act: '去对账',
       where: '本页「结算对账」',
-      note: wait5 || (needRecon ? `还欠 ¥${(pu.balance / 100).toFixed(2)}` : '账已结清'),
-      state: wait5 ? 'todo' : needRecon ? 'now' : 'done',
+      note: wait4 || (needRecon ? `还欠 ¥${(pu.balance / 100).toFixed(2)}` : '账已结清'),
+      state: wait4 ? 'todo' : needRecon ? 'now' : 'done',
     },
   ];
 });
@@ -337,29 +330,30 @@ const ctx: ShippingCtx = {
   receipt,
   importing,
   importExcel,
+  importFile,
 };
 provide(SHIPPING_CTX, ctx);
 
 /**
- * **统一导入入口**（本页唯一实现）：选一份 Excel → 判断它是什么（结算明细 / 商品信息 / 报价单 /
- * 订单报表）→ 落到对的表。识别结果**连判据一起**写进回执与 toast（"识别为 X（因为…）"），
- * 导到哪去了是可核对的，不是黑盒。
+ * **导入的唯一实现**（2026-10-11 抽出来）：「选文件」与「拖文件」只是**字节从哪来**不同，
+ * 识别 → 落库 → 写回执 → 通知各面板重取，这一整套必须只有一份，否则拖进来的那条路会
+ * 慢慢长成"少刷面板 / 不写回执"的半截实现（而它恰恰是**最不容易被点到**的那条路）。
  *
- * 放在**容器**而不是导入页签里：总览空态的「导入 Excel」点了要能**一步直达选文件**
- * （先切页签再让用户找按钮 = 两次点击，白改）。回执写在 `ctx.receipt`，导入页签挂着就读得到。
+ * ⚠️ 成功/未写入**只留回执卡、不发 toast**（2026-10-11）：回执是常驻的，toast 是几秒即走的
+ *    同一句话 —— 两张一起出现只是重复，且 toast 会盖右下角。错误路径仍发 toast（回执装不下）。
+ * ⚠️ 重入守卫：导入**不是幂等**操作（同一份报表导两遍 = 订单行翻倍），而投放区"整块可点"，
+ *    连点两下很容易发生 —— 进行中一律直接返回。
  */
-async function importExcel(): Promise<void> {
+async function runImport(src: { data: ArrayBuffer; filePath: string }): Promise<void> {
+  if (importing.value) return;
   importing.value = true;
   error.value = '';
   try {
-    const sel = await selectExcelFile();
-    if (!sel?.filePath) return;
     // 上一笔的回执先撤掉：识别 + 落库期间界面上不该还挂着**上一条**结论
     //（用户会把它当成这次的结论；重复导入同类文件时尤其明显 —— 两条 message 长得很像）
     receipt.value = null;
-    const r = await detectAndImport({ data: sel.data, filePath: sel.filePath });
+    const r = await detectAndImport(src);
     receipt.value = r;
-    toast(r.message, r.wrote ? 'success' : 'info');
     // 真写了库才 bump（没写库的文件不改变任何数据，不必让各面板白跑一遍取数）
     if (r.wrote) bump();
     else await reload();
@@ -373,6 +367,37 @@ async function importExcel(): Promise<void> {
 }
 
 /**
+ * **选文件导入**（本页两处入口共用）：总览空态的「导入 Excel」与导入页签的投放区都走它。
+ *
+ * 放在**容器**而不是导入页签里：总览空态的「导入 Excel」点了要能**一步直达选文件**
+ * （先切页签再让用户找按钮 = 两次点击，白改）。
+ */
+async function importExcel(): Promise<void> {
+  try {
+    const sel = await selectExcelFile();
+    if (!sel?.filePath) return;
+    await runImport({ data: sel.data, filePath: sel.filePath });
+  } catch (e: unknown) {
+    const msg = `导入失败：${e instanceof Error ? e.message : '未知错误'}`;
+    error.value = msg;
+    toast(msg, 'error');
+  }
+}
+
+/** **拖放导入**：投放区松手 → 读字节 → 走同一条链路（`File.name` 只作展示名） */
+async function importFile(file: File): Promise<void> {
+  if (importing.value) return;
+  try {
+    const data = await file.arrayBuffer();
+    await runImport({ data, filePath: file.name || '拖入的文件' });
+  } catch (e: unknown) {
+    const msg = `读取拖入的文件失败：${e instanceof Error ? e.message : '未知错误'}`;
+    error.value = msg;
+    toast(msg, 'error');
+  }
+}
+
+/**
  * 汇总取数（**本页唯一的取数口**）：三个数字 —— 订单行数 / 待拣 / 数据缺口。
  * 各步的**详细**数据由各面板自己取（拣货面板生成清单、算钱面板跑利润），
  * 这里只回答"有没有 / 多少"，供页签徽标与总览卡使用。
@@ -382,7 +407,13 @@ async function reload(): Promise<void> {
   error.value = '';
   try {
     // 1) 订单：**一个读口**（主干投影；来源由行上的 `source` 区分）
-    const imp = await ipc.orderShippingRows({ limit: 2000 });
+    //
+    // ⚠️ **按「导入日」筛今天**（2026-10-11 用户拍板的口径）：每天上班导一次
+    //    （"昨天 → 导出时点"的全部订单），白天的追加也**同属今天这批**；
+    //    第 1–3 步（导入/归类/算钱）看的就是这批。第 4–5 步（拿货/对账）不按天 ——
+    //    货和钱本来就跨天结转，那两步的取数在 `pickingRows` / `purchaseCounts` 里，不走这里。
+    //    ⇒ 页签徽标与总览卡上的"还有多少活"因此只说今天这批，与页名「发货台」名实相符。
+    const imp = await ipc.orderShippingRows({ limit: 2000, importDate: localDayKey() });
     const all: UnifiedOrderRow[] = imp.success && imp.data ? imp.data : [];
     const imported = all.filter((o) => o.source !== 'collect');
     const collected = all.filter((o) => o.source === 'collect');

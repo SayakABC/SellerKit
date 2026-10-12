@@ -227,8 +227,8 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
   //
   // 为什么能删：它是市场分发的 UI 岛 `ui-plugins/order-insight` 的**独占**能力域 ——
   //   其余四个岛（`shop-accounts` / `excel-copy` / `shipping-rate` / `ae-profit`）的
-  //   `manifest.capabilities` 都没有声明它。而该岛已整体下架：**六步发货台**
-  //   （`src/modules/today/**` 的七个页签）在宿主里做完了它的全部**每日动作**，
+  //   `manifest.capabilities` 都没有声明它。而该岛已整体下架：**五步发货台**
+  //   （`src/modules/today/**` 的六个页签）在宿主里做完了它的全部**每日动作**，
   //   剩下的「识别库 / 透视 / 明细」不是每日动作、按裁量一并去掉。
   //   消费者归零 ⇒ 按"死物可删"移除（同 2026-09-30 的 `picking` 域、2026-10-01 的 `product*` 五域）。
   //   "宿主也在用这些表"**不构成保留理由**：内建页与宿主同进程、走自己的 `ipc.*`，
@@ -411,7 +411,7 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
         orderNo: String(row?.orderNo ?? ''),
         ...extractShipping(row?.rawFields ?? {}),
       }));
-      // 克重：**只从产品库 SKU 表取**（与「算钱」「今天」同一份判定 `resolveWeightG`）。
+      // 克重：**只从产品库 SKU 表取**（与「算钱」「发货台」同一份判定 `resolveWeightG`）。
       // 订单行只要识别出了款色码就能联上；识别不出的行如实报「缺重量」（reasonClass=noWeight）。
       const rowsFull = Array.isArray(r.data) ? r.data : [];
       const { resolveWeightG } = await import('@/lib/orderCost');

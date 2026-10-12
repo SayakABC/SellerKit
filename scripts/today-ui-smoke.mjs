@@ -26,6 +26,13 @@ const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CFG = JSON.parse(readFileSync(path.join(ROOT, 'modules.config.json'), 'utf8'));
 const KNOWN_MODULES = CFG.profiles[CFG.profile] ?? CFG.enabledModules;
 
+// 「发货台」页内页签的 **id**（`flowCtx.SHIPPING_TAB_NAMES` 的键）—— 导入回执的"下一步"可以落在
+// 本页的一个页签上（那时按钮是**就地切页签**，不跳模块）。**从真来源读**，理由同 KNOWN_MODULES：
+// 抄一份副本的话，将来加/删页签这断言会恒绿（副本还停在旧清单上），而"点了没反应"照样漏过去。
+const FLOW_CTX_SRC = readFileSync(path.join(ROOT, 'src/modules/today/flowCtx.ts'), 'utf8');
+const TAB_BLOCK = /SHIPPING_TAB_NAMES\s*=\s*\{([\s\S]*?)\}\s*as const/.exec(FLOW_CTX_SRC);
+const KNOWN_TABS = TAB_BLOCK ? [...TAB_BLOCK[1].matchAll(/(\w+)\s*:/g)].map((m) => m[1]) : [];
+
 if (!existsSync(path.join(DIST, 'index.html'))) {
   console.error(`✗ 找不到构建产物 ${DIST}/index.html —— 先跑 npm run build`);
   process.exit(1);
@@ -74,24 +81,79 @@ const FAKE_BRIDGE = `<script>
     var p = function (x) { return String(x).length < 2 ? '0' + x : String(x); };
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
+  /**
+   * 按种子生成一条**内容不同**的极小图片 dataUrl（8x8 SVG，走 data: 前缀）。
+   * 缩略图假桥若对所有路径回同一个 dataUrl，"两行显示的是不是同一张图"就永远验不出来
+   * （2026-10-11 用户报"拿货单明细的图片都是一样的"——守卫必须能分辨两张图）。
+   * 只用单引号：本段整体在一个模板串里。
+   */
+  function svgThumb(seed, shape) {
+    var h = 0;
+    for (var i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+    var c = '#' + ('000000' + (h % 16777215).toString(16)).slice(-6);
+    // 形状：默认 8x8 方图；传 'pt' 给 6x8 **竖版**。
+    // ⭐ 为什么非得有一张竖版：方图放进方形格子，object-fit 的 fill / contain / cover
+    //    **渲染结果一模一样**（格子本身就是方的）⇒ 只留方图的话，"object-fit 被改成 fill"
+    //   这种错法在冒烟里永远绿。真库 35 张里 31 方 4 竖（2026-10-12 实测），夹具照抄这个比例。
+    var w = shape === 'pt' ? 6 : 8;
+    var ht = 8;
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + ht + '">' +
+        '<rect width="' + w + '" height="' + ht + '" fill="' + c + '"/></svg>',
+    );
+  }
+  // 哪几条夹具行是竖版图（真库约 1/9 竖版）：路径里带 p47 的那行。
+  function shapeOf(p) { return String(p || '').indexOf('p47') >= 0 ? 'pt' : ''; }
   window.__emptyOrders = false;
   // 空态开关（默认关闭 = 有数据）：__noGap / __noPurchaseOrders / __noPendingOrders / __noShopAlloc
   window.__noGap = false;
   window.__noPurchaseOrders = false;
   window.__noPendingOrders = false;
   window.__noShopAlloc = false;
+  // 「今天这批**都核对完了**」的开关（2026-10-11 新增）：与 __noPendingOrders 的区别是 ——
+  //   __noPendingOrders = 什么都没导（待核对 0、已核对也 0）⇒ 空态说「今天还没有导入订单」；
+  //   __allCorrected    = 导过、但全核完了（待核对 0、已核对 > 0）⇒ 空态说「今天这批都核对完了」
+  //   并给**流程的第 3、4 步**出口（去算钱 / 去看要拿什么）。
+  // ⚠️ 两个空态**必须分开造**：只造前者的话，"核完了"那条路径在冒烟里根本走不到，
+  //   而它正是用户问题 ②（"做完归类核对后订单不知道在哪"）要治的那条 —— 断言会恒绿。
+  window.__allCorrected = false;
+  // 「退回待核对」（2026-10-12）动过的订单 id：夹具里**每行的 corrected 状态是按这些集合算出来的**
+  //   · __correctedIds —— 被保存/确认过（已核对）；
+  //   · __reopenedIds  —— 被退回（放回待核对，**优先于**上面那个集合）。
+  // ⚠️ 两个集合都由断言段在运行中写（桥里只读）—— 与 __correctedIds 同一个姿势。
+  window.__reopenedIds = [];
+  // 「点开看原图」（2026-10-12）的两个探针开关：
+  //   __readImageFail  —— 让 orderReadImage 回 data:null ⇒ 验"读失败保留缩略图"那一支；
+  //   __readImageDelay —— { localPath: 毫秒 }，按路径拖慢响应 ⇒ 造"连点"竞态（见下面的桩）。
+  window.__readImageFail = false;
+  window.__readImageDelay = {};
 
   var IMPORTED = [{
     id: 1, orderNo: 'I-1', source: 'import', shop: '店A', orderTime: daysAgo(1) + ' 10:00:00',
     styleCode: 'S1', styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1',
     supplierId: 7, supplierName: '厂A', amountCents: 16518, vatCents: 3469, ddpCents: 2294,
     taxPlatform: '平台已税', bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' },
+    // ⚠️ createdAt = **导入日**（不是下单日 orderTime）。下单在前天、导入在今天 —— 这正是
+    //    真实工作流（每天早上导"昨天 → 现在"的单），也是"按导入日而不是按下单日筛"这条口径的用例。
+    createdAt: daysAgo(0) + ' 10:00:00',
   }];
   var COLLECTED = [{
     id: 9001, orderNo: 'C-1', source: 'collect', shop: '', orderTime: daysAgo(2) + ' 09:00:00',
     styleCode: '', styleColor: '', color: '白', size: 'M', itemId: '',
     supplierId: 0, supplierName: '', qty: 2, amountCents: 20000,
     vatCents: null, ddpCents: null, taxPlatform: '', bizStatus: '等待发货', rawFields: {},
+    createdAt: daysAgo(0) + ' 08:30:00',
+  }];
+  // 「导入日」过滤的**反向夹具**（2026-10-11 新增）：一行是**三天前**导进来的。
+  // 它与上面那两行的 orderTime 同形，**只有 createdAt（导入日）不同** ⇒ 发货台按导入日筛时
+  // 它必须**不出现在任何计数里**。
+  // ⚠️ 没有它，"按导入日筛"这条实现根本测不到：夹具全落在今天就等于恒真 ——
+  //    真库里"错筛成不筛"与"筛对了"看起来一模一样（这正是本仓反复踩的"夹具让断言空转"）。
+  var IMPORTED_OLD = [{
+    id: 5001, orderNo: 'I-OLD', source: 'import', shop: '店A', orderTime: daysAgo(4) + ' 10:00:00',
+    styleCode: '', styleColor: '', color: '灰', size: 'XL', itemId: '', supplierId: 0, supplierName: '',
+    amountCents: 500, vatCents: null, ddpCents: null, taxPlatform: '', bizStatus: '等待发货',
+    rawFields: {}, createdAt: daysAgo(3) + ' 11:00:00',
   }];
 
   function b64ToBuf(b64) {
@@ -106,10 +168,15 @@ const FAKE_BRIDGE = `<script>
   var SUPPLIERS = [
     { id: 7, name: '厂A', phone: '13800000000', note: '', createdAt: '2026-10-01 09:00:00' },
     { id: 8, name: '厂B', phone: '', note: '', createdAt: '2026-10-01 09:00:00' },
+    { id: 9, name: '厂C', phone: '', note: '', createdAt: '2026-10-01 09:00:00' },
   ];
-  // 待拿货缺口：一行，粒度 = 款色码（与宿主 outstanding() 一致）
+  // 待拿货缺口：一行，粒度 = 款色码（与宿主 outstanding() 一致）。
+  // ⚠️ 三个数**故意都不是整组件数**（3/1/2，而拣货清单那组是 3 件）：这样"已拿"与"还差"
+  //    才不会退化成"前者恒 0、后者恒等于需求"—— 尺码格断言（要拿 = 还差 = 2，不是需求 3）
+  //    与顶部条「待拿 1 款色 · 2 件」都靠这一行区分 remaining 与 demand 两种口径；
+  //    行内「无进价 3 件」取自需求口径 ⇒ 与"待拿 2 件"不同数，两条支路互不遮蔽（2026-10-10 换的判据）。
   var GAPS = [
-    { styleCode: 'S1', styleName: '款一', color: '黑', size: 'L', demand: 2, taken: 0, missing: 2 },
+    { styleCode: 'S1', styleName: '款一', color: '黑', size: 'L', demand: 3, taken: 1, missing: 2 },
   ];
   var IGNORES = [
     { styleCode: 'S9', color: '蓝', reason: '已线下拿', createdAt: '2026-10-01 10:00:00' },
@@ -117,21 +184,38 @@ const FAKE_BRIDGE = `<script>
   // 拿货单：一张草稿（明细，2 件 × 60.00 = 120.00）+ 一张已提交（包价 500.00）
   var PURCHASE_ORDERS = [
     { id: 3, supplierId: 7, supplierName: '厂A', bizDate: '2026-10-05', mode: 'detail', status: 'draft',
-      totalCents: 12000, note: '首单', editedAt: null, createdAt: '2026-10-05 09:00:00',
-      items: [{ id: 1, styleCode: 'S1', styleName: '款一', color: '黑', size: 'L', qty: 2,
-        priceCents: 6000, amountCents: 12000, suggestionQty: 2 }] },
+      totalCents: 12000, editedAt: null, createdAt: '2026-10-05 09:00:00',
+      items: [
+        { id: 1, styleCode: 'S1', styleName: '款一', color: '黑', size: 'L', qty: 2,
+          priceCents: 6000, amountCents: 12000, suggestionQty: 2 },
+        // 第二行 **同款同色、只差尺码**（M）—— 这是"行图必须按尺码各取各的"那条守卫的地基：
+        // 只按款色取图时，这两行会显示成同一张（用户报的"拿货单明细的图片都是一样的"）。
+        // 单价留空 ⇒ 金额 0，既有的「合计 ¥120.00」与保存断言都不受影响。
+        { id: 2, styleCode: 'S1', styleName: '款一', color: '黑', size: 'M', qty: 1,
+          priceCents: 0, amountCents: 0, suggestionQty: 1 },
+      ] },
     { id: 2, supplierId: 8, supplierName: '厂B', bizDate: '2026-10-04', mode: 'package', status: 'submitted',
-      totalCents: 50000, note: '', editedAt: null, createdAt: '2026-10-04 09:00:00', items: [] },
+      totalCents: 50000, editedAt: null, createdAt: '2026-10-04 09:00:00', items: [] },
   ];
+  // 新建的单**真的入册**（2026-10-10 重设计后）：生成拿货单会**立刻打开编辑器填价**
+  // （createFromPick → openEditor(r.id)）。假桥若不记住新建的单，purchaseOrderGet(99)
+  // 会拿一句「拿货单不存在」把这条主路径变成错误提示 —— 夹具必须忠于真形状（真库里 create 就是落库的）。
+  var CREATED_ORDERS = [];
+  function allOrders() { return PURCHASE_ORDERS.concat(CREATED_ORDERS); }
 
   // ---- 对账域夹具（2026-10-05「结算对账」页签内建）----
-  // 两行账**故意不同型**：厂A 欠 40.00（拿货 120 / 已付 80）、厂B 欠 520.00（拿货 500 / 退 20）
+  // 两行有账 + 一行零账，**故意不同型**：厂A 欠 40.00（拿货 120 / 已付 80）、厂B 欠 520.00（拿货 500 / 退 20）
   //  ⇒ 四个合计（620 / 80 / 20 / 560）都**不等于任一单行** —— 实现若只显示最后一行，断言会红。
+  //  + 厂C **全零**（真形状：reconciliation 是按 suppliers 表出全量的，零活动厂家照样占一行）——
+  //    本页仿"账本"语义只列**窗口内有账**的厂家（零行是常态噪音：真库 6 家里 5 家恒零），
+  //    厂C 就是这条过滤的载体：它**不该**出现在表里。
   var RECON = [
     { supplierId: 7, supplierName: '厂A', purchaseCents: 12000, paidCents: 8000, refundCents: 0,
       balanceCents: 4000, orderCount: 1, paymentCount: 1 },
     { supplierId: 8, supplierName: '厂B', purchaseCents: 50000, paidCents: 0, refundCents: 2000,
       balanceCents: 52000, orderCount: 1, paymentCount: 1 },
+    { supplierId: 9, supplierName: '厂C', purchaseCents: 0, paidCents: 0, refundCents: 0,
+      balanceCents: 0, orderCount: 0, paymentCount: 0 },
   ];
   // 付款两笔：一笔付款、一笔退款 —— 都覆盖到，"类型"列的两条分支才都有断言
   var PAYMENTS = [
@@ -150,43 +234,94 @@ const FAKE_BRIDGE = `<script>
       styleName: '款一', color: '黑', size: 'L', qty: 2, priceCents: 6000, amountCents: 12000 },
   ];
 
-  // ---- 归类核对域夹具（2026-10-05「归类核对」页签内建）----
-  // ⚠️ 四条**故意各缺一样**，让每个判据**各自独立可观测**（只放"唯一可选项"等于没测）：
-  //    · P-41：有图 + 未归类 → 「未归类」计数 + 缩略图合批都该算上它；
-  //    · P-42：有图 + **已归类** → 「归属款」下拉必须选中**它自己的款**（默认值不靠位置）；
+  // ---- 归类核对域夹具（2026-10-05「归类核对」页签内建；2026-10-10 按新口径重做）----
+  // 五行**故意各不相同**，让每条判据**各自独立可观测**（只放"唯一可选项"等于没测）：
+  //    · P-41：有图 + 未归类 + 没点名款（本款色卡为空）→ 颜色格必须是**自由输入**，值 = 订单自己的颜色；
+  //    · P-42：有图 + 已归类 S1 + 图记住的颜色「白」**在** S1 色卡里、而订单自己的颜色是「黑」→
+  //      颜色格必须自动选中**记住的**「白」而不是订单的「黑」（两条支路给出不同答案，才分得清是哪条在起作用）；
   //    · P-43：**无图** + 未归类 + **没有商品ID** → 无图行不该进缩略图合批（进了就白跑一次往返，
-  //      而"少带一条"与"带对了"在调用数上完全看不出区别）；
-  //    · P-44：有图 + 未归类 + **自己的商品ID**（店B / IT-B，本页只此一行）。
+  //      而"少带一条"与"带对了"在调用数上完全看不出区别）；它同时是"点名一个**还没录颜色**的款
+  //      ⇒ 颜色回落自由输入"这条判据的载体；
+  //    · P-44：有图 + 已归类 S1 + 图记住「印花」**不在** S1 色卡、订单自己的颜色「印花」也不在
+  //      → 颜色格必须**留空**（让用户自己选），不替他改判、也不把别的款的色硬塞进来；
+  //    · P-45：无图 + 已归类 S1 + 图记住「印花」不在色卡、订单自己的颜色「黑」**在**色卡
+  //      → 回落选订单自己的颜色（这条与 P-42 一起把"先认记住的色、次认订单的色"这个次序钉死）。
   //    P-41 与 P-42 是**同一家店的同一个商品ID**（店A / IT-A）⇒ 这两行要标「同商品 ×2」。
   //    ⭐ 「同商品」「独占商品」「没有商品ID」三种情况必须**各有一行**：
   //       只有"两条同商品 + 一条无商品ID"时，「有商品ID 就标」这种错法也能全绿
   //       （缺的正是 P-44 这样的"有商品ID 但只此一行"——它不该有徽标）。
+  // ⭐⭐ **P-43 与 P-45 的 category 必须是空串，这不是随手写的**（2026-10-11 修"归类核对设的颜色不生效"）：
+  //     真库里这两个量恰好**恒空** —— 导入不提品类（实测 23 行 category 全空）、从没跑过 VLM
+  //     （oi_images.result_json 全 null ⇒ features 恒空）⇒ buildStyleFingerprint('', []) 是**空串**。
+  //     夹具原先给的是「帽子」「T恤」⇒ 指纹恒非空 ⇒ "点名款到底要不要指纹"这条**分不出来**，
+  //     夹具把被验的量写成了实现的期望形状，断言只能恒绿（本仓反复踩的同一个坑）。
+  //     · P-43（无款 + 空品类 + 空特征）⇒ **填了颜色也没处挂**："拦住并说明"那条守卫的载体；
+  //     · P-45（有款 S1 + 空品类 + 空特征）⇒ 点名款时必须**照样挂款**（不要求指纹），
+  //       否则颜色永远到不了款色（拿货单 / 算钱 / 取图全读款色）。
   var PENDING_ORDERS = [
     { id: 41, imageId: 401, orderNo: 'P-41', shop: '店A', size: 'L', orderTime: '2026-10-04 10:00:00',
       category: 'T恤', color: '黑', logo: '', styleCode: '', styleName: '', styleColor: '',
       localPath: '/tmp/p41.jpg', fingerprint: 'fp41', features: ['圆领', '短袖'],
-      itemId: 'IT-A',
+      itemId: 'IT-A', createdAt: daysAgo(0) + ' 09:00:00',
       corrected: false, rawFields: { '商品ID': 'IT-A' } },
     { id: 42, imageId: 402, orderNo: 'P-42', shop: '店A', size: 'M', orderTime: '2026-10-04 11:00:00',
-      category: '裤子', color: '白', logo: '', styleCode: 'S1', styleName: '款一', styleColor: 'S1-白',
+      category: '裤子', color: '黑', logo: '', styleCode: 'S1', styleName: '款一', styleColor: '白',
       localPath: '/tmp/p42.jpg', fingerprint: 'fp42', features: [],
-      itemId: 'IT-A',
+      itemId: 'IT-A', createdAt: daysAgo(0) + ' 09:01:00',
       corrected: false, rawFields: { '商品ID': 'IT-A' } },
     { id: 43, imageId: null, orderNo: 'P-43', shop: '店C', size: 'S', orderTime: '2026-10-04 12:00:00',
-      category: '帽子', color: '灰', logo: '', styleCode: '', styleName: '', styleColor: '',
+      category: '', color: '灰', logo: '', styleCode: '', styleName: '', styleColor: '',
       localPath: '', fingerprint: '', features: [],
-      itemId: '',
+      itemId: '', createdAt: daysAgo(0) + ' 09:02:00',
       corrected: false, rawFields: {} },
     { id: 44, imageId: 404, orderNo: 'P-44', shop: '店B', size: 'XL', orderTime: '2026-10-04 13:00:00',
-      category: '外套', color: '蓝', logo: '', styleCode: '', styleName: '', styleColor: '',
+      category: '外套', color: '印花', logo: '', styleCode: 'S1', styleName: '款一', styleColor: '印花',
       localPath: '/tmp/p44.jpg', fingerprint: 'fp44', features: ['连帽'],
-      itemId: 'IT-B',
+      itemId: 'IT-B', createdAt: daysAgo(0) + ' 09:03:00',
       corrected: false, rawFields: { '商品ID': 'IT-B' } },
+    { id: 45, imageId: null, orderNo: 'P-45', shop: '店E', size: 'M', orderTime: '2026-10-04 14:00:00',
+      category: '', color: '黑', logo: '', styleCode: 'S1', styleName: '款一', styleColor: '印花',
+      localPath: '', fingerprint: 'fp45', features: [],
+      itemId: 'IT-C', createdAt: daysAgo(0) + ' 09:04:00',
+      corrected: false, rawFields: { '商品ID': 'IT-C' } },
   ];
-  // 识别库两行（款编码列表）—— 行内"归属款"下拉的数据源
+  // 「已核对」的订单（2026-10-11 新增）：页头「待核对 X · 已核对 Y」里那个 Y 用它们。
+  // ⚠️ **故意给 2 行**（不是 0、也不是全部）：0 的话，"计数实现坏了恒返回 0"照样全绿；
+  //    全部的话，两个数相等也分不出"数错了"。5 + 2 这组数**两边各自可辨**。
+  // ⚠️ 它们也必须是**今天导进来的**（createdAt）—— 口径与待核对那一份同一个筛，
+  //    否则两个数加起来大于这批总数，用户一眼看出对不上。
+  // ⭐⭐ 2026-10-12：这两行的 color / styleColor **刻意不一样**，这是"已核对范围只读格
+  //     显示的是哪一个"唯一能分辨的夹具形状 —— 两个值相同的话（原来 P-46 两处都是「黑」），
+  //     "先读款色"与"先读订单色"两种实现都显示「黑」，断言只能恒绿（本仓反复踩的同一个坑）。
+  //     · P-46：款色「黑」/ 订单色「灰」⇒ 必须显示**黑**（款色是下游真读的那一份）；
+  //     · P-47：款色**空** / 订单色「蓝」⇒ 必须回落显示**蓝**（款色没有时不能让格子空着）。
+  // ⭐⭐ 2026-10-12（用户报"已核对范围看着是坏的"）：这两行**必须也有图**。
+  //     真库实测 23/23 行全有图（已核对 184–206、待核对 207–213 都是 HAS），
+  //     而模板注释明写"已核对范围里同样要出图：退回的判据就是这张图定错了款"。
+  //     原先 localPath 是空串 ⇒ 两个范围各显示一列空占位、行被撑得很高 ⇒ **那一列**在冒烟里
+  //     从来没有被看见过（"已核对范围也出图"这条因此无法被验证 = 恒绿）。
+  //     给图之后它才第一次成为可断言的判据。顺带：p46 是方图、p47 是竖图（见 classify-shot 的形状混合）。
+  var CORRECTED_ORDERS = [
+    { id: 46, imageId: 406, orderNo: 'P-46', shop: '店A', size: 'L', orderTime: '2026-10-04 08:00:00',
+      category: 'T恤', color: '灰', logo: '', styleCode: 'S1', styleName: '款一', styleColor: '黑',
+      localPath: '/tmp/p46.jpg', fingerprint: 'fp46', features: [], itemId: 'IT-A',
+      createdAt: daysAgo(0) + ' 08:30:00', corrected: true, rawFields: {} },
+    { id: 47, imageId: 407, orderNo: 'P-47', shop: '店B', size: 'M', orderTime: '2026-10-04 08:10:00',
+      category: '裤子', color: '蓝', logo: '', styleCode: 'S2', styleName: '款二', styleColor: '',
+      localPath: '/tmp/p47.jpg', fingerprint: 'fp47', features: [], itemId: 'IT-B',
+      createdAt: daysAgo(0) + ' 08:31:00', corrected: true, rawFields: {} },
+  ];
+  // 「归属款」下拉的数据源 = **产品库全集**（不是识别池）。三行各验一件事：
+  //    · S1 / S2 是两个正常款 —— S1 有色卡（黑/白）、S2 有色卡（蓝）；
+  //    · S9 是**产品库里手工新建、识别池里没有**的款（旧实现按 oi_styles 驱动 ⇒ 手工建的款一个都不出现，
+  //      这正是用户报的"展示不全"），且状态是 archived ⇒ 选项文案要带「（停用）」；
+  //      它的色卡**故意为空** ⇒ 点名它之后颜色格要回落成自由输入（而不是给一个空下拉）。
+  //    ⚠️ 有 S9 之后"选项数"本身就成了判据：识别池两行时是 3 个选项（自动匹配 + 2），
+  //       产品库驱动才是 4 个 —— 数不对直接红，不靠人眼比对款名。
   var STYLES = [
-    { id: 5, code: 'S1', name: '款一', fingerprint: 'fp1', colorCount: 1, imageCount: 1, orderCount: 2, colors: [] },
-    { id: 6, code: 'S2', name: '款二', fingerprint: 'fp2', colorCount: 0, imageCount: 0, orderCount: 0, colors: [] },
+    { code: 'S1', name: '款一', status: 'active', colors: ['黑', '白'] },
+    { code: 'S2', name: '款二', status: 'active', colors: ['蓝'] },
+    { code: 'S9', name: '款九', status: 'archived', colors: [] },
   ];
 
   window.__importKind = 'weights';   // 切到 'junk' 时返回一份认不出的表
@@ -196,6 +331,13 @@ const FAKE_BRIDGE = `<script>
 
   // 芒果店长待发货订单样本（base64 在构建期由真实 xlsx 生成后插入 —— 解析路径必须真的走一遍 xlsx）
   var XLSX_MANGO_B64 = '${XLSX_MANGO_B64}';
+
+  // 把四份夹具的 base64 挂到 window：**驱动脚本（另一段注入脚本）要用它合成一个"拖进来的文件"**。
+  // 桥脚本是 IIFE，内部变量从外面取不到 —— 这是唯一的出口（selectExcel 的 override 用它，
+  // 投放区的拖放用例也用它）。
+  window.__smokeXlsxB64 = {
+    orders: XLSX_ORDERS_B64, junk: XLSX_JUNK_B64, weights: XLSX_WEIGHTS_B64, mango: XLSX_MANGO_B64,
+  };
 
   // ⭐ 「已核对 = 离开待核对列表」的开关（默认关）。
   //    宿主里 updateOrder / markOrdersCorrected 都写 corrected = 1，那一行随即不在
@@ -233,21 +375,33 @@ const FAKE_BRIDGE = `<script>
     },
     'orderShippingRows': function (p) {
       rec('orderShippingRows', p);
+      if (window.__emptyOrders) return { success: true, data: [] };
       // 主干一个读口：导入行与采集行在同一个返回里（按 source 区分）
-      return { success: true, data: window.__emptyOrders ? [] : IMPORTED.concat(COLLECTED) };
+      var rows = IMPORTED.concat(COLLECTED, IMPORTED_OLD);
+      // ⚠️ 必须**真的**按 importDate 筛（与主进程 shippingRows 同口径：比 created_at 的日期部分）。
+      //    忽略入参的话，"发货台只取今天导入的那批"这条接线在冒烟里就测不到了 ——
+      //    而它恰恰是本轮改动里最容易漏传的一个参数（漏传 = 静默退回全库，界面看不出异常）。
+      if (p && p.importDate) {
+        rows = rows.filter(function (r) {
+          return String(r.createdAt || '').slice(0, 10) === p.importDate;
+        });
+      }
+      return { success: true, data: rows };
     },
 
-    // 待拣：两行未发货（款 S1 黑 L 各 1 件；不给出块 → 按 1 件并标缺）
+    // 待拣：两行未发货（款 S1 黑 L 各 1 件；不给出块 → 按 1 件并标缺）。
+    // ⚠️ styleName 必须有值：「按此生成拿货单」的入参要带上它（拿货单里看的是款名），
+    //    夹具不给的话那一条断言只能退而求其次（形状对了、内容是空的，错法照样全绿）。
     'pickingRows': function (p) {
       rec('pickingRows', p);
       if (window.__emptyOrders) return { success: true, data: { rows: [], meta: { rows: 0, limit: 2000 } } };
       return { success: true, data: { rows: [
-        { id: 1, orderNo: 'I-1', shop: '店A', orderTime: daysAgo(1) + ' 10:00:00', styleCode: 'S1', styleColor: '红',
-          color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A', imagePath: '/tmp/a.jpg',
-          shipped: false, bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
-        { id: 2, orderNo: 'I-2', shop: '店A', orderTime: daysAgo(1) + ' 11:00:00', styleCode: 'S1', styleColor: '红',
-          color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A', imagePath: '/tmp/a.jpg',
-          shipped: false, bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:2 piece)' } },
+        { id: 1, orderNo: 'I-1', shop: '店A', orderTime: daysAgo(1) + ' 10:00:00', styleCode: 'S1', styleName: '款一',
+          styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
+          imagePath: '/tmp/a.jpg', shipped: false, bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
+        { id: 2, orderNo: 'I-2', shop: '店A', orderTime: daysAgo(1) + ' 11:00:00', styleCode: 'S1', styleName: '款一',
+          styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
+          imagePath: '/tmp/a.jpg', shipped: false, bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:2 piece)' } },
       ], meta: { rows: 2, limit: 2000 } } };
     },
     // 克重：只给 ITEM1 → 缺克重 0；成本表只覆盖 S2 → S1 缺成本 1 行；运价表为空 → "没有"
@@ -284,15 +438,33 @@ const FAKE_BRIDGE = `<script>
     'purchaseIgnoreList': function () { rec('purchaseIgnoreList', {}); return { success: true, data: IGNORES }; },
     'purchaseOrderList': function () {
       rec('purchaseOrderList', {});
-      return { success: true, data: window.__noPurchaseOrders ? [] : PURCHASE_ORDERS };
+      return { success: true, data: window.__noPurchaseOrders ? [] : allOrders() };
     },
     // ⚠️ 按 id 查：返回"第一条"会把"点了 #2 却打开 #3"这类错掩盖掉
     'purchaseOrderGet': function (p) {
       rec('purchaseOrderGet', p);
-      var hit = PURCHASE_ORDERS.filter(function (o) { return o.id === Number(p && p.id); })[0];
+      var hit = allOrders().filter(function (o) { return o.id === Number(p && p.id); })[0];
       return hit ? { success: true, data: hit } : { success: false, error: '拿货单不存在' };
     },
-    'purchaseOrderCreate': function (p) { rec('purchaseOrderCreate', p); return { success: true, data: { id: 99 } }; },
+    'purchaseOrderCreate': function (p) {
+      rec('purchaseOrderCreate', p);
+      // 真形状：建单**落库**，随后 purchaseOrderGet(99) 要能取到（见 CREATED_ORDERS 注释）
+      var items = ((p && p.items) || []).map(function (it, i) {
+        return {
+          id: i + 1, styleCode: it.styleCode, styleName: it.styleName, color: it.color, size: it.size,
+          qty: it.qty, priceCents: it.priceCents || 0, amountCents: it.amountCents || 0,
+          suggestionQty: it.suggestionQty || 0,
+        };
+      });
+      var sup = SUPPLIERS.filter(function (s) { return s.id === Number(p && p.supplierId); })[0];
+      CREATED_ORDERS.push({
+        id: 99, supplierId: Number(p && p.supplierId), supplierName: sup ? sup.name : '',
+        bizDate: (p && p.bizDate) || '', mode: (p && p.mode) || 'detail', status: 'draft',
+        totalCents: items.reduce(function (a, it) { return a + (Number(it.amountCents) || 0); }, 0),
+        editedAt: null, createdAt: '2026-10-10 12:00:00', items: items,
+      });
+      return { success: true, data: { id: 99 } };
+    },
     'purchaseOrderUpdate': function (p) { rec('purchaseOrderUpdate', p); return { success: true }; },
     'purchaseOrderSubmit': function (p) { rec('purchaseOrderSubmit', p); return { success: true }; },
     'purchaseOrderDelete': function (p) { rec('purchaseOrderDelete', p); return { success: true }; },
@@ -307,6 +479,19 @@ const FAKE_BRIDGE = `<script>
       rec('purchaseExportExcel', p);
       return { success: true, data: { filePath: '/tmp/purchase-smoke.xlsx' } };
     },
+    // 行图取路径（编辑器明细表）：**只有 S1·黑 有图**，其余给 null ——
+    // 这个不对称是两条断言的地基：S1·黑 行必须出 <img>、改成的 S9·黑 必须出「缺图」占位。
+    // 路径里**带上尺码**：同款同色、只差尺码的两行必须取到**不同的图**（true 形状：订单 Excel 里
+    // 每个商品行各有自己的图）。只按款色取图时这两行会拿到同一个路径 ⇒「两行图不同」那条会红。
+    // 真形状：未命中就是 null，且**顺序与入参一致**（实现若把 null 与"还没查"混为一谈，缺图那条会红）。
+    'purchaseStyleImages': function (p) {
+      rec('purchaseStyleImages', p);
+      var items = (p && p.items) || [];
+      return { success: true, data: { paths: items.map(function (it) {
+        if (!it || it.styleCode !== 'S1' || it.color !== '黑') return null;
+        return '/fake-orders/S1-hei-' + String(it.size || 'nosize') + '.jpg';
+      }) } };
+    },
 
     // ---- 对账域（2026-10-05「结算对账」页签内建）----
     // 三行账**故意不同型**：厂A 欠 40.00（已付 80 / 拿货 120）、厂B 欠 520.00（拿货 500 / 退 20）
@@ -314,7 +499,14 @@ const FAKE_BRIDGE = `<script>
     'purchasePaymentList': function (p) { rec('purchasePaymentList', p); return { success: true, data: PAYMENTS }; },
     'purchasePaymentAdd': function (p) { rec('purchasePaymentAdd', p); return { success: true, data: { id: 77 } }; },
     'purchasePaymentDelete': function (p) { rec('purchasePaymentDelete', p); return { success: true }; },
-    'purchaseReconciliation': function (p) { rec('purchaseReconciliation', p); return { success: true, data: RECON }; },
+    // window.__noRecon：对账清零的**反向夹具** —— 其余夹具恒有账，没有它"空态"那条路径走不到。
+    // 形态 = 厂家目录还在、这个窗口里全零（不是 []，那是连厂家表都空的全新库）——
+    // 真机上这就是空态的**唯一**触发点：零活动行被页面过滤掉 ⇒ 无行可渲染。
+    'purchaseReconciliation': function (p) {
+      rec('purchaseReconciliation', p);
+      var zero = function (r) { return { supplierId: r.supplierId, supplierName: r.supplierName, purchaseCents: 0, paidCents: 0, refundCents: 0, balanceCents: 0, orderCount: 0, paymentCount: 0 }; };
+      return { success: true, data: window.__noRecon ? RECON.map(zero) : RECON };
+    },
     'purchaseShopAllocation': function (p) {
       rec('purchaseShopAllocation', p);
       return { success: true, data: window.__noShopAlloc ? [] : SHOP_ALLOC };
@@ -330,7 +522,38 @@ const FAKE_BRIDGE = `<script>
       rec('orderList', p);
       if (window.__noPendingOrders) return { success: true, data: { rows: [], total: 0 } };
       var gone = window.__correctedIds || [];
-      var rows = PENDING_ORDERS.filter(function (o) { return gone.indexOf(o.id) < 0; });
+      var reopened = window.__reopenedIds || [];
+      // corrected 过滤（2026-10-11 起必须真的做）：pendingCounts 用它**分别**数
+      // 「待核对」「已核对」两个数，两个数都从这一条通道出。
+      // ⚠️ 原先这里忽略 corrected（两个调用返回同一批）—— 那时只有"待核对"一个数在用，
+      //    没暴露；现在忽略它会让「已核对」恒等于「待核对」，页头两个数永远一样（静默错）。
+      var wantCorrected = !!(p && p.corrected === true);
+      var wantPending = !!(p && p.corrected === false);
+      // ⭐ 2026-10-12：状态改成**按行算**（原来是从两个数组里各挑一部分拼出来）。
+      //    退回会把一行从"已核对"变回"待核对"，两个数组的写法表达不了"它现在属于哪一边" ——
+      //    而"退回真的把它放回了待核对队列"正是这一轮最该验的那件事。
+      function isCorrected(o) {
+        // 被退回的**优先**（退回是可逆动作：再点一次「确认无误」就回到已核对 —— 但这里没有
+        // 那条路径的模拟，夹具只需要"退回后它是待核对"，见下面 orderMarkCorrected 的注释）
+        if (reopened.indexOf(o.id) >= 0) return false;
+        // 「全核完了」：待核对清空、已核对照旧有数 —— 与 __noPendingOrders（两个都清空）区分开。
+        if (window.__allCorrected) return true;
+        // 夹具基线（CORRECTED_ORDERS 的 corrected:true）+ 本次会话里被保存/确认过的
+        return o.corrected === true || gone.indexOf(o.id) >= 0;
+      }
+      var all = PENDING_ORDERS.concat(CORRECTED_ORDERS);
+      // 与主进程 listOrdersPage **同语义**：corrected 未传 = **不过滤**（全表），传了才按该列筛。
+      // ⚠️ 这一点必须照搬，否则"corrected 过滤"这组断言是**空转**：默认分支只回"待核对"的话，
+      //    列表忘了传 corrected: false 这个回归在冒烟里抓不到（表里永远不会有已核对的那些行）。
+      //    这正是本仓反复踩的"夹具让断言恒绿"——夹具的结构必须与真实实现一致，不能只复刻内容。
+      var base = all.filter(function (o) {
+        var c = isCorrected(o);
+        return wantCorrected ? c : (wantPending ? !c : true);
+      });
+      // 「导入日」过滤：与主进程 listOrdersPage(importDate) 同口径（比 createdAt 的日期部分）
+      var rows = (p && p.importDate)
+        ? base.filter(function (o) { return String(o.createdAt || '').slice(0, 10) === p.importDate; })
+        : base;
       return { success: true, data: { rows: rows, total: rows.length } };
     },
     'orderStyleList': function () { rec('orderStyleList', {}); return { success: true, data: STYLES }; },
@@ -342,34 +565,69 @@ const FAKE_BRIDGE = `<script>
     // ⭐ 点名款时宿主会**回流**「(店铺, 商品ID) → 款 + 色」（写 pl_shop_sku + 回填存量订单），
     //    结果随 skuBackfill 回来。这里刻意给**最值得说**的那一种：记住了 + 顺带归好 2 单
     //    —— 界面若不把回执说出来，用户永远不知道"记住过一次"这件事存在（下面有断言钉它）。
-    'orderStyleAssign': function (p) { rec('orderStyleAssign', p); return { success: true, data: { styleCode: 'S2', styleColorCode: 'S2-黑', skuBackfill: { status: 'written', reassigned: 2, spec: '黑', conflictCode: '' } } }; },
+    // ⚠️ 回执里的款编码是**夹具固定值**（S2），不是从入参回显 —— 断言钉的是"界面把点名的款编码
+    //    原样发到请求里"（看 calls('orderStyleAssign') 的载荷），别拿回执反推请求发对了。
+    'orderStyleAssign': function (p) { rec('orderStyleAssign', p); return { success: true, data: { styleCode: 'S2', styleColorCode: 'S2-蓝', skuBackfill: { status: 'written', reassigned: 2, spec: '蓝', conflictCode: '' } } }; },
     'orderMarkCorrected': function (p) {
       rec('orderMarkCorrected', p);
       if (Array.isArray(p)) p.forEach(markCorrectedIfEmulating);
       return { success: true, data: { updated: Array.isArray(p) ? p.length : 2 } };
     },
-    // ⭐ 本页产品维度（指标条）：宿主拿（店铺原文, 商品ID）查 pl_shop_sku 得出。
-    //    夹具刻意让**产品数 ≠ 供应商数**（2 个产品 / 1 家供应商）—— 两个数相等时，
-    //    "把产品数当供应商数画出来"这种错法照样全绿（本仓同类教训不止一次）。
-    //    两个开关各打一种**与"0"不同**的状态：__noSkuRollup = 查过了、一个都没配上；
-    //    __skuRollupFails = 压根没取到（那一格必须整格不显示，不能画成 0）。
-    'orderSkuRollup': function (p) {
-      rec('orderSkuRollup', p);
-      if (window.__skuRollupFails) return { success: false, error: '产品域不可用' };
-      if (window.__noSkuRollup) return { success: true, data: { products: 0, suppliers: 0 } };
-      return { success: true, data: { products: 2, suppliers: 1 } };
+    // ⭐ 「退回待核对」（2026-10-12）：把已核对的行放回待核对（corrected = 0）。
+    // ⚠️ 入参是**裸数组**（真 preload 就是这个形状：orderReopenCorrected(ids) 的 { ids } 包装
+    //    发生在 preload 里，而假桥替的就是 preload 上面那一层）—— 对照 orderMarkCorrected
+    //    的记录值也是裸数组（[43]），两者形状必须一致，否则断言会去读一个不存在的字段。
+    // ⚠️ 它**只记 id、只改状态位**：夹具若顺手改了款/色，就验不出"退回不重写上一轮的结论"了
+    //    （那条判据钉在**请求载荷**上 —— 载荷里只要多了 color/styleCode 之类的字段就该红）。
+    // ⚠️ 本段整块在**模板串**里 ⇒ 注释不能含反引号（会把模板串提前闭合，见文件头第 9 行）。
+    'orderReopenCorrected': function (p) {
+      rec('orderReopenCorrected', p);
+      var ids = Array.isArray(p) ? p : [];
+      var arr = window.__reopenedIds = window.__reopenedIds || [];
+      ids.forEach(function (n) { if (arr.indexOf(n) < 0) arr.push(n); });
+      return { success: true, data: { updated: ids.length } };
     },
+    // ~~产品维度（指标条那一格）的桩 orderSkuRollup~~ **已随指标条整条撤掉（2026-10-10）**：
+    // 那条通道只为页头那排"待核对 / 未归类 / 识别库 / 已配产品"而生，用户看不懂 ⇒ 整条退场
+    // （handler / preload / types / ipc / classify / product-db 一并删）。留一个没人调的桩，
+    // 下一个人会以为"产品维度在这一页还有覆盖"。**要用时连实现一起加回来。**
     'orderImageThumbBatch': function (p) {
       rec('orderImageThumbBatch', p);
       // ⚠️ 载荷是**裸数组**（orderImageThumbBatch(items)，见 src/types.ts 声明）；
       //    归一成 {items} 发生在 preload 里，而假桥替的就是 preload 上面那一层。
       //    写成 p.items ⇒ 恒空数组 ⇒ 缩略图永远是空占位，"图列"那条断言等于没验。
       var items = Array.isArray(p) ? p : (p && p.items) || [];
-      // 给**每一条**都回一个极小的 GIF dataUrl：只有真的渲染出 <img>，才说明缩略图链路接上了
-      return { success: true, data: { dataUrls: items.map(function () {
-        return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+      // 给**每一条**都回一条能解码的图 dataUrl：只有真的渲染出 <img>，才说明缩略图链路接上了。
+      // ⚠️ 按 localPath 生成**内容不同**的 dataUrl：全回同一条的话，「同款不同尺码的两行图不一样」
+      //    这条守卫会恒绿（两行 src 永远相同）—— 那正是用户报的 bug 的形状。
+      return { success: true, data: { dataUrls: items.map(function (it) {
+        return svgThumb(String((it && it.localPath) || ''), shapeOf(it && it.localPath));
       }) } };
     },
+    // 读**原图**（不缩放）——「点开看大图」专用（2026-10-12 新增：用户第二次报"图片展示不全"，
+    // 表格缩略图放到 96px 仍看不清印花/领型 ⇒ 与「货与成本」同一套模式：点开读原图）。
+    // ⚠️ 回的必须与缩略图**不同的** dataUrl、且同样能解码：否则"换上原图了"这条断言恒绿
+    //    （src 压根没变也能算对）。window.__readImageFail = true 时返回 data:null
+    //    ⇒ 验"读失败保留缩略图、不比现在更坏"那一支。
+    'orderReadImage': function (p) {
+      rec('orderReadImage', p);
+      var path = String(p || '');
+      var fail = !!window.__readImageFail;
+      // __readImageDelay：按路径把这一条的响应**拖慢**若干毫秒。
+      // ⭐ 没有它，"连点只认最后一次"这条守卫是**恒绿**的：假桥同步返回时，两次
+      //    await 的 continuation 按点击顺序排队，后点的那个总在最后生效 ⇒ 坏实现也绿。
+      //    真竞态是"第一次的响应晚于第二次到达，把新结果盖掉"——必须把第一次拖慢才造得出来。
+      var delay = window.__readImageDelay && window.__readImageDelay[path];
+      var out = function () {
+        return fail ? { success: true, data: null }
+          : { success: true, data: { mime: 'image/svg+xml', dataUrl: svgThumb('FULL-' + path, shapeOf(path)) } };
+      };
+      if (delay) return new Promise(function (res) { setTimeout(function () { res(out()); }, delay); });
+      return out();
+    },
+    // 「复制给厂家」的图片剪贴板（2026-10-10 第二轮）：渲染层把这一家的清单画成 canvas → PNG dataURL
+    // → 这个通道（真写系统剪贴板在主进程）。记下**载荷**：这里唯一能验的就是"发出去的是不是图片"。
+    'writeClipboardImage': function (dataUrl) { rec('writeClipboardImage', dataUrl); return { success: true }; },
     // ~~识别链路的四个桩（orderReadImage / orderImageSave / orderApiKeyGet / orderApiKeySet）~~
     // **已随「识别未归类」一起删除（2026-10-05）**：它们只服务那条批量识别链路。
     // 假桥里留着没人用的桩会让下一个人以为"识别在这里还有覆盖" —— 要用时再加回来。
@@ -381,6 +639,11 @@ const FAKE_BRIDGE = `<script>
       var fn = OVERRIDES[key];
       if (fn) return function () { return Promise.resolve(fn.apply(null, arguments)); };
       if (/^on[A-Z]/.test(key)) return function () { return function () {}; };
+      // ⭐ 兜底分支顺带记一笔：**渲染层读了哪些没人实现的键**。
+      //    它是为"某条通道被整条删掉之后，页面不能再读它"这类**反向断言**留的钩子 ——
+      //    桩删掉之后"通道被调用了几次"恒为 0（读不到就无所谓调用），那是条恒绿的假守卫；
+      //    只有记"有没有人读"才能真的红。顺带它也把"本页偷偷用了什么没实现的键"暴露出来。
+      rec('__unhandled', String(key));
       return function () { return Promise.resolve({ success: true, data: null }); };
     },
   });
@@ -416,9 +679,16 @@ function card(act) { return document.querySelector('[data-act="' + act + '"]'); 
 function queryAll(sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); }
 // 真实模块 id（构建期从 modules.config.json 插进来）—— 判"下一步"按钮指向的模块存不存在
 var KNOWN_MODULES = ${JSON.stringify(KNOWN_MODULES)};
+// 「发货台」页内页签的 id（构建期从 flowCtx.SHIPPING_TAB_NAMES 插进来）—— 见下 checkNextTargets
+var KNOWN_TABS = ${JSON.stringify(KNOWN_TABS)};
 
 /**
- * 回执的「下一步」按钮**必须指向真实存在的模块**（id 写错 = 点了没反应，且不报错）。
+ * 回执的「下一步」按钮**必须指向真实存在的目的地**（写错 = 点了没反应，且不报错）。
+ *
+ * 目的地有两类（ImportNextStep 是 tab / moduleId 二选一）：
+ *   · 本页页签（tab）—— 就地切页签，id ∈ KNOWN_TABS（从 flowCtx 现读）；
+ *   · 别的模块（moduleId）—— 真跳转，id ∈ KNOWN_MODULES（从 modules.config.json 现读）。
+ * 两类都从真来源读，不在这里抄清单 —— 抄了的话将来改配置这条断言会恒绿。
  *
  * 抽成函数是为了在**两个场景**都跑：订单回执按"店铺已归属 / 未归属"给**两组不同按钮**，
  * 只测一组等于只覆盖一半 —— 实测把它们合并成一条断言、只在其中一个场景跑时，
@@ -428,9 +698,10 @@ function checkNextTargets(tag) {
   var btns = queryAll('[data-act="import-next"] button');
   var bad = btns.filter(function (b) {
     var id = (b.getAttribute('data-act') || '').replace('import-next-', '');
-    return KNOWN_MODULES.indexOf(id) < 0 || flat(b).length === 0;
+    var known = KNOWN_MODULES.indexOf(id) >= 0 || KNOWN_TABS.indexOf(id) >= 0;
+    return !known || flat(b).length === 0;
   });
-  report('回执的「下一步」按钮都指向真实模块、且都带文字（' + tag + '）',
+  report('回执的「下一步」按钮都指向真实目的地（本页页签或模块）、且都带文字（' + tag + '）',
     btns.length >= 1 && bad.length === 0,
     JSON.stringify(btns.map(function (b) { return flat(b) + '->' + b.getAttribute('data-act'); })));
 }
@@ -456,18 +727,72 @@ function pickingGenCalls() {
  *
  * ⚠️ 面板是「defineAsyncComponent」**懒加载**的 ⇒ 点完页签**不能立刻**断言面板内容：
  *    必须等该面板的特征元素出现。原来的脚本是"整页都在 DOM 里"，没有这一步的概念。
- * ⚠️ 各页签的「.pk-view」/「.oc-view」是**内嵌视图自己的根类**（复用整页视图，只是藏了页头），
+ * ⚠️ 各页签的「.oc-view」是**内嵌视图自己的根类**（复用整页视图，只是藏了页头），
  *    用它当"这个面板挂上了"的判据，比找某个按钮稳（按钮会跟数据走，空库时不存在）。
+ * ⚠️ 2026-10-10：原独立的「生成拣货单」页签（判据 .pk-view）**并进了「拿货」** ——
+ *    拣货清单现在是「拿货」页签「要拿什么」子视图里的整页视图（PurchasePanel 内嵌），
+ *    所以页面级只剩六个页签；.pk-view 仍存在，但它是**拿货面板的下属**，不再是一个页签。
  */
 var PANEL_SEL = {
   overview: '[data-act="flow"]',
   import: '[data-act="import"]',
   classify: '[data-act="classify-panel"]',
-  picking: '.pk-view',
   cost: '.oc-view',
   purchase: '.pu-view',
   recon: '[data-act="recon-panel"]',
 };
+
+/** 拣货清单里的一款色**卡**（2026-10-10 起是卡片网格，不再是表格行；键如 'S1 · 黑'，尺码折进卡上的 size-chip 条） */
+function pickCard(key) {
+  return document.querySelector('[data-act="pk-card"][data-key="' + key + '"]');
+}
+/** 取该卡里某个 data-act 格的文本（钉在格上，不拿整卡拼串 —— 拼串会被相邻格串味） */
+function cellText(el, act) {
+  var td = el && el.querySelector('[data-act="' + act + '"]');
+  return td ? td.textContent.trim() : '';
+}
+/** 底部汇总条里某厂家那一行（一本账一行：这家什么情况 + 复制发哪家 + 一键开单） */
+function sumRow(sid) {
+  return document.querySelector('[data-act="pk-sum-row"][data-supplier="' + sid + '"]');
+}
+
+// ── 按压塌守卫（2026-10-10）────────────────────────────────────────────────────
+// 替换原先的「position === 'sticky'」**声明断言** —— CSS 里写了 sticky，不等于条子真的在眼前。
+// 实测错法（真机 CDP 量的）：.pk-view 是 .wb-page（height:100% 的定高弹性列），内容一多就压缩
+// **默认可缩**的弹性项；.pk-sum 自己 overflow:hidden ⇒ 自动最小尺寸归零 ⇒ 被压到 2px，
+// 行与按钮**还在 DOM 里、却被自己裁掉**（elementFromPoint 中心命中不到）。转页签只改变卡片数
+// ⇒ 不同的压塌程度，看着像"按钮跟页签走"（真机「全部 6 款色/集雨 4」没按钮、「欢喜/大众 1」有，
+// 就是这么来的 —— 与页签语义毫无关系）。所以判据必须落在**几何 + 可达性**上，三条缺一不可：
+//   ① 条子没被压扁：clientHeight ≈ scrollHeight（压塌时 2 vs 158，必红）；
+//   ② 条子底边在视口内（sticky 把它钉在滚动口底边，钉住了才见得到）；
+//   ③ 每个按钮中心 elementFromPoint **命中它自己**（存在性 ≠ 可达性）。
+// 这里两个按钮都要在（本页是嵌入形态，supplier-action 开着 ⇒ 生成拿货单必须出现）。
+function pkSumGuard(requiredActs) {
+  var sum = document.querySelector('[data-act="pk-sum"]');
+  var view = document.querySelector('.pk-view');
+  if (!sum) return { ok: false, detail: 'no-sum' };
+  var rect = sum.getBoundingClientRect();
+  var notSquashed = sum.clientHeight + 1 >= sum.scrollHeight;
+  var inView = rect.bottom <= window.innerHeight + 1 && rect.top >= -1;
+  var miss = [];
+  for (var i = 0; i < requiredActs.length; i++) {
+    var act = requiredActs[i];
+    var b = sum.querySelector('[data-act="' + act + '"]');
+    if (!b) { miss.push(act + '→按钮不在'); continue; }
+    var r = b.getBoundingClientRect();
+    var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || (hit !== b && !b.contains(hit))) {
+      miss.push(act + '→点到 ' + (hit ? String(hit.getAttribute('data-act') || hit.className || hit.tagName).slice(0, 36) : 'null'));
+    }
+  }
+  return {
+    ok: notSquashed && inView && miss.length === 0,
+    detail: '条 h=' + Math.round(rect.height) + '（client ' + sum.clientHeight + ' / scroll ' + sum.scrollHeight +
+      '）底=' + Math.round(rect.bottom) + '/视口高 ' + window.innerHeight +
+      ' 视图 scroll/client=' + (view ? view.scrollHeight + '/' + view.clientHeight : '?') +
+      (miss.length ? ' | ' + miss.join('；') : ''),
+  };
+}
 function tabEl(id) { return document.querySelector('[data-act="tab-' + id + '"]'); }
 function onTab(id) { var el = tabEl(id); return !!el && el.className.indexOf('is-on') >= 0; }
 async function activateTab(id) {
@@ -544,30 +869,37 @@ async function main() {
     await waitFor(function () { return flat(card('card-orders')).indexOf('行') >= 0; }, 8000);
 
     step('tabs');
-    // 页签栏（2026-10-05「发货台」改造）：六步 + 总览 = 七个。
-    // ⚠️ 「懒加载」也要验：只断言"页签在"不够 —— 面板若是全量挂载，七个整页视图
-    //    （拣货 / 算钱各上千行、各自取数）会在进页面时一起跑，表现是打开就很慢。
-    var tabIds = ['overview', 'import', 'classify', 'picking', 'cost', 'purchase', 'recon'];
-    report('页签栏：七个页签齐全（总览 + 六步）',
+    // 页签栏（2026-10-05「发货台」改造）：五步 + 总览 = 六个。
+    //   2026-10-10：原第 3 步「生成拣货单」并进「拿货」⇒ 六步 → 五步，页签少一个。
+    // ⚠️ 「懒加载」也要验：只断言"页签在"不够 —— 面板若是全量挂载，六个整页视图
+    //    （算钱上千行、各自取数）会在进页面时一起跑，表现是打开就很慢。
+    var tabIds = ['overview', 'import', 'classify', 'cost', 'purchase', 'recon'];
+    report('页签栏：六个页签齐全（总览 + 五步）',
       tabIds.every(function (id) { return !!tabEl(id); }),
       tabIds.map(function (id) { return id + '=' + !!tabEl(id); }).join(' '));
     report('进入页面默认落在「总览」', onTab('overview'), '');
+    // 自证非空转：KNOWN_TABS 解析失败会返回 []，于是"回执的下一步指向真实页签"那条守卫
+    // 悄悄退化成"只认模块 id"（页签类按钮全被判悬空 → 假红；或反过来配上副本 → 恒绿）。
+    report('页签 id 清单从 flowCtx 真的读到了（否则"下一步"的页签守卫是空转的）',
+      KNOWN_TABS.length >= 5 && KNOWN_TABS.indexOf('classify') >= 0 && KNOWN_TABS.indexOf('purchase') >= 0,
+      JSON.stringify(KNOWN_TABS));
     report('懒加载：还没点过的页签，面板一个都没挂载（DOM 里查不到）',
       !document.querySelector('.oc-view') && !document.querySelector('.pu-view') &&
         !document.querySelector('[data-act="classify-panel"]') &&
         !document.querySelector('[data-act="recon-panel"]'), '');
 
     step('flow');
-    // 发货主线（2026-10-05「发货台」改造后）：**六步**齐全 + 每步标明"在本页哪个页签做"
+    // 发货主线（2026-10-05「发货台」改造后）：**五步**齐全 + 每步标明"在本页哪个页签做"
     //   + 当前步高亮 + 「下一步」是切页签（不再跳模块）。
+    //   2026-10-10：原第 3 步「生成拣货单」并进「拿货」⇒ 六步 → 五步（flow-picking 卡不存在了）。
     //   ⚠️ 这段会点一次 flow-next，**必须清掉 __events**，
     //   否则后面按 evts('switch-module')[0] 取的断言会读到我这条（假红）。
-    var flowKeys = ['import', 'classify', 'picking', 'cost', 'purchase', 'recon'];
+    var flowKeys = ['import', 'classify', 'cost', 'purchase', 'recon'];
     await waitFor(function () {
       var el = card('flow-classify');
       return !!el && flat(el).indexOf('未识别款') >= 0;   // 等到 gaps 也算出来（flow 依赖它）
     }, 8000);
-    report('发货主线：六步齐全（导入 / 归类 / 拣货 / 算钱 / 拿货 / 对账）',
+    report('发货主线：五步齐全（导入 / 归类 / 算钱 / 拿货 / 对账）',
       flowKeys.every(function (k) { return !!card('flow-' + k); }),
       flowKeys.map(function (k) { return k + '=' + !!card('flow-' + k); }).join(' '));
     // 「在哪做」的语义变了：以前是"跳去哪个模块"，现在是"本页的哪个页签"。
@@ -578,7 +910,7 @@ async function main() {
         var t = flat(card('flow-' + k));
         return t.indexOf('本页') >= 0 && t.indexOf('picking') < 0 && t.indexOf('order-cost') < 0;
       }) &&
-        flat(card('flow-picking')).indexOf('拣货') >= 0 &&
+        flat(card('flow-purchase')).indexOf('拿货') >= 0 &&
         flat(card('flow-cost')).indexOf('算钱') >= 0,
       flowKeys.map(function (k) { return flat(card('flow-' + k)); }).join(' | '));
     // 假桥数据：2 行订单（1 采集 + 1 导入），采集行无款编码 → 第 2 步是当前步
@@ -593,16 +925,16 @@ async function main() {
     report('当前步唯一：高亮（now/gap）的步骤数 = 1，且第 2 步未完成时第 3/4 步是 todo 并写明「等第 2 步」',
       queryAll('.td-flow__step.is-now, .td-flow__step.is-gap').length === 1 &&
         card('flow-classify').className.indexOf('is-now') >= 0 &&
-        card('flow-picking').className.indexOf('is-todo') >= 0 &&
+        card('flow-purchase').className.indexOf('is-todo') >= 0 &&
         card('flow-cost').className.indexOf('is-todo') >= 0 &&
-        flat(card('flow-picking')).indexOf('等第 2 步') >= 0 &&
+        flat(card('flow-purchase')).indexOf('等第 2 步') >= 0 &&
         flat(card('flow-cost')).indexOf('等第 2 步') >= 0,
       '高亮数=' + queryAll('.td-flow__step.is-now, .td-flow__step.is-gap').length +
-        ' | ' + [card('flow-picking'), card('flow-cost')].map(function (el) { return flat(el); }).join(' | '));
+        ' | ' + [card('flow-purchase'), card('flow-cost')].map(function (el) { return flat(el); }).join(' | '));
     report('「下一步」按钮跟着当前步走（当前步 = 归类核对）',
       !!document.querySelector('[data-act="flow-next-classify"]'),
       card('flow-next') ? flat(card('flow-next')) : 'no-next');
-    report('六步全部在本页页签里（流程卡不再有"在插件里"的步骤、也不给"去插件"的岔路）',
+    report('五步全部在本页页签里（流程卡不再有"在插件里"的步骤、也不给"去插件"的岔路）',
       flat(card('flow')).indexOf('插件') < 0 &&
         flat(card('flow-purchase')).indexOf('本页') >= 0 &&
         flat(card('flow-recon')).indexOf('本页') >= 0,
@@ -628,8 +960,21 @@ async function main() {
     var o = flat(card('card-orders'));
     report('订单卡：总数 + 两条来源分开计数', o.indexOf('2 行') >= 0 && o.indexOf('采集 1 行') >= 0 && o.indexOf('导入 1 行') >= 0, o);
     report('订单卡：显示最近下单日期（可核对）', /最近下单 \\d{4}-\\d{2}-\\d{2}/.test(o), o);
+    // ---- 口径：发货台只数**今天导入**的那批（2026-10-11 新增）--------------------------------
+    // ① 卡上必须**写明口径**：没有标签时那个「2 行」会被读成"库里一共 2 行"，而库里的数在
+    //    「导入订单」页签（问"库里有几行"的地方在那儿）—— 同一页两个数不一样时，用户没法判断谁对。
+    //    标签就是这个数字的作用域。
+    var scopeEl = card('card-orders') && card('card-orders').querySelector('[data-act="orders-scope"]');
+    report('订单卡：口径标签「今天导入」在卡片标题行（数字的作用域，不是全库）',
+      !!scopeEl && flat(scopeEl).indexOf('今天导入') >= 0, scopeEl ? flat(scopeEl) : 'no-scope');
+    // ② **反向夹具**坐实"真的按导入日筛"：夹具里有一行 IMPORTED_OLD（**三天前**导进来、orderTime 与今天
+    //    那两行同形），它必须**不在**这个计数里 —— 漏传 importDate 会静默退回全库，这里就成 3 行。
+    //    ⚠️ 只断言"等于 2"不够自证：把 OLD 行从夹具里去掉，"漏传"照样是 2 ⇒ 恒绿。
+    //    OLD 行就是让"漏传"这个错误**可造**的那一半（本仓"夹具让断言空转"的老毛病）。
+    report('订单卡：**只数今天导入的**（三天前导进来的那行不准算 —— 漏传 importDate 这里会变 3 行）',
+      o.indexOf('2 行') >= 0 && o.indexOf('3 行') < 0, o);
 
-    step('picking');
+    step('picking-card');
     var p = flat(card('card-picking'));
     report('待拣卡：同一 SKU 合一组 = 1 个 SKU / 3 件（1+2 件）/ 涉及 2 单',
       p.indexOf('1 个 SKU') >= 0 && p.indexOf('3 件') >= 0 && p.indexOf('涉及订单 2') >= 0, p);
@@ -731,19 +1076,75 @@ async function main() {
         ordDetail.indexOf('归到该店') >= 0,
       JSON.stringify({ title: ordTitle, detail: ordDetail }));
 
+    // ---- 结论卡（2026-10-11 重做）--------------------------------------------
+    // 用户实报「导完记录不知道去哪了、反馈信息模糊、文字太多、完全看不懂」。
+    // 这一层要钉的是**层次**而不只是"文案里有这几个字"：
+    //   ① 大字结论（import-headline）独立存在，且**真的比明细大**（读计算样式，不读 class 名）；
+    //   ② 判据（import-detail）**默认折叠**，点一下能展开 —— 否则"折叠"只写在样式上，
+    //      用户根本找不到展开的入口（文案还在，只是永远看不见）。
+    //   ③ 异常行只在**真的出事**时出现（本次导入没有跳过/没有主图失败 ⇒ import-warn 不该在）。
+    var headlineEl = document.querySelector('[data-act="import-headline"]');
+    var detailEl = document.querySelector('[data-act="import-detail"]');
+    var hlSize = headlineEl ? parseFloat(getComputedStyle(headlineEl).fontSize) : 0;
+    var dtSize = detailEl ? parseFloat(getComputedStyle(detailEl).fontSize) : 0;
+    report('回执有一行**大字结论**（"已导入 2 行订单"），且字号真的比判据大（读计算样式）',
+      !!headlineEl && flat(headlineEl).indexOf('已导入 2 行订单') >= 0 && hlSize > dtSize,
+      'headline=' + (headlineEl ? flat(headlineEl) : '无') +
+        ' 字号 ' + hlSize + ' vs 明细 ' + dtSize);
+
+    var moreEl = detailEl ? detailEl.closest('details') : null;
+    var toggleEl = document.querySelector('[data-act="import-detail-toggle"]');
+    var collapsedBefore = !!moreEl && moreEl.open === false;
+    if (toggleEl) toggleEl.click();
+    await waitFor(function () {
+      var d = document.querySelector('[data-act="import-detail"]');
+      return !!d && !!d.closest('details') && d.closest('details').open === true;
+    }, 2000).catch(function () {});
+    var expandedAfter = !!moreEl && moreEl.open === true;
+    report('判据（识别凭什么/拆了几行）**默认折叠**，点「怎么看出来的」能展开',
+      collapsedBefore && expandedAfter,
+      'details在=' + !!moreEl + ' 展开前open=' + (moreEl ? moreEl.open : '?') + ' 展开后=' + expandedAfter);
+
+    report('本次导入没有异常行 ⇒ 回执**不出现**异常块（不写"无异常"这种不带信息的话）',
+      !document.querySelector('[data-act="import-warn"]'),
+      'warn=' + (document.querySelector('[data-act="import-warn"]') ? flat(document.querySelector('[data-act="import-warn"]')) : '无'));
+
     // 「数据去哪了」—— 这是回执存在的首要理由
     //（2026-10-05 用户实报：导完不知道接下来做什么，也不知道数据去哪了）
     var ordLanded = flat(document.querySelector('[data-act="import-landed"]'));
-    report('回执回答"数据去哪了"：落到订单，并列出能看到它的三处页面',
-      ordLanded.indexOf('订单') >= 0 && ordLanded.indexOf('拣货') >= 0 && ordLanded.indexOf('算钱') >= 0,
+    // ⚠️ 口径 2026-10-10 变过：拣货清单并进「拿货」⇒ "能看到它的页面"里那格从「拣货」改成「拿货」。
+    //    2026-10-11 又把「归类核对」排到最前（刚导完的行大概率还没归款）。
+    report('回执回答"数据去哪了"：存到订单，并列出能看到它的三处页面',
+      ordLanded.indexOf('订单') >= 0 && ordLanded.indexOf('归类核对') >= 0 &&
+        ordLanded.indexOf('拿货') >= 0 && ordLanded.indexOf('算钱') >= 0,
       ordLanded);
 
-    // 「接下来做什么」—— 按钮必须指向**真实存在的模块**（id 写错 = 点了没反应，且不报错）。
-    // 这一场是"店铺未归属"那组按钮；"已归属"那组在下面的芒果步里另测一次。
+    // 「接下来做什么」—— 按钮必须指向**真实存在的目的地**（写错 = 点了没反应，且不报错）。
+    // 这一场是"店铺**未归属**"那组按钮（订单夹具没有店铺列）；"已归属"那组在下面的芒果步里另测一次。
     checkNextTargets('订单报表·店铺未归属');
-    report('订单报表的主操作是「生成待拣清单」（导完订单的下一步就是拣货）',
-      flat(document.querySelector('button[data-act="import-next-picking"]')).indexOf('待拣') >= 0,
-      flat(document.querySelector('button[data-act="import-next-picking"]')));
+    // ⚠️ 主操作 2026-10-11 从「去看要拿什么」（第 4 步）改成「去核对这些行」（第 2 步）——
+    //    原先与流程卡上"第 2 步才是当前步"自相矛盾：卡片让用户去归类，回执却把人送到拿货。
+    //    判据同时钉**主次**（primary 在 classify 上）与**落点**（tab ⇒ 就地切页签，不跳模块）。
+    // ⚠️ 次操作**按场景分叉**：店铺已归属 → 「去看要拿什么」(purchase)；未归属 → 「去「算钱」归店铺」(cost)。
+    //    本场是**未归属**（夹具没有店铺列）⇒ 次操作必须是 cost、**不是** purchase。
+    //    两支分别在本场与芒果场各验一次 —— 只验一支等于漏掉另一条分支（"对称交换仍绿"的老毛病）。
+    report('订单报表（店铺未归属）：主操作「去核对这些行」(classify) + 次操作「去「算钱」归店铺」(cost)',
+      flat(document.querySelector('button[data-act="import-next-classify"]')).indexOf('核对') >= 0 &&
+        !!document.querySelector('button[data-act="import-next-cost"]') &&
+        flat(document.querySelector('button[data-act="import-next-cost"]')).indexOf('算钱') >= 0 &&
+        !document.querySelector('button[data-act="import-next-purchase"]'),
+      JSON.stringify(queryAll('[data-act="import-next"] button').map(function (b) {
+        return flat(b) + '->' + b.getAttribute('data-act') + (b.className.indexOf('primary') >= 0 ? '(主)' : '');
+      })));
+    report('主按钮带 primary 样式（"哪个是主操作"在界面上看得出来，不靠用户猜）',
+      (function () {
+        var b = document.querySelector('button[data-act="import-next-classify"]');
+        return !!b && b.className.indexOf('primary') >= 0;
+      })(),
+      (function () {
+        var b = document.querySelector('button[data-act="import-next-classify"]');
+        return b ? b.className : 'no-btn';
+      })());
 
     // 只给按钮还不够：三个卡并列时用户仍要自己找。刚导完订单就把「待拣」卡点亮（**只引导，不重复入口**）
     // ⚠️ 「待拣」卡在**总览**页签里（导入页签只有导入按钮 + 回执）⇒ 切回去看
@@ -789,12 +1190,15 @@ async function main() {
     report('回执标题点名到「芒果店长待发货订单」',
       flat(document.querySelector('[data-act="import-title"]')).indexOf('芒果店长待发货订单') >= 0,
       flat(document.querySelector('[data-act="import-title"]')));
-    // 待发货订单 = 下一步就是拣货：主操作必须是它，且指向 picking
-    // （这一场是"店铺已归属"那组按钮 —— 与上面订单报表那组**不是同一条代码路径**）
+    // 待发货订单：主操作与次操作都落在本页页签上（这一场是"店铺已归属"那组按钮 ——
+    // 与上面订单报表那组**不是同一条代码路径**）。
     checkNextTargets('芒果店长待发货订单·店铺已归属');
-    report('芒果待发货订单的下一步是「生成待拣清单」（指向 picking）',
-      !!document.querySelector('button[data-act="import-next-picking"]') &&
-        flat(document.querySelector('button[data-act="import-next-picking"]')).indexOf('待拣') >= 0,
+    report('芒果待发货订单的下一步：主操作「去核对这些行」(classify) + 次操作「去看要拿什么」(purchase)',
+      !!document.querySelector('button[data-act="import-next-classify"]') &&
+        flat(document.querySelector('button[data-act="import-next-classify"]')).indexOf('核对') >= 0 &&
+        !!document.querySelector('button[data-act="import-next-purchase"]') &&
+        flat(document.querySelector('button[data-act="import-next-purchase"]')).indexOf('要拿什么') >= 0 &&
+        !document.querySelector('button[data-act="import-next-cost"]'),
       flat(document.querySelector('[data-act="import-next"]')));
 
     // 回执是**常驻**的（不是一闪而过的 toast），用户处理完要能关掉；关掉必须真的消失，不留空壳
@@ -805,6 +1209,98 @@ async function main() {
     }
     report('回执可关掉，且关掉后卡片真的消失',
       !!dismiss && !document.querySelector('[data-act="import-result"]'), String(!!dismiss));
+    // 关掉后要**回到干净的空态**：页面上没有回执，而**入口还在**。
+    // ⚠️ 判据 2026-10-11 换过：原先断言的是"空态那段说明文字里有没有 Excel / 回执"—— 那段文字
+    //    已按"少提示、靠交互"撤掉，再钉文案等于把一段说明文锁进测试。现在钉的是**真会坏的东西**：
+    //    没留残壳（无 import-result）+ 投放区还在 + 主按钮没被禁用（关回执顺手把入口也禁了 = 死路）。
+    //    ⚠️ 只断言"回执没了"是空转：页面整个塌成空白时它也绿。
+    var zoneAfter = document.querySelector('[data-act="import-drop"]');
+    var pickAfter = card('import');
+    report('关掉回执后回到干净空态：无残壳、入口仍在且可用',
+      !document.querySelector('[data-act="import-result"]') &&
+        !!zoneAfter && !!pickAfter && !pickAfter.disabled && flat(pickAfter).indexOf('Excel') >= 0,
+      'result=' + !!document.querySelector('[data-act="import-result"]') +
+        ' zone=' + !!zoneAfter +
+        ' btn=' + (pickAfter ? flat(pickAfter) + '/disabled=' + pickAfter.disabled : 'none'));
+
+    step('import-drop');
+    // 投放区（2026-10-11 重设计）：① 点**区块本身**（不是里面那个按钮）也要拉起选文件；
+    // ② 把文件**拖进来**要真的导入。这两条是"可点可拖"这层交互**唯一**的守卫 ——
+    //    只断言"元素在"是空转：点上去没反应、拖了没动作照样绿。
+    await waitImportIdle();
+    window.__importKind = 'junk';   // 先用认不出的表：只验"有没有发起选文件"，一个字节都不写库
+    var selBeforeZone = calls('selectExcel').length;
+    var insBeforeZone = calls('orderInsert').length;
+    var zone = document.querySelector('[data-act="import-drop"]');
+    report('导入页有投放区（可点可拖的入口）', !!zone, String(!!zone));
+    if (zone) zone.click();         // ⚠️ 点的是**区**本身，不是 [data-act="import"] 那个按钮
+    await waitFor(function () { return calls('selectExcel').length > selBeforeZone; }, 6000);
+    report('投放区整块可点：点区块本身（非按钮）也会拉起选文件',
+      calls('selectExcel').length > selBeforeZone, 'selectExcel=' + calls('selectExcel').length);
+    // ⚠️ **必须等整轮导入结束**再往下：waitImportIdle 单看"按钮可点"是不够的 ——
+    //    选文件对话框刚弹出来那一瞬按钮仍可点（importing 还没置位），此刻拖放会被
+    //    runImport 的重入守卫静默吞掉，症状是"拖了没反应"（实测踩到：orderInsert+0、
+    //    回执还停在上一条的结论上）。完成信号取"回执换成认不出的结论 **且** 按钮恢复可点"。
+    try {
+      await waitFor(function () {
+        var t = document.querySelector('[data-act="import-title"]');
+        return !!t && flat(t).indexOf('没认出') >= 0 && !card('import').disabled;
+      }, 8000);
+    } catch (e) { /* 下面那条 report 给结论 */ }
+    report('认不出的表走同一条链路：只解释、不写库',
+      calls('orderInsert').length === insBeforeZone, 'orderInsert=' + calls('orderInsert').length);
+
+    // 真"拖"一份订单报表进来：字节来自 DataTransfer（不是文件对话框），必须照样拆行落库。
+    // ⚠️ 先把旧回执撤掉：下面的判据是"**新**回执出现了"，不清场的话上一条结论会让它恒绿。
+    // ⚠️ 用 new Event('drop') + defineProperty 挂 dataTransfer，而不是 new DragEvent(...) ——
+    //    DragEvent 构造器对 dataTransfer 的支持在各版本不一致，这条链上失败会被读成"投放区没实现"。
+    if (card('import-dismiss')) card('import-dismiss').click();
+    var insBeforeDrop = calls('orderInsert').length;
+    var dropNote = '';
+    try {
+      var db64 = (window.__smokeXlsxB64 || {}).orders || '';
+      var dbin = atob(db64);
+      var dbytes = new Uint8Array(dbin.length);
+      for (var di = 0; di < dbin.length; di++) dbytes[di] = dbin.charCodeAt(di);
+      var dfile = new File([dbytes.buffer], '拖进来的订单报表.xlsx', { type: 'application/vnd.ms-excel' });
+      var ddt = new DataTransfer();
+      ddt.items.add(dfile);
+      var dev = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(dev, 'dataTransfer', { value: ddt });
+      document.querySelector('[data-act="import-drop"]').dispatchEvent(dev);
+      dropNote = 'bytes=' + dbytes.length + '/files=' + ddt.files.length;
+    } catch (e) { dropNote = 'throw:' + String((e && e.message) || e); }
+    try { await waitFor(function () { return calls('orderInsert').length >= insBeforeDrop + 2; }, 8000); } catch (e) {}
+    report('把 Excel 拖进投放区 = 真的导入（订单报表照样拆两行落库）',
+      calls('orderInsert').length >= insBeforeDrop + 2,
+      dropNote + ' orderInsert+' + (calls('orderInsert').length - insBeforeDrop) +
+        ' err=' + flat(document.querySelector('.td-error')));
+    report('拖入后同样留下回执（拖放不是一条静默路径）',
+      !!document.querySelector('[data-act="import-result"]') &&
+        flat(document.querySelector('[data-act="import-title"]')).indexOf('订单报表') >= 0,
+      flat(document.querySelector('[data-act="import-result"]')));
+
+    // 能识别的四类要拧成**可扫的标签**（原先埋在空态那句长括号里，用户很难确认"我这份在不在里面"）
+    var chips = queryAll('[data-act="import-drop"] .ti-drop__types li');
+    var chipText = chips.map(function (c) { return flat(c); }).join('|');
+    report('投放区把能识别的四类文件列成标签（不埋在长句里）',
+      chips.length === 4 && chipText.indexOf('结算明细') >= 0 && chipText.indexOf('报价单') >= 0, chipText);
+
+    // 说明文字压到只剩一行标题之后，**"拖到上面时区自己会变"就成了用户唯一的引导**：
+    // 原先靠副标题写"也可以直接把文件拖进来"，现在靠虚线框在 dragenter 时变实线 + 标题换字。
+    // ⚠️ 判据读的是**计算样式**（dashed → solid）而不是 class 名：'is-over' 挂上了但样式没生效
+    //    （选择器写错、被覆盖）时用户照样看不出来，只查 class 会恒绿。等待与判定分开写。
+    var zIdle = getComputedStyle(zone).borderStyle;
+    zone.dispatchEvent(new Event('dragenter', { bubbles: true, cancelable: true }));
+    try { await waitFor(function () { return getComputedStyle(zone).borderStyle === 'solid'; }, 2000); } catch (e) {}
+    var zOver = getComputedStyle(zone).borderStyle;
+    var zOverTitle = flat(zone.querySelector('.ti-drop__title'));
+    zone.dispatchEvent(new Event('dragleave', { bubbles: true, cancelable: true }));
+    try { await waitFor(function () { return getComputedStyle(zone).borderStyle === 'dashed'; }, 2000); } catch (e) {}
+    var zBack = getComputedStyle(zone).borderStyle;
+    report('文件悬在投放区上方时：边框虚线变实线 + 标题换成「松手就导入」，离开后复原',
+      zIdle === 'dashed' && zOver === 'solid' && zBack === 'dashed' && zOverTitle.indexOf('松手') >= 0,
+      'idle=' + zIdle + ' over=' + zOver + ' back=' + zBack + ' title=' + zOverTitle);
 
     step('empty');
     // 空态：给的是"动作"，不是一句"暂无数据"；而且动作必须是**宿主自己能做的那一步**
@@ -814,12 +1310,20 @@ async function main() {
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () {
       var el = card('card-orders');
-      return el && flat(el).indexOf('还没有订单数据') >= 0;
+      return el && flat(el).indexOf('今天还没有导入订单') >= 0;
     }, 8000);
     var emptyCard = flat(card('card-orders'));
     report('无订单时：空态卡说明两条来源并给出下一步按钮',
       !!card('card-orders').querySelector('button[data-act="empty-import"]') &&
         emptyCard.indexOf('来源①') >= 0, emptyCard);
+    // ⚠️ 空态说「今天还没有导入订单」而不是「还没有订单数据」（2026-10-11）：发货台只数**今天导入**的
+    //    那批，库里可能明明有前几天的单 —— 说"还没有订单数据"是假话（用户会以为数据丢了，正是本轮要治的病）。
+    report('无订单时不说"还没有订单数据"（那是假话：库里可能有前几天的单）',
+      emptyCard.indexOf('还没有订单数据') < 0 && emptyCard.indexOf('今天还没有导入订单') >= 0,
+      emptyCard.slice(0, 160));
+    // 空态**不该**出现口径标签（那句本身已经交代了范围），标签是给"有数字"时的数字配的作用域。
+    report('空态不挂「今天导入」口径标签（避免与空态那句话重复）',
+      !card('card-orders').querySelector('[data-act="orders-scope"]'), '');
     // ⚠️ 判据随改造变了：以前要做的是"别再劝用户去装插件"（那时归类只在插件里），
     //    现在归类有了页签 ⇒ 反向守卫升级成"**不许**出现『另装』"，并指向本页页签。
     report('空态的主操作是「导入 Excel」（且不再把用户送去装插件）',
@@ -844,15 +1348,16 @@ async function main() {
 
     step('nav');
     // 点击出参是唯一能抓"点了没反应"的手段。
-    // ⚠️ 改造后这里**不再跳页**：点「生成待拣清单」= 切到「生成拣货单」页签，人一直停在「今天」。
+    // ⚠️ 改造后这里**不再跳页**：点「去看要拿什么」= 切到「拿货」页签，人一直停在「今天」。
+    //    2026-10-10：拣货清单并进「拿货」⇒ 落点从原「生成拣货单」页签改成「拿货」页签。
     window.__emptyOrders = false;
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () { return card('card-picking') && card('card-picking').querySelector('button[data-act="go-picking"]'); }, 8000);
     var swBeforeNav = evts('switch-module').length;
     card('card-picking').querySelector('button[data-act="go-picking"]').click();
-    await waitFor(function () { return onTab('picking') && !!document.querySelector(PANEL_SEL.picking); }, 8000);
-    report('「生成待拣清单」= 切到「生成拣货单」页签（就地切换）',
-      onTab('picking') && !!document.querySelector('.pk-view'), '');
+    await waitFor(function () { return onTab('purchase') && !!document.querySelector(PANEL_SEL.purchase); }, 8000);
+    report('「去看要拿什么」= 切到「拿货」页签（就地切换）',
+      onTab('purchase') && !!document.querySelector('.pu-view'), '');
     report('全程没有派发 switch-module（页面始终没离开「今天」）',
       evts('switch-module').length === swBeforeNav,
       'switch-module=' + evts('switch-module').length);
@@ -861,20 +1366,21 @@ async function main() {
     // **"丝滑"的判据**：切走再切回，面板是**同一个 DOM 实例**（KeepAlive 保活），不是重新挂载。
     // ⚠️ 只在 DOM 上打个标记来验 —— 断言"取了数"不够（重挂载也会取数），
     //    而"节点还是那一个"是保活的直接证据。标记跟着缓存的 DOM 走，重挂载就丢。
-    var pkEl = document.querySelector('.pk-view');
+    //    2026-10-10：拣货清单现在住在「拿货」面板里 ⇒ 标记打在**拿货面板**上（它才是被 KeepAlive 的那个）。
+    var pkEl = document.querySelector('.pu-view');
     var mark = 'KEEP' + Math.random();
     pkEl.__keepMark = mark;
     await activateTab('cost');
-    await activateTab('picking');
-    var pkBack = document.querySelector('.pk-view');
-    report('切走再切回：拣货面板是**同一个 DOM 实例**（KeepAlive 保活，界面不重建）',
+    await activateTab('purchase');
+    var pkBack = document.querySelector('.pu-view');
+    report('切走再切回：拿货面板是**同一个 DOM 实例**（KeepAlive 保活，界面不重建）',
       !!pkBack && pkBack.__keepMark === mark, 'mark=' + String(pkBack && pkBack.__keepMark));
     report('「算钱」面板也已经挂上过（两个内嵌整页视图在同一页里共存）',
       !!document.querySelector('[data-act="tab-cost"]'), '');
 
     step('refresh-link');
     // **保活的代价必须还回去**：导入新订单后，已经生成过的拣货单要跟着重算
-    // （否则用户切回拣货页签，看到的是"导入之前"那份清单，还以为没生效）。
+    // （否则用户切回拿货页签，看到的是"导入之前"那份清单，还以为没生效）。
     // ⚠️ 判据必须是**拣货面板自己发出的**那些调用（见 「pickingGenCalls」 的注释）：
     //    用总数会被容器的 reload 满足 ⇒ 变异（拿掉 refresh-token）照样全绿，守卫是假的。
     var genBefore = pickingGenCalls().length;
@@ -894,7 +1400,7 @@ async function main() {
       throw new Error('refresh-link 这一步的导入没落库：orderInsert=' + calls('orderInsert').length +
         ' 结论=' + flat(document.querySelector('[data-act="import-result"]')));
     }
-    await activateTab('picking');
+    await activateTab('purchase');
     try {
       await waitFor(function () { return pickingGenCalls().length > genAfter; }, 8000);
     } catch (e) { /* 下面 report 给结论 */ }
@@ -903,43 +1409,122 @@ async function main() {
       '拣货面板的 pickingRows: 生成后=' + genAfter + ' 导入后=' + pickingGenCalls().length);
 
     step('purchase');
-    // 「拿货」页签（2026-10-05 内建）。数据层全是宿主现成的 purchase* 通道，界面是本轮新写的。
+    // 「拿货」页签（2026-10-05 内建；**2026-10-10 拣货清单并进来 + 两轮页内重设计**）—— 两条子视图：
+    //   ① 要拿什么（默认）：内嵌整页「拣货」视图（embedded auto row-action supplier-action：
+    //      顶部厂家筛选标签 / 款色卡片网格（图 + 尺码角标 + 缺口 + 进价 + 行尾忽略）/
+    //      吸底汇总条（逐厂：复制给厂家 + 生成拿货单（N 件）））；
+    //   ② 拿了什么：拿货单列表 + 编辑器。
+    // 2026-10-10 重设计（改这一段前先读 tabs/PurchasePanel.vue 与 picking/PickingView.vue 头注释）：
+    //   · 页级指标条**整条撤掉** ⇒ 数字**就地**给：清单条（待拿 N 款色 · N 件 · 预估 ¥）/
+    //     面板头（N 张 · N 张草稿待提交 · 已提交 ¥）；两段徽标一并撤掉（数字就在正下方同一处）；
+    //   · 第二轮：表格 → **卡片网格**（一张卡 = 一个款色），开单/复制从"页级 + 先选厂家"
+    //     **钉到厂家行上**（一张单只能挂一个厂家，行就是天然分组）；
+    //   · 已忽略清单折成一行（pu-ignore-toggle），展开才出表；
+    //   · 生成后**直接切到「拿了什么」并打开编辑器**填价（这条链的下一步就是录付了多少钱）。
     // 断言纪律：① 数字钉在 data-act 上、按真夹具逐格核；② 每个按钮断言**它发出的 IPC 入参**
     //（这是唯一能抓"点了没反应 / 发给了别的通道"的手段）；③ 确认弹层要断言**确认前一个请求都不发**。
     await activateTab('purchase');
     await waitFor(function () {
-      return flat(card('pu-stats')).indexOf('拿货单') >= 0 && calls('purchaseOrderList').length >= 1;
+      return !!card('pu-sub-pick') && calls('purchaseOrderList').length >= 1;
     }, 10000);
 
-    report('拿货指标条：四个计数来自真取数（拿货单 2 / 草稿 1 / 缺口 1 / 已忽略 1）',
-      flat(card('pu-stats')).indexOf('拿货单 2') >= 0 && flat(card('pu-stats')).indexOf('草稿 1') >= 0 &&
-        flat(card('pu-stats')).indexOf('待拿货缺口 1') >= 0 && flat(card('pu-stats')).indexOf('已忽略 1') >= 0,
-      flat(card('pu-stats')));
-    report('默认落在「待拿货缺口」（这一步的动词是"去拿货"，缺口才是入口）',
-      card('pu-sub-gap').className.indexOf('is-on') >= 0 && !!card('pu-gap-table'), '');
-    report('缺口按款色码列全（S1 · 黑 · L），三列数字各就各位（需求 / 已拿 / 还差）',
-      (function () {
-        var t = flat(card('pu-gap-table'));
-        return t.indexOf('S1') >= 0 && t.indexOf('款一') >= 0 && t.indexOf('黑') >= 0 &&
-          t.indexOf('需求') >= 0 && t.indexOf('已拿') >= 0 && t.indexOf('还差') >= 0;
-      })(),
-      flat(card('pu-gap-table')));
-    report('缺口默认全勾（进这一步就是"这些是还差的货"；要少拿自己取消勾选）',
-      !!card('pu-gap-pick-0') && card('pu-gap-pick-0').checked === true, '');
-    // ⚠️ **默认值不能靠位置**：厂家下拉不许预选第一个 —— 夹具里故意放两个厂，
-    //    否则"预选第一个"与"不预选"在只有一个选项时看起来一模一样，守卫恒绿。
-    report('厂家不预选（下拉停在"选择厂家…"，不是第一个选项）',
-      !!card('pu-supplier') && card('pu-supplier').value === '0' && card('pu-supplier').options.length === 3,
-      card('pu-supplier') ? 'value=' + card('pu-supplier').value + ' options=' + card('pu-supplier').options.length : 'no-select');
-    report('没选厂家时「生成拿货单」是禁用的（不允许开出无主单）',
-      !!card('pu-create-from-gap') && card('pu-create-from-gap').disabled === true, '');
-    report('已忽略清单照实显示（S9 · 蓝 · 已线下拿）',
-      !!card('pu-ignore-table') && flat(card('pu-ignore-table')).indexOf('已线下拿') >= 0,
-      card('pu-ignore-table') ? flat(card('pu-ignore-table')) : 'no-table');
+    // ---- 子视图 A：要拿什么（默认）----
+    report('默认落在「要拿什么」（这一步的动词是"去拿货"，清单才是入口）',
+      card('pu-sub-pick').className.indexOf('is-on') >= 0 && !!card('pk-bar'), '');
+    // auto：进这一步清单就该出好了（"生成"是它自己的按钮，但这里是拿货，得先看见货）
+    await waitFor(function () { return !!pickCard('S1 · 黑'); }, 10000);
+    report('清单自动生成过（auto）：进来就有卡片网格，不用再点一次「生成待拣清单」',
+      !!card('pk-grid') && pickingGenCalls().length >= 1,
+      'grid=' + !!card('pk-grid') + ' genCalls=' + pickingGenCalls().length);
+    // 卡片网格（2026-10-10 第二轮重设计）：顶部**厂家筛选标签**（数 = 待拿款色数），
+    // 底部一条**吸底汇总条**逐厂收口。内嵌形态下面板头不渲染，这两块是本页看货/发厂/开单的入口。
+    report('顶部厂家筛选标签：全部 1 / 厂A 1（数 = 待拿款色数；未指定厂家不占位、也不该混进来）',
+      !!card('pk-tabs') && flat(card('pk-tab-all')) === '全部 1' &&
+        !!document.querySelector('[data-act="pk-tab"][data-supplier="7"]') &&
+        flat(document.querySelector('[data-act="pk-tab"][data-supplier="7"]')) === '厂A 1' &&
+        !document.querySelector('[data-act="pk-tab"][data-supplier="0"]'),
+      card('pk-tabs') ? flat(card('pk-tabs')) : 'no-tabs');
+    // ⚠️ 2026-10-10 收口：这条以前只断言 position === 'sticky'（声明断言）—— 真机上
+    //    「全部/集雨」页签下汇总条被 flex 压塌到 2px、按钮全被自己裁掉时，它照样全绿。
+    //    现在按几何 + 可达性断言（见 pkSumGuard 头注释）：页签只筛网格不改这条的数据，
+    //    按钮该出现就必须**看得见、点得到**。
+    var psg = pkSumGuard(['pk-copy', 'pk-create-order']);
+    report('底部汇总条**在眼前**（几何 + 可达性）：没被压扁、底边在视口内、两个按钮中心 elementFromPoint 命中它自己',
+      psg.ok, psg.detail);
 
-    // ---- 拿货单视图 ----
+    // 款色一行（2026-10-10）：同款同色所有尺码折进**一行**，尺码格 = L×2（**还差**件数）。
+    // ⚠️ 文字与 tooltip 必须断言在**同一格**上：字面说"还要拿 2"、tooltip 说"需求 3 / 已拿 1"，
+    //    分开成两条断言的话，实现里把 tooltip 接错口径（如需求改取还差列）照样全绿。
+    var chipEl = pickCard('S1 · 黑').querySelector('[data-act="size-chip"][data-size="L"]');
+    report('尺码格 = 尺码 × **还差**件数（L×2，不是需求 L×3），tooltip 三个数一个不丢（需求 3 · 已拿 1 · 还差 2）',
+      !!chipEl && chipEl.textContent.trim() === 'L×2' &&
+        chipEl.getAttribute('title') === 'L：需求 3 · 已拿 1 · 还差 2',
+      chipEl ? chipEl.textContent.trim() + ' | ' + chipEl.getAttribute('title') : 'no-chip');
+    report('卡上进价格在一件价都没查到时写 —（成本表只覆盖 S2，不写 ¥0.00）',
+      cellText(pickCard('S1 · 黑'), 'unit-price') === '—',
+      cellText(pickCard('S1 · 黑'), 'unit-price'));
+    // 清单条主数 = **待拿**（与段尾按钮、「按此生成」同一判据 pendingRollup）——
+    // 一件价都没查到时不写 ¥0.00（那等于说"这批货值 0 元"），走 —（N 件全部无进价）。
+    report('清单条就地给数：待拿 1 款色 · 2 件 · 预估 —（2 件全部无进价）',
+      !!card('amount') && flat(card('amount')).indexOf('待拿 1 款色') >= 0 &&
+        flat(card('amount')).indexOf('2 件') >= 0 && flat(card('amount')).indexOf('预估 —') >= 0 &&
+        flat(card('amount')).indexOf('2 件全部无进价') >= 0,
+      card('amount') ? flat(card('amount')) : 'no-amount');
+    // 缺口行「无进价 3 件」取**需求**口径 ⇒ 与"待拿 2 件"**不同数**：两条支路互不遮蔽
+    //（把「无进价」也换成待拿口径、或两个数写成一个，这条会当场红 —— 夹具三个数故意都不同）。
+    report('缺口条按需求口径报无进价件数（3 件，不是待拿的 2 件 —— 口径混用会在此露馅）',
+      !!card('gaps') && flat(card('gaps')).indexOf('无进价 3 件') >= 0,
+      card('gaps') ? flat(card('gaps')) : 'no-gaps');
+    report('款色卡上照实标缺口（无进价 3 件）',
+      flat(pickCard('S1 · 黑')).indexOf('无进价 3 件') >= 0,
+      flat(pickCard('S1 · 黑')));
+    // 底部汇总条逐厂一行（2026-10-10 第二轮）：一行 = 「这家什么情况 + 复制发哪家 + 一键开单」。
+    // 一件一单的约束（一张拿货单只能挂一个厂家）直接落在行上，不用先选厂家再对一遍。
+    var srow = sumRow(7);
+    report('汇总条逐厂一行：厂A → 1 款色 · 待拿 2 件 · —（2 件全部无进价）',
+      !!srow && flat(srow).indexOf('厂A') >= 0 &&
+        flat(srow).indexOf('1 款色 · 待拿 2 件') >= 0 &&
+        flat(srow).indexOf('2 件全部无进价') >= 0,
+      srow ? flat(srow) : 'no-sum-row');
+    // 开单按钮**钉在厂家行上**（2026-10-10）：一张单只能挂一个厂家，行就是天然分组 ——
+    // 原先"页级按钮 + 先选厂家"的那一步对用户是白问的。按钮上的 N 件 = 这家厂**待拿**件数
+    //（与清单条、主进程开单明细同一条判据 pendingOf）。
+    report('汇总条那行给「生成拿货单（2 件）」且带厂家 id（按厂家开单，不必先选厂家）',
+      !!srow && !!srow.querySelector('[data-act="pk-create-order"]') &&
+        flat(srow.querySelector('[data-act="pk-create-order"]')).indexOf('生成拿货单（2 件）') >= 0 &&
+        srow.querySelector('[data-act="pk-create-order"]').getAttribute('data-supplier') === '7',
+      srow && srow.querySelector('[data-act="pk-create-order"]')
+        ? flat(srow.querySelector('[data-act="pk-create-order"]')) + ' | data-supplier=' +
+          srow.querySelector('[data-act="pk-create-order"]').getAttribute('data-supplier')
+        : 'no-btn');
+    // 「复制给厂家」：把**这一家**的待拿货画成一张 PNG 写进**系统图片剪贴板**（用户粘到微信发给厂家）。
+    // 真写剪贴板在主进程 ⇒ 这里断言"发出去的是图片（PNG dataURL），不是纯文本"。
+    var clipBefore = calls('writeClipboardImage').length;
+    sumRow(7).querySelector('[data-act="pk-copy"]').click();
+    var okClip = true;
+    try { await waitFor(function () { return calls('writeClipboardImage').length > clipBefore; }, 8000); }
+    catch (e) { okClip = false; }
+    var clip = calls('writeClipboardImage')[clipBefore] || '';
+    report('「复制给厂家」发出的是图片（PNG dataURL），不是纯文本（粘进微信直接是清单图）',
+      okClip && typeof clip === 'string' && clip.indexOf('data:image/png;base64,') === 0,
+      okClip ? 'len=' + clip.length : 'timeout');
+    var okClipToast = true;
+    try { await waitFor(function () { return toastHas('已复制 1 款色 · 2 件 的清单图'); }, 4000); }
+    catch (e) { okClipToast = false; }
+    report('复制成功后的提示说清"几款色几件 + 发给谁"（能核对，不是一句"复制成功"）',
+      okClipToast && toastHas('厂A'), toastDump());
+    // 已忽略清单**折成一行**（低频）：一行说完几条 + 生效范围，表要展开才出（展开在下面撤销那步验）
+    report('已忽略折成一行：一行说清几条 + 生效范围，展开才出表',
+      !!card('pu-ignore-toggle') && !card('pu-ignore-table') &&
+        flat(card('pu-ignore-toggle')).indexOf('已忽略 1 项') >= 0 &&
+        flat(card('pu-ignore-toggle')).indexOf('款编码 + 款色') >= 0,
+      card('pu-ignore-toggle') ? flat(card('pu-ignore-toggle')) : 'no-toggle');
+
+    // ---- 子视图 B：拿了什么（切换要真的换内容 —— 存在性由这条钉） ----
     card('pu-sub-orders').click();
     await waitFor(function () { return !!card('pu-order-table'); }, 6000);
+    report('切到「拿了什么」：面板真的换内容（拿货单表上来、拣货清单退场）',
+      !!card('pu-order-table') && !card('pk-grid'), '');
     report('拿货单表：两张单都在，状态与金额逐格对（12000 分 → ¥120.00）',
       (function () {
         var t = flat(card('pu-order-table'));
@@ -947,8 +1532,38 @@ async function main() {
           t.indexOf('已提交') >= 0 && t.indexOf('¥120.00') >= 0 && t.indexOf('¥500.00') >= 0;
       })(),
       flat(card('pu-order-table')));
+    // 备注整列已删（零消费者字段）：表头不再有「备注」二字（模式并进厂家格的两个标签不算）
+    report('拿货单列表不再有「备注」列（零消费者字段已删）',
+      !!card('pu-order-table') && flat(card('pu-order-table')).indexOf('备注') < 0,
+      flat(card('pu-order-table')));
     report('只有草稿给「提交」（已提交的单不该出现提交按钮）',
       !!card('pu-submit-3') && !card('pu-submit-2'), '');
+    // 就地给数（替代撤掉的页级指标条）：几张 / 几张草稿待提交 / 已提交多少钱
+    //（"已提交 ¥"就是对账的拿货一侧；草稿不计入 —— 与下面那行说明同一口径）。
+    report('面板头就地给数：2 张 · 1 张草稿待提交 · 已提交 ¥500.00',
+      !!card('pu-orders-meta') && flat(card('pu-orders-meta')).indexOf('2 张') >= 0 &&
+        flat(card('pu-orders-meta')).indexOf('1 张草稿待提交') >= 0 &&
+        flat(card('pu-orders-meta')).indexOf('已提交 ¥500.00') >= 0,
+      card('pu-orders-meta') ? flat(card('pu-orders-meta')) : 'no-meta');
+    // ⚠️ **默认值不能靠位置**：厂家下拉不许预选第一个 —— 夹具里故意放多个厂，
+    //    否则"预选第一个"与"不预选"在只有一个选项时看起来一模一样，守卫恒绿。
+    //    判据故意**不钉死选项数**（厂家目录会随夹具长大：对账段的厂C 就是第三个）——
+    //    绝对计数是污染源；这里要的只是"占位项在前、value=0、且真选项 ≥ 2"。
+    report('厂家不预选（下拉停在"选择厂家…"，不是第一个选项）',
+      !!card('pu-supplier') && card('pu-supplier').value === '0' &&
+        card('pu-supplier').options.length >= 3,
+      card('pu-supplier') ? 'value=' + card('pu-supplier').value + ' options=' + card('pu-supplier').options.length : 'no-select');
+    report('没选厂家时两个「新建」都禁用（不允许开出无主单）',
+      !!card('pu-new-detail') && card('pu-new-detail').disabled === true &&
+        !!card('pu-new-package') && card('pu-new-package').disabled === true, '');
+    var supSel = card('pu-supplier');
+    supSel.value = '7';
+    supSel.dispatchEvent(new Event('change', { bubbles: true }));
+    var okEnable = true;
+    try { await waitFor(function () { return card('pu-new-detail').disabled === false; }, 4000); }
+    catch (e) { okEnable = false; }
+    report('选了厂家就解禁（"禁用"守卫不是恒绿的假守卫）',
+      okEnable && card('pu-new-package').disabled === false, '');
 
     // ---- 编辑器：真取单、真算、真提交（分 ↔ 元）----
     card('pu-edit-3').click();
@@ -958,9 +1573,115 @@ async function main() {
       JSON.stringify(calls('purchaseOrderGet')[0] || {}));
     report('编辑器里明细金额真算（2 件 × 60.00 = ¥120.00）',
       flat(card('pue-total')).indexOf('120.00') >= 0, flat(card('pue-total')));
-    // 模式创建时定死（宿主 update 不收 mode）⇒ 界面**不给**改不动的下拉框（那是假动作）
-    report('模式是只读的（不给"改不动的下拉框"）',
-      !card('pue-mode') && flat(card('pu-editor')).indexOf('明细') >= 0, '');
+    // 模式创建时定死（宿主 update 不收 mode）⇒ 界面**不给**改不动的下拉框（那是假动作），
+    // 只在页头给一个只读标签（措辞与列表里的模式标签同源）。
+    report('模式是只读的（页头标签，不是"改不动的下拉框"）',
+      !card('pue-mode') && !!card('pue-mode-tag') &&
+        flat(card('pue-mode-tag')).indexOf('明细') >= 0, '');
+    // 备注整条已删（零消费者字段）：编辑器里不再有那个输入框
+    report('备注整条已删（零消费者字段）：编辑器不再有备注输入框',
+      !!card('pu-editor') && !card('pue-note'), '');
+
+    // ---- 明细表字段（2026-10-10 第二轮）：图片 / 款色 / 尺码 / 建议 / 实拿 / 单价 / 金额 ----
+    // 列集合**逐列钉死**（含反向：款编码、款式名不再各自成列 —— 它们归进「款色」格：
+    // 款编码·颜色两个输入 + 款名灰字一行）。少一列、多一列都会红。
+    var heads = queryAll('[data-act="pue-table"] thead th').map(function (th) { return flat(th); });
+    report('明细表列 = 图片/款色/尺码/建议/实拿/单价(元)/金额(元)（款编码、款式名不再各自成列）',
+      heads.join('|') === '图片|款色|尺码|建议|实拿|单价(元)|金额(元)|', heads.join('|'));
+    report('款色格里的款名还在（只读灰字，权威在产品库）',
+      !!card('pue-name-1') && flat(card('pue-name-1')) === '款一',
+      card('pue-name-1') ? flat(card('pue-name-1')) : 'no-name');
+
+    // ---- 身份列不再是"输入框长相"（2026-10-10 第二轮反馈）----
+    // 款色 / 尺码是清单带过来的**身份数据**，不是要填的字段 —— 方框会被读成"这里要我填什么"
+    // （用户原话："拿货单中的款色和尺码为什么要用输入框的样式？"）。
+    // 现在默认无边框无底色（像文字），点进去才变输入框；实拿/单价仍是输入框。
+    // ⚠️ 判据用字符串相等而不是正则：本段代码嵌在模板字符串里，正则里的转义括号会被剥掉
+    //    （实测第一次跑就栽在这 —— 诊断值全对、断言恒红）。
+    function cssOf(act, prop) {
+      var el = card(act);
+      return el ? getComputedStyle(el)[prop] : '';
+    }
+    function isTransparent(v) {
+      return v === 'rgba(0, 0, 0, 0)' || v === 'transparent';
+    }
+    var ghostOk =
+      isTransparent(cssOf('pue-code-1', 'borderTopColor')) &&
+      isTransparent(cssOf('pue-code-1', 'backgroundColor')) &&
+      isTransparent(cssOf('pue-size-1', 'borderTopColor')) &&
+      isTransparent(cssOf('pue-size-1', 'backgroundColor'));
+    var solidOk =
+      !isTransparent(cssOf('pue-qty-1', 'borderTopColor')) &&
+      !isTransparent(cssOf('pue-price-1', 'borderTopColor'));
+    report('款色/尺码默认像文字（无边框无底色，点进去才变输入框）；实拿/单价保留输入框',
+      ghostOk && solidOk,
+      'code=' + cssOf('pue-code-1', 'borderTopColor') + '/' + cssOf('pue-code-1', 'backgroundColor') +
+        ' size=' + cssOf('pue-size-1', 'borderTopColor') +
+        ' qty=' + cssOf('pue-qty-1', 'borderTopColor') +
+        ' price=' + cssOf('pue-price-1', 'borderTopColor'));
+
+    // ---- 布局守卫（2026-10-10 重设计）：8 列必须一行放下、行尾两个按钮必须**真的可达** ----
+    // 之前的形态：表格固有宽度 658px > 抽屉内容区 527px ⇒ 「金额(元)」被裁半边、行尾操作列
+    // 落在视窗外 —— **静默不可达**（点不到、也没有任何报错，只有截图能看出来）。
+    // 这两条就是为它补的守卫；纯 DOM 存在性断言（上面的 heads）抓不到这类问题。
+    var wrapEl = document.querySelector('[data-act="pu-editor"] .wb-table-wrap');
+    report('明细表不横向溢出（8 列一行放下，金额列不被裁）',
+      !!wrapEl && wrapEl.scrollWidth <= wrapEl.clientWidth + 1,
+      wrapEl ? ('scrollWidth=' + wrapEl.scrollWidth + ' clientWidth=' + wrapEl.clientWidth) : 'no-wrap');
+
+    function reachable(act) {
+      var el = card(act);
+      if (!el) return { ok: false, why: 'no-el' };
+      var r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return { ok: false, why: 'zero-size' };
+      if (r.right > window.innerWidth || r.left < 0 || r.bottom > window.innerHeight || r.top < 0) {
+        return { ok: false, why: 'out-of-view ' + Math.round(r.left) + ',' + Math.round(r.top) };
+      }
+      // 按钮里可能有子节点（文字 / SVG），elementFromPoint 命中的可能是子节点 ⇒ 用 contains 判
+      var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      var ok = !!hit && (hit === el || el.contains(hit));
+      return { ok: ok, why: ok ? '' : 'hit=' + (hit ? hit.tagName : 'null') };
+    }
+    var reachFill = reachable('pue-fill-1');
+    var reachDel = reachable('pue-delrow-1');
+    report('行尾「取最近价」「删除」按钮在视口内且可被点中（不是被裁掉/滚出视野）',
+      reachFill.ok && reachDel.ok,
+      'fill=' + JSON.stringify(reachFill) + ' del=' + JSON.stringify(reachDel));
+    // 两个动作必须是**读得懂的文字**（2026-10-10 第二轮反馈：↻ / ✕ 图标"完全不知道是什么意思"）
+    report('行尾两个动作是文字按钮（「取最近价」「删除」，不是无标注图标）',
+      flat(card('pue-fill-1')) === '取最近价' && flat(card('pue-delrow-1')) === '删除',
+      'fill=' + flat(card('pue-fill-1')) + ' | del=' + flat(card('pue-delrow-1')));
+
+    // 打开就按行取图：入参 = 这一行的款色 **+ 尺码**，一次带全（不是逐行往返）
+    var si0 = calls('purchaseStyleImages')[0];
+    report('打开编辑器就按行取图（purchaseStyleImages 一次收到 S1·黑·L 与 S1·黑·M 两行）',
+      !!si0 && (si0.items || []).length === 2 &&
+        si0.items[0].styleCode === 'S1' && si0.items[0].color === '黑' && si0.items[0].size === 'L' &&
+        si0.items[1].styleCode === 'S1' && si0.items[1].color === '黑' && si0.items[1].size === 'M',
+      JSON.stringify(si0 || null));
+    var okRowImg = true;
+    try {
+      await waitFor(function () {
+        var im = card('pue-img-1');
+        return !!im && im.complete && im.naturalWidth > 0;
+      }, 6000);
+    } catch (e) { okRowImg = false; }
+    report('行图真的渲染出来（取图 + 缩略图两条通道接上，<img> 解码出内容）',
+      okRowImg, card('pue-img-1') ? (card('pue-img-1').src || '').slice(0, 48) : 'no-img');
+    // ⭐ 同款同色、**只差尺码**的两行必须各显示自己那件的图 —— 这是用户 2026-10-11 报的
+    //    "拿货单明细的图片都是一样的"的正面守卫：取图只按款色时两行会拿到同一张。
+    var okRowImg2 = true;
+    try {
+      await waitFor(function () {
+        var a = card('pue-img-1'), b = card('pue-img-2');
+        return !!a && !!b && a.complete && a.naturalWidth > 0 && b.complete && b.naturalWidth > 0;
+      }, 6000);
+    } catch (e) { okRowImg2 = false; }
+    var imgA = card('pue-img-1'), imgB = card('pue-img-2');
+    report('同款同色只差尺码的两行各取各的图（两张 src 不同，不是同款全同一张）',
+      okRowImg2 && !!imgA && !!imgB && String(imgA.src) !== String(imgB.src),
+      'L=' + (imgA ? String(imgA.src).slice(-26) : 'no-img') +
+        ' | M=' + (imgB ? String(imgB.src).slice(-26) : 'no-img'));
 
     var qtyEl = card('pue-qty-1');
     qtyEl.value = '3';
@@ -984,6 +1705,36 @@ async function main() {
       !!card('pue-price-1') && String(card('pue-price-1').value) === '55.5',
       card('pue-price-1') ? card('pue-price-1').value : 'no-input');
 
+    // ---- 改款色 → 行图跟着重查；查不到的给「缺图」占位（不是死不掉的旧图）----
+    // ⚠️ 只 dispatch 'change' 不会更新 v-model（文本输入的 v-model 听 'input'）⇒ 两个都要发，
+    //    否则 onCodeChange 读到的是**旧款编码**，这条断言反而会绿得莫名其妙。
+    var code1 = card('pue-code-1');
+    code1.value = 'S9';
+    code1.dispatchEvent(new Event('input', { bubbles: true }));
+    code1.dispatchEvent(new Event('change', { bubbles: true }));
+    var okMiss = true;
+    try {
+      await waitFor(function () { return !!card('pue-noimg-1') && !card('pue-img-1'); }, 6000);
+    } catch (e) { okMiss = false; }
+    var siAll = calls('purchaseStyleImages');
+    var siLast = siAll[siAll.length - 1];
+    report('款色改成 S9 · 黑 → 行图重查、查不到给「缺图」占位',
+      okMiss && !!siLast && (siLast.items || [])[0] && siLast.items[0].styleCode === 'S9',
+      JSON.stringify(siLast || null));
+    // 改回 S1 · 黑：图从缓存回来，**不再发第二次请求**（同款色来回改不重复往返）
+    var siBeforeBack = calls('purchaseStyleImages').length;
+    code1 = card('pue-code-1');
+    code1.value = 'S1';
+    code1.dispatchEvent(new Event('input', { bubbles: true }));
+    code1.dispatchEvent(new Event('change', { bubbles: true }));
+    var okBack = true;
+    try {
+      await waitFor(function () { return !!card('pue-img-1') && !card('pue-noimg-1'); }, 6000);
+    } catch (e) { okBack = false; }
+    report('改回 S1 · 黑：图从缓存回来（同款色不重复往返 —— 请求数没涨）',
+      okBack && calls('purchaseStyleImages').length === siBeforeBack,
+      'calls=' + calls('purchaseStyleImages').length + ' before=' + siBeforeBack);
+
     var updBefore = calls('purchaseOrderUpdate').length;
     card('pue-save').click();
     var okSave = true;
@@ -1004,7 +1755,10 @@ async function main() {
     await waitFor(function () { return !!card('confirm-dialog'); }, 4000);
     var subBefore = calls('purchaseOrderSubmit').length;
     report('提交前先确认，且弹层写清后果（"已拿" / 缺口 / 对账 / 成本）',
-      flat(card('confirm-dialog')).indexOf('已拿') >= 0 && flat(card('confirm-dialog')).indexOf('对账') >= 0,
+      flat(card('confirm-dialog')).indexOf('已拿') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('缺口') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('对账') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('成本') >= 0,
       flat(card('confirm-dialog')));
     report('没点确认时一个请求都不发（确认是真拦，不是装饰）',
       calls('purchaseOrderSubmit').length === subBefore, '');
@@ -1018,8 +1772,12 @@ async function main() {
 
     card('pu-del-2').click();
     await waitFor(function () { return !!card('confirm-dialog'); }, 4000);
-    report('删除的确认里说明白了"已拿数量会回滚、缺口会回升"（不可逆要讲后果）',
-      flat(card('confirm-dialog')).indexOf('回升') >= 0, flat(card('confirm-dialog')));
+    // ⚠️ #2 是**包价单**：确认只能讲对账影响，不许再一刀切地说"缺口回升"（包价不参与缺口/成本）。
+    //    "回升不得出现"是**反向守卫** —— 文案若退回那句旧话，这条立刻红。
+    report('删除包价单的确认只说对账影响、不谎称"缺口回升"（包价只进对账）',
+      flat(card('confirm-dialog')).indexOf('对账') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('回升') < 0,
+      flat(card('confirm-dialog')));
     var delBefore = calls('purchaseOrderDelete').length;
     await confirmOk();
     var okDel = true;
@@ -1036,83 +1794,176 @@ async function main() {
     try { await waitFor(function () { return calls('purchaseExportExcel').length > expBefore; }, 6000); }
     catch (e) { okExp = false; }
     var ex = calls('purchaseExportExcel')[expBefore] || {};
-    report('导出：出参是这张单的明细 + 默认文件名（少了图就查不到款色）',
-      okExp && (ex.items || []).length === 1 && (ex.items || [])[0].styleCode === 'S1' &&
-        (ex.items || [])[0].color === '黑' && !!ex.defaultName,
+    report('导出：出参是这张单的**全部明细行**（每行带款色 + 尺码，主进程靠它查每行自己那件的图）+ 默认文件名',
+      okExp && (ex.items || []).length === 2 &&
+        (ex.items || [])[0].styleCode === 'S1' && (ex.items || [])[0].color === '黑' &&
+        (ex.items || [])[0].size === 'L' &&
+        (ex.items || [])[1].styleCode === 'S1' && (ex.items || [])[1].color === '黑' &&
+        (ex.items || [])[1].size === 'M' &&
+        !!ex.defaultName,
       JSON.stringify(ex));
 
-    // ---- 按勾选生成草稿（拿货的主路径）----
-    card('pu-sub-gap').click();
-    await waitFor(function () { return !!card('pu-gap-table'); }, 4000);
-    var sel = card('pu-supplier');
-    sel.value = '7';
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise(function (r) { setTimeout(r, 60); });
+    // ---- 回「要拿什么」：按**厂家段**一键开单（拿货的主路径）----
+    // 一张拿货单只能挂一个厂家 ⇒ 按钮就在段上，只收这家厂的行（混着发会把单开给错的厂，
+    // 而单上看不出来）。段存在性由上面的「厂家段尾给…」那条钉住。
+    card('pu-sub-pick').click();
+    await waitFor(function () { return !!pickCard('S1 · 黑'); }, 8000);
     var crBefore = calls('purchaseOrderCreate').length;
-    card('pu-create-from-gap').click();
+    card('pk-create-order').click();
     var okCreate = true;
     try { await waitFor(function () { return calls('purchaseOrderCreate').length > crBefore; }, 6000); }
     catch (e) { okCreate = false; }
     var cr = calls('purchaseOrderCreate')[crBefore] || {};
     var crItem = (cr.items || [])[0] || {};
-    report('按勾选生成：出参带厂家 + 日期 + 明细（qty = 缺口、单价留 0 待填、建议数量 = 缺口）',
-      okCreate && cr.supplierId === 7 && !!cr.bizDate && crItem.styleCode === 'S1' &&
-        crItem.qty === 2 && crItem.priceCents === 0 && crItem.suggestionQty === 2 && crItem.color === '黑',
+    report('按清单开单：出参带厂家 + 日期 + 模式 + 明细（qty = **还差 2**、单价留 0 待填、建议数量 = 还差、款名带上）',
+      okCreate && cr.supplierId === 7 && !!cr.bizDate && cr.mode === 'detail' &&
+        crItem.styleCode === 'S1' && crItem.styleName === '款一' && crItem.color === '黑' && crItem.size === 'L' &&
+        crItem.qty === 2 && crItem.priceCents === 0 && crItem.suggestionQty === 2 && crItem.amountCents === 0,
       JSON.stringify(cr));
+    // 反向守卫：出参不再带备注（整条链已删；谁把 note 加回 payload，这条立刻红）
+    report('开单出参不再带备注（整条链已删）', okCreate && !('note' in cr), JSON.stringify(cr));
+    // 提示是 createOrder **之后**才 toast 的（IPC 被记录 ≠ 提示已出来）⇒ 必须等，
+    // 直接断言会看上一刻的旧提示，红的却是"新提示没出来"（方向整个反掉）。
+    var okToast = true;
+    try {
+      await waitFor(function () { return toastHas('已生成拿货单 #99'); }, 4000);
+    } catch (e) { okToast = false; }
+    report('生成后给一条能核对去向的提示（带单号与下一步）',
+      okToast && toastHas('填好单价'), toastDump());
     var okSwitch = true;
     try {
       await waitFor(function () { return card('pu-sub-orders').className.indexOf('is-on') >= 0; }, 4000);
     } catch (e) { okSwitch = false; }
-    report('生成后自动切到「拿货单」视图（下一步就是填单价，不让用户再找）', okSwitch, '');
+    report('生成后自动切到「拿了什么」（下一步就是填单价，不让用户再找）', okSwitch, '');
+    // 生成后**直接打开这张新单的编辑器**（这条链的下一步就是"录付了多少钱"，价格全是 0，就地填）。
+    // ⚠️ 假桥必须**记住新建的单**（CREATED_ORDERS）：真库里 create 就是落库，get 要取得回来 ——
+    //    否则这个断言会在一个"不存在的单"上翻转成假红。
+    var okNewEditor = true;
+    try {
+      await waitFor(function () {
+        return !!card('pu-editor') && !!card('pue-table') &&
+          flat(card('pu-editor')).indexOf('拿货单 #99') >= 0;
+      }, 6000);
+    } catch (e) { okNewEditor = false; }
+    report('生成后直接进编辑器填价（新单 #99 打开着、明细在、合计 0.00 等填）',
+      okNewEditor && flat(card('pue-total')).indexOf('0.00') >= 0,
+      card('pu-editor') ? flat(card('pue-total')) : 'no-editor');
+    // 关掉编辑器再继续（遮罩挡着下面所有点击）
+    card('pue-close').click();
+    var okNewClosed = true;
+    try { await waitFor(function () { return !card('pu-editor'); }, 4000); } catch (e) { okNewClosed = false; }
+    report('编辑器关得掉（这一步不留遮罩挡住后面的操作）', okNewClosed, '');
+    // 新单**真的入册**：列表出现 #99 一行，面板头跟着变（3 张 / 2 张草稿 —— 草稿数必须跟着涨，
+    // 只涨总数不涨草稿说明口径接错了列）。
+    var okNewRow = true;
+    try {
+      await waitFor(function () {
+        return !!card('pu-edit-99') &&
+          flat(card('pu-orders-meta')).indexOf('3 张') >= 0 &&
+          flat(card('pu-orders-meta')).indexOf('2 张草稿待提交') >= 0;
+      }, 6000);
+    } catch (e) { okNewRow = false; }
+    report('新单入册：列表出现 #99 一行，面板头跟着变（3 张 · 2 张草稿待提交 · 已提交 ¥500.00）',
+      okNewRow && flat(card('pu-orders-meta')).indexOf('已提交 ¥500.00') >= 0,
+      card('pu-orders-meta') ? flat(card('pu-orders-meta')) : 'no-meta');
 
     // ---- 忽略：原因要用户敲字 ⇒ **必须自绘弹层**（Electron 没有 window.prompt）----
-    card('pu-sub-gap').click();
-    await waitFor(function () { return !!card('pu-ignore-0'); }, 4000);
-    card('pu-ignore-0').click();
+    // 意图来自清单**行尾**（PickingView 只发意图；确认弹层与写库都在本面板 —— 见其头注释）。
+    // 2026-10-10：忽略按**款色整组**生效（ignoreKey 里没有码）⇒ 动作挂在款色行上（键 = S1 · 黑）。
+    card('pu-sub-pick').click();
+    await waitFor(function () { return !!card('pk-ignore-S1 · 黑'); }, 8000);
+    card('pk-ignore-S1 · 黑').click();
     await waitFor(function () { return !!card('pu-ignore-reason'); }, 4000);
     report('忽略走自绘弹层并给了原因输入框（不是在用 window.prompt）',
       !!card('pu-ignore-reason') && !!card('confirm-ok'), '');
+    report('弹层说清是哪一款色（款色一行）+ 还差几件 + 影响范围（这款色含全部尺码）',
+      flat(card('confirm-dialog')).indexOf('S1 · 黑') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('还差 2 件') >= 0 &&
+        flat(card('confirm-dialog')).indexOf('全部尺码') >= 0,
+      flat(card('confirm-dialog')));
     var reasonEl = card('pu-ignore-reason');
     reasonEl.value = '已线下拿';
     reasonEl.dispatchEvent(new Event('input', { bubbles: true }));
     var igBefore = calls('purchaseIgnoreAdd').length;
+    report('没点确认时一个请求都不发（确认是真拦，不是装饰）',
+      calls('purchaseIgnoreAdd').length === igBefore, '');
     await confirmOk();
     var okIg = true;
     try { await waitFor(function () { return calls('purchaseIgnoreAdd').length > igBefore; }, 6000); }
     catch (e) { okIg = false; }
     var iga = calls('purchaseIgnoreAdd')[igBefore] || {};
-    report('忽略出参：款编码 + 款色 + 用户敲的原因（按款色整组生效）',
-      okIg && iga.styleCode === 'S1' && iga.color === '黑' && iga.reason === '已线下拿',
+    report('忽略出参：款编码 + 款色 + 用户敲的原因，且**不带尺码**（按款色整组生效）',
+      okIg && iga.styleCode === 'S1' && iga.color === '黑' && iga.reason === '已线下拿' &&
+        iga.size === undefined,
       JSON.stringify(iga));
+
+    // ---- 取消忽略（折起的忽略清单**展开后**撤销；撤销没有不可逆后果 ⇒ 不再要一次确认）----
+    card('pu-ignore-toggle').click();
+    var okExpand = true;
+    try { await waitFor(function () { return !!card('pu-ignore-table'); }, 4000); }
+    catch (e) { okExpand = false; }
+    report('展开后忽略清单照实显示（S9 · 蓝 · 已线下拿），行尾给「取消忽略」',
+      okExpand && flat(card('pu-ignore-table')).indexOf('已线下拿') >= 0 && !!card('pu-unignore-0'),
+      card('pu-ignore-table') ? flat(card('pu-ignore-table')) : 'no-table');
+    var unIgBefore = calls('purchaseIgnoreRemove').length;
+    card('pu-unignore-0').click();
+    var okUnIg = true;
+    try { await waitFor(function () { return calls('purchaseIgnoreRemove').length > unIgBefore; }, 6000); }
+    catch (e) { okUnIg = false; }
+    var uniga = calls('purchaseIgnoreRemove')[unIgBefore] || {};
+    report('取消忽略按「款编码 + 款色」整组撤销（S9 · 蓝）',
+      okUnIg && uniga.styleCode === 'S9' && uniga.color === '蓝', JSON.stringify(uniga));
 
     // ---- 空态：不许留空白，要说清"为什么空 / 去哪做" ----
     // ⚠️ 容器的「刷新」必须**作废各面板缓存**（token+1）——只重算汇总不刷面板的话，
     //    面板会一直显示旧数据（这正是本轮顺手缝掉的缝）。所以这里点刷新就能看到新状态。
+    //    三个开关一起开：订单行没了（清单空）+ 缺口空 + 拿货单空 ⇒ 两个子视图同时进空态。
+    window.__emptyOrders = true;
     window.__noGap = true;
     window.__noPurchaseOrders = true;
     await clickRefresh();
-    var okGapEmpty = true;
+    var okPickEmpty = true;
     try {
       await waitFor(function () {
-        return !!card('pu-gap-none') && flat(card('pu-stats')).indexOf('待拿货缺口 0') >= 0;
+        return !!card('empty') && flat(card('empty')).indexOf('一行订单都没扫到') >= 0;
       }, 8000);
-    } catch (e) { okGapEmpty = false; }
-    report('没有缺口时给空态（说清缺口怎么来的 + 给「去导入订单」），不留空白',
-      okGapEmpty && !!card('pu-goto-import'),
-      okGapEmpty ? flat(card('pu-gap-none')) : 'timeout / 缺口数字没归零');
+    } catch (e) { okPickEmpty = false; }
+    report('一行订单都没有时：清单空态说清"为什么空"并给可点的下一步（去导入）',
+      okPickEmpty && !!card('empty-import') && !card('amount') && !card('gaps'),
+      okPickEmpty ? flat(card('empty')) + ' | amount=' + !!card('amount') : 'timeout / 清单没进空态');
+    // 空态的动作跟着**原因**走：「超窗」才给"调天数窗"；这里是"压根没扫到行"，给了就是把用户送去瞎点。
+    report('空态的动作跟着**原因**走：不是超窗的场景不给「调天数窗」', !card('empty-widen'), '');
+    var emptyImpBefore = evts('switch-module').length;
+    card('empty-import').click();
+    await waitFor(function () { return onTab('import'); }, 6000);
+    report('清单空态的「去导入」= 就地切到「导入订单」页签（内嵌事件交给宿主，不跳模块）',
+      onTab('import') && evts('switch-module').length === emptyImpBefore, '');
+
+    // 拿货单空态（有入口回「要拿什么」，不是死胡同）
+    await activateTab('purchase');
     card('pu-sub-orders').click();
     await waitFor(function () { return !!card('pu-order-none'); }, 6000);
-    report('没有拿货单时给空态（说清最省事的开法 + 给「去待拿货缺口」）',
-      !!card('pu-goto-gap'), flat(card('pu-order-none')));
+    report('没有拿货单时给空态（说清最省事的开法 + 给「去看要拿什么」）',
+      !!card('pu-goto-pick') && flat(card('pu-order-none')).indexOf('要拿什么') >= 0,
+      flat(card('pu-order-none')));
+    card('pu-goto-pick').click();
+    await waitFor(function () { return card('pu-sub-pick').className.indexOf('is-on') >= 0; }, 4000);
+    report('空态的按钮真的把子视图切回「要拿什么」（一步回到能干活的地方）',
+      card('pu-sub-pick').className.indexOf('is-on') >= 0 && !!card('pk-bar'), '');
+
+    // 数据回来后界面跟着回来（保活 + token 联动，不是一次性的）
+    window.__emptyOrders = false;
     window.__noGap = false;
     window.__noPurchaseOrders = false;
     await clickRefresh();
     var okBack = true;
     try {
-      await waitFor(function () { return flat(card('pu-stats')).indexOf('拿货单 2') >= 0; }, 8000);
+      await waitFor(function () {
+        return !!card('amount') && flat(card('amount')).indexOf('待拿 1 款色') >= 0 && !!pickCard('S1 · 黑');
+      }, 8000);
     } catch (e) { okBack = false; }
     report('数据回来后界面跟着回来（保活 + token 联动，不是一次性的）',
-      okBack, flat(card('pu-stats')));
+      okBack, (card('amount') ? flat(card('amount')) : 'no-amount') + ' | 清单卡=' + !!pickCard('S1 · 黑'));
 
     // 提示（toast）的读取工具。**必须"全部提示里有没有"**，不能用 querySelector 取第一条：
     // 同一时刻界面上可以并排好几条（本页跑完累计几十条），第一条往往是**旧**提示 ——
@@ -1129,84 +1980,28 @@ async function main() {
 
     step('classify');
     // 「归类核对」页签（2026-10-05 内建；从「订单归类」岛搬来，功能照搬、样式走 .wb-*）。
-    // 三个重点：① 取数真落到宿主通道；② 逐行动作（保存 / 确认无误 / 全部确认）各自发对通道；
-    // ③ **只剩下逐行动作** —— 原「识别未归类」批量按钮已按用户要求删除，本段末尾有一条
-    //    反向断言钉住"它不在"，避免它悄悄长回来（要加回来就同步改那条断言）。
+    // 2026-10-10 按用户口径重做后，本段四个重点 —— 改这一段前先读组件头注释：
+    //   ① 页头那排「待核对 / 未归类 / 识别库 / 已配产品」指标条**整条撤掉**（用户："看不懂"）；
+    //   ② 「品类」「Logo」两列**撤掉**（等"印花 logo 管理"做出来再加回来）；
+    //   ③ 列表图**不裁切**（核对是拿图比出来的，不是读文字读出来的）；
+    //   ④ 颜色改成**跟着归属款走** + 记住"这张图上次定的颜色"。
+    // 末尾仍有反向断言（批量识别 / 指标条各自的"它不在了"守卫）。
     await activateTab('classify');
     await waitFor(function () {
-      return !!card('classify-panel') && flat(card('cl-stats')).indexOf('待核对') >= 0 && !!card('cl-table');
+      return !!card('classify-panel') && !!card('cl-table');
     }, 10000);
 
-    report('归类指标条：四个计数格都是真取数（待核对 4 / 未归类 3 / 识别库 2 款 / 本页 2 个商品）',
-      flat(card('cl-stats')).indexOf('待核对 4') >= 0 &&
-        flat(card('cl-stats')).indexOf('未归类 3') >= 0 &&
-        flat(card('cl-stats')).indexOf('识别库 2 款') >= 0 &&
-        // 「本页 2 个商品」= 4 行里去重后的商品数（店A/IT-A 占 2 行、店B/IT-B 占 1 行；
-        //  P-43 没有商品ID ⇒ 不计入）。它把"这一页其实只有两件事要定"说出来。
-        flat(card('cl-stats')).indexOf('本页 2 个商品') >= 0,
-      flat(card('cl-stats')));
-
-    // ---- ⭐ 产品维度：这一页的活落在「货与成本」里的哪些产品 / 几家供应商 ----
-    // 这一格存在的理由是让**配映射的收益显形**（配一条，同一商品的后续订单就直接归类）。
-    // 两条断言各管一件事，**不能合并**：
-    //   ① 请求真的带上了本页商品的键 —— 传空数组会"成功但空"，格子恒显示 0 而一条报错都没有
-    //      （先例见 docs/notes/2026-10-04-preload-payload-shape.md），所以判据钉在**载荷形状**上；
-    //      ⚠️ 假桥替的是 preload **上面**那一层 ⇒ 这里收到的是**裸数组**（包装成 {rows} 在 preload 里，
-    //         它由 ipc:shape:smoke 守，不在本脚本的覆盖范围内）。
-    //   ② 格子画的是宿主回来的数（2 个产品 / 1 家供应商 —— 两个数刻意不等，防"拿产品数当供应商数"）。
-    var rollupCalls = calls('orderSkuRollup') || [];
-    report('产品维度取数只带**有商品ID** 的行（P-41/P-42 是同一商品的 2 行 + P-44；无商品ID 的 P-43 不进请求）',
-      (function () {
-        var rows = rollupCalls[rollupCalls.length - 1];
-        return Array.isArray(rows) && rows.length === 3 &&
-          rows[0].shop === '店A' && rows[0].itemId === 'IT-A' &&
-          rows[1].shop === '店A' && rows[1].itemId === 'IT-A' &&
-          rows[2].shop === '店B' && rows[2].itemId === 'IT-B';
-      })(),
-      JSON.stringify(rollupCalls[rollupCalls.length - 1] || null));
-    report('指标条多一格产品维度，画的是宿主回来的数（已配产品 2 个 · 供应商 1 家）',
-      !!card('cl-metric-product') &&
-        flat(card('cl-metric-product')).indexOf('已配产品 2 个 · 供应商 1 家') >= 0,
-      card('cl-metric-product') ? flat(card('cl-metric-product')) : '没有这一格');
-    report('待核对四条都在（P-41 / P-42 / P-43 / P-44），店铺逐格对',
-      (function () {
-        var t = flat(card('cl-table'));
-        return t.indexOf('P-41') >= 0 && t.indexOf('P-42') >= 0 && t.indexOf('P-43') >= 0 &&
-          t.indexOf('P-44') >= 0 &&
-          t.indexOf('店A') >= 0 && t.indexOf('店B') >= 0 && t.indexOf('店C') >= 0;
-      })(),
-      flat(card('cl-table')));
-    // ⚠️ 缩略图合批只该带**有图**的行：无图行的 localPath 是空串，混进去就是白跑一次往返
-    report('缩略图合批只带**有图**的行（P-41 + P-42 + P-44 三条），无图的 P-43 不进请求',
-      (calls('orderImageThumbBatch') || []).some(function (a) {
-        return Array.isArray(a) && a.length === 3 &&
-          a[0] && a[0].localPath === '/tmp/p41.jpg' &&
-          a[1] && a[1].localPath === '/tmp/p42.jpg' &&
-          a[2] && a[2].localPath === '/tmp/p44.jpg';
-      }),
-      JSON.stringify((calls('orderImageThumbBatch') || []).slice(-1)[0] || null));
-    report('有图的两行真的渲染出 <img>（核对是"拿图比"出来的，图不能只是空占位）',
-      (function () {
-        var t = card('cl-table');
-        return !!t && t.querySelectorAll('img').length === 3;
-      })(),
-      'img数=' + (card('cl-table') ? card('cl-table').querySelectorAll('img').length : -1));
-
-    report('归属款下拉用识别库的真款（自动匹配 + S1 + S2 = 3 个选项）',
-      !!card('cl-style-41') && card('cl-style-41').options.length === 3,
-      card('cl-style-41') ? 'options=' + card('cl-style-41').options.length : 'no-select');
-    // ⚠️ **默认值不能靠位置**：已归类那行要选中**它自己的款**（按 code 反查 id），不是第一个选项
-    report('默认值不靠位置：已归类行选中它的款（P-42 → id 5），未归类行停在「自动匹配」（0）',
-      !!card('cl-style-42') && card('cl-style-42').value === '5' &&
-        !!card('cl-style-41') && card('cl-style-41').value === '0',
-      'P-42=' + (card('cl-style-42') ? card('cl-style-42').value : '?') +
-        ' P-41=' + (card('cl-style-41') ? card('cl-style-41').value : '?'));
-
-    // ---- 品类/颜色的输入建议（datalist）：标准词表 + 本库已用过的写法 ----
-    // 存在的意义是"同一个词各写各的"：T恤 与 短袖T恤 会算成两个款。词表给规范写法，
-    // 库内写法让第二次遇到同一个词时能选到同一个（白名单覆盖不到的现实品类只能这样收敛）。
-    // ⚠️ 只断言"有 datalist"不够 —— list 属性写歪、datalist 空壳都会让它恒绿，
-    //    所以三条分开：①list 指向的元素真的在 ②选项非空 ③内容里既有词表也有库内写法。
+    // 本段两个小工具。⚠️ 全段都在 ASSERT_SCRIPT 模板串里 ⇒ 注释里**不能出现反引号**。
+    function setInput(act, val) {
+      var el = card(act);
+      if (!el) return false;
+      el.value = val;
+      // input 与 change **都要**派发：input 走 <input> 的 v-model，change 走 <select> 的 v-model
+      // 与 @change 处理器。只派一种，另一支会静默不生效 —— 症状是"联动没接上"，很难查。
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
     function datalistValues(inputAct) {
       var el = card(inputAct);
       var id = el ? el.getAttribute('list') : '';
@@ -1218,20 +2013,253 @@ async function main() {
         values: Array.prototype.map.call(dl.querySelectorAll('option'), function (o) { return o.value; }),
       };
     }
-    var catOpt = datalistValues('cl-cat-41');
-    report('品类框的输入建议真的挂上了（list 指向的 datalist 存在且选项非空）',
-      !!catOpt.id && catOpt.found && catOpt.values.length > 0,
-      'list=' + catOpt.id + ' found=' + catOpt.found + ' 选项数=' + catOpt.values.length);
-    report('品类建议 = 标准词表 + 本库已用过的写法（短袖T恤 来自词表；帽子 来自本页数据）',
-      catOpt.values.indexOf('短袖T恤') >= 0 && catOpt.values.indexOf('帽子') >= 0,
-      JSON.stringify(catOpt.values));
-    report('品类建议**不**推荐「其他」（它是空值语义，归一化后是空串，不是一个可选值）',
-      catOpt.values.indexOf('其他') < 0,
-      JSON.stringify(catOpt.values));
+
+    // ---- ① 页头指标条整条撤掉（用户："我看不太懂，用户肯定也会很懵"）----
+    // ⚠️ 反向断言必须**自证非空转**：同一条 report 里先确认面板与表格真的在（同一个 card() 查找
+    //    函数、同一时刻），否则 !card('cl-stats') 可能只是"这一页压根没挂上"。
+    // ⚠️ 判据用的是「识别库 / 已配产品」这两个**只出现在那排指标条上**的词，不是「待核对」——
+    //    面板标题就叫「待核对订单」，拿它判会把正常文案当成残留。
+    report('页头的「待核对 / 未归类 / 识别库 / 已配产品」指标条整条撤掉（面板与表格仍在，不是空页）',
+      !!card('classify-panel') && !!card('cl-table') && !card('cl-stats') &&
+        flat(card('classify-panel')).indexOf('识别库') < 0 &&
+        flat(card('classify-panel')).indexOf('已配产品') < 0,
+      'cl-stats=' + (card('cl-stats') ? '仍在（错）' : '已无') +
+        ' 表=' + (card('cl-table') ? '在' : '没了') +
+        ' 面板文案=' + (card('classify-panel') ? flat(card('classify-panel')).slice(0, 48) : '?'));
+    // 页头操作说明压到**一行**：点名款 → 选色 → 保存 / 确认无误，回车提示在即可。
+    // ⚠️ 长度守卫是**刻意的**（2026-10-11 收瘦：原文案三行、含整段"为什么要点款"的解释）——
+    //    这段的回归风险就是"又被人把解释抄回来"，长度是最省事也最准的判据。
+    //    80 不是"美观线"：关键词（点名/颜色/保存/确认无误/回车）本身 ≈ 45 字，80 给的是
+    //    "还能补半句实用提示"的余量，重抄回那段 ≈110 字的解释必然红。
+    var clGuide = card('cl-guide');
+    report('页头操作说明**一行讲完**（点名「归属款」→ 选色 → 保存 / 确认无误 + 回车提示），≤ 80 字',
+      !!clGuide && flat(clGuide).length <= 80 &&
+        flat(clGuide).indexOf('回车') >= 0 && flat(clGuide).indexOf('保存') >= 0 &&
+        flat(clGuide).indexOf('确认无误') >= 0,
+      clGuide ? 'len=' + flat(clGuide).length + ' | ' + flat(clGuide) : 'no-guide');
+    // 连带：那条**只为指标条而生**的取数通道在渲染层一次都不该被读（留着它 = 每次进页面白跑一次往返）。
+    // ⚠️ 判据钉在"electronAPI 上有没有人**读**这个键"，而不是"这个通道被调用了几次"：桩删掉之后
+    //    后者恒为 0（读不到就无所谓调用）—— 那是条恒绿的假守卫。假桥在兜底分支里把**没人实现的键**
+    //    记进 __unhandled，就是为这条断言留的钩子（顺带也把"本页偷偷用了什么没实现的键"暴露出来）。
+    report('指标条的取数通道（orderSkuRollup）在渲染层一次都没被读（零消费者即删，不是"留着不显示"）',
+      (calls('__unhandled') || []).indexOf('orderSkuRollup') < 0,
+      '本页读过的未实现键=' + JSON.stringify(calls('__unhandled') || []));
+    // ⚠️ 这条是**实测踩到的**（2026-10-10）：改版时把说明文字写成 markdown 粗体（两颗星号夹住一段话），
+    //    而 Vue 模板**不解析 markdown** ⇒ 屏幕上原样显示成一串星号（日志里一眼看到）。
+    //    所以判据是"渲染出来的文字里不许出现 markdown 记号"，不是"源码里有没有写"。
+    //    同一条也顺手盖住反引号（注释里常写 o.color 这种，写进可见文案就是一样的事故）。
+    //    ⚠️ 反引号要用 fromCharCode(96) 拼 —— 本段在模板串里，直接写一个反引号会把模板串提前闭合
+    //       （上面刚踩过：写成字面量时 node --check 报的是文件末尾的 brace 不配，很难往这里想）。
+    var BACKTICK = String.fromCharCode(96);
+    report('面板上可见的文案没有漏出 markdown 记号（模板里写 **粗体** 会原样显示成一串星号）',
+      (function () {
+        var t = flat(card('classify-panel'));
+        return !!t && t.indexOf('**') < 0 && t.indexOf(BACKTICK) < 0;
+      })(),
+      '文案片段=' + flat(card('classify-panel')).slice(0, 80));
+    report('待核对五行都在（P-41 / P-42 / P-43 / P-44 / P-45），店铺逐格对',
+      (function () {
+        var t = flat(card('cl-table'));
+        return t.indexOf('P-41') >= 0 && t.indexOf('P-42') >= 0 && t.indexOf('P-43') >= 0 &&
+          t.indexOf('P-44') >= 0 && t.indexOf('P-45') >= 0 &&
+          t.indexOf('店A') >= 0 && t.indexOf('店B') >= 0 && t.indexOf('店C') >= 0 && t.indexOf('店E') >= 0;
+      })(),
+      flat(card('cl-table')));
+
+    // ---- 页头**范围切换**：待核对 5 / 已核对 2（2026-10-11 加计数，2026-10-12 两个数各自成范围）----
+    // 用户问题 ②：「做完归类核对后，订单不知道在哪」—— 根因之一是**核对过的行全无屏幕可见**
+    // （本页只查 corrected=0）。那两个数从"只读的计数句"变成**两个可点的范围**，就是这件事的解。
+    // ⚠️ 夹具是 **5 待核对 + 2 已核对**（故意给 2，不是 0、也不是给满）：0 的话"计数实现坏了恒返回 0"
+    //    照样绿；给满的话两个数相等，也分不出"数错了"。5 / 2 这组两边各自可辨。
+    // ⚠️ 判据钉在两个**徽标各自的文本**上（不是"面板上出现过这两个数"）：后者会被列表里的
+    //    行号/金额蒙对，而这里要的正是"哪个范围各有多少行"。
+    report('页头范围切换：待核对 5 · 已核对 2（夹具刻意让两个数**不相等且都不为 0**，否则计数坏了也绿）',
+      flat(card('cl-count-pending')) === '5' && flat(card('cl-count-corrected')) === '2',
+      '待核对=' + JSON.stringify(flat(card('cl-count-pending'))) +
+        ' 已核对=' + JSON.stringify(flat(card('cl-count-corrected'))));
+    // 默认停在**待核对**：已核对是"出错了才去"的那一支，默认落在它上面会让每天第一次进来
+    // 看到的是一屏不需要动的行（而这一页的本职工作是核对还没定的那些）。
+    // **自证非空转**：下面那条 report 用同一个 card() 取到了两个范围按钮的真元素 ⇒
+    // 这里的 !card(...) 不可能是"因为查不到元素才恒绿"。
+    report('默认停在「待核对」范围（已核对不是首屏：它是出错了才去的那一支）',
+      !!card('cl-scope-pending') && card('cl-scope-pending').className.indexOf('is-on') >= 0 &&
+        !!card('cl-scope-corrected') && card('cl-scope-corrected').className.indexOf('is-on') < 0,
+      '待核对=' + (card('cl-scope-pending') ? card('cl-scope-pending').className : 'missing') +
+        ' 已核对=' + (card('cl-scope-corrected') ? card('cl-scope-corrected').className : 'missing'));
+    // 反向夹具坐实"corrected 过滤真的做了"：CORRECTED_ORDERS（P-46 / P-47）**不许**出现在待核对表里。
+    // ⚠️ 若实现漏了 corrected=false（或桥忽略该参数），表里会多出这两行 —— 那正是用户抱怨的
+    //    "核对过的单还赖在待核对列表里"。只断言"5 行都在"是抓不到这个的（多出来的行不会被发现）。
+    report('待核对表里**没有**已核对的那两行（P-46 / P-47）—— corrected 过滤真的生效，不是只多不少',
+      (function () {
+        var t = flat(card('cl-table'));
+        return t.indexOf('P-46') < 0 && t.indexOf('P-47') < 0;
+      })(),
+      'P-46=' + (flat(card('cl-table')).indexOf('P-46') >= 0 ? '混进来了（错）' : '无') +
+        ' P-47=' + (flat(card('cl-table')).indexOf('P-47') >= 0 ? '混进来了（错）' : '无'));
+
+    // ---- ② 品类 / Logo 两列撤掉（等"印花 logo 管理"做出来再加回来）----
+    // 判据钉在**表头**（7 列）与**控件**两处：只看表头会漏掉"列撤了、控件还在原地写值"这种
+    // 半拉子改法 —— 那是最糟的一种（看不见，却仍在写）。两处都要，不能只留一处。
+    var headTh = card('cl-table') ? card('cl-table').querySelectorAll('thead th') : [];
+    var headText = Array.prototype.map.call(headTh, function (th) { return th.textContent.trim(); }).join('|');
+    report('表格只剩 7 列（图 / 订单号 / 店铺 / 颜色 / 尺码 / 归属款 / 操作）—— 品类与 Logo 两列已撤',
+      headTh.length === 7 && headText.indexOf('品类') < 0 && headText.indexOf('Logo') < 0 &&
+        headText.indexOf('颜色') >= 0 && headText.indexOf('归属款') >= 0 && headText.indexOf('尺码') >= 0,
+      '表头=' + headText);
+    report('品类 / Logo 的输入控件也一并消失（列撤了控件却留着 = 看不见但仍在写）',
+      !card('cl-cat-41') && !card('cl-logo-41') && !card('cl-cat-options'),
+      'cl-cat-41=' + (card('cl-cat-41') ? '仍在（错）' : '已无') +
+        ' cl-logo-41=' + (card('cl-logo-41') ? '仍在（错）' : '已无') +
+        ' cl-cat-options=' + (card('cl-cat-options') ? '仍在（错）' : '已无'));
+
+    // ⚠️ 缩略图合批只该带**有图**的行：无图行的 localPath 是空串，混进去就是白跑一次往返
+    report('缩略图合批只带**有图**的行（P-41 + P-42 + P-44 三条），无图的 P-43 / P-45 不进请求',
+      (calls('orderImageThumbBatch') || []).some(function (a) {
+        return Array.isArray(a) && a.length === 3 &&
+          a[0] && a[0].localPath === '/tmp/p41.jpg' &&
+          a[1] && a[1].localPath === '/tmp/p42.jpg' &&
+          a[2] && a[2].localPath === '/tmp/p44.jpg';
+      }),
+      JSON.stringify((calls('orderImageThumbBatch') || []).slice(-1)[0] || null));
+
+    // ---- ③ 图**整张**看得见（用户报的"图片展示不全"）----
+    // 根因是基座 .wb-thumb 的 40px + object-fit: cover（会裁掉边缘），而商品照多是竖版 ——
+    // 上下两端恰恰是"这个款长什么样"的关键部位 ⇒ 本页覆盖成 contain。
+    // ⚠️ 先等图片元素真的解码出内容（naturalWidth > 0）再判：图是异步加载的，在"元素在、但还没
+    //    加载完"的那一刻取 computed style 读到的是占位状态，断言会变成"看运气"。
+    try {
+      await waitFor(function () {
+        var ims = card('cl-table') ? card('cl-table').querySelectorAll('img') : [];
+        return ims.length === 3 && Array.prototype.every.call(ims, function (im) {
+          return im.complete && im.naturalWidth > 0;
+        });
+      }, 6000);
+    } catch (e) { /* 下面那条断言会把实际值写出来 */ }
+    var thumbImgs = card('cl-table') ? card('cl-table').querySelectorAll('img') : [];
+    var thumbDetail = Array.prototype.map.call(thumbImgs, function (im) {
+      var cs = getComputedStyle(im);
+      return cs.objectFit + '/' + cs.width + 'x' + cs.height + '/nat=' + im.naturalWidth;
+    }).join(' , ');
+    report('列表图片是**整图**（放大的格子 + object-fit: contain），不是基座那个 40px cover 裁出来的中心块',
+      thumbImgs.length === 3 && Array.prototype.every.call(thumbImgs, function (im) {
+        var cs = getComputedStyle(im);
+        return cs.objectFit === 'contain' && parseFloat(cs.width) >= 90 && im.naturalWidth > 0;
+      }),
+      'img数=' + thumbImgs.length + ' | ' + thumbDetail);
+
+    // ---- ③b 尺寸：64px 不够，用户**原话复报**了一次"展示不全"（2026-10-12）----
+    // 上一轮（10-10）修的是 cover→contain + 40→64px。同一句话再来一遍 ⇒ 图既然从来不缺角
+    // （主进程等比缩放 + contain；真库 35 张 31 方 4 竖都完整），剩下的问题只能是**尺寸**：
+    // 64px 看不清印花 / 领型 / 颜色，而这一页的全部工作就是拿图比对。
+    // ⚠️ 阈值从"≥60"收到"≥90"：64px 那一版留下的旧阈值对 96px 与 64px **都放行**，
+    //    等于这条断言对"到底放大了没有"不设防。判定值取实测 96。
+    report('表格图放大到 96px（64px 时代用户原话复报"展示不全"—— 认款要看清印花/领型/颜色）',
+      thumbImgs.length === 3 && Array.prototype.every.call(thumbImgs, function (im) {
+        return parseFloat(getComputedStyle(im).width) >= 90 &&
+          parseFloat(getComputedStyle(im).height) >= 90;
+      }),
+      thumbDetail);
+    // 「能点开」必须**常显**：只写在 title 里的话，触屏 / 不会悬停的人永远看不到
+    // （2026-10-10 PoolPane P2-1 同一个教训）。判据读**计算样式**而不是 class 名 ——
+    // class 在、样式被别的规则盖掉，屏幕上还是没有（读 class 是恒绿的）。
+    var zoomBtn = card('cl-zoom-41');
+    var zoomMark = zoomBtn ? zoomBtn.querySelector('.cl-thumb-btn__zoom') : null;
+    report('每张图带**常显**的「看大图」角标（⤢ 算得出来、不是只写在 title 里）',
+      !!zoomBtn && !!zoomMark && getComputedStyle(zoomMark).display !== 'none' &&
+        getComputedStyle(zoomMark).visibility !== 'hidden' &&
+        parseFloat(getComputedStyle(zoomMark).opacity) > 0,
+      zoomBtn
+        ? 'btn=在 角标 display=' + getComputedStyle(zoomMark).display +
+          ' opacity=' + getComputedStyle(zoomMark).opacity
+        : 'no-zoom-btn');
+
+    // ---- ③c 行高：两个文字动作不许换行把行撑高 ----
+    // 「保存 / 确认无误」换行成两行时每行多出约 20px（5 行多占 100px），是用户报的
+    // "样式有问题"里最扎眼的一处。判据是**几何**（两个按钮在同一视觉行上），不是 DOM 结构 ——
+    // flex-wrap 从 wrap 改成 nowrap 之后，两个按钮**仍然都在 DOM 里**，只数元素个数分不出来。
+    var save41 = card('cl-save-41');
+    var ok41 = card('cl-ok-41');
+    var opsTd = save41 ? save41.closest('td') : null;
+    report('操作列「保存 / 确认无误」排在**同一行**（换行会把每行撑高，5 行多占 100px）',
+      !!save41 && !!ok41 && save41.offsetTop === ok41.offsetTop &&
+        !!opsTd && opsTd.scrollWidth <= opsTd.clientWidth + 1,
+      save41 && ok41
+        ? 'saveTop=' + save41.offsetTop + ' okTop=' + ok41.offsetTop +
+          ' opsWrap=' + (opsTd ? getComputedStyle(opsTd).flexWrap : '?') +
+          ' opsH=' + (opsTd ? getComputedStyle(opsTd).height : '?')
+        : 'no-btns');
+
+    // ---- ③d 页头：范围名只说一处（同一件事 adjacent 说两遍 = 本仓纪律）----
+    // 原先是「面板标题 待核对订单」+ 紧挨着的「分段控件 待核对 5」，同一个信息写两遍。
+    // 分段控件自带 is-on 高亮 + 计数 ⇒ 它是唯一真源，标题删掉。
+    // ⚠️ 判据按**页头元素的文本**判，不按"整个面板"：面板里别处（空态出口"看已核对的 N 行"）
+    //    出现"已核对"是正当的，只会在全局文本上误伤。
+    var panelHead = document.querySelector('.wb-panel__head');
+    report('页头不再重复写「待核对订单」—— 范围名只说一处（分段控件那个，带计数与选中态）',
+      !!panelHead && flat(panelHead).indexOf('待核对订单') < 0 && flat(panelHead).indexOf('已核对订单') < 0,
+      panelHead ? flat(panelHead) : 'no-head');
+
+    // ---- ④「归属款」下拉的数据源 = **产品库全集**（用户报的"展示不全"就是它）----
+    report('归属款下拉 = 产品库全集（自动匹配 + S1 + S2 + S9 = 4 个选项），识别池只有 2 款 ⇒ 3 个就说明驱动表没换',
+      !!card('cl-style-41') && card('cl-style-41').options.length === 4,
+      card('cl-style-41') ? 'options=' + card('cl-style-41').options.length : 'no-select');
+    report('产品库里手工新建、识别池里没有的款也在下拉里（S9），且停用款带「（停用）」标记',
+      (function () {
+        var sel = card('cl-style-41');
+        if (!sel) return false;
+        var hit = Array.prototype.filter.call(sel.options, function (o) { return o.value === 'S9'; })[0];
+        return !!hit && hit.textContent.indexOf('停用') >= 0;
+      })(),
+      card('cl-style-41')
+        ? Array.prototype.map.call(card('cl-style-41').options, function (o) {
+          return o.value + ':' + o.textContent;
+        }).join(' / ')
+        : 'no-select');
+    // ⚠️ **默认值不能靠位置**：已归类那行要选中**它自己的款编码**（产品库驱动 ⇒ 下拉的 value 就是 code），
+    //    不是第一个选项；未归类那行停在「自动匹配」（空值）。
+    report('默认值不靠位置：已归类行选中它自己的款编码（P-42 → S1），未归类行停在「自动匹配」（空值）',
+      !!card('cl-style-42') && card('cl-style-42').value === 'S1' &&
+        !!card('cl-style-41') && card('cl-style-41').value === '',
+      'P-42=' + (card('cl-style-42') ? card('cl-style-42').value : '?') +
+        ' P-41=' + (card('cl-style-41') ? card('cl-style-41').value : '?'));
+
+    // ---- ④ 颜色**跟着归属款走** + 记住"这张图上次定的颜色" ----
+    // 取值优先级（每一支都要**落在该款的色卡里**才作数）：① 图记住的颜色 → ② 订单自己的颜色 → ③ 留空。
+    // 三条各有专属夹具行，**不能合并**：只留 P-42 一条的话，"永远取订单自己的颜色"这种错法照样全绿
+    //（P-42 两个值恰好都在色卡里）；只留 P-44 的话，"永远读记住的颜色"也能蒙对。
+    var col42 = card('cl-color-42');
+    report('点名了款 ⇒ 颜色格是**该款的下拉**（S1 色卡 = 请选择颜色 + 黑 + 白）',
+      !!col42 && col42.tagName === 'SELECT' && col42.options.length === 3 &&
+        Array.prototype.map.call(col42.options, function (o) { return o.value; }).join(',') === ',黑,白',
+      col42 ? col42.tagName + ' opts=' +
+        Array.prototype.map.call(col42.options, function (o) { return o.value; }).join(',') : 'no-el');
+    report('图记住的颜色**在**该款色卡里 ⇒ 自动选中它（P-42 图记住「白」、订单自己的颜色是「黑」⇒ 必须是白）',
+      !!col42 && col42.value === '白',
+      col42 ? 'value=' + col42.value : 'no-el');
+    var col45 = card('cl-color-45');
+    report('图记住的颜色**不在**色卡、订单自己的颜色在 ⇒ 回落选订单那个（P-45 记住「印花」/ 订单「黑」⇒ 黑）',
+      !!col45 && col45.tagName === 'SELECT' && col45.value === '黑',
+      col45 ? col45.tagName + ' value=' + col45.value : 'no-el');
+    var col44 = card('cl-color-44');
+    report('两个颜色都**不在**色卡里 ⇒ 留空让用户自己选（P-44 记住与订单都是「印花」⇒ 空），并写明原因',
+      !!col44 && col44.tagName === 'SELECT' && col44.value === '' && !!card('cl-color-warn-44'),
+      col44 ? 'value=' + JSON.stringify(col44.value) +
+        ' warn=' + (card('cl-color-warn-44') ? flat(card('cl-color-warn-44')) : '无') : 'no-el');
+    var col41 = card('cl-color-41');
+    report('没点名款 ⇒ 颜色格回落**自由输入**（本款没有色卡，给下拉就成了无源之水）',
+      !!col41 && col41.tagName === 'INPUT' && col41.value === '黑',
+      col41 ? col41.tagName + ' value=' + col41.value : 'no-el');
+    // 自由输入那一支的输入建议（datalist）= 标准色词表 + 本库已用过的写法。
+    // ⚠️ 只断言"有 datalist"不够 —— list 属性写歪、datalist 空壳都会让它恒绿，所以三条分开：
+    //    ①list 指向的元素真的在 ②内容里有**词表**写法（灰色） ③内容里有**本库数据**（灰 —— 词表里
+    //    没有这个写法，只可能来自订单行）。少了 ③，"只读词表、不读库"的实现照样全绿。
     var colOpt = datalistValues('cl-color-41');
-    report('颜色建议 = 标准词表 + 本库写法（黑色 来自词表；蓝 来自本页数据）',
-      colOpt.found && colOpt.values.indexOf('黑色') >= 0 && colOpt.values.indexOf('蓝') >= 0,
-      'list=' + colOpt.id + ' ' + JSON.stringify(colOpt.values));
+    report('颜色自由输入的输入建议真的挂上了（list 指向的 datalist 存在且选项非空）',
+      !!colOpt.id && colOpt.found && colOpt.values.length > 0,
+      'list=' + colOpt.id + ' found=' + colOpt.found + ' 选项数=' + colOpt.values.length);
+    report('颜色建议 = 标准色词表 + 本库已用过的写法（灰色 来自词表；灰 只可能来自本页订单）',
+      colOpt.found && colOpt.values.indexOf('灰色') >= 0 && colOpt.values.indexOf('灰') >= 0,
+      'list=' + colOpt.id + ' ' + JSON.stringify(colOpt.values.slice(0, 14)));
 
     // ---- ⭐「同商品」徽标：这一页到底有几件事要定 ----
     // P-41 与 P-42 是**同一家店的同一个商品ID**（店A/IT-A）⇒ 两行都标「同商品 ×2」；
@@ -1251,16 +2279,65 @@ async function main() {
       'P-43=' + (card('cl-same-43') ? '有徽标（错）' : '无') +
         ' P-44=' + (card('cl-same-44') ? '有徽标（错）' : '无'));
 
-    // ---- 保存：出参必须带指纹 ----
+    // ---- ④b 「颜色无处挂」：没点名款、又没有可用于自动匹配的指纹 ⇒ 不许"保存成功" ----
+    // 载体是 P-43（无款 + 空品类 + 空特征，见夹具头的说明）。这条判据**必须两边都看**：
+    //   · P-43 填了颜色却没处挂 ⇒ 提示在 + 「保存」按不下去；
+    //   · P-41 同样没点名款，但它有特征（指纹非空、能自动匹配）⇒ **不许**出现同一个提示 ——
+    //     否则"凡没点名款就拦"这种错法会把自动匹配这条路整条堵死，而只盯 P-43 是全绿的。
+    // 与下面 ⑥ 的那条配成一对：**同一个动作（填颜色）在两行上给相反的结果**，才分得出是哪条在起作用。
+    setInput('cl-color-43', '青');
+    var okOrphan = true;
+    try {
+      await waitFor(function () {
+        var el = card('cl-color-43');
+        return !!el && el.value === '青' && !!card('cl-style-warn-43') &&
+          !!card('cl-save-43') && card('cl-save-43').disabled === true;
+      }, 4000);
+    } catch (e) { okOrphan = false; }
+    report('有颜色却没款可挂：P-43（无款 + 空品类 + 空特征）给提示且「保存」按不下去',
+      okOrphan,
+      '值=' + JSON.stringify(card('cl-color-43') ? card('cl-color-43').value : null) +
+        ' 提示=' + (card('cl-style-warn-43') ? flat(card('cl-style-warn-43')) : '无') +
+        ' save禁用=' + (card('cl-save-43') ? String(card('cl-save-43').disabled) : 'no-el'));
+    report('换个行就不拦：P-41 也没点名款，但它有特征（指纹非空、能自动匹配）⇒ 没有这条提示',
+      !card('cl-style-warn-41'),
+      'P-41提示=' + (card('cl-style-warn-41') ? flat(card('cl-style-warn-41')) : '无'));
+
+    // ---- ⑤ 换款就换色卡；原颜色不在新色卡里 ⇒ 清空 + 拦住「保存」----
+    // 用 P-43（未归类、颜色是自由输入、刚被填成「青」）：点 S1 后「青」不在 S1 的（黑/白）里 ⇒ 应被清空。
+    // ⚠️ 这三条**必须连着看才叫验过**：只断言"保存禁用"会被"这行本来就不脏"满足（恒绿），
+    //    所以后面补一条"补上颜色立刻可保存"—— 它才证明卡住的是缺色，不是"没改动"。
+    setInput('cl-style-43', 'S1');
+    var okPick = true;
+    try {
+      await waitFor(function () {
+        var el = card('cl-color-43');
+        return !!el && el.tagName === 'SELECT' && el.value === '' && !!card('cl-color-warn-43');
+      }, 4000);
+    } catch (e) { okPick = false; }
+    report('换款后色卡跟着换：原颜色不在新色卡里 ⇒ 清空并提示（P-43 的「灰」不在 S1 的黑/白里）',
+      okPick,
+      'tag=' + (card('cl-color-43') ? card('cl-color-43').tagName : '?') +
+        ' value=' + JSON.stringify(card('cl-color-43') ? card('cl-color-43').value : null) +
+        ' warn=' + (card('cl-color-warn-43') ? flat(card('cl-color-warn-43')) : '无'));
+    report('点名了款却没给颜色时「保存」按不下去（否则会落出一个没有名字的款色，而界面上看不出异常）',
+      !!card('cl-save-43') && card('cl-save-43').disabled === true,
+      'disabled=' + (card('cl-save-43') ? card('cl-save-43').disabled : 'no-el'));
+    setInput('cl-color-43', '黑');
+    var okEnable = true;
+    try { await waitFor(function () { return !!card('cl-save-43') && card('cl-save-43').disabled === false; }, 4000); }
+    catch (e) { okEnable = false; }
+    report('补上颜色后**同一行**立刻可保存 —— 证明上面"按不下去"卡的是缺色，不是"这行压根没改动"',
+      okEnable, '');
+
+    // ---- ⑥ 保存（没点名款）：只走重归类，出参必须带指纹 ----
     report('没改动时「保存」是禁用的（不做"点了没反应"的假动作）',
       !!card('cl-save-41') && card('cl-save-41').disabled === true, '');
-    var catEl = card('cl-cat-41');
-    catEl.value = '卫衣';
-    catEl.dispatchEvent(new Event('input', { bubbles: true }));
+    setInput('cl-color-41', '白');
     var okDirty = true;
     try { await waitFor(function () { return !!card('cl-save-41') && card('cl-save-41').disabled === false; }, 4000); }
     catch (e) { okDirty = false; }
-    report('改了品类后才允许保存（脏值一眼看得出来）', okDirty, '');
+    report('改了颜色后才允许保存（脏值一眼看得出来）', okDirty, '');
 
     var updBefore = calls('orderUpdate').length;
     var asgBefore = calls('orderStyleAssign').length;
@@ -1301,20 +2378,37 @@ async function main() {
     catch (e) { okReload = false; }
     report('保存后整页重取（保活的旧数据不会赖着不走）', okReload, '');
 
-    var sel = card('cl-style-41');
-    sel.value = '6';   // S2
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    // ---- ⑦ 点名某个款 + 从**该款的色卡**里选颜色 ⇒ 两件事一起落库 ----
+    setInput('cl-style-41', 'S2');
+    var okPick2 = true;
+    try {
+      await waitFor(function () {
+        var el = card('cl-color-41');
+        return !!el && el.tagName === 'SELECT' && el.value === '' && !!card('cl-color-warn-41');
+      }, 4000);
+    } catch (e) { okPick2 = false; }
+    report('同一段联动在另一行复现：P-41 刚改的「白」不在 S2 的色卡（只有蓝）里 ⇒ 换款后清空并提示',
+      okPick2,
+      'tag=' + (card('cl-color-41') ? card('cl-color-41').tagName : '?') +
+        ' value=' + JSON.stringify(card('cl-color-41') ? card('cl-color-41').value : null));
+    report('点名款但还没选颜色：P-41 的「保存」也按不下去（同一条守卫，换一行照样成立）',
+      !!card('cl-save-41') && card('cl-save-41').disabled === true, '');
+    setInput('cl-color-41', '蓝');
     var okDirty2 = true;
     try { await waitFor(function () { return !!card('cl-save-41') && card('cl-save-41').disabled === false; }, 4000); }
     catch (e) { okDirty2 = false; }
+    report('从该款色卡里选上颜色后可以保存', okDirty2, '');
     var asg2 = calls('orderStyleAssign').length;
     await clickReady('cl-save-41');
     var okAsg = true;
     try { await waitFor(function () { return calls('orderStyleAssign').length > asg2; }, 6000); }
     catch (e) { okAsg = false; }
     var ca = calls('orderStyleAssign')[asg2] || {};
-    report('点名某个款时把**指纹记入该款**（后续自动识别会命中同一编码）{orderId:41, styleId:6}',
-      okAsg && ca.orderId === 41 && ca.styleId === 6 && !!ca.fingerprint, JSON.stringify(ca));
+    // ⚠️ 必须走**款编码**而不是 id：下拉的数据源是产品库全集，产品库里手工新建的款在识别池里没有行
+    //    （宿主按 code ensureStyleByCode 补占位款）—— 发 id 的话那些款根本点不了。
+    report('点名款走的是**款编码** + 选中的颜色 + 指纹 {orderId:41, styleCode:S2, color:蓝}',
+      okAsg && ca.orderId === 41 && ca.styleCode === 'S2' && ca.color === '蓝' && !!ca.fingerprint,
+      JSON.stringify(ca));
 
     // ---- ⭐ 回流被**说出来**（"记住了"这件事不说，用户就不知道它可以重复发生）----
     // 同样要先**等**它出现（理由同上：通道被调用的那一刻提示还没进 DOM）。
@@ -1327,6 +2421,30 @@ async function main() {
     report('回流被说出来：点名款后提示「已记住这个商品 → 款和颜色，另有 2 单一起归好了」',
       backfillToastSeen && toastHas('已记住这个商品'), toastDump());
 
+    // ---- ⭐⭐ 点名款**不要求指纹**（2026-10-11 用户报"归类核对设的颜色不生效"的回归守卫）----
+    // 载体是 P-45 = **生产形状**（有款 S1 + 空品类 + 空特征 ⇒ 指纹是空串）。真库每一行都是这个形状。
+    // 改前那句是 if (named && fingerprint) ⇒ 挂款 / 颜色记忆 / 商品ID 回流**一次都不跑**，
+    //   而 orderUpdate 那一步照样写订单自己的 color 列、提示还说"已保存" ⇒ 用户设的颜色哪儿都没生效
+    //   （拿货单 / 算钱 / 取图读的都是款色）。上面 ⑦ 那条用的是 P-41（指纹非空）⇒ **它挡不住这个回归**。
+    // 判据钉在**请求载荷**上，不钉回执：回执是假桥的固定值，拿回执反推请求，改坏了照样能全绿。
+    var asgEmpty = calls('orderStyleAssign').length;
+    var clListC = calls('orderList').length;
+    setInput('cl-color-45', '白');
+    var okDirty45 = true;
+    try { await waitFor(function () { return !!card('cl-save-45') && card('cl-save-45').disabled === false; }, 4000); }
+    catch (e) { okDirty45 = false; }
+    report('空指纹那一行的保存前提就绪：P-45 改了颜色后「保存」可点', okDirty45, '');
+    await clickReady('cl-save-45');
+    var okAsgEmpty = true;
+    try { await waitFor(function () { return calls('orderStyleAssign').length > asgEmpty; }, 6000); }
+    catch (e) { okAsgEmpty = false; }
+    var caE = calls('orderStyleAssign')[asgEmpty] || {};
+    report('指纹为空也**照样挂款**：P-45 点名 S1 + 颜色 白 ⇒ orderStyleAssign 被调用（带款编码与颜色，指纹为空）',
+      okAsgEmpty && caE.orderId === 45 && caE.styleCode === 'S1' && caE.color === '白' && !caE.fingerprint,
+      JSON.stringify(caE));
+    // 等这次保存触发的重取落地再进键盘流那一段（否则会和它的"列表缩水/焦点"判据抢时序）
+    try { await waitFor(function () { return calls('orderList').length > clListC; }, 8000); } catch (e) { /* 下一条不依赖它 */ }
+
     // ---- 键盘流：回车＝保存这一行，焦点自动交给**顶上来的**那一条 ----
     // ⚠️ 从这里开始让夹具**模拟宿主的真实行为**：已核对的单离开待核对列表
     //    （updateOrder 写 corrected = 1）。前面不开这一步是因为那些断言要反复操作同一行；
@@ -1334,16 +2452,14 @@ async function main() {
     //    根本分不出"往下走了一格"和"原地没动"。
     window.__emulateCorrected = true;
     window.__correctedIds = [];
-    var catEl2 = card('cl-cat-42');
-    catEl2.value = '长裤';
-    catEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    setInput('cl-color-42', '黑');
     var okDirty3 = true;
     try { await waitFor(function () { return !!card('cl-save-42') && card('cl-save-42').disabled === false; }, 4000); }
     catch (e) { okDirty3 = false; }
-    report('回车流的前提就绪：改了品类后该行可保存', okDirty3, '');
+    report('回车流的前提就绪：改了颜色后该行可保存', okDirty3, '');
     var updKey = calls('orderUpdate').length;
-    // 在**行内输入框**上派发 Enter（会冒泡到 tr 上的 @keydown.enter）
-    catEl2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    // 在**行内控件**上派发 Enter（会冒泡到 tr 上的 @keydown.enter）
+    card('cl-color-42').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     var okKeySave = true;
     try { await waitFor(function () { return calls('orderUpdate').length > updKey; }, 6000); }
     catch (e) { okKeySave = false; }
@@ -1363,6 +2479,44 @@ async function main() {
         ' 焦点=' + (document.activeElement && document.activeElement.getAttribute
           ? String(document.activeElement.getAttribute('data-act'))
           : String(document.activeElement)));
+
+    // ---- ⭐ 确认无误 的守卫：有没保存的改动时**不许**确认（否则刚填的颜色被静默丢掉）----
+    // 「确认无误」只把 corrected 置 1、**不写任何字段** ⇒ 用户"选了颜色再点确认无误"是很自然的动作
+    // （两个按钮就在同一格里），而这一下会把刚填的东西丢掉、那一行还离开了列表。
+    // 真库现场正是这个形状：23 行全 corrected=1、oi_orders.color 全空、款色全是「未分类」。
+    // ⚠️ 位置很讲究：必须放在**上一段重取已经落定之后**（上面的焦点断言就是那个信号）。
+    //    放早了会撞上重取 —— 重取会把草稿按主进程的数据重建（本页有意为之），
+    //    于是"我这边刚填的颜色"被冲掉，行**根本没脏**，这条断言会以"守卫没触发"的样子假红。
+    //    ⚠️ "点了但什么都没发生"这类断言**必须先证明前提成立**（这一行真的脏了）——
+    //    否则"按钮点不动 / 行不在 / 值没填进去"都能让它恒绿（本仓反复踩过的空转）。
+    // ⚠️ 判据钉在**通道没被调用**上（不是钉提示）：提示给错一句话不影响数据，落库了才是真丢东西。
+    await waitFor(function () { return !!card('cl-style-44') && !!card('cl-color-44'); }, 6000);
+    setInput('cl-color-44', '黑');
+    var okDirty44 = true;
+    try { await waitFor(function () { return !!card('cl-save-44') && card('cl-save-44').disabled === false; }, 4000); }
+    catch (e) { okDirty44 = false; }
+    report('确认守卫的前提就绪：P-44 填了颜色（该行变脏、「保存」可点）',
+      okDirty44,
+      '存在=' + !!card('cl-color-44') + ' 值=' +
+        JSON.stringify(card('cl-color-44') ? card('cl-color-44').value : null) +
+        ' save=' + (card('cl-save-44') ? String(card('cl-save-44').disabled) : 'no-el'));
+    var mkGuard = calls('orderMarkCorrected').length;
+    await clickReady('cl-ok-44');
+    // 守卫是同步弹提示的 ⇒ 给渲染一点时间即可（toast 2s 后自动下线，别等太久把它等没了）
+    await new Promise(function (r) { setTimeout(r, 300); });
+    report('单行「确认无误」在**有未保存改动**时不落库，并说清要先保存',
+      calls('orderMarkCorrected').length === mkGuard && toastHas('先点「保存」'),
+      '调用数=' + calls('orderMarkCorrected').length + '（点前 ' + mkGuard + '）| 提示=' + toastDump());
+    // 批量那道口子：**任一行**脏就不许"全部确认"（一起丢、且说不清是哪几行）
+    var mkAllGuard = calls('orderMarkCorrected').length;
+    await clickReady('cl-all-ok');
+    await new Promise(function (r) { setTimeout(r, 300); });
+    report('「全部确认无误」在任一行有未保存改动时也不落库（提示与单行那条不同，是批量版）',
+      calls('orderMarkCorrected').length === mkAllGuard && toastHas('先逐行点「保存」'),
+      '调用数=' + calls('orderMarkCorrected').length + '（点前 ' + mkAllGuard + '）| 提示=' + toastDump());
+    // 把 P-44 的草稿改回原样（它载入时颜色就是空的），免得脏着影响后面这两段确认与空态
+    setInput('cl-color-44', '');
+    await waitFor(function () { return !!card('cl-save-44') && card('cl-save-44').disabled === true; }, 4000);
 
     // ---- 确认无误：单行 / 全部两条分支 ----
     var mkB = calls('orderMarkCorrected').length;
@@ -1417,33 +2571,357 @@ async function main() {
     try { await waitFor(function () { return !!card('cl-table'); }, 8000); } catch (e) { okClBack = false; }
     report('数据回来后表格跟着回来（刷新作废面板缓存，不是一次性的）', okClBack, '');
 
-    // ---- ⭐ 产品维度：显示 0 与 整格隐藏 必须长得不一样 ----
-    // 这一格是**附加信息**，但"0"不能乱说：主进程真查过而一个都没配上，是一个**明确的待办**
-    // （界面要说清缘故，否则单看 0 会被读成"数据坏了 / 这一页没有产品"）；
-    // 通道没取到则是"不知道"，那一格**整格不显示**。两种状态的下一步动作完全不同。
-    window.__noSkuRollup = true;
+    // ---- 空态之二：**今天这批都核对完了**（2026-10-11 新增，用户问题 ② 的正解）------------
+    // 这是与上面那条**不同**的空态：上面是"什么都没导"（待核对 0、已核对 0 ⇒ 出口 = 去导入），
+    // 这里是"导过、全核完了"（待核对 0、已核对 > 0 ⇒ 出口 = 流程的第 3、4 步）。
+    // ⚠️ 两者必须分开造：只有一个开关的话，"核完了"这条路径在冒烟里走不到 —— 而它才是用户抱怨的
+    //    "做完归类核对后订单不知道在哪"要治的那条（原先这里什么都没有，用户核对完就断在这一页）。
+    window.__allCorrected = true;
     await clickRefresh();
-    var okRollupZero = true;
+    var okClDone = true;
+    try { await waitFor(function () { return !!card('cl-empty'); }, 8000); } catch (e) { okClDone = false; }
+    report('待核对清零但有已核对的行时：空态说「今天这批都核对完了」（与"什么都没导"区分开）',
+      okClDone && flat(card('cl-empty')).indexOf('今天这批都核对完了') >= 0 &&
+        flat(card('cl-empty')).indexOf('今天还没有导入订单') < 0,
+      okClDone ? flat(card('cl-empty')) : 'timeout');
+    // 出口是**可点**的第 3、4 步（提示不是入口：空态说明里的下一步必须点得到）。
+    // ⚠️ 两件事一起验：按钮在 + **它真的切页签**（看不见的按钮点了等于没点；只验在不在会漏"点了没反应"）。
+    // ⚠️ 2026-10-12 起是**三个**出口：第三个「看已核对的 N 行」是**往后走**（核对完了发现漏/错了），
+    //    前两个是往前走。判据里要带上它，否则"哪天后两个被换掉"照样绿。
+    report('「都核对完了」空态给三个可点出口：去算钱 / 去看要拿什么（第 3、4 步）+ 看已核对的行',
+      !!card('cl-goto-cost') && !!card('cl-goto-purchase') && !!card('cl-goto-corrected') &&
+        !card('cl-goto-import'),
+      'cost=' + (card('cl-goto-cost') ? '在' : '无') + ' purchase=' + (card('cl-goto-purchase') ? '在' : '无') +
+        ' corrected=' + (card('cl-goto-corrected') ? '在' : '无') +
+        ' import=' + (card('cl-goto-import') ? '在（错：这不是"没导过"）' : '无'));
+    // ⭐ 第三个出口要**真的切范围并列出内容**（不是"点了仍停在空态"）：两个范围共用同一个
+    //    视图与同一个取数实现 ⇒ 切过去应该看到行。__allCorrected 还开着 ⇒ 那边列的是全部行。
+    card('cl-goto-corrected').click();
+    var okGotoCorr = true;
     try {
       await waitFor(function () {
-        var el = card('cl-metric-product');
-        return !!el && flat(el).indexOf('已配产品 0 个') >= 0;
-      }, 6000);
-    } catch (e) { okRollupZero = false; }
-    report('本页商品一个都没配上时：显示 0 并**说明缘故**（"本页商品还没配映射"），不是把 0 丢在那里',
-      okRollupZero && flat(card('cl-metric-product')).indexOf('本页商品还没配映射') >= 0,
-      card('cl-metric-product') ? flat(card('cl-metric-product')) : '整格不见了（错）');
-    window.__noSkuRollup = false;
-    window.__skuRollupFails = true;
+        return !card('cl-empty') && !!card('cl-table') && !!card('cl-scope-corrected') &&
+          card('cl-scope-corrected').className.indexOf('is-on') >= 0;
+      }, 8000);
+    } catch (e) { okGotoCorr = false; }
+    report('点「看已核对的行」切到已核对范围并真的列出内容（不是仍停在空态上）',
+      okGotoCorr,
+      '空态=' + (card('cl-empty') ? '仍在（错）' : '已无') + ' 表=' + (card('cl-table') ? '在' : '没了'));
+    card('cl-scope-pending').click();
+    await waitFor(function () { return !!card('cl-empty'); }, 8000);
+    card('cl-goto-cost').click();
+    await waitFor(function () { return onTab('cost') && !!document.querySelector(PANEL_SEL.cost); }, 8000);
+    report('点「去算钱」真的切到「算钱」页签（就地切换，不跳模块）', onTab('cost'), '');
+    await activateTab('classify');
+    await waitFor(function () { return !!card('cl-empty'); }, 8000);
+    var pBeforeGoto = evts('switch-module').length;
+    card('cl-goto-purchase').click();
+    await waitFor(function () { return onTab('purchase') && !!document.querySelector(PANEL_SEL.purchase); }, 8000);
+    report('点「去看要拿什么」真的切到「拿货」页签（且是就地切页签，没走 switch-module）',
+      onTab('purchase') && evts('switch-module').length === pBeforeGoto, '');
+    window.__allCorrected = false;
+    await activateTab('classify');
     await clickRefresh();
-    var okRollupGone = true;
-    try { await waitFor(function () { return !card('cl-metric-product'); }, 6000); }
-    catch (e) { okRollupGone = false; }
-    report('取不到产品维度时：那一格整格不显示（"没取到"不许画成 0），且核对列表照常可用',
-      okRollupGone && !!card('cl-table'),
-      '格=' + (card('cl-metric-product') ? '仍在（错）' : '已隐藏') +
-        ' 表=' + (card('cl-table') ? '在' : '没了'));
-    window.__skuRollupFails = false;
+    var okClRestore = true;
+    try { await waitFor(function () { return !!card('cl-table'); }, 8000); } catch (e) { okClRestore = false; }
+    report('关掉"全核完了"后表格回来（开关没有粘住）', okClRestore, '');
+
+    // ============ 「已核对」范围 + 行内「退回待核对」（2026-10-12）========================
+    // 要治的：核对过之后发现定错了款/色 —— 那些行按定义不在待核对列表里（本页只查 corrected=0），
+    // 屏幕上根本没有它们，也就没有任何地方能改回去。真库现场：23 行全 corrected=1、color 全空、
+    // 款色全是「未分类」，而代码里此前**没有任何一处**会把 corrected 置回 0（用户再也回不到那些行）。
+    //
+    // ⚠️ 夹具先**复位到基线**：上面几段（保存 / 确认单行 / 全部确认）已经把 __correctedIds 攒到
+    //    {42,43} —— 那会让"已核对几行"变成一个跟着前面段落走的数（前面改一句断言这里就变）。
+    //    复位到 P-46 / P-47 这两行，下面的判据才有**确定的数**（5 待核对 · 2 已核对）而不是"恰好"。
+    //    ⚠️ 复位动的是**夹具的集合**、不是断言 —— 这不是"把跑不过的删掉"，是把夹具摆成它该有的形状。
+    window.__correctedIds = [];
+    window.__reopenedIds = [];
+    await clickRefresh();
+    await waitFor(function () { return !!card('cl-table'); }, 8000);
+
+    // ---- 切到「已核对」：列出来的必须是**另一批行** ----
+    card('cl-scope-corrected').click();
+    var okScope = true;
+    try {
+      await waitFor(function () {
+        return !!card('cl-table') && flat(card('cl-table')).indexOf('P-46') >= 0 &&
+          !!card('cl-scope-corrected') && card('cl-scope-corrected').className.indexOf('is-on') >= 0;
+      }, 8000);
+    } catch (e) { okScope = false; }
+    report('切到「已核对」范围：列出已核对的行（P-46 在），切换按钮进选中态',
+      okScope,
+      '表=' + (card('cl-table') ? flat(card('cl-table')).slice(0, 60) : '没了') +
+        ' 已核对按钮=' + (card('cl-scope-corrected') ? card('cl-scope-corrected').className : 'missing'));
+    // ⭐ 反向守卫：**待核对的行不许混进来**。只断言"P-46 在"的话，取数忘了传 corrected:true
+    //    （两个范围列同一批行）照样全绿 —— 而那正是"换个范围看不出区别"这个毛病本身。
+    report('「已核对」范围里**没有**待核对的行（P-41…P-45）—— 两个范围真的是两批行',
+      (function () {
+        var t = flat(card('cl-table'));
+        return t.indexOf('P-46') >= 0 && t.indexOf('P-47') >= 0 &&
+          t.indexOf('P-41') < 0 && t.indexOf('P-42') < 0 && t.indexOf('P-43') < 0 &&
+          t.indexOf('P-44') < 0 && t.indexOf('P-45') < 0;
+      })(),
+      flat(card('cl-table')));
+    // ⭐ 已核对范围是**只读**的：款/色的输入控件不在，唯一的动作是「退回待核对」。
+    //    ⚠️ 两件事必须一起验：只验"控件没了"会被"整块没渲染"蒙对（连退回按钮也没有 = 那行没法用）。
+    report('已核对范围的行是只读的：款/色变成文本（没有下拉/输入框），操作列只有「退回待核对」',
+      !card('cl-style-46') && !card('cl-color-46') && !card('cl-save-46') && !card('cl-ok-46') &&
+        !!card('cl-reopen-46') && !!card('cl-ro-style-46') && !!card('cl-ro-color-46'),
+      'style=' + (card('cl-style-46') ? '仍在（错）' : '无') +
+        ' color=' + (card('cl-color-46') ? '仍在（错）' : '无') +
+        ' reopen=' + (card('cl-reopen-46') ? '在' : '无（错）') +
+        ' roStyle=' + (card('cl-ro-style-46') ? '在' : '无（错）'));
+    // ⚠️ 只读格必须是**这一行现在的值**，而且**两个取值分支各有一行夹具**（见 CORRECTED_ORDERS）：
+    //    · P-46 —— 款色「黑」与订单色「灰」**不同** ⇒ 必须显示款色「黑」（下游读的就是这一份）；
+    //    · P-47 —— 款色为空、订单色「蓝」 ⇒ 必须回落显示「蓝」（不能让格子空着）。
+    //    只留 P-46 的话，"先读订单色"这种错法照样绿（单看它两种实现给出不同答案，才分得出来）；
+    //    只留 P-47 的话，"永远读款色、空了就留白"也能蒙对。两行**一起**才把这条钉死。
+    report('只读格显示这一行现在的款与颜色（P-46 款色优先「黑」/ P-47 款色空则回落订单色「蓝」）',
+      flat(card('cl-ro-style-46')).indexOf('S1') >= 0 && flat(card('cl-ro-color-46')) === '黑' &&
+        flat(card('cl-ro-color-47')) === '蓝',
+      'P46style=' + JSON.stringify(flat(card('cl-ro-style-46'))) +
+        ' P46color=' + JSON.stringify(flat(card('cl-ro-color-46'))) +
+        ' P47color=' + JSON.stringify(flat(card('cl-ro-color-47'))));
+    // 「全部确认无误」对已核对的行是**空动作**（那些行 corrected 本来就是 1）：
+    // 留在已核对范围里会让人以为它能做别的什么。这是本块唯一的**反向**断言（别把它删成"应该还在"）。
+    report('已核对范围里没有「全部确认无误」（对已核对的行再确认一次是空动作）',
+      !card('cl-all-ok'), 'cl-all-ok=' + (card('cl-all-ok') ? '仍在（错）' : '已无'));
+    // 说明句跟着范围换：待核对讲"点名款/选色/保存"、已核对讲"退回待核对"。
+    // 一句话盖两边必然有一边是错的（"点保存"在已核对范围里根本没有那个按钮）。
+    report('页头说明跟着范围换：已核对范围讲的是「退回待核对」，不再讲待核对那一套',
+      !!card('cl-guide') && flat(card('cl-guide')).indexOf('退回待核对') >= 0 &&
+        flat(card('cl-guide')).indexOf('确认无误') < 0,
+      card('cl-guide') ? flat(card('cl-guide')) : 'no-guide');
+
+    // ---- 已核对范围**也出图**（2026-10-12：用户报"已核对范围看着是坏的"）----
+    // 真库实测 23/23 行全有图，模板注释也明写"退回的判据就是这张图定错了款，没有图退回只能靠猜"。
+    // 而夹具原先给这两行 localPath 空串 ⇒ 屏幕上两列空占位、行被撑得很高，看着像页面坏了；
+    // 更要紧的是**这一列从来没有被任何断言看见过**（"已核对范围也出图"因此是恒绿的）。
+    var okImgs = [];
+    try {
+      await waitFor(function () {
+        var ims = card('cl-table') ? card('cl-table').querySelectorAll('img') : [];
+        okImgs = Array.prototype.slice.call(ims);
+        return ims.length === 2 && Array.prototype.every.call(ims, function (im) {
+          return im.complete && im.naturalWidth > 0;
+        });
+      }, 6000);
+    } catch (e) { /* 下面那条断言会把实际值写出来 */ }
+    var okImgDetail = okImgs.map(function (im) {
+      var cs = getComputedStyle(im);
+      var td = im.closest('td');
+      var tr = td ? td.getBoundingClientRect() : null;
+      // detail 里带上**列宽**：这一条断言红的时候，第一要看的的就是图列有没有被 auto 布局压扁
+      // （2026-10-12 实测：窄窗口下图列从 112px 塌到 32px，max-width:100% 随即使图变 12px 细条）
+      return cs.objectFit + '/' + cs.width + 'x' + cs.height +
+        '/nat=' + im.naturalWidth + 'x' + im.naturalHeight + '/列宽=' + (tr ? Math.round(tr.width) : '?');
+    }).join(' , ') + ' || 表宽=' + (card('cl-table') ? Math.round(card('cl-table').getBoundingClientRect().width) : '?');
+    report('已核对范围**同样出图**（2 张都解码得出来、contain、96px）—— 退回的判据就是"这张图定错了款"',
+      okImgs.length === 2 && okImgs.every(function (im) {
+        return im.naturalWidth > 0 && getComputedStyle(im).objectFit === 'contain' &&
+          parseFloat(getComputedStyle(im).width) >= 90;
+      }),
+      'img数=' + okImgs.length + ' | ' + okImgDetail);
+    // ⭐ 竖版那一行（P-47）单独钉：方图放进**方形**格子，object-fit 的 fill 与 contain
+    //    渲染结果一模一样 ⇒ 只留方图的话，"contain 被改成 fill"这种错法永远绿。
+    //    真库 35 张里 4 张竖版，夹具照抄这个比例（P-47 是竖版）。
+    var ptImg = (function () {
+      var ims = card('cl-table') ? card('cl-table').querySelectorAll('img') : [];
+      for (var i = 0; i < ims.length; i++) if (ims[i].naturalHeight > ims[i].naturalWidth) return ims[i];
+      return null;
+    })();
+    report('竖版图走 contain 而不是 fill（方图放进方格子两者渲染相同 —— 只有竖版行分得出来）',
+      !!ptImg && ptImg.naturalWidth === 6 && ptImg.naturalHeight === 8 &&
+        getComputedStyle(ptImg).objectFit === 'contain',
+      ptImg ? 'nat=' + ptImg.naturalWidth + 'x' + ptImg.naturalHeight +
+        ' fit=' + getComputedStyle(ptImg).objectFit : 'no-portrait-img');
+
+    // ---- 点开看**原图**（2026-10-12）----
+    // 表格放到 96px 仍看不清印花/领型 ⇒ 与「货与成本」同一套模式：点开读原图（不缩放）。
+    // 四步各自单独验，少一步就有一条错法能蒙混：
+    //   ① 弹层**立刻**出（用已在手里的缩略图顶上，不等磁盘）—— 只有把读图拖慢才看得见这一跳；
+    //   ② 原图换上（src 真的变了且解码得出来）；
+    //   ③ 载荷是**这一行**的 localPath；
+    //   ④ 读失败保留缩略图、连点只认最后一次。
+    function thumbSrc(id) {
+      var b = card('cl-zoom-' + id);
+      var im = b ? b.querySelector('img') : null;
+      return im ? im.getAttribute('src') : '';
+    }
+    window.__readImageDelay = { '/tmp/p46.jpg': 400 };
+    var rb0 = calls('orderReadImage').length;
+    await clickReady('cl-zoom-46');
+    var okThumbFirst = true;
+    try {
+      await waitFor(function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return !!im && im.complete && im.getAttribute('src') === thumbSrc(46);
+      }, 3000);
+    } catch (e) { okThumbFirst = false; }
+    report('点开先弹出**缩略图**（点下去立刻有东西看，不等磁盘 —— 读图拖慢 400ms 才看得见这一跳）',
+      okThumbFirst,
+      'viewer=' + (card('cl-viewer') ? '在' : '无') + ' src同表格图=' + (function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return im ? String(im.getAttribute('src') === thumbSrc(46)) : '?';
+      })());
+    var okSwap = true;
+    try {
+      await waitFor(function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return !!im && im.complete && im.naturalWidth > 0 && im.getAttribute('src') !== thumbSrc(46);
+      }, 3000);
+    } catch (e) { okSwap = false; }
+    report('再把**原图**换上（src 真的变了、且解码得出来；批量那条通道 maxEdge 只到 256）',
+      okSwap,
+      'viewer src=' + (function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return im ? String(im.getAttribute('src')).slice(0, 40) : '?';
+      })());
+    report('读原图的载荷是**这一行**的 localPath（点 46 行读 /tmp/p46.jpg，不是别的行的）',
+      calls('orderReadImage').length > rb0 &&
+        calls('orderReadImage')[calls('orderReadImage').length - 1] === '/tmp/p46.jpg',
+      JSON.stringify(calls('orderReadImage').slice(-1)));
+
+    // ---- 读失败**保留缩略图**（不比现在更坏）----
+    window.__readImageDelay = {};
+    window.__readImageFail = true;
+    var rb1 = calls('orderReadImage').length;
+    await clickReady('cl-zoom-47');
+    var okFailKeep = true;
+    try {
+      await waitFor(function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return !!im && calls('orderReadImage').length > rb1;
+      }, 3000);
+    } catch (e) { okFailKeep = false; }
+    report('原图读失败时**保留缩略图**（弹层不空、不比现在更坏；用户至少看到原来那张）',
+      okFailKeep && (function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return !!im && im.complete && im.getAttribute('src') === thumbSrc(47);
+      })(),
+      'read调用=' + (calls('orderReadImage').length - rb1) + ' src同表格图=' + (function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return im ? String(im.getAttribute('src') === thumbSrc(47)) : '?';
+      })());
+    window.__readImageFail = false;
+
+    // ---- 连点只认**最后**一次（viewerSeq 守卫）----
+    // 先取"只点 47"时的正确终态作基准（p47 的原图）。
+    var full47 = '';
+    await clickReady('cl-zoom-47');
+    try {
+      await waitFor(function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        return !!im && im.complete && im.getAttribute('src') !== thumbSrc(47);
+      }, 3000);
+      full47 = card('cl-viewer').querySelector('img').getAttribute('src');
+    } catch (e) { /* 下面写实际值 */ }
+    // ⭐ 竞态必须**造出来**才算验过：把 p46 的响应拖慢 300ms，先点 46 再立刻点 47 ——
+    //    没有 viewerSeq 时，46 的晚到响应会把已换成 47 的弹层盖回 46（用户看到的是点错的那张）。
+    //    假桥同步返回时两条 continuation 按点击顺序排队、后点的总在最后生效 ⇒ 坏实现也绿，
+    //    所以这个拖慢 + 事后等待是这条断言**唯一**的取证手段。
+    window.__readImageDelay = { '/tmp/p46.jpg': 300 };
+    await clickReady('cl-zoom-46');
+    await clickReady('cl-zoom-47');
+    await new Promise(function (r) { setTimeout(r, 800); });
+    var okRace = (function () {
+      var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+      var head = card('cl-viewer') ? flat(card('cl-viewer').querySelector('.wb-dialog__head')) : '';
+      return !!im && !!full47 && im.getAttribute('src') === full47 && head.indexOf('P-47') >= 0;
+    })();
+    report('连点两张只认**最后一次**（拖慢第一次的响应，才造得出"晚到的旧图盖掉新图"这个竞态）',
+      okRace,
+      '终态=' + (function () {
+        var im = card('cl-viewer') ? card('cl-viewer').querySelector('img') : null;
+        var head = card('cl-viewer') ? flat(card('cl-viewer').querySelector('.wb-dialog__head')) : '';
+        return 'src=' + (im ? String(im.getAttribute('src')).slice(0, 24) : '?') + ' head=' + head;
+      })());
+    window.__readImageDelay = {};
+    card('cl-viewer-close').click();
+    await waitFor(function () { return !card('cl-viewer'); }, 3000);
+
+    // ---- 行内「退回待核对」：只发这一行的 id ----
+    // ⚠️ 判据钉在**请求载荷**上（不钉提示、也不钉"行不见了"）：
+    //    载荷错了（比如带上 { all:true }）才是真危险的事，而提示写错一句话不影响数据。
+    var rpB = calls('orderReopenCorrected').length;
+    await clickReady('cl-reopen-46');
+    var okReopen = true;
+    try { await waitFor(function () { return calls('orderReopenCorrected').length > rpB; }, 6000); }
+    catch (e) { okReopen = false; }
+    var rp = calls('orderReopenCorrected')[rpB];
+    // 载荷是**裸数组**（真 preload 的形状），且**没有** mark-corrected 那种 { all } ——
+    // 退回一律点名。"全部退回"被刻意拿掉了（不可逆，且用户看不出退回了多少）。
+    report('「退回待核对」只发这一行的 id（载荷 [46]；没有 { all } 形态 —— 退回一律点名）',
+      okReopen && JSON.stringify(rp) === '[46]', JSON.stringify(rp));
+    // ⭐⭐ 退回的**正确性判据**：它把那行放回了待核对队列 —— 不是"只是从当前表里挪走"。
+    //     只断言"它不在了"会被"退回把行删了"这类错法蒙对，必须**到待核对里看见它**才算数。
+    //     先验这一半（离开已核对 + 页头计数当场变），切范围那一半在下面。
+    var okLeftCorr = true;
+    try {
+      await waitFor(function () {
+        return flat(card('cl-table')).indexOf('P-46') < 0 && flat(card('cl-count-corrected')) === '1';
+      }, 8000);
+    } catch (e) { okLeftCorr = false; }
+    report('退回后它离开「已核对」表，页头已核对计数 2 → 1（计数当场跟着变，不用等切范围刷）',
+      okLeftCorr,
+      '表=' + (flat(card('cl-table')).indexOf('P-46') >= 0 ? 'P-46 仍在（错）' : 'P-46 已离开') +
+        ' 已核对=' + JSON.stringify(flat(card('cl-count-corrected'))));
+    card('cl-scope-pending').click();
+    var okBack = true;
+    try {
+      await waitFor(function () {
+        return !!card('cl-table') && flat(card('cl-table')).indexOf('P-46') >= 0 &&
+          flat(card('cl-count-pending')) === '6';
+      }, 8000);
+    } catch (e) { okBack = false; }
+    report('切回「待核对」：退回来的那一行**真的在待核对列表里**（P-46 可见，待核对 5 → 6）',
+      okBack,
+      'P-46=' + (flat(card('cl-table')).indexOf('P-46') >= 0 ? '在' : '不在（错）') +
+        ' 待核对=' + JSON.stringify(flat(card('cl-count-pending'))));
+    // 退回来的行必须是**可编辑**的 —— 退回的全部意义是让它重新能改（不是为了"看"）。
+    report('退回来的那一行可编辑：款下拉 + 颜色控件都在，且它不再是已核对那套动作',
+      !!card('cl-style-46') && !!card('cl-color-46') && !card('cl-reopen-46'),
+      'style=' + (card('cl-style-46') ? '在' : '无（错）') +
+        ' color=' + (card('cl-color-46') ? '在' : '无（错）') +
+        ' reopen=' + (card('cl-reopen-46') ? '仍在（错）' : '无'));
+
+    // ---- 「已核对」范围自己的空态（退回把这一批退光之后）----
+    // 这是与"待核对都核对完了"**不同**的第四种空态（那个是待核对侧清零）——两个方向各自要有话说，
+    // 而且要各有**可点的出口**（在已核对侧空着时唯一的下一步就是回去）。
+    // ⚠️ 必须真的把已核对退光才造得出来：靠开关造（像 __allCorrected 那样）会跳过"退回"这条实现路径。
+    card('cl-scope-corrected').click();
+    await waitFor(function () { return !!card('cl-reopen-47'); }, 8000);
+    await clickReady('cl-reopen-47');
+    var okCorrEmpty = true;
+    try { await waitFor(function () { return !!card('cl-empty'); }, 8000); } catch (e) { okCorrEmpty = false; }
+    report('把已核对退光后给**它自己的**空态（不是"都核对完了"，那说的是待核对侧）',
+      okCorrEmpty && flat(card('cl-empty')).indexOf('还没有核对过的行') >= 0 &&
+        flat(card('cl-empty')).indexOf('都核对完了') < 0,
+      okCorrEmpty ? flat(card('cl-empty')) : 'timeout');
+    report('已核对空态的出口是**回到待核对**（而不是"去算钱"那套往前走的话术）',
+      !!card('cl-goto-pending') && !card('cl-goto-cost') && !card('cl-goto-import'),
+      'goto-pending=' + (card('cl-goto-pending') ? '在' : '无（错）') +
+        ' goto-cost=' + (card('cl-goto-cost') ? '在（错）' : '无'));
+    card('cl-goto-pending').click();
+    var okBack2 = true;
+    try {
+      await waitFor(function () {
+        return !!card('cl-table') && flat(card('cl-table')).indexOf('P-47') >= 0 &&
+          flat(card('cl-count-pending')) === '7';
+      }, 8000);
+    } catch (e) { okBack2 = false; }
+    report('点「回到待核对」真的切回去并列出退回来的两行（待核对 5 → 7：两行都退回来了）',
+      okBack2,
+      'P-47=' + (flat(card('cl-table')).indexOf('P-47') >= 0 ? '在' : '不在（错）') +
+        ' 待核对=' + JSON.stringify(flat(card('cl-count-pending'))));
+
+    // ~~产品维度（指标条那一格）的"显示 0 / 整格隐藏"两条断言~~
+    // **已随指标条整条撤掉（2026-10-10）**：那一格连同它上面那排「待核对 / 未归类 / 识别库」
+    // 一起被用户判为"看不懂"，取数通道 orderSkuRollup 也整条退场（handler / preload / types /
+    // ipc / classify / product-db 一并删）。它"不在了"的守卫在上面的 ① 段里（页头没那排 +
+    // 渲染层一次都没读那个键）。**别只把这两条断言注释掉、却把通道留着** —— 那会变成
+    // "每次进页面白跑一次往返、且没有任何断言看得见"。
 
     step('recon');
     // 「结算对账」页签（2026-10-05 内建）。数字全在主进程算好（purchase-db），界面只展示 ——
@@ -1452,6 +2930,26 @@ async function main() {
     await waitFor(function () {
       return !!card('recon-panel') && flat(card('rc-stats')).indexOf('拿货') >= 0 && !!card('rc-table');
     }, 10000);
+
+    // 内嵌时页面上只该有一个「刷新」（容器页头那个）。本页原来还有一个面板内的「刷新」，
+    // 与容器重复（2026-10-11 删除）——容器那个是超集：「bump()」波及所有面板，含本页。
+    // ⚠️ 判据按**用户可见的按钮文字**数，不按 data-act —— 那个重复按钮的 data-act 叫
+    //    rc-reload，而「[data-act="refresh"]」选择器从来只命中容器这一个（拿它判恒绿，实测过）。
+    //    先等容器按钮回到可点：它 loading 时显示「读取中…」，文字数出来会是 0。
+    await waitFor(function () {
+      var b = card('refresh');
+      return !!b && !b.disabled;
+    }, 8000);
+    var refreshBtns = (function () {
+      var all = document.querySelectorAll('button');
+      var n = 0;
+      for (var i = 0; i < all.length; i++) {
+        if ((all[i].textContent || '').trim() === '刷新') n++;
+      }
+      return n;
+    })();
+    report('内嵌时可见的「刷新」只有一个（容器页头那个），本页不再重复一个同名的',
+      refreshBtns === 1, 'count=' + refreshBtns);
 
     report('对账指标条：四个金额同口径（拿货 ¥620 / 已付 ¥80 / 已退 ¥20 / 欠款 ¥560）',
       flat(card('rc-stats')).indexOf('拿货 ¥620.00') >= 0 &&
@@ -1467,6 +2965,18 @@ async function main() {
           t.indexOf('¥500.00') >= 0 && t.indexOf('¥520.00') >= 0;
       })(),
       flat(card('rc-table')));
+    // 零活动的厂家**不占一行**（2026-10-11）：对账 op 按 suppliers 表出全量（厂C 全零也在内），
+    // 本页只列**窗口内有账**的厂家 —— 真库 6 家里 5 家恒零，全列出来是常态噪音。
+    // ⚠️ 判据要同时数"行数 = 2"与"无厂C"：只看无厂C的话，"只显示前两行"这类错法也能蒙对。
+    report('零活动的厂家不占一行（厂家目录 3 家、表里只列有账的 2 家）',
+      (function () {
+        var t = card('rc-table');
+        if (!t) return false;
+        return t.querySelectorAll('tbody tr').length === 2 && flat(t).indexOf('厂C') < 0;
+      })(),
+      card('rc-table')
+        ? 'rows=' + card('rc-table').querySelectorAll('tbody tr').length + ' ' + flat(card('rc-table'))
+        : 'no-table');
     report('付款记录两笔都在，类型列**逐行**打标（一笔付款、一笔退款）',
       (function () {
         var t = card('rc-pay-table');
@@ -1519,6 +3029,22 @@ async function main() {
     report('确认后才真删（purchasePaymentDelete {id:21}）',
       okDel && (calls('purchasePaymentDelete')[delB] || {}).id === 21,
       JSON.stringify(calls('purchasePaymentDelete')[delB] || {}));
+
+    // ---- 删退款：后果文案按**类型分叉**（2026-10-11）----
+    // 差额 = 拿货 −（已付 − 退款）⇒ 删付款欠款**回升**、删退款欠款**减少**（方向相反）。
+    // 旧文案「（或「已退」）会同步减少，欠款随之回升」把两笔账糊成一句，对退款是**反的**。
+    // ⚠️ 断言要三维：讲到「已退」、方向是「减少」、且**不许出现**「回升」——前两条都满足时
+    //    最后一条才拦得住"两句糅一起"的旧写法（旧文案恰好同时含「已退」与「减少」）。
+    await clickReady('rc-pay-del-22');
+    await waitFor(function () { return !!card('confirm-dialog'); }, 6000);
+    report('删退款时的后果文案：写「欠款减少」（付款才是「回升」—— 两文案按类型分叉）',
+      (function () {
+        var t = flat(card('confirm-dialog'));
+        return t.indexOf('已退') >= 0 && t.indexOf('减少') >= 0 && t.indexOf('回升') < 0;
+      })(),
+      flat(card('confirm-dialog')));
+    await clickReady('confirm-cancel', 6000);
+    try { await waitFor(function () { return !card('confirm-dialog'); }, 4000); } catch (e) {}
 
     // ---- 时间窗：切了必须**带窗口重取**（否则数字与窗口打架）----
     var rcB = calls('purchaseReconciliation').length;
@@ -1577,8 +3103,41 @@ async function main() {
     report('没有可归属的拿货成本时给空态，并说清"分摊的原料从哪来"',
       okShopEmpty && flat(card('rc-shop-none')).indexOf('拿货单') >= 0,
       okShopEmpty ? flat(card('rc-shop-none')) : 'timeout');
+    // 空态要给**一个可点的下一步**（2026-10-11 补的按钮 —— 此前只有文字、没有出口；
+    // 与厂家视图的「去拿货」同一个落点：这张表空 ⇔ 窗口里没有已提交的拿货单）。
+    var gotoShopEl = card('rc-shop-goto-purchase');
+    if (gotoShopEl) {
+      gotoShopEl.click();
+      try { await waitFor(function () { return onTab('purchase'); }, 4000); } catch (e) {}
+    }
+    report('店铺空态的下一步：按钮切到「拿货」页签（就地切换，不跳页）',
+      !!gotoShopEl && onTab('purchase'),
+      'button=' + !!gotoShopEl + ' onPurchase=' + onTab('purchase'));
+    await activateTab('recon');
     window.__noShopAlloc = false;
     await clickRefresh();
+
+    // ---- 厂家账清零：空态 + **步号钉死**（2026-10-11 修「第 5 步」→「第 4 步」）----
+    // 六步→五步后拿货顺位成第 4 步，本页空态文案漏改 —— 步号这类"跨页复制的字"
+    // 只能靠断言钉住（注释改了、界面没改，没有任何门禁看得见）。
+    // 触发形态 = 厂家目录还在、窗口内全零（__noRecon 归零而不是清空）—— 真机上这就是空态的
+    // 唯一入口（零活动行被过滤 ⇒ 无行可渲染）；老实现全列零行、这里会一直等不到，同样能抓。
+    // ⚠️ 先切回「按厂家」：上面「按店铺」用例把视图留在了 shop，而 rc-recon-none 只属于
+    //    厂家视图（保活还会把视图状态带回来）—— 不切回就永远等不到，会误报成"空态没实现"。
+    card('rc-view-supplier').click();
+    try { await waitFor(function () { return !!card('rc-table'); }, 6000); } catch (e) {}
+    window.__noRecon = true;
+    await clickRefresh();
+    var okReconEmpty = true;
+    try { await waitFor(function () { return !!card('rc-recon-none'); }, 8000); } catch (e) { okReconEmpty = false; }
+    var reconEmpty = okReconEmpty ? flat(card('rc-recon-none')) : 'timeout';
+    report('厂家账清零时给空态：账从哪来 + 出口指到第 4 步「拿货」（步号与实际一致）',
+      okReconEmpty && reconEmpty.indexOf('第 4 步') >= 0 && reconEmpty.indexOf('拿货') >= 0 &&
+        !!card('rc-goto-purchase'),
+      reconEmpty);
+    window.__noRecon = false;
+    await clickRefresh();
+    try { await waitFor(function () { return !!card('rc-table'); }, 8000); } catch (e) {}
 
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));

@@ -59,14 +59,12 @@
     <!-- ============ 视图 A：按厂家（结算 + 付款） ============ -->
     <template v-if="view === 'supplier'">
       <section class="wb-panel">
+        <!-- 面板头没有「刷新」：本页**只作为容器页签存在**，容器页头已有一个「刷新」且是超集
+             （bump() 波及所有面板，含本页）—— 同屏两个同名按钮只会让人停下来想"点哪个"
+             （2026-10-11 删，与「算钱」页同一条裁定；冒烟按可见按钮文字数钉着"只有一个"）。 -->
         <div class="wb-panel__head">
           <span>厂家对账</span>
           <span class="wb-muted">差额 = 拿货 −（已付 − 退款）· 窗口「{{ rangeText }}」</span>
-          <span class="rc-actions">
-            <button type="button" class="wb-btn wb-btn--sm" data-act="rc-reload" :disabled="loading" @click="load">
-              刷新
-            </button>
-          </span>
         </div>
         <div v-if="recon.length" class="wb-panel__body wb-table-wrap">
           <table class="wb-table" data-act="rc-table">
@@ -109,7 +107,7 @@
           <p class="wb-empty__title">这个窗口里没有账</p>
           <p class="wb-empty__desc">
             对账的两个来源是「拿货单」（欠厂家多少）与「付款记录」（已付多少）。窗口切到「全部」看历史，
-            或者先去第 5 步「拿货」把拿货单开出来。
+            或者先去第 4 步「拿货」把拿货单开出来。
           </p>
           <div class="wb-empty__actions">
             <button type="button" class="wb-btn" data-act="rc-goto-purchase" @click="go('purchase')">
@@ -258,9 +256,14 @@
       <div v-else class="wb-empty" data-act="rc-shop-none">
         <p class="wb-empty__title">还没有可归属店铺的拿货成本</p>
         <p class="wb-empty__desc">
-          分摊的原料是「拿货单锁定来源订单」这件事：先在「算钱」把订单归属到店铺，
+          窗口切到「全部」看历史；拿货成本来自「拿货单」锁定的来源订单 —— 先在「算钱」把订单归属到店铺，
           再从「拿货」按缺口生成拿货单，成本就会拆到店铺。
         </p>
+        <div class="wb-empty__actions">
+          <button type="button" class="wb-btn" data-act="rc-shop-goto-purchase" @click="go('purchase')">
+            去拿货
+          </button>
+        </div>
       </div>
     </section>
 
@@ -332,7 +335,8 @@
 </template>
 
 <script setup lang="ts">
-// 「结算对账」页签 = 发货流程第 6 步（2026-10-05 从「订单归类」岛的「拿货对账」页内建过来）。
+// 「结算对账」页签 = 发货流程第 5 步（2026-10-05 从「订单归类」岛的「拿货对账」页内建过来；
+// 2026-10-10 原第 3 步「生成拣货单」并入「拿货」后，六步 → 五步，本页由第 6 步顺位成第 5 步）。
 //
 // **这一步回答两个问题**：① 这个窗口里我欠厂家多少（拿货 − 已付 + 退款）；② 这些拿货成本
 // 落在哪个店铺上。前者是"结算"，后者是"分摊"，所以按**视图**切换而不是两个页签 ——
@@ -350,7 +354,7 @@
 //     （带款色图、按厂家分表），不是"把任意表格倒成 xlsx"。要导对账汇总得新开一条通道，
 //     而对账数字屏幕上看得见、也不属于每日动作 ⇒ 不造这个按钮（岛里那个点了其实是被宿主拒的）。
 //   · **厂家增删改** —— 供应商是主数据，维护在「货与成本 › 供应商」；本页只读引用。
-//   · 岛里的**待拿货缺口 / 拿货单**两块 —— 它们是第 5 步「拿货」的事，岛把它们和付款挤在一页，
+//   · 岛里的**待拿货缺口 / 拿货单**两块 —— 它们是第 4 步「拿货」的事，岛把它们和付款挤在一页，
 //     本页按流程拆开了（页签各管一步）。
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
@@ -376,7 +380,6 @@ import {
 
 const { token, go, bump } = useShipping();
 
-const loading = ref(false);
 const busy = ref(false);
 const error = ref('');
 
@@ -453,11 +456,16 @@ type ConfirmSpec = { title: string; body: string[]; okText: string; danger: bool
 const confirm = ref<ConfirmSpec | null>(null);
 
 function askDeletePayment(p: Payment): void {
+  // 后果文案按**类型分叉**：差额 = 拿货 −（已付 − 退款）⇒ 删付款欠款**回升**、
+  // 删退款欠款**减少**（方向相反）。原先一句「（或「已退」）…回升」糊两笔账，对退款是反的。
+  const isRefund = p.type === 'refund';
   confirm.value = {
-    title: '删除这笔款项？',
+    title: isRefund ? '删除这笔退款？' : '删除这笔付款？',
     body: [
       `${p.payDate} · ${p.supplierName || '（无厂家）'} · ¥${money(p.amountCents)}`,
-      '删除后对账表里的「已付」（或「已退」）会同步减少，欠款随之回升。',
+      isRefund
+        ? '删除后对账表里的「已退」会同步减少，欠款随之减少。'
+        : '删除后对账表里的「已付」会同步减少，欠款随之回升。',
     ],
     okText: '删除',
     danger: true,
@@ -511,7 +519,6 @@ async function toggleShop(shop: string): Promise<void> {
 }
 
 async function load(): Promise<void> {
-  loading.value = true;
   error.value = '';
   try {
     const win = windowOf(range.value, customFrom.value, customTo.value);
@@ -522,7 +529,11 @@ async function load(): Promise<void> {
       listPayments(win),
       listSuppliers(),
     ]);
-    recon.value = rc;
+    // 只列**窗口内有账**的厂家（有拿货单或有付款）：对账 op 按 suppliers 表出全量，
+    // 零活动厂家照样占一行（真库 6 家里 5 家恒零）—— 那是常态噪音，不是"账"。
+    // 空态「这个窗口里没有账」正以此为前提；记付款不因此丢出口：付款记录面板的
+    // 「登记付款」带完整厂家下拉。
+    recon.value = rc.filter((r) => r.orderCount > 0 || r.paymentCount > 0);
     payments.value = pm;
     suppliers.value = sp;
     if (view.value === 'shop') {
@@ -534,8 +545,6 @@ async function load(): Promise<void> {
     }
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取对账数据失败';
-  } finally {
-    loading.value = false;
   }
 }
 

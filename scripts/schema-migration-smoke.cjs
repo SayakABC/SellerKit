@@ -15,6 +15,7 @@
 //   · AUTOINCREMENT 序列被重置 → 新插入不复用已发出的 id
 //   · 幂等：再跑一次不报错、不重复搬数据、版本不回退
 //   · 新库（已 5 列）走的是"跳过重建"那条路，不产生 __old 表
+//   · 删列（purchase_orders.note）：老库 DROP 后数据不丢、建单路径可用；新库直建即无该列（两侧形状一致）
 // 每个场景自带独立临时库。
 
 const assert = require('assert');
@@ -60,6 +61,7 @@ function check(name, fn) {
 const PRODUCT_SKU_STEPS = 3; // pl_shop_sku：1 补列 → 2 唯一键归一 → 3 删 pl_item_weights（克重只属 SKU）
 const ORDER_MAIN_STEPS = 4; // oi_*：1/2 提列 → 3 主干归一 → 4 历史采集单回填
 const AE_MAIN_STEPS = 2; // 成本口径：1 建表 → 2 生效区间
+const PURCHASE_STEPS = 1; // purchase_orders：1 删 note（零读者列：不进导出/对账/成本）
 
 /** 数一数某个 xxxMigrationSteps() 里有几个 version:（返回 -1 = 压根没找到那个函数体） */
 function stepsInSource(file, fnName) {
@@ -93,7 +95,27 @@ check('迁移步数与源码一致（加了一步却忘了改常数 → 这里�
     AE_MAIN_STEPS,
     'ae.main 的步数变了：改 AE_MAIN_STEPS，并复核 D 场景',
   );
+  assert.strictEqual(
+    stepsInSource('purchase-db.ts', 'purchaseMigrationSteps'),
+    PURCHASE_STEPS,
+    'purchase.main 的步数变了：改 PURCHASE_STEPS，并复核 F 场景',
+  );
 });
+
+/**
+ * 造一张「商品ID 克重」老表（v3 迁移要把它删掉）。
+ * 真实历史形状不可考（该表从未进过本仓库的 DDL 记录），字段按迁移文档里点过名的
+ * `item_id` / `weight_g` 取 —— 本场景只关心"存在 → 被删"，不关心列细节。
+ */
+function buildLegacyItemWeights() {
+  dbMigrate([
+    `CREATE TABLE pl_item_weights (
+      item_id TEXT PRIMARY KEY,
+      weight_g INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )`,
+  ]);
+}
 
 /** 造一个**老库形状**的 pl_shop_sku：4 列唯一键、且没有 image_url / imported_at */
 function buildLegacyTable() {
@@ -138,6 +160,8 @@ function insertRow(o) {
 console.log('\n[A] 老库（4 列唯一键 + 缺两列）→ 迁移');
 const dirA = newDb('legacy');
 buildLegacyTable();
+buildLegacyItemWeights();
+dbRun(`INSERT INTO pl_item_weights (item_id, weight_g) VALUES ('A1', 300)`); // 有数据也照删（该数据源整体退场）
 insertRow({ platform: 'amazon', shopId: 1, itemId: 'A1', productId: 0, source: 'shop-import' });
 insertRow({ platform: 'amazon', shopId: 1, itemId: 'A2', productId: 7 });
 insertRow({
@@ -151,10 +175,15 @@ insertRow({
 const before = dbQuery(`SELECT id, platform, shop_id, item_id, product_id, status, source, note
                         FROM pl_shop_sku ORDER BY id`);
 
-check('迁移前：确实是老形状（唯一键不含 product_id）', () => {
+check('迁移前：确实是老形状（唯一键不含 product_id）+ 老库确有「商品ID 克重」表', () => {
   const sql = require(path.join(ROOT, 'dist', 'electron', 'db.js')).tableSql('pl_shop_sku');
   assert.ok(!/unique\s*\([^)]*product_id/i.test(sql), `建表 SQL 不该含 product_id 唯一键：${sql}`);
   assert.ok(!/image_url/.test(sql), '老库不该有 image_url 列');
+  assert.strictEqual(
+    require(path.join(ROOT, 'dist', 'electron', 'db.js')).tableExists('pl_item_weights'),
+    true,
+    '夹具没造出 pl_item_weights，v3 的 DROP 分支会静默跳过',
+  );
 });
 
 let applied = 0;
@@ -163,6 +192,11 @@ check('ensureSkuSchema 不抛错并把迁移链跑到底', () => {
   const db = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
   applied = db.migrationVersion('product.sku');
   assert.strictEqual(applied, PRODUCT_SKU_STEPS);
+});
+
+check('v3 迁移删掉 pl_item_weights（「商品ID 克重」整条链退场；有数据也照删）', () => {
+  const db = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
+  assert.strictEqual(db.tableExists('pl_item_weights'), false);
 });
 
 check('数据一条不丢（行数 / 主键 / 取值）', () => {
@@ -227,6 +261,7 @@ check('幂等：再跑一次不报错、不搬数据、版本不回退', () => {
   const db = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
   assert.strictEqual(db.migrationVersion('product.sku'), PRODUCT_SKU_STEPS);
   assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM pl_shop_sku`).n), rowsBefore);
+  assert.strictEqual(db.tableExists('pl_item_weights'), false, '重跑不该把它带回来');
 });
 closeDb();
 try {
@@ -598,6 +633,97 @@ check('老采集表**原样保留**（回填是加法，删表是另一步）', 
 closeDb();
 try {
   fs.rmSync(dirE, { recursive: true, force: true });
+} catch {
+  /* 清理失败不影响结论 */
+}
+
+// ───────────────────────────────────── 场景 F：purchase 域删列（purchase.main v1：purchase_orders.note）
+console.log('\n[F] purchase_orders 老形状（带零读者列 note）→ 迁移删列；新库直建无 note 形状');
+const dirF = newDb('purchase-note-old');
+const pdbF = require(path.join(ROOT, 'dist', 'electron', 'purchase-db.js'));
+// 老库形状：purchase_orders 带 note 列（本仓历史 DDL 就是它，非虚构）
+dbMigrate([
+  `CREATE TABLE suppliers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    phone TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`,
+  `CREATE TABLE purchase_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    biz_date TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'detail',
+    status TEXT NOT NULL DEFAULT 'draft',
+    total_cents INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    edited_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`,
+]);
+dbRun(`INSERT INTO suppliers (id, name) VALUES (1, '厂X')`);
+dbRun(
+  `INSERT INTO purchase_orders (id, supplier_id, biz_date, mode, status, total_cents, note)
+   VALUES (1, 1, '2026-10-01', 'detail', 'submitted', 12345, '首单备注')`,
+);
+
+check('迁移前：老库确有 note 列（夹具自证，免得断言打在别的形状上）', () => {
+  const cols = dbQuery(`PRAGMA table_info(purchase_orders)`).map((r) => String(r.name));
+  assert.ok(cols.includes('note'), `夹具没造出 note 列：${cols.join(',')}`);
+});
+
+check(`ensurePurchaseSchema 把 purchase.main 记到 v${PURCHASE_STEPS} 并把 note 列删掉`, () => {
+  pdbF.ensurePurchaseSchema();
+  assert.strictEqual(migrationVersion('purchase.main'), PURCHASE_STEPS);
+  const cols = dbQuery(`PRAGMA table_info(purchase_orders)`).map((r) => String(r.name));
+  assert.ok(!cols.includes('note'), `note 列应已删除：${cols.join(',')}`);
+});
+
+check('删列路径数据一条不丢（其余列取值原样）', () => {
+  const r = dbGet(
+    `SELECT id, supplier_id, biz_date, mode, status, total_cents FROM purchase_orders WHERE id = 1`,
+  );
+  assert.strictEqual(Number(r.id), 1);
+  assert.strictEqual(Number(r.supplier_id), 1);
+  assert.strictEqual(r.biz_date, '2026-10-01');
+  assert.strictEqual(r.mode, 'detail');
+  assert.strictEqual(r.status, 'submitted');
+  assert.strictEqual(Number(r.total_cents), 12345);
+});
+
+// 同 `oi_styles.name` 的教训：列删了但 INSERT 还写它 → **老库上任何建单路径必抛**
+// （而夹具常建的是新库：新库形状本就无该列，写得出来却看不出来）⇒ 真建一张单，让这条路径实跑。
+check('老库删列后新建单可用（INSERT 不再引用 note；退回旧写法这条路必抛）', () => {
+  const id = pdbF.createPurchaseOrder({ supplierId: 1, bizDate: '2026-10-10', mode: 'detail', items: [] });
+  assert.ok(Number(id) > 1, `新单 id 应大于历史最大 id：${id}`);
+});
+
+check('幂等：再跑一次不报错、版本不回退、行数不变', () => {
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM purchase_orders`).n);
+  pdbF.ensurePurchaseSchema();
+  pdbF.ensurePurchaseSchema();
+  assert.strictEqual(migrationVersion('purchase.main'), PURCHASE_STEPS);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM purchase_orders`).n), before);
+});
+closeDb();
+try {
+  fs.rmSync(dirF, { recursive: true, force: true });
+} catch {
+  /* 清理失败不影响结论 */
+}
+
+// 新库方向：抓「只删迁移忘了删 SCHEMA」的形状分叉（新库会多出 note 列、与老库不一致）
+const dirF2 = newDb('purchase-note-fresh');
+check('新库直建的形状不含 note（SCHEMA 与迁移两侧同向，否则新旧库形状会分叉）', () => {
+  pdbF.ensurePurchaseSchema();
+  const cols = dbQuery(`PRAGMA table_info(purchase_orders)`).map((r) => String(r.name));
+  assert.ok(!cols.includes('note'), `新库不该有 note 列：${cols.join(',')}`);
+  assert.strictEqual(migrationVersion('purchase.main'), PURCHASE_STEPS);
+});
+closeDb();
+try {
+  fs.rmSync(dirF2, { recursive: true, force: true });
 } catch {
   /* 清理失败不影响结论 */
 }

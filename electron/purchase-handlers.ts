@@ -113,7 +113,6 @@ register('purchase-order-create', async (payload) => {
     supplierId: payload.supplierId,
     bizDate: dateStr(payload.bizDate),
     mode,
-    note: str(payload.note, 500),
     totalCents: num(payload.totalCents),
     items,
     sources,
@@ -162,7 +161,6 @@ register('purchase-order-update', async (payload) => {
   const items = Array.isArray(payload.items) ? sanitizeItems(payload.items) : undefined;
   purchaseDb.updatePurchaseOrder(payload.id, {
     bizDate: payload.bizDate !== undefined ? dateStr(payload.bizDate) : undefined,
-    note: payload.note !== undefined ? str(payload.note, 500) : undefined,
     totalCents: payload.totalCents !== undefined ? num(payload.totalCents) : undefined,
     items,
   });
@@ -296,6 +294,31 @@ const { dialog: electronDialog, BrowserWindow, app } = require('electron');
 const orderDb = require('./order-db');
 const path = require('path');
 
+// ---- 编辑器行图：按「款编码 + 款色 + 尺码」批量取本地图路径（渲染层再经 order-image-thumb-batch 出缩略图）----
+// 与导出嵌图共用 `findStyleColorImagePath` 同一份实现（改口径只改那一处）；
+// 未命中/缺款色为 null —— 图是装饰，查不到只是空占位，不阻断编辑器。
+//
+// ⚠️ `size` 必须原样带下去（2026-10-11 用户报"细节图全一样"）：订单 Excel 里每个商品行各有自己的图，
+// 而明细行的粒度是「款色 × 尺码」⇒ 只按款色取会把同款所有行都显示成同一张（且多半不是本行那件）。
+const STYLE_IMAGES_MAX = 500;
+register('purchase-style-images', async (payload) => {
+  if (!isPlainObject(payload) || !Array.isArray(payload.items)) {
+    return { success: false, error: 'invalid payload' };
+  }
+  orderDb.ensureOrderSchema();
+  const items = payload.items.slice(0, STYLE_IMAGES_MAX).map((it: any) => ({
+    styleCode: str(it?.styleCode, 50).trim(),
+    color: str(it?.color, 50).trim(),
+    size: str(it?.size, 50).trim(),
+  }));
+  const paths = items.map((it: any) =>
+    it.styleCode && it.color
+      ? orderDb.findStyleColorImagePath(it.styleCode, it.color, it.size)
+      : null,
+  );
+  return { success: true, data: { paths } };
+});
+
 // 嵌图：与「拣货单带图导出」共用一份实现（`xlsx-image.ts`）——
 // 原先本文件自己读文件头 + 自己调 `wb.addImage({filename})`，两处都踩过坑（见该文件头）。
 const { embedCellImage } = require('./xlsx-image') as typeof import('./xlsx-image');
@@ -358,11 +381,11 @@ register('purchase-export-excel', async (payload) => {
     if (price !== null) row.getCell(8).numFmt = '0.00';
     if (amount !== null) row.getCell(9).numFmt = '0.00';
     if (!it.styleCode || !it.color) return;
-    // 按 款编码+款色 查本地代表图并嵌进 A 列。
+    // 按 款编码+款色+尺码 查本地代表图并嵌进 A 列（尺码 = 该行对应订单商品的画像，见 order-db 同函数注释）。
     // ⚠️ 嵌图必须走 `xlsx-image.embedCellImage`：v4.4.0 下 `wb.addImage({filename})` 只给文件名时
     // 会写成 `xl/media/image1.undefined` + `<Default ContentType="image/undefined"/>`（**包结构不合法**，
     // Excel 会提示修复并丢掉图）。该文件头记了两个实测坑 + 修法。
-    const imgPath = orderDb.findStyleColorImagePath(it.styleCode, it.color);
+    const imgPath = orderDb.findStyleColorImagePath(it.styleCode, it.color, it.size);
     const h = embedCellImage(wb, ws, r, imgPath ? { filePath: imgPath } : null, {
       width: IMG_W,
       colOff,

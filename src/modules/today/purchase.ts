@@ -10,6 +10,7 @@
 // `ipc.purchaseOrderList({})`，且失败一律抛错（`success:false` 的 error 文案比"静默空数组"有用）。
 
 import { ipc, type ApiResult } from '@/core/services/ipc';
+import { localDayKey } from '@/lib/localDay';
 import type {
   IgnoreRow,
   OutstandingRow,
@@ -76,7 +77,6 @@ export function createOrder(payload: {
   supplierId: number;
   bizDate: string;
   mode?: 'detail' | 'package';
-  note?: string;
   totalCents?: number;
   items?: PurchaseItemInput[];
 }): Promise<{ id: number }> {
@@ -93,7 +93,6 @@ export function createOrder(payload: {
 export function updateOrder(payload: {
   id: number;
   bizDate?: string;
-  note?: string;
   totalCents?: number;
   items?: PurchaseItemInput[];
 }): Promise<unknown> {
@@ -196,6 +195,17 @@ export async function exportOrderXlsx(payload: {
   throw new Error(r.error || '导出失败');
 }
 
+/**
+ * 编辑器行图：按「款编码 + 款色 + 尺码」批量取本地图路径（顺序与入参一致，未命中为 null）。
+ * `size` 是取图键的一部分 —— 同一款下每个订单商品各有各的图，漏传它会让同款所有行显示成同一张。
+ */
+export async function styleImages(payload: {
+  items: { styleCode: string; color: string; size?: string }[];
+}): Promise<(string | null)[]> {
+  const d = await need(ipc.purchaseStyleImages(payload));
+  return d?.paths ?? [];
+}
+
 // ---- 纯函数：元 ↔ 分 与时间窗 ----
 
 /** 元 → 分（非有限数按 0，负数归零）——与主进程 `num()` 同口径 */
@@ -216,10 +226,9 @@ export function money(cents: unknown): string {
   return centsToYuan(cents).toFixed(2);
 }
 
-/** 本地日期 yyyy-MM-dd（**不可用 `toISOString`**：会按 UTC 偏移串天） */
+/** 本地日期 yyyy-MM-dd —— 实现收敛在 `@/lib/localDay`（**不可用 `toISOString`**：会按 UTC 偏移串天） */
 export function localDay(d = new Date()): string {
-  const p = (x: number): string => String(x).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return localDayKey(d);
 }
 
 export type ReconRange = 'all' | 'day' | 'month' | 'year' | 'custom';
@@ -294,7 +303,7 @@ export interface PurchaseCounts {
   /**
    * 全部窗口的欠款合计（分）= Σ 各厂家「拿货 −（已付 − 退款)」。
    * **保留符号不改判**：负数说明付多了，那是真信息，不是 0。
-   * 它只用于"第 6 步做完没有"这一个判断；对账页里的四个金额由对账页自己按当前窗口取。
+   * 它只用于"第 5 步做完没有"这一个判断；对账页里的四个金额由对账页自己按当前窗口取。
    */
   balance: number;
 }
@@ -303,7 +312,7 @@ export interface PurchaseCounts {
  * 汇总取数：**失败按 0 处理**，不抛。
  *
  * 为什么与上面的 `listXxx()` 不同：那几条是面板自己那一屏的数据，取不到就该报错；
- * 而这是"页签上挂个徽标 + 流程卡判第 6 步做没做完"用的 —— 为它让整页汇总挂掉
+ * 而这是"页签上挂个徽标 + 流程卡判第 5 步做没做完"用的 —— 为它让整页汇总挂掉
  * （连带总览卡全空）不值得。拿不到就显示 0，用户点进页签自然会看到真正的错误。
  */
 export async function purchaseCounts(): Promise<PurchaseCounts> {

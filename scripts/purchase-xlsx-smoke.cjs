@@ -113,7 +113,22 @@ const IMG_MAP = {
   'S2|白': REAL_PNG,
   'S4|灰': NOT_IMAGE, // 命中但内容不是图 → 这一行没图，整表照常导出
 };
-orderDb.findStyleColorImagePath = (code, color) => IMG_MAP[`${String(code)}|${String(color)}`] ?? null;
+/**
+ * 「款色 + 尺码」精确覆盖表 —— 用来造**同款同色、只差尺码**的两行（见 ⑤b 段）。
+ * ⚠️ 这是 2026-10-11 用户报的"拿货单明细图片全一样"的复现场景：订单 Excel 里每个商品行各有自己的图，
+ * 而取图只按款色挑 ⇒ 同一款的多行全落到同一张。守卫必须能造出"只差尺码、图就该不同"的输入。
+ */
+const IMG_BY_SIZE = {
+  'S1|黑|M': REAL_PNG,
+};
+/** 每次查图的入参（守卫"size 真的透传到了取图口"——漏传会让上面那条退化） */
+const imgCalls = [];
+orderDb.findStyleColorImagePath = (code, color, size) => {
+  const c = String(code);
+  const k = `${c}|${String(color)}`;
+  imgCalls.push(`${k}|${String(size ?? '')}`);
+  return IMG_BY_SIZE[`${k}|${String(size ?? '')}`] ?? IMG_MAP[k] ?? null;
+};
 
 const call = (payload) => handlers.get('purchase-export-excel')(null, payload);
 
@@ -252,6 +267,43 @@ async function main() {
     const ct = await zip.file('[Content_Types].xml').async('string');
     assert.ok(/ContentType="image\/png"/.test(ct), `没有 image/png：${ct.slice(0, 300)}`);
     assert.ok(!/undefined/.test(ct), `出现 undefined：${ct.slice(0, 300)}`);
+  });
+
+  section('⑤b 取图带尺码（同款同色、只差尺码 ⇒ 各嵌自己那件的图）');
+  // 2026-10-11 用户报"拿货单明细的图片都是一样的"：订单 Excel 里每个商品行各有自己的图，
+  // 而明细行粒度是「款色 × 尺码」。这条守卫造的就是"只差尺码"的两行 —— 只按款色取图会两张一样。
+  // ⚠️ 边界：本段的 `findStyleColorImagePath` 是 **stub**（见文件上方 IMG_MAP/IMG_BY_SIZE），
+  //    它验的是「**导出调用点**把该行的尺码传下去了」；SQL 侧的挑图口径（同款色里优先该尺码那张）
+  //    由 `ipc:shape:smoke` ⑨ 段用**真库 JOIN** 守（改坏 SQL 只会让它红，这里照样绿）。
+  imgCalls.length = 0;
+  const OUT_SIZE = path.join(dir, 'by-size.xlsx');
+  savePath = OUT_SIZE;
+  await call({
+    items: [
+      item({ styleCode: 'S1', styleName: '黑T', color: '黑', size: 'L', qty: 1, priceCents: 1000 }),
+      item({ styleCode: 'S1', styleName: '黑T', color: '黑', size: 'M', qty: 1, priceCents: 1000 }),
+    ],
+  });
+  await check('取图入参逐行带上了该行的尺码', () => {
+    assert.deepStrictEqual(imgCalls, ['S1|黑|L', 'S1|黑|M'], imgCalls.join(' , '));
+  });
+  const zipSize = await JSZip.loadAsync(fs.readFileSync(OUT_SIZE));
+  const mediaSize = Object.keys(zipSize.files)
+    .filter((n) => /^xl\/media\//.test(n) && !n.endsWith('/'))
+    .sort();
+  await check('两行各嵌一张图（不是"同款只画一张"）', () => {
+    assert.strictEqual(mediaSize.length, 2, `xl/media 条数应为 2，实际 ${mediaSize.length}（${mediaSize.join(', ')}）`);
+  });
+  await check('两张图的**内容**真的不同，且分别等于两个源文件（L→PNG_AS_JPG / M→REAL_PNG）', async () => {
+    const a = await zipSize.file(mediaSize[0]).async('nodebuffer');
+    const b = await zipSize.file(mediaSize[1]).async('nodebuffer');
+    assert.ok(!a.equals(b), '两张图字节相同 —— 尺码没起作用，同款两行仍挑到了同一张');
+    const set = new Set([a.toString('base64'), b.toString('base64')]);
+    assert.ok(
+      set.has(fs.readFileSync(PNG_AS_JPG).toString('base64')) &&
+        set.has(fs.readFileSync(REAL_PNG).toString('base64')),
+      '两张图应分别等于 PNG_AS_JPG 与 REAL_PNG',
+    );
   });
 
   section('⑥ 读回数值（口径一个都不能错）');

@@ -3,9 +3,15 @@
     实时区域：屏幕阅读器要能"听见"提示，光有视觉是不够的。
     aria-live=polite 让提示在读屏当前语句结束后播报，不打断用户正在做的事。
     容器常驻（即便没有 toast）—— 若容器随提示一起挂载，读屏会错过"区域刚出现时"的第一条内容。
+    ⚠️ `pointer-events-none`（2026-10-10 修）：容器既然**常驻**，就不能是"看不见但点得到"的盒子 ——
+    提示是纯信息、无任何可点元素，它不得吃掉下方控件的点击。实测两例（都由「拿货」页的按压塌守卫抓出）：
+    ① 两条提示之间的缝（gap-2）命中的是容器本体，挡住了汇总条上「复制给厂家」的按钮；
+    ② 刚点完「复制给厂家」提示就弹在同在右下角的「生成拿货单」上方，用户紧接着点它会被拦下。
+    `pointer-events` 会**继承** ⇒ 加在容器上，整条提示一并穿透（含胶囊），不做元素级例外 ——
+    真需要提示可交互时，也一定是修这里而不是在调用方绕着走。
   -->
   <div
-    class="fixed bottom-4 right-4 z-[60] flex flex-col gap-2"
+    class="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 pointer-events-none"
     role="status"
     aria-live="polite"
     aria-relevant="additions text"

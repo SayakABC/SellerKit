@@ -12,6 +12,8 @@ import {
   dbGet,
   dbRun,
   dbTransaction,
+  migrate,
+  type MigrationStep,
 } from './db';
 import { productSchemaReady } from './product-db';
 
@@ -95,7 +97,6 @@ export interface PurchaseOrder {
   mode: 'detail' | 'package';
   status: 'draft' | 'submitted';
   totalCents: number;
-  note: string;
   editedAt: string | null;
   createdAt: string;
   items: PurchaseItem[];
@@ -159,7 +160,6 @@ const SCHEMA = [
     mode TEXT NOT NULL DEFAULT 'detail',
     status TEXT NOT NULL DEFAULT 'draft',
     total_cents INTEGER NOT NULL DEFAULT 0,
-    note TEXT NOT NULL DEFAULT '',
     edited_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
@@ -211,11 +211,39 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_payments_supplier ON payments(supplier_id)`,
 ];
 
-/** 幂等初始化：建表 + 索引 + 存量库升级（应用启动 / 首次使用自动调用） */
+/** 幂等初始化：迁移 + 建表/索引 + 存量库升级（应用启动 / 首次使用自动调用） */
 export function ensurePurchaseSchema(): void {
   initDb();
+  // house convention：**自定义迁移先跑，再 dbMigrate(SCHEMA)** —— 老库删列在 SCHEMA 之前收敛，
+  // 新库由（已无 note 的）建表语句一次建到当前形状。
+  migrate('purchase.main', purchaseMigrationSteps());
   dbMigrate(SCHEMA);
   migrateItemsSize();
+}
+
+/** `purchase_orders` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`） */
+function purchaseMigrationSteps(): MigrationStep[] {
+  return [
+    { version: 1, name: 'purchase_orders 删 note（零读者列：不进导出/对账/成本）', up: dropOrderNote },
+  ];
+}
+
+/**
+ * v1 迁移：删 `purchase_orders.note`。
+ *
+ * 判据：该列全仓零消费者 —— 只被存过、在拿货单列表显示过，不进导出 xlsx、不进对账
+ * （`reconciliation` 只读 total_cents）、不进成本快照（`costSnapshot` 只读明细行）；
+ * 「模式」(mode) 与它不同，有两条真实下游链路（明细扣缺口 / 包价只进对账），故保留。
+ * **不改历史的迁移是空转**：老库带着这列时在此收敛掉，SCHEMA（新库路径）里也已无此列，
+ * 两侧形状一致（同 `oi_styles.name` 的删法）。
+ *
+ * ⚠️ 与所有迁移步骤同一条纪律：**迁移跑在表可能存在之前** —— 表还不存在时 PRAGMA 返回空，
+ * 直接跳过（新库由 SCHEMA 建出已无 note 的形状）。
+ */
+function dropOrderNote(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(purchase_orders)`);
+  if (!cols.some((c) => c.name === 'note')) return;
+  dbRun(`ALTER TABLE purchase_orders DROP COLUMN note`);
 }
 
 /**
@@ -271,6 +299,46 @@ export function createSupplier(name: string, phone: string, note: string): numbe
   ]).lastInsertRowid;
 }
 
+/**
+ * 厂商名归一（**只用于查重比对**，不改变落库原文）：去空白 + 小写。
+ *
+ * 与渲染层 `src/lib/productImport.ts` 的 `normSupplierName` **同一套口径** ——
+ * 预览里"这个名字对得上库里那家"与主进程"找不到就新建"必须是同一个判据，
+ * 否则会出现"预览说已关联、导入却新建了一家重名厂商"（名字只差一个空格）。
+ *
+ * ⚠️ 刻意**不剥**「有限公司」「厂」这类后缀：那是模糊匹配，会把两家不同的供应商并成一家，
+ *    而合并了的分账在界面上看不出来（与"不猜近似名"同一判据）。
+ */
+function normSupplierNameKey(v: unknown): string {
+  return String(v ?? '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+/**
+ * 按名称**查找，不存在则新建**，返回厂商 id（2026-10-10，产品 Excel 导入用）。
+ *
+ * 为什么放在采购域：`suppliers` 表的 owner 是这里（ADR-002 C1 单点写入）——
+ * 产品域只借它做「名称 → id」的解析（`product-db.listSuppliers`），自己**不写**它。
+ * 产品导入了新厂商名却写不进去，症状正是"供应商没有写入"。
+ *
+ * 比对口径 = 去空白 + 忽略大小写（**精确**，不做近似）：`factory_name` 上的 UNIQUE 是区分大小写
+ * 与空格的，直接 INSERT 会造出「厂A」「厂 A」「厂a」三家，所以先查再建。
+ *
+ * @returns 已存在 → 那条的 id；不存在 → 新建后的 id
+ */
+export function findOrCreateSupplierByName(name: string): { id: number; created: boolean } {
+  const raw = String(name ?? '').trim();
+  if (!raw) return { id: 0, created: false };
+  ensurePurchaseSchema();
+  const key = normSupplierNameKey(raw);
+  const hit = dbQuery<{ id: number; name: string }>(`SELECT id, name FROM suppliers`).find(
+    (s) => normSupplierNameKey(s.name) === key,
+  );
+  if (hit) return { id: Number(hit.id) || 0, created: false };
+  return { id: createSupplier(raw, '', '产品导入时自动新建'), created: true };
+}
+
 export function updateSupplier(id: number, phone: string, note: string): void {
   const sup = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [id]);
   if (!sup) throw new Error(`厂商不存在: id=${id}`);
@@ -308,7 +376,7 @@ function mapSupplier(r: Record<string, unknown>): Supplier {
 export function listPurchaseOrders(): PurchaseOrder[] {
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT po.id, po.supplier_id, s.name AS supplier_name, po.biz_date, po.mode, po.status,
-            po.total_cents, po.note, po.edited_at, po.created_at
+            po.total_cents, po.edited_at, po.created_at
      FROM purchase_orders po JOIN suppliers s ON po.supplier_id = s.id
      ORDER BY po.biz_date DESC, po.id DESC`,
   );
@@ -318,7 +386,7 @@ export function listPurchaseOrders(): PurchaseOrder[] {
 export function getPurchaseOrder(id: number): PurchaseOrder | undefined {
   const r = dbGet<Record<string, unknown>>(
     `SELECT po.id, po.supplier_id, s.name AS supplier_name, po.biz_date, po.mode, po.status,
-            po.total_cents, po.note, po.edited_at, po.created_at
+            po.total_cents, po.edited_at, po.created_at
      FROM purchase_orders po JOIN suppliers s ON po.supplier_id = s.id
      WHERE po.id = ?`,
     [id],
@@ -336,7 +404,6 @@ export function createPurchaseOrder(input: {
   supplierId: number;
   bizDate: string;
   mode: 'detail' | 'package';
-  note: string;
   totalCents?: number;
   items?: PurchaseItem[];
   sources?: PurchaseSourceRow[];
@@ -352,9 +419,9 @@ export function createPurchaseOrder(input: {
       ? Math.max(0, Math.round(Number(input.totalCents ?? 0)))
       : computeTotal(input.items ?? []);
     const id = dbRun(
-      `INSERT INTO purchase_orders (supplier_id, biz_date, mode, status, total_cents, note)
-       VALUES (?, ?, ?, 'draft', ?, ?)`,
-      [input.supplierId, date, mode, total, String(input.note ?? '').slice(0, 500)],
+      `INSERT INTO purchase_orders (supplier_id, biz_date, mode, status, total_cents)
+       VALUES (?, ?, ?, 'draft', ?)`,
+      [input.supplierId, date, mode, total],
     ).lastInsertRowid;
     if (mode === 'detail') {
       const items = input.items ?? [];
@@ -466,7 +533,6 @@ function insertSources(purchaseId: number, sources: PurchaseSourceRow[]): void {
  */
 export function updatePurchaseOrder(id: number, input: {
   bizDate?: string;
-  note?: string;
   totalCents?: number;
   items?: PurchaseItem[];
 }): void {
@@ -480,10 +546,6 @@ export function updatePurchaseOrder(id: number, input: {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式不正确');
       sets.push('biz_date = ?');
       params.push(date);
-    }
-    if (input.note !== undefined) {
-      sets.push('note = ?');
-      params.push(String(input.note).slice(0, 500));
     }
     if (order.mode === 'package' && input.totalCents !== undefined) {
       sets.push('total_cents = ?');
@@ -579,7 +641,6 @@ function mapOrderRow(r: Record<string, unknown>): Omit<PurchaseOrder, 'items'> {
     mode: (r.mode === 'package' ? 'package' : 'detail') as 'detail' | 'package',
     status: (r.status === 'submitted' ? 'submitted' : 'draft') as 'draft' | 'submitted',
     totalCents: Number(r.total_cents ?? 0),
-    note: String(r.note ?? ''),
     editedAt: r.edited_at ? String(r.edited_at) : null,
     createdAt: String(r.created_at ?? ''),
   };

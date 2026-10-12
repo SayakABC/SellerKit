@@ -17,13 +17,14 @@ export type GoodsTabId =
   | 'shop-products'
   | 'mappings'
   | 'registry'
-  | 'suppliers';
+  | 'suppliers'
+  | 'cost';
 
 /**
  * 页签 id → 用户可见名。
- * ⚠️ 六个 id 都在表里，但**同时出现在屏幕上的只有一部分**（页签表按页面形态分叉，见 `GoodsView`）：
- * `'workbench'` 形态 = 建档与关联 / 店铺登记 / 供应商；`'tabs'` 回退形态 = 产品 /（商品清单）/
- * 映射与关联 / 店铺登记 / 供应商。所以**别拿这张表当"页签都在"的判据**。
+ * ⚠️ 七个 id 都在表里，但**同时出现在屏幕上的只有一部分**（页签表按页面形态分叉，见 `GoodsView`）：
+ * `'workbench'` 形态 = 建档与关联 / 进价 / 店铺登记 / 供应商；`'tabs'` 回退形态 = 产品 /（商品清单）/
+ * 映射与关联 / 店铺登记 / 供应商 / 进价。所以**别拿这张表当"页签都在"的判据**。
  */
 export const GOODS_TAB_LABEL: Record<GoodsTabId, string> = {
   workbench: '建档与关联',
@@ -32,6 +33,9 @@ export const GOODS_TAB_LABEL: Record<GoodsTabId, string> = {
   mappings: '映射与关联',
   registry: '店铺登记',
   suppliers: '供应商',
+  // 「进价」而不是「成本」：产品列表的列头、导入模板的列名、拣货单的列头都叫「进价」，
+  // 页签名跟着走 —— 同一个东西四处四个叫法是术语分裂的老毛病（见 `glossary.ts` 头部）。
+  cost: '进价',
 };
 
 /**

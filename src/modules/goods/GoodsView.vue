@@ -12,7 +12,7 @@
         <!-- ⭐ 应用内帮助（2026-10-08 R3 · UX-G5）：全仓原先**没有任何用户可见的帮助入口**
              （扫描"教|教程|帮助|引导|新手|指南"在 `src/**` 的命中全是代码注释）。
              不新建长文档：就把三句话 + 一张三步图放在这里，够回答"这页怎么用"。
-             ⚠️ 面板里那两步**都带真按钮**（去「今天」导订单 / 打开店铺登记）——
+             ⚠️ 面板里那两步**都带真按钮**（去「发货台」导订单 / 打开店铺登记）——
              本仓既有结论是"提示不是入口"，一份只说"你应该先去别处"的帮助就是那句话的现行犯。 -->
         <div class="gd-help">
           <button
@@ -45,7 +45,7 @@
               </p>
               <p>
                 右边那些商品不是导入进来的，是从<b>订单</b>里长出来的 ——
-                「今天」页导过订单，这里才会有待办；订单里没有商品ID的行会单独报出来，不会静默丢掉。
+                「发货台」导过订单，这里才会有待办；订单里没有商品ID的行会单独报出来，不会静默丢掉。
               </p>
               <p>
                 左边点开任意一行就能看到它的规格与已认的商品。<b>认款入口左右各有一个</b>，
@@ -65,7 +65,7 @@
                   data-act="help-go-today"
                   @click="goImportOrders"
                 >
-                  去「今天」导入订单
+                  去「发货台」导入订单
                 </button>
                 <button
                   class="wb-btn wb-btn--sm"
@@ -158,6 +158,12 @@
            是为了要放回来时只改那一个常量。`tab` 永远取不到这个值，所以这段是不渲染的死代码 ——
            别当成"多余的 else-if"清掉，那是恢复开关的另一半。 -->
       <ShopProductView v-else-if="tab === 'shop-products'" />
+      <!-- 「进价」（P4 成本维护）：款级成本的**唯一手工写入口**。
+           放在这一页而不是算钱页：成本是主数据，这一页是主数据的家。
+           ⚠️ 2026-10-10 起产品列表**不再有「进价」列**（用户口径：产品列表不展示 SKU 与进价）——
+           本页签因此是这个数字唯一的界面入口：切过来就能看「当前生效价」与「还没维护进价的款」
+           （后者比列表里一个「—」可操作）。算钱页那边的成本表仍是**只读诊断**。 -->
+      <CostPane v-else-if="tab === 'cost'" :refresh-nonce="refreshNonce" />
       <!-- 以下两支是 `GOODS_LAYOUT === 'tabs'` 的**回退路径**（与重构前逐字一致），不是死代码。 -->
       <ProductListView v-else-if="tab === 'products'" :refresh-nonce="refreshNonce" />
       <SkuMappingView v-else :refresh-nonce="refreshNonce" :navigate="goTab" />
@@ -184,6 +190,7 @@ import * as api from './api';
 import ProductListView from './components/ProductListView.vue';
 import GoodsWorkbenchView from './components/GoodsWorkbenchView.vue';
 import ShopProductView from './components/ShopProductView.vue';
+import CostPane from './components/CostPane.vue';
 import ShopRegistryView from './components/ShopRegistryView.vue';
 import SkuMappingView from './components/SkuMappingView.vue';
 import SupplierView from './components/SupplierView.vue';
@@ -205,7 +212,7 @@ type TabId = GoodsTabId;
  * **其它任何页面都不会变**。
  *
  * 它还额外要求一份**独立准备**的 Excel（列名须为「产品ID」「产品图片链接」），而用户真正想要的
- * "导入后看看到底进来了哪些数据"由「映射与关联」的待关联队列（从订单实时聚出）与「今天」页的
+ * "导入后看看到底进来了哪些数据"由「映射与关联」的待关联队列（从订单实时聚出）与「发货台」页的
  * 导入回执覆盖了。留着它只会让人以为"少做了这一步所以后面算不出来"。
  *
  * **只收界面，不动数据**：`ShopProductView.vue`、`shop-product-*` 6 个 IPC 通道、`shop-product-db.ts`
@@ -256,6 +263,7 @@ const TABS: { id: TabId; label: string }[] =
         { id: 'workbench', label: GOODS_TAB_LABEL.workbench },
         { id: 'registry', label: GOODS_TAB_LABEL.registry },
         { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
+        { id: 'cost', label: GOODS_TAB_LABEL.cost },
       ]
     : [
         { id: 'products', label: GOODS_TAB_LABEL.products },
@@ -265,6 +273,7 @@ const TABS: { id: TabId; label: string }[] =
         { id: 'mappings', label: GOODS_TAB_LABEL.mappings },
         { id: 'registry', label: GOODS_TAB_LABEL.registry },
         { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
+        { id: 'cost', label: GOODS_TAB_LABEL.cost },
       ];
 
 /**
@@ -286,6 +295,8 @@ const TAB_DESC: Record<TabId, string> = {
   // 这句要回答"我什么时候会来这"——答案是"队列里有一行写着「需先登记店铺」的时候"。
   registry: '给订单里出现过的店名指定它是哪家店 —— 队列里写着「需先登记店铺」的商品，先在登记完才能认款。',
   suppliers: '拿货的供应商（厂）主数据 —— 产品建档与采购单据都引它。',
+  // 这句要回答"我什么时候会来这"：算钱 / 拣货说"无进价"的时候，就是来这补。
+  cost: '给款维护进价 —— 算钱与拣货里写着「无进价」的款，来这里补。改价只影响之后的订单，历史订单按各自下单时生效的价算。',
 };
 
 const error = ref('');

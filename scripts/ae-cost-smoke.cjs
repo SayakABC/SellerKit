@@ -326,6 +326,101 @@ check('同步**不碰**手工改过的价（source=manual）—— 自动同步�
   assert.strictEqual(Number(manual[0].unit_price_cents), 999);
 });
 
+console.log('\n[4.6] 手工进价落 ae_cost_map（manual-costs.applyManualCosts，2026-10-09）');
+
+const manualCosts = require(path.join(ROOT, 'dist', 'electron', 'manual-costs.js'));
+
+/** 本段自带 reset：用例之间不留数据 */
+function resetManualCost() {
+  resetCost();
+  dbRun(`DELETE FROM ae_cost_map`);
+}
+
+check('导入进价 → 写 manual 行，生效日 = 传入的导入当日', () => {
+  resetManualCost();
+  const r = manualCosts.applyManualCosts([{ code: 'P-1', name: '收纳箱', costCents: 1234 }], D_100);
+  assert.strictEqual(r.written, 1);
+  assert.strictEqual(r.skipped, 0);
+  const rows = dbQuery(`SELECT style_code, source, effective_from, unit_price_cents FROM ae_cost_map`);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].style_code, 'P-1');
+  assert.strictEqual(rows[0].source, 'manual');
+  assert.strictEqual(rows[0].effective_from, D_100);
+  assert.strictEqual(Number(rows[0].unit_price_cents), 1234);
+});
+
+check('⭐ 幂等：值没变再导一次 → 不新增区间行（否则"导出→原样导回"每天膨胀一行）', () => {
+  resetManualCost();
+  manualCosts.applyManualCosts([{ code: 'P-1', costCents: 1234 }], D_100);
+  const r = manualCosts.applyManualCosts([{ code: 'P-1', costCents: 1234 }], D_400);
+  assert.strictEqual(r.written, 0, '值一样就不该写');
+  assert.strictEqual(r.skipped, 1);
+  assert.strictEqual(Number(dbQuery(`SELECT COUNT(*) AS c FROM ae_cost_map`)[0].c), 1);
+});
+
+check('改价 → 新增一条区间行（历史订单仍按旧区间复算，改价不改历史）', () => {
+  resetManualCost();
+  manualCosts.applyManualCosts([{ code: 'P-1', costCents: 1234 }], D_400);
+  const r = manualCosts.applyManualCosts([{ code: 'P-1', costCents: 2000 }], D_100);
+  assert.strictEqual(r.written, 1);
+  const rows = dbQuery(`SELECT effective_from, unit_price_cents FROM ae_cost_map ORDER BY effective_from`);
+  assert.strictEqual(rows.length, 2, '两次不同价 = 两条区间');
+  assert.strictEqual(Number(rows[0].unit_price_cents), 1234); // D_400 更早
+  assert.strictEqual(Number(rows[1].unit_price_cents), 2000);
+});
+
+check('无效行（空编码 / 非数字）跳过，不写进成本表', () => {
+  resetManualCost();
+  const r = manualCosts.applyManualCosts(
+    [{ code: '', costCents: 100 }, { code: 'P-9', costCents: Number.NaN }],
+    D_100,
+  );
+  assert.strictEqual(r.written, 0);
+  assert.strictEqual(Number(dbQuery(`SELECT COUNT(*) AS c FROM ae_cost_map`)[0].c), 0);
+});
+
+check('手工进价与拿货自动同步**并存**（两个来源都在，读取侧 manual 优先）', () => {
+  resetManualCost();
+  dbRun(
+    `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date)
+     VALUES ('P-1', ?, 'purchase', '', 300, 1, ?)`,
+    [D_100, D_100],
+  );
+  manualCosts.applyManualCosts([{ code: 'P-1', costCents: 1234 }], D_400);
+  const rows = dbQuery(`SELECT source FROM ae_cost_map WHERE style_code='P-1' ORDER BY source`);
+  assert.deepStrictEqual(rows.map((x) => x.source), ['manual', 'purchase']);
+});
+
+check('删除手工区间 → 那条消失（读取回落到更早的区间）', () => {
+  resetManualCost();
+  manualCosts.applyManualCosts([{ code: 'P-1', costCents: 1000 }], D_400);
+  manualCosts.applyManualCosts([{ code: 'P-1', costCents: 2000 }], D_100);
+  const del = adb.costMapDeleteManual([{ styleCode: 'P-1', effectiveFrom: D_100 }]);
+  assert.strictEqual(del.deleted, 1);
+  const rows = dbQuery(`SELECT effective_from, unit_price_cents FROM ae_cost_map WHERE style_code='P-1'`);
+  assert.strictEqual(rows.length, 1, '只该剩更早的那条');
+  assert.strictEqual(rows[0].effective_from, D_400);
+  assert.strictEqual(Number(rows[0].unit_price_cents), 1000);
+});
+
+check('⭐ 删除**不动**拿货对账的价（只删 manual）—— 删了下次落账同步也会原样写回来', () => {
+  resetManualCost();
+  dbRun(
+    `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date)
+     VALUES ('P-1', ?, 'purchase', '', 300, 1, ?)`,
+    [D_100, D_100],
+  );
+  const del = adb.costMapDeleteManual([{ styleCode: 'P-1', effectiveFrom: D_100 }]);
+  assert.strictEqual(del.deleted, 0, 'purchase 行不该被删掉');
+  assert.strictEqual(Number(dbQuery(`SELECT COUNT(*) AS c FROM ae_cost_map`)[0].c), 1);
+});
+
+check('删不存在的区间 → deleted=0（不是错误，重复点删除不该报红）', () => {
+  resetManualCost();
+  const del = adb.costMapDeleteManual([{ styleCode: 'P-404', effectiveFrom: D_100 }]);
+  assert.strictEqual(del.deleted, 0);
+});
+
 console.log('\n[5] 采集订单 → 写入**唯一订单主干**（C1 合并的写侧）');
 
 /** 造一帧"采集来"的订单（形状＝扩展推送的 AeIngestOrder） */

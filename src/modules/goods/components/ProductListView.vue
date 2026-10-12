@@ -170,6 +170,7 @@
               <th>类目</th>
               <th class="wb-num">SKU</th>
               <th class="wb-num">缺克重</th>
+              <th class="wb-num">进价</th>
               <th>状态</th>
               <th class="gd-c-ops">操作</th>
             </tr>
@@ -213,6 +214,15 @@
               >
                 {{ missingOf(p.id) }}
               </td>
+              <td class="wb-num" data-act="p-cost">
+                <span
+                  v-if="costText(p.code) === '—'"
+                  class="wb-muted"
+                  title="还没维护进价（导入模板填「进价」列，或从拿货对账同步）"
+                  >—</span
+                >
+                <span v-else>{{ costText(p.code) }}</span>
+              </td>
               <td data-act="p-status">
                 <span class="wb-tag" :class="p.status === 'archived' ? '' : 'is-on'">
                   {{ p.status === 'archived' ? '停用' : '启用' }}
@@ -230,7 +240,7 @@
               </td>
             </tr>
             <tr v-if="!rows.length && !loading">
-              <td colspan="10" class="gd-list__empty">
+              <td colspan="11" class="gd-list__empty">
                 <div class="wb-empty">
                   <div class="wb-empty__icon" aria-hidden="true">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -445,6 +455,7 @@ const {
   variantsOfSelected,
   countVariants,
   missingOf,
+  costCentsOf,
   totalPages,
   filtered,
   allChecked,
@@ -471,6 +482,12 @@ const {
   batchError,
   batch,
 } = useProductList({ refresh: () => props.refreshNonce });
+
+/** 进价（元，两位小数）；还没价显示「—」（**不写 0.00** —— 0 会被读成"零成本/免费"） */
+function costText(code: string): string {
+  const cents = costCentsOf(code);
+  return cents === null ? '—' : (cents / 100).toFixed(2);
+}
 </script>
 
 <style scoped>

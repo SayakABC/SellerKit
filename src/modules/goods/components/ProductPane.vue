@@ -3,14 +3,20 @@
        与整宽形态（`ProductListView.vue`，`GOODS_LAYOUT='tabs'` 的回退路径）**共用同一份逻辑**
        （`../useProductList`），差别只在渲染：这里列少、把装不下的东西放进展开区。
 
-       列的取舍（见 `docs/plans/GOODS_WORKBENCH_PLAN.md` §7-1）：
-         · 主列只留「☑ / 图 / 款编码 / 款式名 / n·缺 m / 状态」—— 栏宽有限，这几列是"扫一眼找款"必需的；
-         · 供应商 / 类目 / 操作（编辑、删除）**移入行展开** —— 它们是"选中之后才关心"的信息；
-         · 行展开里还有 `detail-skus`（SKU 子表 + 改克重）与 `detail-links`（已关联商品，只读）。
+       列的取舍（2026-10-10 用户口径收紧后）：
+         · 主列只留「☑ / 图 / 款编码 / 款式名 / 状态」—— 栏宽有限，"扫一眼找款"只要这几项；
+         · SKU 数 / 缺克重 / 进价 **三列整列撤掉**（用户口径：产品列表不展示 SKU 与进价）：
+           它们是"维护进度 / 成本数据"，却一直在跟**款名**抢宽度 —— 撤掉它们，款名才显示得全。
+           ⚠️ 撤列不等于撤能力，两条都另有入口：缺克重走工具栏「问题件 › 缺克重」筛选，
+           进价走同页「进价」页签（那里有"还没维护进价的款"清单，比列表里一个「—」可操作）；
+         · 供应商 / 类目 / 操作（编辑、删除）仍在**行展开**里 —— 它们是"选中之后才关心"的信息；
+         · 展开区只剩两块：档案带（元信息 + 编辑/删除）与「已关联商品」（只读反查）。
+           ⚠️ SKU 清单 2026-10-10 一并撤掉（用户口径："展开页中的 SKU 也去掉"）；
+           SKU 的增删改**没有**因此失去入口 —— 仍在「编辑」抽屉（颜色 × 尺码批量生成 + 逐行克重）。
 
-       为什么把 SKU 改克重放进展开区、而不是像整宽形态那样放在列表下方：
-       分栏之后下方那块高度被右栏占着，"点行 → 下面改"在窄栏里会把人眼睛来回拽；
-       展开区紧贴那一行，改哪行看得见哪行。 -->
+       ⭐ 款名是**弹性列**，撤掉三列之后它要真的把名字显示出来（旧版单行省略号 + 栏宽被挤 ⇒
+       "款式名展示不完全"）。现在最多两行 + `title` 给全文 —— 判据是那一格的
+       `scrollWidth <= clientWidth`（放不下就会溢出，不是"看着短一点"）。 -->
   <div class="gd-pane">
     <div class="gd-toolbar">
       <input
@@ -180,10 +186,9 @@
                 />
               </th>
               <th class="gd-c-img">图</th>
-              <th>款编码</th>
-              <th>款式名</th>
-              <th class="wb-num">SKU</th>
-              <th>状态</th>
+              <th class="gd-c-code">款编码</th>
+              <th class="gd-c-name">款式名</th>
+              <th class="gd-c-status">状态</th>
             </tr>
           </thead>
           <tbody>
@@ -218,25 +223,14 @@
                   <img v-if="thumbs.get(p.id)" :src="thumbs.get(p.id)" class="wb-thumb" alt="" />
                   <span v-else class="wb-thumb wb-thumb--empty" title="暂无主图"></span>
                 </td>
-                <td class="wb-mono" data-act="p-code">{{ p.code }}</td>
+                <td class="wb-mono gd-c-code" data-act="p-code">{{ p.code }}</td>
+                <!-- 款名：弹性列，最多两行。里层 span 承担折行（td 自己必须是 table-cell，
+                     不能直接 `display:-webkit-box`，否则这一格会脱离表格布局）。
+                     ⚠️ 文本仍是一个节点 ⇒ `el.textContent` 与撤列前逐字相同（断言不受影响）。 -->
                 <td class="gd-pane__name" data-act="p-name" :title="p.name || ''">
-                  {{ p.name || '—' }}
+                  <span class="gd-pane__name-text">{{ p.name || '—' }}</span>
                 </td>
-                <!-- SKU 数与缺克重合成一格：栏宽有限，它们是同一个问题的两面（有几个 / 还差几个）。
-                     两个 data-act 各自留在自己的 span 上 —— 断言钉的是"那个数字对不对"，
-                     不是"它占几格"。
-                     ⚠️ 2026-10-08 R2（UX-G2/W2）：「缺 0」只在**这款有 SKU 时**才渲染。
-                     新建一款还没生成 SKU 时，`0 · 缺 0` 是一句什么都没说的废话 —— 新手第一屏
-                     看到的就是它。但**有** SKU 而缺 0 时必须照旧写 0（不能改成「—」：那会被读成
-                     "没读到数据"，2026-10-01 已实报过一次）。 -->
-                <td class="wb-num" :class="{ 'gd-warn': missingOf(p.id) > 0 }">
-                  <span data-act="p-sku">{{ countVariants(p.id) }}</span>
-                  <template v-if="countVariants(p.id) > 0">
-                    <span class="wb-muted"> · 缺 </span>
-                    <span data-act="missing-weight-cell">{{ missingOf(p.id) }}</span>
-                  </template>
-                </td>
-                <td data-act="p-status">
+                <td class="gd-c-status" data-act="p-status">
                   <span class="wb-tag" :class="p.status === 'archived' ? '' : 'is-on'">
                     {{ p.status === 'archived' ? '停用' : '启用' }}
                   </span>
@@ -297,55 +291,6 @@
                       </div>
                     </div>
 
-                    <!-- SKU 子表：改克重走与整宽形态**同一个**保存路径（全量提交，带全部现有字段） -->
-                    <div class="gd-detail__block">
-                      <div class="gd-detail__head">
-                        <span>SKU 克重</span>
-                        <span class="wb-muted" v-if="variantsOf(p.id).length">
-                          {{ variantsOf(p.id).length }} 个 · 缺 {{ missingOf(p.id) }} 个
-                        </span>
-                      </div>
-                      <!-- 术语首次出现处：`weight` 的括号说明放在**真正往里填数字的地方**，
-                           而不是页头 —— 页头那句已经背了款 / SKU / 映射三个词（UX-G1 的口径：
-                           只在每个术语真正的首次出现处解释一次，之后照旧用术语）。 -->
-                      <p class="wb-muted gd-detail__note">{{ gloss('weight') }}</p>
-                      <table class="wb-table gd-detail__table" data-act="variant-table">
-                        <thead>
-                          <tr>
-                            <th>SKU</th>
-                            <th>编码</th>
-                            <th class="wb-num gd-detail__w">克重(g)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="v in variantsOf(p.id)" :key="v.id" :data-variant-id="v.id">
-                            <td>{{ v.name }}</td>
-                            <td class="wb-mono wb-muted">{{ v.code || '—' }}</td>
-                            <td class="wb-num">
-                              <input
-                                class="wb-input wb-input--sm gd-detail__input"
-                                data-act="weight"
-                                type="number"
-                                min="0"
-                                step="1"
-                                :value="v.weightG || ''"
-                                :disabled="saving"
-                                :aria-label="`${v.name} 克重`"
-                                @click.stop
-                                @change="saveWeight(v, ($event.target as HTMLInputElement).value)"
-                              />
-                            </td>
-                          </tr>
-                          <tr v-if="!variantsOf(p.id).length">
-                            <td colspan="3" class="gd-detail__empty">
-                              这款还没有 SKU —— 点「编辑」，用颜色 × 尺码批量生成
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                      <p v-if="savedHint" class="gd-detail__saved" data-act="saved">{{ savedHint }}</p>
-                    </div>
-
                     <!-- 已关联商品：**只读反查**（数据层 `skuList({productId})`）。
                          刻意没有「解除」按钮 —— 硬删会让"关联率"莫名回落，且查不出原因；
                          失效的映射按"标失效"处理，这里只如实列出它已经不生效。 -->
@@ -356,6 +301,11 @@
                           {{ linksBusy(p.id) ? '读取中…' : `${linksOf(p.id).length} 个店铺商品` }}
                         </span>
                       </div>
+                      <!-- 一句"这里是只读的、要改去哪儿"。原先这句住在 SKU 块里（随那块一起撤了）——
+                           而它守的**不是** SKU 的事，是"这一块为什么没有按钮"。 -->
+                      <p class="wb-muted gd-detail__note">
+                        只读：列出这个款已认下的商品。认款在右栏做 —— 认了哪个，这里就多哪个
+                      </p>
                       <ul class="gd-links" data-act="detail-links">
                         <li
                           v-for="l in linksOf(p.id)"
@@ -365,7 +315,7 @@
                         >
                           <span class="wb-mono">{{ l.itemId }}</span>
                           <span class="wb-muted">{{ l.shopName || `#${l.shopId}` }}</span>
-                          <span class="wb-muted gd-links__plat">{{ l.platform }}</span>
+                          <span class="gd-links__plat">{{ l.platform }}</span>
                         </li>
                         <li v-if="!linksBusy(p.id) && !linksOf(p.id).length" class="wb-muted">
                           还没有店铺商品关联到这个款 —— 到右栏把商品认到这个款上，这里就会列出来
@@ -397,7 +347,7 @@
                   <p class="wb-empty__title">{{ filtered ? '没有符合条件的款' : '还没有产品' }}</p>
                   <!-- ⭐ 空态要说清"先做哪个"（P0-5 左半）。真实顺序是**先有订单才有队列**：
                        队列不是缓存表，是从订单里实时聚出来的。所以队列已拉过且为空时，
-                       领头那句和领头那个按钮都换成「去「今天」导订单」。
+                       领头那句和领头那个按钮都换成「去「发货台」导订单」。
                        ⚠️ 判据是 `queueEmpty === true`（不是 `!queueEmpty`）：`null` = 队列还没拉过，
                        那时我们并不知道顺序该不该翻 —— 按默认顺序说，并保留那句稳妥的原理说明。 -->
                   <p class="wb-empty__desc">
@@ -405,7 +355,7 @@
                       filtered
                         ? '换个关键字，或把上面的筛选条件清掉再试。'
                         : queueEmpty === true
-                          ? '右边那些待认的商品不是导入进来的，是从订单里长出来的 —— 先在「今天」页把订单导进来，这里才有款可配。'
+                          ? '右边那些待认的商品不是导入进来的，是从订单里长出来的 —— 先在「发货台」把订单导进来，这里才有款可配。'
                           : '产品库是订单 / 采购 / 成本三域的关联锚点 —— 先建档，后面才有得算。'
                     }}
                   </p>
@@ -414,7 +364,7 @@
                       清空筛选
                     </button>
                     <template v-else>
-                      <!-- 队列也空：把「去「今天」导订单」放到**第一位**并做成主按钮（顺序即答案） -->
+                      <!-- 队列也空：把「去「发货台」导订单」放到**第一位**并做成主按钮（顺序即答案） -->
                       <button
                         v-if="queueEmpty === true"
                         class="wb-btn wb-btn--primary"
@@ -422,7 +372,7 @@
                         data-act="empty-go-today"
                         @click="emit('import-orders')"
                       >
-                        去「今天」导入订单
+                        去「发货台」导入订单
                       </button>
                       <button
                         class="wb-btn"
@@ -579,9 +529,8 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { useProductList } from '../useProductList';
 import * as api from '../api';
-import type { ShopSkuRow, VariantRow } from '@/types';
+import type { ShopSkuRow } from '@/types';
 import ProductEditorDrawer from './ProductEditorDrawer.vue';
-import { gloss } from '../glossary';
 import { goodsSimple } from '../simple';
 import ProductImportDialog from './ProductImportDialog.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
@@ -634,7 +583,7 @@ const emit = defineEmits<{
    */
   'relate-request': [];
   /**
-   * 空态里那个「去「今天」导入订单」按下了（只发信号）。
+   * 空态里那个「去「发货台」导入订单」按下了（只发信号）。
    *
    * 跨模块跳转由外壳做（`GoodsWorkbenchView.goImportOrders`）：本组件不认识模块表，
    * 也不该认识 —— 同 `relate-request` 的分工。
@@ -645,9 +594,7 @@ const emit = defineEmits<{
 const {
   loading,
   busy,
-  saving,
   error,
-  savedHint,
   rows,
   total,
   page,
@@ -664,10 +611,7 @@ const {
   editing,
   importOpen,
   pendingDelete,
-  variants,
   thumbs,
-  countVariants,
-  missingOf,
   stylesTotal,
   totalPages,
   filtered,
@@ -684,7 +628,6 @@ const {
   openEditor,
   onEditorSaved,
   onImported,
-  saveWeight,
   openBatchEdit,
   applyBatchEdit,
   confirmDelete,
@@ -705,10 +648,14 @@ watch(() => stylesTotal.value, (n) => emit('styles-total', n), { immediate: true
 
 /**
  * 表格的列数。**必须跟着「简洁模式」变** —— 空态与展开行都是跨全表的单元格，
- * 写死 `colspan="7"` 的话，简洁模式少一列时它们会各短一格（右边留一条空白，
+ * 写死数字的话，简洁模式少一列时它们会各短一格（右边留一条空白，
  * 越宽的窗口越显眼，但**不会报错** —— 属于"看着就是不对、查起来没头绪"那一类）。
+ *
+ * 列数 = ▸ /（勾选框）/ 图 / 款编码 / 款式名 / 状态 ⇒ 简洁 5、完整 6。
+ * （2026-10-10 撤掉 SKU / 缺克重 / 进价三列，两档各 −3；冒烟里那条断言是
+ *  `colSpan === 表头 th 数` 的动态比法，所以撤列**不需要**改断言里的数字。）
  */
-const gdColspan = computed(() => (goodsSimple.value ? 6 : 7));
+const gdColspan = computed(() => (goodsSimple.value ? 5 : 6));
 
 /**
  * 切成简洁模式时把"已选"清空。
@@ -751,8 +698,6 @@ watch(rows, (list) => {
     emit('select-product', null);
   }
 });
-
-const variantsOf = (id: number): VariantRow[] => variants.value[id] ?? [];
 
 /* ---- 已关联商品（按款反查，只读） ---- */
 
@@ -926,12 +871,30 @@ watch(
 .gd-c-img {
   width: 48px;
 }
-/* 款式名是**弹性列**：窄栏里靠省略号，`title` 给全文（不能把名字裁掉还查不到） */
-.gd-pane__name {
-  max-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* 款编码 / 状态：按内容定宽（`width:1%` + nowrap 就是这个意思），**别跟款名抢宽度**。
+   2026-10-10 撤掉 SKU / 缺克重 / 进价三列之后，款名是唯一该吃剩余宽度的列。 */
+.gd-c-code,
+.gd-c-status {
+  width: 1%;
   white-space: nowrap;
+}
+/* 款名 = **弹性列**，也是这一版要修的症状所在（用户："款式名现在展示不完全"）。
+   做法：td 只负责"吃掉剩余宽度"，折行交给里层 span（td 自己必须保持 table-cell，
+   直接上 `display:-webkit-box` 会让这一格脱离表格布局）。
+   上限两行：再长的名字截断，但 `title` 里仍有全文（不能裁了又查不到）。 */
+.gd-pane__name {
+  overflow: hidden;
+  padding-right: 12px;
+}
+.gd-pane__name-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .gd-pane__caret {
@@ -946,43 +909,35 @@ watch(
   color: var(--wb-text);
 }
 
-.gd-warn {
-  color: var(--wb-warning);
-}
-
 /* 展开区所在行：不随 hover 高亮（它是详情不是可点行），底色与主行区分。
    ⚠️ 必须恢复 white-space: normal —— 展开区住在 .wb-table 的 td 里，而基座给 td 定了
-   nowrap（styles/index.css），不恢复的话展开区里所有长文案（认款提示 / 克重说明 / 元信息）
-   一行顶出去，横穿网格列压住右边的内容（2026-10-09 实测：hint 325px 顶进 217px 的列）。
-   SKU 子表自己的 td 仍按 .wb-table td 的 nowrap 走（直接命中优先于继承，不受影响）。 */
+   nowrap（styles/index.css），不恢复的话展开区里所有长文案（认款提示 / 说明 / 元信息）
+   一行顶出去，横穿网格列压住右边的内容（2026-10-09 实测：hint 325px 顶进 217px 的列）。 */
 .gd-pane__drow > td {
   padding: 0;
   background: var(--wb-surface-2);
   white-space: normal;
 }
-/* ── 展开区（2026-10-09 重设计）────────────────────────────────────
-   旧版四块内容（认款条 / SKU 表 / 关联列表 / 元信息+按钮）全部平铺在 surface-2 上，
-   视觉重量相同、没有分组边界，元信息挤左下、按钮悬右下 —— "看着乱"的根源。
-   新结构三层：① 认款条（全宽、带主色浅底 —— 页内唯一带色块，主动作一眼可见）；
-   ② 元信息带（档案 + 编辑/删除 同一行）；③ 两张白底内容卡片（surface-2 上浮起）。 */
+/* ── 展开区（2026-10-10 定稿）──────────────────────────────────────
+   2026-10-09 那一版解决的是"分组"（四块平铺 → 主动作条 / 元信息带 / 双白卡）；
+   2026-10-10 用户口径再砍一刀：SKU 清单整块撤掉、元信息带并入卡片 —— 只剩三层：
+     ① 认款条（带主色浅底，展开区里唯一带色块 ⇒ 主动作一眼可见）；
+     ② 档案卡（供应商 / 类目 / 备注 / 创建 + 编辑·删除）；
+     ③ 「已关联商品」卡。
+   三层都是**满宽**、同一套圆角与间距 —— 一列到底，不再有"左一块右一块、高低还不齐"。 */
 .gd-detail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px;
 }
-@media (max-width: 1180px) {
-  .gd-detail {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-/* 认款动作条：横跨两列。挤在左列里时提示语只能在 ~217px 里折行，
-   视觉上是"左边一块细长条、右边一块"两堆没关系的内容。 */
+/* 认款动作条：满宽。挤在窄列里时提示语只能在 ~217px 里折行，
+   主动作和它自己的说明被拆成两行读；`wrap` 让窄栏下按钮与提示自然换行而不是溢出。 */
 .gd-detail__relate {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   min-width: 0;
   padding: 8px 12px;
   border: 1px solid var(--wb-primary-soft);
@@ -993,7 +948,7 @@ watch(
   font-size: 12px;
   min-width: 0;
 }
-/* 内容卡片：从 surface-2 的井里浮起一级，块与块的边界不再靠猜 */
+/* 卡片：从 surface-2 的井里浮起一级，块与块的边界不再靠猜 */
 .gd-detail__block {
   min-width: 0;
   padding: 10px 12px;
@@ -1013,54 +968,42 @@ watch(
   font-weight: 600;
   color: var(--wb-text);
 }
-.gd-detail__table {
-  width: 100%;
-}
-.gd-detail__w {
-  width: 96px;
-}
-.gd-detail__input {
-  width: 78px;
-  text-align: right;
-}
-.gd-detail__empty {
-  padding: 10px;
-  text-align: center;
-  white-space: normal;
-  color: var(--wb-text-muted);
-  font-size: 12px;
-}
-/* 术语说明是 <p>：不给 margin 的话浏览器默认 1em 上下距会在标题和表格之间撑出一截 */
+/* 说明是 <p>：不给 margin 的话浏览器默认 1em 上下距会在标题和内容之间撑出一截 */
 .gd-detail__note {
   margin: 0 0 8px;
   font-size: 12px;
 }
-.gd-detail__saved {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--wb-success);
-}
 
-/* 元信息带：label·值 横排一组一组；「编辑/删除」靠右跟档案同一行。
+/* 档案卡：label·值 一组一组横排。原先它是一条**裸露**的横排（无底色无边框），
+   跟旁边两张白卡混在同一层上，读起来像"卡片漏出来的一行" —— 现在同为一等卡片。
    备注可能很长 —— 允许它占满一整行（flex-basis:100%），别的项保持紧凑。 */
 .gd-detail__meta {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 18px;
-  padding: 0 2px;
+  gap: 6px 20px;
+  padding: 9px 12px;
+  background: var(--wb-surface);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-md);
   font-size: 12px;
 }
 .gd-detail__meta p {
   margin: 0;
-  display: flex;
+  display: inline-flex;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
 }
+/* 标签统一占位宽（供应商 / 类目 / 创建 / 备注 两三个字）⇒ 值从左对齐，一眼能横着比 */
+.gd-detail__meta p > .wb-muted:first-child {
+  min-width: 3.2em;
+}
 .gd-detail__meta-note {
   flex-basis: 100%;
+}
+.gd-detail__meta-note > .wb-muted:first-child {
+  flex-shrink: 0;
 }
 
 .gd-links {
@@ -1068,21 +1011,27 @@ watch(
   padding: 0;
   list-style: none;
   font-size: 12px;
-  max-height: 160px;
+  max-height: 200px;
   overflow: auto;
 }
 .gd-links__row {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 4px 0;
+  padding: 5px 0;
   border-bottom: 1px dashed var(--wb-border);
 }
 .gd-links__row:last-child {
   border-bottom: none;
 }
+/* 平台名做成小标签靠右：原先它只是又一个灰字，跟店铺名挤在同一行分不出主次 */
 .gd-links__plat {
   margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface-2);
+  font-size: 11px;
 }
 .gd-links__dead {
   margin: 8px 0 0;

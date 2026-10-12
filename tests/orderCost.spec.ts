@@ -282,7 +282,7 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
     expect(skuWeightKey('S1', '黑', '')).not.toBe('');
   });
 
-  it('克重按**款色码**取（唯一来源）：命中 → 算得出来，来源标 sku', () => {
+  it('克重按**款色码**取（唯一来源）：命中 → 算得出来', () => {
     const r = computeOrderCosts({
       orders: [order({ color: '黑', size: 'L' })],
       skuWeights: skuW(275),
@@ -291,7 +291,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
     });
     const row = r.rows[0];
     expect(row.weightG).toBe(275);
-    expect(row.weightSource).toBe('sku');
     // 275g × 80/kg = 22 + 挂号 8 = 30
     expect(row.shipping).toBeCloseTo(30, 2);
     expect(row.gaps).toEqual([]);
@@ -322,7 +321,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       costs: [cost()],
     });
     expect(r.rows[0].weightG).toBeNull();
-    expect(r.rows[0].weightSource).toBeNull();
     expect(r.rows[0].gaps).toEqual(['weight']);
   });
 

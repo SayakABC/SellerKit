@@ -13,7 +13,9 @@
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import * as api from './api';
-import { exportProducts } from './productIo';
+import { exportProducts, todayKey } from './productIo';
+import { pickUnitCost } from '@/lib/orderCost';
+import type { CostInterval } from '@/lib/orderCost';
 import { toast } from '@/core/services/toast';
 import type { ProductListItem, VariantRow } from '@/types';
 
@@ -81,6 +83,11 @@ export function useProductList(opts: ProductListOptions) {
 
   /** 产品 id → 该款的 SKU（本页一次性合批取回，行展开与速修面板共用同一份） */
   const variants = ref<Record<number, VariantRow[]>>({});
+  /**
+   * 款编码 → **当前生效进价**（分）；`null` = 还没价。列表「进价」列读它。
+   * 口径与算钱 / 拣货一致（`pickUnitCost` 按今天取；见 `loadCosts`）。
+   */
+  const costCentsByCode = ref(new Map<string, number | null>());
   const selectedId = ref(0);
 
   const selected = computed(() => rows.value.find((p) => p.id === selectedId.value) ?? null);
@@ -88,6 +95,9 @@ export function useProductList(opts: ProductListOptions) {
   const countVariants = (id: number): number => (variants.value[id] ?? []).length;
   const missingOf = (id: number): number =>
     (variants.value[id] ?? []).filter((v) => !(Number(v.weightG) > 0)).length;
+
+  /** 该款当前生效进价（分）；`null` = 还没价（查不到也当没价，与库层一致） */
+  const costCentsOf = (code: string): number | null => costCentsByCode.value.get(code) ?? null;
 
   const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
   const filtered = computed(
@@ -143,6 +153,7 @@ export function useProductList(opts: ProductListOptions) {
       }
 
       await loadVariants();
+      await loadCosts();
       void loadThumbs();
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : String(e);
@@ -160,6 +171,41 @@ export function useProductList(opts: ProductListOptions) {
     }
     variants.value = map;
     if (!selectedId.value && rows.value.length) selectedId.value = rows.value[0].id;
+  }
+
+  /**
+   * 拉**本页**每款的「当前生效进价」（分）。
+   *
+   * 口径与算钱 / 拣货两页一致：一次读全 `ae_cost_map`，用 `pickUnitCost` 按**今天**取该款
+   * 当时生效的那条（同一天 manual 优先）。列表只要这一页的款 —— 导出那条路是全量补价
+   * （`productIo.fillExportCosts`），两处共用同一份取价实现。
+   *
+   * 读不到成本（ae 库还没建等）**不挡列表**：进价列显示「—」，其余照常。
+   */
+  async function loadCosts(): Promise<void> {
+    const codes = rows.value.map((p) => p.code).filter(Boolean);
+    const map = new Map<string, number | null>();
+    if (!codes.length) {
+      costCentsByCode.value = map;
+      return;
+    }
+    try {
+      const list = await api.costMapList();
+      const costs: CostInterval[] = list.map((x) => ({
+        styleCode: String(x.styleCode ?? ''),
+        effectiveFrom: String(x.effectiveFrom ?? ''),
+        unitPrice: (Number(x.unitPriceCents) || 0) / 100,
+        source: String(x.source ?? ''),
+      }));
+      const today = todayKey();
+      for (const code of codes) {
+        const unit = pickUnitCost(costs, code, today);
+        map.set(code, unit === null ? null : Math.round(unit * 100));
+      }
+    } catch {
+      // 读不到 → 全部 null（列显示「—」），不挡列表
+    }
+    costCentsByCode.value = map;
   }
 
   async function loadSupplierOptions(): Promise<void> {
@@ -524,6 +570,7 @@ export function useProductList(opts: ProductListOptions) {
     variantsOfSelected,
     countVariants,
     missingOf,
+    costCentsOf,
     totalPages,
     filtered,
     allChecked,

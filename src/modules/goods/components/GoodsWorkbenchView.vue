@@ -144,7 +144,7 @@ const queueEmpty = computed<boolean | null>(() =>
 );
 
 /**
- * 第 1 步的出口：跨模块跳到「今天」导订单。
+ * 第 1 步的出口：跨模块跳到「发货台」导订单。
  *
  * 判据同 `useSkuPool.goToday`：订单导入不在这一页，也不该在这一页再做一个 —— 跳过去是诚实的。
  * 外壳自己 import 而不是让卡片 import：卡片不认识模块表（同 `navigate` 的分工）。

@@ -472,9 +472,9 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
   watch(() => opts.refresh?.(), () => { void refreshAll(); });
 
   /**
-   * 空态的「去「今天」导入订单」：**跨模块真跳转**（`switchModule`）。
+   * 空态的「去「发货台」导入订单」：**跨模块真跳转**（`switchModule`）。
    *
-   * 为什么这一处是真跳转而「映射」本身不跳：队列的数据源头是订单，而导入订单只在「今天」页 ——
+   * 为什么这一处是真跳转而「映射」本身不跳：队列的数据源头是订单，而导入订单只在「发货台」页 ——
    * 这一页没有它的页签，所以只能跳走。（与「总览」页点「去「货与成本」补克重」同例：
    * 主数据维护不属于发货流程的任何一步，跳转是诚实的。）
    */
@@ -562,10 +562,11 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
       const adopted = res?.adopted ?? 0;
       const failed = failures.value.length;
       // 回填报出来 —— 否则"配完映射，订单页悄悄变了"是查不出的（人不知道归款是写时触发的）；
+      // 「补色」同理：给某个商品补上颜色后，它的存量订单会一起改到该色 —— 也是界面之外的变化。
       // 采纳款主图同理 —— 它写的是**产品主数据**，不说一声用户只会觉得"我的产品页怎么多了张图"。
       // 两个数都为 0 时都不提（"全零不是正确表达"），有值才报。
       const tail =
-        (reassigned ? `，已自动关联 ${reassigned} 行存量订单` : '') +
+        (reassigned ? `，另有 ${reassigned} 行老订单一并归好` : '') +
         (adopted ? `，并把 ${adopted} 张订单图设为款主图` : '');
       const head = `新增 ${created} 条、更新 ${updated} 条${color ? `（颜色「${color}」）` : ''}${tail}`;
       if (failed) toast(`${head}，${failed} 条失败`, 'error');

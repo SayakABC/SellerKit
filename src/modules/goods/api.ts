@@ -14,6 +14,7 @@
 import * as ipc from '@/core/services/ipc';
 import { unwrapAsync } from './unwrapApi';
 import type {
+  AeCostMapItem,
   ImageDataUrl,
   ItemImagePoolEntry,
   ProductBatchUpdateInput,
@@ -82,6 +83,18 @@ export const remove = (id: number): Promise<{ deleted: boolean }> =>
 /** 批量编辑（**部分 patch**：只传要改的字段；`supplierId: 0` = 清空关联） */
 export const batchUpdate = (payload: ProductBatchUpdateInput): Promise<{ updated: number }> =>
   unwrap(ipc.productBatchUpdate(payload));
+
+/* ============================================================================
+   成本（`ae_cost_map`；owner 是 ae 域）
+   ============================================================================ */
+
+/**
+ * 成本表全量（款级 + 生效区间 + `source`）。
+ *
+ * 进价**展示**（列表列）与**导出**（模板补价）共用这一个读取口；取「当前生效价」的
+ * 口径在消费侧用 `pickUnitCost`（`@/lib/orderCost`），与算钱 / 拣货两页同一份实现。
+ */
+export const costMapList = (): Promise<AeCostMapItem[]> => unwrap(ipc.aeCostMapList());
 
 /* ============================================================================
    SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）

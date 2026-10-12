@@ -24,6 +24,9 @@ import type {
 } from '@/lib/productImport';
 import * as ipc from '@/core/services/ipc';
 import type { ExcelFilePayload } from '@/core/services/ipc';
+import { pickUnitCost } from '@/lib/orderCost';
+import type { CostInterval } from '@/lib/orderCost';
+import { localDayKey } from '@/lib/localDay';
 import { unwrapApi, isCanceled } from './unwrapApi';
 
 /* ============================================================================
@@ -91,8 +94,28 @@ export interface ProductImportCommitResult {
   skusWritten: number;
   /** 本次设为款主图的张数 */
   imagesAttached: number;
+  /** 本次写入 `ae_cost_map` 的手工进价条数 */
+  costsWritten: number;
+  /** 因与现价相同（幂等）或未填而跳过的进价条数 */
+  costsSkipped: number;
+  /** 本次**新建**的供应商条数（2026-10-10） */
+  suppliersCreated: number;
   /** 库层才拦得住的失败行（如 insertOnly 下编码已存在） */
   failed: { rowNo: number; code: string; message: string }[];
+  /**
+   * 因「同名款：跳过不覆盖」而**没有提交**的行（2026-10-10）。
+   * 与 `failed` 分开：这些行不是错了，是用户按自己的选择留下的。
+   */
+  skippedByName: { rowNo: number; code: string; name: string }[];
+}
+
+/** 「同名款（款式名在库内已存在）」的处理方式；默认覆盖 = 沿用库内编码更新那一款 */
+export type SameNameMode = 'overwrite' | 'skip';
+
+/** 本地日期 `yyyy-mm-dd` —— 手工进价的生效日（口径：**导入当日**，见 `product-cost-sync.ts`）。
+ *  实现收敛在 `@/lib/localDay`（三处"今天"共用一份，见该文件注释）。 */
+export function todayKey(): string {
+  return localDayKey();
 }
 
 /** 导出翻页护栏：每页与主进程 `product-db` 的 `MAX_LIST_LIMIT` 一致，最多 40 页 = 2 万行 */
@@ -103,6 +126,48 @@ const EXPORT_MAX_PAGES = 40;
 async function supplierRefs(): Promise<{ id: number; name: string }[]> {
   const s = unwrapApi(await ipc.productSummary());
   return (s?.supplierOptions ?? []).map((x) => ({ id: x.id, name: x.name }));
+}
+
+/** 库内已有产品的两个索引（同一趟分页取回，别读两遍） */
+interface ExistingProductIndex {
+  /** 全部款编码（自动生成编码时做碰撞防护） */
+  codes: Set<string>;
+  /** 款式名（归一：去空白 + 小写）→ 款编码（同名款判定 + 编码回显） */
+  codeByName: Map<string, string>;
+}
+
+/** 款式名归一 —— 与 `@/lib/productImport` 的 `normStyleName` **同一套口径**（两侧判据必须一致） */
+function normStyleName(v: unknown): string {
+  return String(v ?? '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+/**
+ * 取库内已有产品的编码集合 + 款式名索引。
+ *
+ * 为什么两个索引一起建：`productList` 是**分页**读的（最多 40 页 = 2 万款），
+ * 为两个用途各扫一遍等于把整库读两次。命名也照旧（`existingProductCodes` 的老调用点只关心编码）。
+ *
+ * 同名时保留**先出现**的那条（`productList` 按 id 升序）—— 重名款是数据问题，不是这里能修的；
+ * 但"回显哪一个"必须是确定性的，否则同一份文件导两次结果不一样。
+ */
+async function existingProductIndex(): Promise<ExistingProductIndex> {
+  const codes = new Set<string>();
+  const codeByName = new Map<string, string>();
+  // 分页取全量（最多 40 页 = 2 万款）
+  for (let page = 0; page < 40; page++) {
+    const res = unwrapApi(
+      await ipc.productList({ offset: page * 500, limit: 500, search: '', status: '', supplierId: 0 })
+    );
+    for (const r of res?.rows ?? []) {
+      if (r.code) codes.add(r.code);
+      const key = normStyleName(r.name);
+      if (key && r.code && !codeByName.has(key)) codeByName.set(key, r.code);
+    }
+    if (codes.size >= (res?.total ?? 0) || !(res?.rows ?? []).length) break;
+  }
+  return { codes, codeByName };
 }
 
 interface SheetRead {
@@ -121,12 +186,14 @@ interface SheetRead {
  * 读不出任何产品表时返回 `null`，并把体检结论一并带出（错误文案要用）。
  */
 async function readProductSheet(
-  buffer: ArrayBuffer
+  buffer: ArrayBuffer,
+  suppliers: { id: number; name: string }[],
+  existingCodes: ReadonlySet<string>,
+  existingNames: ReadonlyMap<string, string>
 ): Promise<{ read: SheetRead } | { read: null; scanned: string[]; sheetNames: string[] }> {
   const XLSX = await import('xlsx');
   const wb = XLSX.read(buffer, { type: 'array' });
   const sheetNames = wb.SheetNames ?? [];
-  const suppliers = await supplierRefs();
 
   const scanned: string[] = [];
   let best: { sheetName: string; result: ReturnType<typeof parseProductRows> } | null = null;
@@ -136,7 +203,7 @@ async function readProductSheet(
       header: 1,
       defval: '',
     }) as unknown[][];
-    const parsed = parseProductRows(sheetRows, suppliers);
+    const parsed = parseProductRows(sheetRows, suppliers, existingCodes, existingNames);
     if (parsed.headerRow === -1) {
       scanned.push(`${name}:表头无「编码 + 名称」列`);
       continue;
@@ -177,7 +244,10 @@ async function readProductSheet(
  *     "导入成功了但一张图都没有"如果不报，用户只会以为是自己 Excel 里没贴图。
  */
 export async function previewProductImport(file: ExcelFilePayload): Promise<ProductImportPreview> {
-  const res = await readProductSheet(file.data);
+  // 库内索引先取一次，供解析使用（同名款判定 + 编码回显 + 自动生成的碰撞防护都靠它）
+  const suppliers = await supplierRefs();
+  const { codes, codeByName } = await existingProductIndex();
+  const res = await readProductSheet(file.data, suppliers, codes, codeByName);
   if (!res.read) {
     throw new Error(
       `Excel 内没有可识别的产品表（逐张体检：${res.scanned.join('；') || '无工作表'}）`
@@ -235,13 +305,25 @@ export async function previewProductImport(file: ExcelFilePayload): Promise<Prod
  */
 export async function commitProductImport(
   rows: ProductImportRowResult[],
-  mode: 'upsert' | 'insertOnly'
+  mode: 'upsert' | 'insertOnly',
+  sameName: SameNameMode = 'overwrite',
 ): Promise<ProductImportCommitResult> {
   const suppliers = await supplierRefs();
-  const v = validateImportRows(rows, suppliers);
+  const { codes: existingCodes, codeByName } = await existingProductIndex();
+  const v = validateImportRows(rows, suppliers, existingCodes, codeByName);
   const errors = v.issues.filter((x) => x.level === 'error').length;
 
-  const submittable = v.rows.filter((x) => x.ok);
+  // 「同名款：跳过」—— 只拦**用户点名要跳过的那一类**（款式名在库内已存在），
+  // 其余行照常提交。被判跳过的行随返回值回到界面（不是消失），用户能看见自己放弃了哪几行。
+  const skippedByName =
+    sameName === 'skip'
+      ? v.rows
+          .filter((x) => x.ok && x.nameMatched)
+          .map((x) => ({ rowNo: x.rowNo, code: x.code, name: x.name }))
+      : [];
+  const skipRowNos = new Set(skippedByName.map((x) => x.rowNo));
+
+  const submittable = v.rows.filter((x) => x.ok && !skipRowNos.has(x.rowNo));
   const save = submittable.length
     ? unwrapApi(
         await ipc.productImport({
@@ -250,17 +332,33 @@ export async function commitProductImport(
             code: x.code,
             name: x.name,
             supplierId: x.supplierId,
+            // 供应商原文一并带上：库里没有这个名字时主进程要**按它新建**（2026-10-10）。
+            // 只带 id 的话"名字对不上"就只剩一个 0，新建这件事根本无从执行。
+            supplierRaw: x.supplierRaw,
             status: x.status,
             note: x.note,
             // SKU 与图都在这一层带走：`imageId` 是抽图那步贴到行上的，
             // `skus` 是解析（或界面回改）后的归一形态 —— 库层不再认识"单元格"这种东西。
             skus: x.skus.map((s) => ({ color: s.color, size: s.size, weightG: s.weightG })),
             imageId: x.imageId,
+            // 手工进价（**分**）：`null` = 这行没填 ⇒ 主进程**不修改**库内已有价（不是清 0）。
+            // 生效日 = 导入当日 —— 改价只影响此后的订单，历史订单按区间回查仍取旧价。
+            costCents: x.costCents,
           })),
           mode,
+          effectiveFrom: todayKey(),
         })
       )
-    : { created: 0, updated: 0, skusWritten: 0, imagesAttached: 0, failed: [] };
+    : {
+        created: 0,
+        updated: 0,
+        skusWritten: 0,
+        imagesAttached: 0,
+        costsWritten: 0,
+        costsSkipped: 0,
+        suppliersCreated: 0,
+        failed: [],
+      };
 
   return {
     rows: v.rows,
@@ -271,7 +369,11 @@ export async function commitProductImport(
     updated: save?.updated ?? 0,
     skusWritten: save?.skusWritten ?? 0,
     imagesAttached: save?.imagesAttached ?? 0,
+    costsWritten: save?.costsWritten ?? 0,
+    costsSkipped: save?.costsSkipped ?? 0,
+    suppliersCreated: save?.suppliersCreated ?? 0,
     failed: save?.failed ?? [],
+    skippedByName,
   };
 }
 
@@ -318,6 +420,8 @@ export async function exportProducts(opts: {
           imagePath: r.imagePath ?? '',
           status: r.status,
           note: r.note,
+          // 进价在 `fillExportCosts` 里补（要跨域读 `ae_cost_map`）；这里先占位
+          costCents: null,
           skus: [],
         });
         idByCode.set(r.code, r.id);
@@ -325,6 +429,7 @@ export async function exportProducts(opts: {
       if (rows.length >= (res?.total ?? 0) || !(res?.rows ?? []).length) break;
     }
     await fillExportSkus(rows, idByCode);
+    await fillExportCosts(rows);
   }
 
   const layout = buildProductSheetLayout(rows, template);
@@ -380,6 +485,36 @@ async function fillExportSkus(
       if (!code) continue;
       byCode.get(code)?.skus.push({ color: v.color, size: v.size, weightG: v.weightG });
     }
+  }
+}
+
+/**
+ * 给导出行补上**当前生效进价**（分）。
+ *
+ * 口径与**算钱 / 拣货两页完全一致**：一次读全 `ae_cost_map`，用 `pickUnitCost` 按业务日期取
+ * 该款当时生效的那条（同一天 manual 优先）。这里业务日期取**今天** —— 「当前价」就是这个意思；
+ * 改价后历史订单仍按各自的下单日期回查到旧价（区间口径，不是快照）。
+ *
+ * 取不到**不报错**：那一列空着比"导出整个失败"更接近事实（款确实在，只是还没维护进价）。
+ */
+async function fillExportCosts(rows: ProductExportRow[]): Promise<void> {
+  if (!rows.length) return;
+  let costs: CostInterval[] = [];
+  try {
+    const c = unwrapApi(await ipc.aeCostMapList());
+    costs = (c ?? []).map((x) => ({
+      styleCode: String(x.styleCode ?? ''),
+      effectiveFrom: String(x.effectiveFrom ?? ''),
+      unitPrice: (Number(x.unitPriceCents) || 0) / 100,
+      source: String(x.source ?? ''),
+    }));
+  } catch {
+    return; // 读不到成本 → 进价列全空，导出照常
+  }
+  const today = todayKey();
+  for (const r of rows) {
+    const unit = pickUnitCost(costs, r.code, today);
+    r.costCents = unit === null ? null : Math.round(unit * 100);
   }
 }
 

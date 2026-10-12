@@ -8,7 +8,8 @@
 //
 // 覆盖：建表幂等、批量关联（行级失败不整批回滚）、商品ID/平台归一后同键、店铺与产品存在性校验、
 // 待关联队列的实时聚合（含「删订单后立刻少一组」这条证明它不是缓存表）、resolve 只认 confirmed、
-// invalidate 不物理删除、映射列表过滤与汇总，以及 P3 的验收原文两条。
+// invalidate 不物理删除、映射列表过滤与汇总、人工核对回流的存量回填，以及 P3 的验收原文两条；
+// 以及**补色通道**（2026-10-10：改色=替换同一条绑定 + 占位「未分类」上的存量订单跟着补色）。
 //
 // 夹具用**真实结构**（走 shop-db / order-db 的 ensure + 各自 upsert 接口），不手搓同构小表 ——
 // 结构被抹平的夹具会让依赖该结构的错误实现恒绿。
@@ -548,6 +549,34 @@ function seedOrderRows(rows) {
 }
 
 /**
+ * 走**真实落库路径**导入订单（`insertOrder` 内含订单落库那一刻的 `autoAssignByMap`）。
+ * ⚠️ 不能拿 `seedOrderRows` 顶替：那是裸 INSERT，不触发归款 —— 而"补色通道"验的正是
+ * 「落库当时归在占位色上 → 后来补色把图改到真实颜色」这条链，跳过错落库路径就全测不到了。
+ */
+function importOrderRows(rows) {
+  const out = [];
+  for (const r of rows) {
+    fpSeq += 1;
+    const img = dbRun(
+      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      [`fp-imp-${fpSeq}`, `ufp-imp-${fpSeq}`, '', ''],
+    ).lastInsertRowid;
+    const orderId = odb.insertOrder({
+      imageId: img,
+      orderNo: r.orderNo ?? `IM-${fpSeq}`,
+      shop: r.shop,
+      size: 'M',
+      rawFields: r.fields,
+      category: '',
+      color: r.color ?? '',
+      logo: '',
+    });
+    out.push({ orderId, imageId: img });
+  }
+  return out;
+}
+
+/**
  * 回流夹具：一家**已归一**的店（店1 → 店铺1 / amazon）+ 产品库里的两个款 + 两条订单。
  * 款走 `importStyles` 建（**真实路径**：同时写 `oi_styles` 与 `adoptProduct`），
  * 不手搓 `oi_styles` 一行 —— 手搓会把"两域锚点"这个最容易取错的地方抹平，让错误实现恒绿。
@@ -682,7 +711,7 @@ check('颜色只填不猜：没有可信颜色时只记到**款级**（`*`），
   );
 });
 
-check('已有**款级**映射时点名带色 → 补出带色行并生效（"配了色却没用"是最难查的一类）', () => {
+check('已有**款级**映射时点名带色 → 补成带色（**替换**款级行，不并排留一条永远命不中的旧行）', () => {
   const { style1 } = seedClassify();
   const itemId = 'B0UP';
   pdb.upsertSkuMappings([
@@ -693,6 +722,79 @@ check('已有**款级**映射时点名带色 → 补出带色行并生效（"配
   const res = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
   assert.strictEqual(res.skuBackfill.status, 'written', '同产品+能补色时不该判成 already');
   assert.strictEqual(pdb.resolveOrderSku({ shop: '店1', itemId }).spec, '黑色', '带色行没生效');
+  assert.strictEqual(
+    queryMap({ search: itemId }).total,
+    1,
+    '补色并排留了一条款级旧行（永远命中不了，却出现在映射列表里）',
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ 补色通道（2026-10-10）：映射补上颜色 → 挂占位「未分类」的存量订单一起改到该色
+//
+// 为什么单列一节：这是「货与成本 › 商品ID 映射」改绑时的用户动作，验的是两条**跨层**语义——
+//   ① 改色 = **改同一条绑定**（`upsertSkuMappings` 的 twin 替换，旧的 `*` 行不留）；
+//   ② 回填覆盖**占位色**（`reassignOrdersByItemIds`），已挂在真实颜色上的图一律不动。
+// 两条都只改数据层：界面上只看得到"映射列表少了一行 + 订单都换了色"——不钉在这里就没人守得住。
+// ═══════════════════════════════════════════════════════════════════════════════
+
+check('补色通道：映射补上颜色 → 挂占位「未分类」的存量订单一起改到该色（且不留旧映射行）', () => {
+  seedClassify();
+  const shopId = shopByName('店铺1').id;
+  const itemId = 'B0COLOR';
+  const pid = productByCode('P-0001').id;
+
+  // ① 初始形态 = 真库现状：只到款、没有色（spec='*'）；订单落库当时颜色只能兜底成占位色
+  assert.strictEqual(
+    pdb.upsertSkuMappings([{ platform: 'amazon', shopId, itemId, productId: pid }]).created,
+    1,
+  );
+  const [{ orderId: o1 }, { orderId: o2 }] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: itemId } },
+    { shop: '店1', fields: { 商品ID: itemId } },
+  ]);
+  assert.strictEqual(styleColorOfOrder(o1).color, '未分类', '夹具前提：订单此刻应归在占位色上');
+  assert.strictEqual(styleColorOfOrder(o2).color, '未分类');
+
+  // ② 改绑补色（同产品）→ 替换原款级行，不是并排新增
+  const col = pdb.upsertSkuMappings([{ platform: 'amazon', shopId, itemId, spec: '黑色', productId: pid }]);
+  assert.strictEqual(col.created, 0, '补色写成了新增 —— 旧款级行留在列表里、却永远命中不了');
+  assert.strictEqual(col.updated, 1);
+  assert.strictEqual(queryMap({ search: itemId }).total, 1, '同商品补色后应只有一条映射（改色 = 改同一条绑定）');
+  assert.strictEqual(queryMap({ search: itemId }).rows[0].spec, '黑色');
+
+  // ③ 回填：占位色上的两条存量订单跟着改到「黑色」
+  assert.strictEqual(odb.reassignOrdersByItemIds([itemId]), 2, '补色没回填存量订单 —— 用户看不到任何变化');
+  assert.strictEqual(styleColorOfOrder(o1).code, 'P-0001');
+  assert.strictEqual(styleColorOfOrder(o1).color, '黑色');
+  assert.strictEqual(styleColorOfOrder(o2).color, '黑色');
+
+  // ④ 再补一个不同的色：映射仍是一条（继续替换）；但订单已挂在**真实颜色**上 → 不跟着改判
+  //（"补过的色"也是结论，改一次映射不能把历史订单全洗一遍）
+  const again = pdb.upsertSkuMappings([{ platform: 'amazon', shopId, itemId, spec: '白色', productId: pid }]);
+  assert.strictEqual(again.updated, 1);
+  assert.strictEqual(queryMap({ search: itemId }).total, 1);
+  assert.strictEqual(queryMap({ search: itemId }).rows[0].spec, '白色');
+  assert.strictEqual(odb.reassignOrdersByItemIds([itemId]), 0, '挂在真实颜色上的图被重判了');
+  assert.strictEqual(styleColorOfOrder(o1).color, '黑色', '已定色的订单被改色 —— 改一次映射把历史订单全洗了');
+});
+
+check('补色通道的**边界**：同商品把不同颜色绑到不同产品 → 新增绑定（不把既有那条替换掉）', () => {
+  seedClassify();
+  const shopId = shopByName('店铺1').id;
+  const itemId = 'B0TWIN';
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId, itemId, spec: '黑色', productId: productByCode('P-0001').id },
+  ]);
+  const out = pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId, itemId, spec: '白色', productId: productByCode('P-0002').id },
+  ]);
+  assert.strictEqual(out.created, 1, '不同产品的带色绑定被当成"改色"替换掉了 —— 会悄悄改掉另一种颜色的归属');
+  assert.strictEqual(out.updated, 0);
+  const rows = queryMap({ search: itemId }).rows;
+  assert.strictEqual(rows.length, 2, '两条合法绑定应并存（同商品不同颜色绑不同产品是既有形态）');
+  assert.strictEqual(rows.find((r) => r.spec === '黑色').productCode, 'P-0001', '黑色那条被误替换了');
+  assert.strictEqual(rows.find((r) => r.spec === '白色').productCode, 'P-0002');
 });
 
 check('重复点名同一个款 → already（不新增行、不重复写）', () => {
@@ -786,143 +888,18 @@ check('验收②：批量确认后同一批 1000 个商品 100% 命中', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ⭐ 本页汇总（「归类核对」页指标条的产品维度）：一批订单行（店铺**原文** + 商品ID）
-//    → 已配到的**产品数 / 供应商数**
+// ~~本页汇总（`resolveOrderSkuRollup`）~~ **已随指标条整条删除（2026-10-10）**
 //
-// 为什么钉在数据层：「这一页的活落在哪些产品上」= 店铺原文归一 + `pl_shop_sku` 匹配 + 去重，
-// 三件事都在主进程。假桥冒烟只能证明"界面把回来的两个数画出来了"，证明不了**数的来历**。
-// 判据全部成对：没有任何可命中的行时是 0，插进一行能命中的就变 1 —— 否则"恒 0"也能全绿。
+// 那是「归类核对」页页头指标条上"已配产品 N 个 · 供应商 M 家"那一格的取数函数。用户判它
+// "看不懂" ⇒ 指标条整条撤掉 ⇒ 这个函数在渲染层与主进程都**零消费者**，按本仓纪律删除
+//（`electron/product-db.ts` 的 `resolveOrderSkuRollup` / `OrderSkuRollup` / `MAX_ROLLUP_ROWS`，
+//  `electron/order-handlers.ts` 的 `order-sku-rollup` 通道、preload 暴露键、types/ipc 声明一并退场）。
+//
+// ⚠️ 它测的**规则**没有消失，只是换了个入口活着：店铺原文 → 实体走 `resolveShopRef`、
+//    (平台,店铺,商品ID) → 产品走 `resolveSkuBatch` —— 这两条在**上面**都还有各自的用例。
+//    所以这里不是"删掉跑不过的用例"，而是"删掉一个已经没有调用方的汇总壳"。
+// ⚠️ 要用回来时：**连实现一起加回来**（别只把这几条断言注释掉、却让通道空跑）。
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/** 带厂家的产品（`supplier_id` 不做存在性校验，故不必建采购域的 suppliers 表） */
-function seedProductWithSupplier(code, supplierId) {
-  return pdb.upsertProduct({
-    id: 0,
-    code,
-    name: code,
-    supplierId,
-    category: '',
-    status: 'active',
-    note: '',
-  }).id;
-}
-
-check('本页汇总：一个映射都没有 → 0 产品 / 0 供应商（是"还没配"，不是"没有这个维度"）', () => {
-  reset();
-  seedShops(2);
-  mapShopNames(2);
-  seedProducts(2);
-  const r = pdb.resolveOrderSkuRollup([
-    { shop: '店1', itemId: 'R-1' },
-    { shop: '店1', itemId: 'R-2' },
-    { shop: '店2', itemId: 'R-3' },
-  ]);
-  assert.deepStrictEqual(r, { products: 0, suppliers: 0 });
-});
-
-check('本页汇总：两个商品指向同一产品 → 只算 1 个产品；同一商品的重复行不翻倍', () => {
-  reset();
-  const shops = seedShops(1);
-  mapShopNames(1);
-  const pid = seedProductWithSupplier('R-A', 7);
-  pdb.upsertSkuMappings([
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-2', productId: pid },
-  ]);
-  const r = pdb.resolveOrderSkuRollup([
-    { shop: '店1', itemId: 'R-1' },
-    { shop: '店1', itemId: 'R-2' },
-    { shop: '店1', itemId: 'R-1' },
-  ]);
-  assert.strictEqual(r.products, 1, '同一产品被算了多次');
-  assert.strictEqual(r.suppliers, 1);
-});
-
-check('本页汇总：产品数按产品去重、供应商按 supplier_id 去重（"未关联厂家"不算一家）', () => {
-  reset();
-  const shops = seedShops(1);
-  mapShopNames(1);
-  const a = seedProductWithSupplier('R-A', 7);
-  const b = seedProductWithSupplier('R-B', 7); // 与 R-A 同一厂家
-  const c = seedProductWithSupplier('R-C', 0); // 还没关联厂家
-  pdb.upsertSkuMappings([
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-A1', productId: a },
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-B1', productId: b },
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-C1', productId: c },
-  ]);
-  const r = pdb.resolveOrderSkuRollup([
-    { shop: '店1', itemId: 'R-A1' },
-    { shop: '店1', itemId: 'R-B1' },
-    { shop: '店1', itemId: 'R-C1' },
-  ]);
-  assert.strictEqual(r.products, 3, '三个不同的产品');
-  assert.strictEqual(r.suppliers, 1, '两个产品同属厂家 7；supplier_id = 0 的不计家数');
-});
-
-check('本页汇总：店铺未归一 / 没有商品ID 的行不计入（与归款同口径：不认跨店池行）', () => {
-  reset();
-  const shops = seedShops(1);
-  mapShopNames(1);
-  const pid = seedProductWithSupplier('R-A', 7);
-  const poolPid = seedProductWithSupplier('R-POOL', 8); // 池行的产品（**不该被算进来**）
-  pdb.upsertSkuMappings([
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
-  ]);
-  // 池行 = 「商品清单」的**跨店共用**关联（`shop_id = 0` + `source='shop-import'`），
-  // 只能直接写（`upsertSkuMappings` 会以"请选择店铺"拒掉）。它存在是为了让上面那条
-  // "店铺未归一 ⇒ 不计入"**可判别**：只放一个查不到的行，任何实现都会给出 0（恒绿）；
-  // 放上它之后，"拿 itemId 全库匹配"（例如改用 `resolveOrderSkuList`，它允许池行）
-  // 就会把 R-POOL 算成第二个产品 ⇒ 当场变红。
-  dbRun(
-    `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, status, source, note, created_at, updated_at)
-     VALUES ('', 0, 'R-9', '*', ?, 'confirmed', 'shop-import', '', '', '')`,
-    [poolPid],
-  );
-  const r = pdb.resolveOrderSkuRollup([
-    { shop: '店1', itemId: 'R-1' }, // 命中
-    { shop: '野店X', itemId: 'R-9' }, // 店铺没归一 ⇒ 无从查起（池行也不算：归款也不认它）
-    { shop: '店1', itemId: '' }, // 没有商品ID
-    { shop: '', itemId: 'R-8' },
-  ]);
-  assert.strictEqual(r.products, 1, '产物数对不上：池行或未归一的行被算进来了');
-  assert.strictEqual(r.suppliers, 1);
-});
-
-check('本页汇总：映射指向的产品已删 → 按未命中（悬空指针不能算成"这一页配了 N 个产品"）', () => {
-  reset();
-  const shops = seedShops(1);
-  mapShopNames(1);
-  const pid = seedProductWithSupplier('R-A', 7);
-  pdb.upsertSkuMappings([
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
-  ]);
-  assert.deepStrictEqual(pdb.resolveOrderSkuRollup([{ shop: '店1', itemId: 'R-1' }]), {
-    products: 1,
-    suppliers: 1,
-  });
-  pdb.deleteProduct(pid); // deleteProduct 不级联删映射 ⇒ 映射行真成了悬空指针
-  assert.strictEqual(queryMap({ search: 'R-1' }).total, 1, '夹具前提：映射行还在（否则这条测的是另一件事）');
-  assert.deepStrictEqual(pdb.resolveOrderSkuRollup([{ shop: '店1', itemId: 'R-1' }]), {
-    products: 0,
-    suppliers: 0,
-  });
-});
-
-check('本页汇总：入参是**订单原文** —— 「店1」与归一后的「店铺1」落在同一家店、同一个产品', () => {
-  reset();
-  const shops = seedShops(1);
-  mapShopNames(1);
-  const pid = seedProductWithSupplier('R-A', 7);
-  pdb.upsertSkuMappings([
-    { platform: 'amazon', shopId: shops[0], itemId: 'R-1', productId: pid },
-  ]);
-  const r = pdb.resolveOrderSkuRollup([
-    { shop: '店1', itemId: 'R-1' },
-    { shop: '店铺1', itemId: 'R-1' },
-  ]);
-  assert.strictEqual(r.products, 1, '两种写法没归到同一家店（说明这层没走人工归一规则）');
-  assert.strictEqual(r.suppliers, 1);
-});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ⭐ 认款顺手采纳：订单图 → **款主图**（`pendingProductImages` 只负责"挑对对象"）

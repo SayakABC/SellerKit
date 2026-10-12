@@ -10,7 +10,7 @@
 //   product-delete     删除
 //   product-batch-update 批量编辑（部分 patch：厂家/类目/状态/备注，undefined = 不修改）
 //   product-summary    汇总（总数 / 按状态 / 厂家分布 + 全量厂家下拉）
-//   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验）
+//   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验）+ 手工进价 → `ae_cost_map`
 //   product-export     导出/模板：主进程用 exceljs 生成 xlsx（按行嵌图）并弹保存框
 //   product-extract-images 从导入的 xlsx 里抽**嵌入图片**，落盘登记后按锚点行报回
 //   product-sku-list   映射列表（店铺商品ID → 产品；筛选 + 分页）
@@ -57,6 +57,13 @@ import {
   type SkuMapInput,
 } from './product-db';
 import { handle, IMG_EXT_BY_FORMAT, sniffImageFormat } from './ipc-util';
+// 产品导入 → 手工进价落 `ae_cost_map`（写入口径与成本维护界面共用；见 `manual-costs.ts` 的文件头）
+import { applyManualCosts } from './manual-costs';
+// 空库上 `costMapList()` 不会自己建表 ⇒ 带进价的导入要先 ensure（否则第一次就抛）
+import { ensureAeSchema } from './ae-db';
+// 供应商「按名称查找、不存在则新建」—— `suppliers` 表的 owner 是采购域（ADR-002 C1 单点写入），
+// 产品域只借它把 Excel 里的厂家名落成一个 id（2026-10-10）
+import { findOrCreateSupplierByName } from './purchase-db';
 // 产品表 xlsx 的生成与抽图（表头/行列宽/锚点归位都在这份里；"图真的嵌进去了没有"与
 // "图归到了哪一行"由 `scripts/product-xlsx-smoke.cjs` 单独钉住）
 import { buildProductWorkbook, extractEmbeddedImages } from './product-xlsx';
@@ -191,6 +198,8 @@ handle('product-import', (payload: any) => {
     code: str(r?.code, MAX.code).trim(),
     name: str(r?.name, MAX.name).trim(),
     supplierId: toId(r?.supplierId),
+    // 供应商**原文**：库里没有这个名字时靠它去「查找或新建」（2026-10-10）
+    supplierRaw: str(r?.supplierRaw, 100).trim(),
     // 类目**不再从导入侧来**（模板与导出都没有这一列）：库层对已存在的产品原样保留，
     // 见 `importProducts` 的文件注释 —— 这里保留字段会造成"少一列就清空一列"。
     status: coerceStatus(r?.status),
@@ -202,7 +211,48 @@ handle('product-import', (payload: any) => {
     })),
     imageId: toId(r?.imageId),
   }));
-  return importProducts(rows, payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert');
+
+  // 供应商：库里没有的名字**当场建**（用户口径 2026-10-10：「可以先通过名称查找供应商是否存在，
+  // 如果不存在则创建新的供应商」）。写成域归采购域（ADR-002 C1），产品域只注入解析器。
+  //
+  // ⚠️ 按**归一后的名字**记忆：同一批里 200 行写了同一家厂，只会查/建一次 —— 否则每行都跑一遍
+  //    `ensurePurchaseSchema` 的 DDL，500 行就是 500 遍建表语句（幂等但纯浪费）。
+  //    `created` 只在**第一次**返回 true，故 `suppliersCreated` 数的是"新建了几家"，不是"用了几次"。
+  const supplierMemo = new Map<string, { id: number; created: boolean }>();
+  const ensureSupplier = (name: string): { id: number; created: boolean } => {
+    const key = String(name ?? '').trim().replace(/\s+/g, '').toLowerCase();
+    const hit = supplierMemo.get(key);
+    if (hit) return { id: hit.id, created: false };
+    const got = findOrCreateSupplierByName(name);
+    supplierMemo.set(key, got);
+    return got;
+  };
+
+  const outcome = importProducts(
+    rows,
+    payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert',
+    { ensureSupplier },
+  );
+
+  // 手工进价 → `ae_cost_map`（写入口径在 `manual-costs.ts`，与成本维护界面同一份）。
+  // 只对**成功入库**的行写：编码冲突被跳过的行连产品都没进去，价留成孤儿只会误导。
+  // `costCents` 非 number（`null`/缺省）= 这行没填进价 ⇒ **不修改**库内已有价（**不是清 0**）。
+  //
+  // ⚠️ 先 `ensureAeSchema()`：`costMapList()` 不会自己建表，空库上第一次"带进价导入"
+  //    会在这里抛（而产品那半已经落库了 —— 用户看到的是"导入失败"但款其实进来了）。
+  ensureAeSchema();
+  const failedCodes = new Set(outcome.failed.map((f) => f.code));
+  const costs = items
+    .filter((r: any) => typeof r?.costCents === 'number')
+    .filter((r: any) => !failedCodes.has(str(r?.code, MAX.code).trim()))
+    .map((r: any) => ({
+      code: str(r?.code, MAX.code).trim(),
+      name: str(r?.name, MAX.name).trim(),
+      costCents: Number(r.costCents),
+    }));
+  const cost = applyManualCosts(costs, String(payload?.effectiveFrom ?? ''));
+
+  return { ...outcome, costsWritten: cost.written, costsSkipped: cost.skipped };
 });
 
 /**
@@ -299,10 +349,9 @@ ipcMain.handle('product-export', async (event: any, payload: any) => {
   }
 });
 
-// ---- 商品重量（pl_item_weights；按订单算运费的数据源头） ----
+// ---- 商品重量：克重只属于 SKU（`pl_variants.weight_g`），「商品ID 克重」整条链已退场 ----
 
-/** 单次导入上限（商品信息表全量导入；速卖通万级商品之内） */
-/** 单次查询上限 */
+/** 单次查询上限（product-variant-list 按产品 id 批量取 SKU） */
 const MAX_WEIGHT_QUERY = 5000;
 
 // ---- 「店铺商品ID → 产品」映射（P3）----

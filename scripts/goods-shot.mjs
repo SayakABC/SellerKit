@@ -187,6 +187,26 @@ if (box && box.w > 10 && box.h > 10) {
 const logText = await evaluate('(document.getElementById("shot-log")||{}).textContent || ""');
 console.log('状态：', logText);
 
+// ---- 第四张：切到「进价」页签（2026-10-10 整页改版：两栏 + 展开的生效区间）---------------
+// 布局类问题（这一页改版的重点）唯一能判的是人眼，所以两种形态各出一张：
+// 宽视口看两栏并排、窄视口看上下堆叠。
+const costOk = await evaluate(`(async function(){
+  var t = document.querySelector('[data-act="tab-cost"]');
+  if (!t) return false;
+  t.click();
+  var t0 = Date.now();
+  while (Date.now() - t0 < 10000) {
+    if (document.querySelector('[data-act="cost-table"]')) break;
+    await new Promise(function (r) { setTimeout(r, 60); });
+  }
+  var b = document.querySelector('[data-cost-code="S1"] [data-act="cost-row-expand"]');
+  if (b) b.click();
+  await new Promise(function (r) { setTimeout(r, 500); });
+  return !!document.querySelector('[data-act="cost-table"]');
+})()`);
+if (costOk) await shot(`cost-${W}x${H}`);
+else console.log('⚠ 「进价」页没渲染出来，跳过该张（检查假桥的 aeCostMapList）');
+
 // PROBE=1 时额外量几何：谁压着谁、各块的矩形与 z-index/position —— 布局类缺陷的判据，
 // 不靠人眼猜"是不是重叠"。
 if (process.env.PROBE === '1') {
@@ -213,12 +233,34 @@ if (process.env.PROBE === '1') {
       info('.gd-detail__relate'),
       info('[data-act="relate-from-expanded"]'),
       info('.gd-detail__note'),
-      info('[data-act="variant-table"]'),
+      info('[data-act="detail-links"]'),
+      info('.gd-detail__meta'),
       info('.gd-detail__ops'),
       { btnHitTest: at, scrollY: window.scrollY }
     ];
   })()`);
   console.log(JSON.stringify(probe, null, 1));
+  // 「展示不全」类问题的专属度量：容器宽度 → 卡片宽度 → 子表 min-content 宽度。
+  // 判据是 scrollWidth > clientWidth（横向溢出被裁）与表格 rect 宽度超过卡片。
+  const overflow = await evaluate(`(function(){
+    function box(el) { if (!el) return null; var r = el.getBoundingClientRect();
+      return { w: Math.round(r.width), sw: el.scrollWidth, cw: el.clientWidth, x: Math.round(r.left) }; }
+    var pane = document.querySelector('[data-act="pane-products"]');
+    var detail = document.querySelector('[data-act="row-detail"]');
+    var grid = document.querySelector('.gd-detail');
+    var blocks = Array.prototype.map.call(document.querySelectorAll('.gd-detail__block'), function (b) {
+      var l = b.querySelector('[data-act="detail-links"]');
+      return { block: box(b), inner: box(l), innerSel: l ? 'detail-links' : null };
+    });
+    var body = document.querySelector('.gd-panel__body, .wb-panel__body');
+    var rel = document.querySelector('.gd-detail__relate');
+    return { innerWidth: window.innerWidth, pane: box(pane), detail: box(detail),
+             grid: box(grid), gridCols: grid ? getComputedStyle(grid).gridTemplateColumns : null,
+             relate: box(rel), blocks: blocks,
+             bodyScrollX: body ? body.scrollWidth - body.clientWidth : null,
+             bodyW: body ? body.clientWidth : null };
+  })()`);
+  console.log('overflow:', JSON.stringify(overflow, null, 1));
   // 找出按钮到根之间所有会创建 stacking context 的祖先（z-index 抬升类缺陷的唯一来源）
   const chain = await evaluate(`(function(){
     var el = document.querySelector('[data-act="relate-from-expanded"]');

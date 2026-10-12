@@ -93,7 +93,7 @@
           <span v-else class="wb-field__hint">先保存产品，才能上传主图与维护 SKU。</span>
         </div>
 
-        <!-- SKU 子表：颜色 × 尺码组合；行内即时保存；克重口径与 pl_item_weights 一致（克，整数） -->
+        <!-- SKU 子表：颜色 × 尺码组合；行内即时保存；克重单位克、取整数 -->
         <div v-if="isEdit" class="wb-field ed-skus">
           <span class="wb-field__label">SKU（颜色 / 尺码 / 编码 / 克重）</span>
           <div v-if="skuLoading" class="wb-field__hint">SKU 读取中…</div>
@@ -244,8 +244,8 @@
             </div>
 
             <span class="wb-field__hint">
-              同款下「颜色+尺码」组合不可重复；编码非空时全局唯一。克重单位为克（与商品信息 Excel
-              的物流重量同口径）。标「旧」的历史 SKU 只有名称，填上颜色尺码保存后即升级。
+              同款下「颜色+尺码」组合不可重复；编码非空时全局唯一。{{ gloss('weight') }}，与商品信息
+              Excel 的物流重量同口径。标「旧」的历史 SKU 只有名称，填上颜色尺码保存后即升级。
             </span>
           </template>
         </div>
@@ -313,6 +313,9 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import * as api from '../api';
 import { pickImage as selectImageFile } from '../productIo';
+// 克重的术语解释在这里（而不是左栏展开区）：2026-10-09 起，克重的**唯一编辑处**就是这一屏 ——
+// 术语说明跟着它走，展开区只留一句"要改去点编辑"。
+import { gloss } from '../glossary';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 import { toast } from '@/core/services/toast';
 import type { ProductListItem, VariantRow } from '@/types';

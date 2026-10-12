@@ -519,6 +519,14 @@ export interface ProductImportRow {
   code: string;
   name: string;
   supplierId: number;
+  /**
+   * 供应商**原文**（Excel 里写的名字；2026-10-10 新增）。
+   *
+   * `supplierId` 为 0 且有它时，由调用方注入的 `ensureSupplier` 去**按名称查找、不存在则新建**
+   * （见 `importProducts` 的第 3 个参数）—— 本层自己**不写** `suppliers` 表：
+   * 那张表的 owner 是采购域（ADR-002 C1 单点写入）。
+   */
+  supplierRaw?: string;
   status: string;
   note: string;
   /**
@@ -542,6 +550,11 @@ export interface ProductImportOutcome {
   imagesAttached: number;
   /** 只有库层才拦得住的失败行（如 `insertOnly` 模式下编码已存在） */
   failed: { rowNo: number; code: string; message: string }[];
+  /**
+   * 本次由 `ensureSupplier` **新建**的供应商条数（2026-10-10）。
+   * 只统计"真的为某一行建了档"的次数 —— 名称已存在时不计（那本来就不是新写）。
+   */
+  suppliersCreated: number;
 }
 
 /**
@@ -565,21 +578,27 @@ export interface ProductImportOutcome {
  *    但删图的意图不如"没带图"这个事实明确，宁可不覆盖）。
  *
  * @param mode `upsert`（默认）= 编码已存在则更新该行；`insertOnly` = 编码已存在则记为该行失败
- * @returns 新增 / 更新 / SKU / 图 / 失败行的计数与明细
+ * @param opts.ensureSupplier 「名称 → 供应商 id」的解析器（**由调用方注入**，本层不写 `suppliers` 表）。
+ *        只在行**确定要接着往下走**（编码冲突检查已通过）时才调用 ⇒ 失败行不会留下孤儿供应商。
+ *        `created: true` 会被计入 `outcome.suppliersCreated`。
+ * @returns 新增 / 更新 / SKU / 图 / 失败行 / 新建供应商 的计数与明细
  */
 export function importProducts(
   rows: ProductImportRow[],
   mode: 'upsert' | 'insertOnly' = 'upsert',
+  opts?: { ensureSupplier?: (name: string) => { id: number; created: boolean } },
 ): ProductImportOutcome {
   ensureProductSchema();
   ensureVariantSchema();
   const list = Array.isArray(rows) ? rows : [];
+  const ensureSupplier = typeof opts?.ensureSupplier === 'function' ? opts.ensureSupplier : null;
   const out: ProductImportOutcome = {
     created: 0,
     updated: 0,
     skusWritten: 0,
     imagesAttached: 0,
     failed: [],
+    suppliersCreated: 0,
   };
 
   dbTransaction(() => {
@@ -595,11 +614,22 @@ export function importProducts(
         if (existing && mode === 'insertOnly') {
           throw new Error(`款编码已存在：${code}`);
         }
+
+        // 供应商：显式 id 优先；否则拿原文去「查找或新建」（2026-10-10）。
+        // ⚠️ 放在编码冲突检查**之后**：insertOnly 下会被跳过的行不该先把供应商建出来，
+        //    否则用户会看到一堆"从没被任何产品引用过"的供应商。
+        let supplierId = toId(r?.supplierId);
+        if (!supplierId && ensureSupplier && r?.supplierRaw) {
+          const sup = ensureSupplier(String(r.supplierRaw));
+          supplierId = toId(sup?.id);
+          if (sup?.created) out.suppliersCreated++;
+        }
+
         const saved = upsertProduct({
           id: existing ? num(existing.id) : 0,
           code,
           name: str(r?.name, MAX.name),
-          supplierId: toId(r?.supplierId),
+          supplierId,
           // ① 保留类目：新行无类目（空串），已有行原样带回来
           category: existing ? str(existing.category, MAX.category) : '',
           status: (PRODUCT_STATUSES as readonly string[]).includes(str(r?.status, MAX.status))
@@ -742,7 +772,7 @@ export interface SkuMapInput {
 export interface SkuMapOutcome {
   created: number;
   updated: number;
-  /** 顺带回填的**存量订单行数**（映射写入后重跑确定性归款的结果）。
+  /** 顺带处理的**存量订单行数**（映射写入后重跑确定性归款：新归款 + 补色都算，值没变的不计）。
    *  由 handler 层填（本层不 import 订单域，避免 `order-db → product-db` 成环）。 */
   reassigned: number;
   /** 顺带把订单图采纳为**款主图**的张数（认款那一刻顺手做，见 `pendingProductImages`）。
@@ -1291,81 +1321,6 @@ export function resolveShopRef(shop: unknown): { shopId: number; platform: strin
   return { shopId, platform: shopLabelMap().get(shopId)?.platform ?? '' };
 }
 
-// ---- 本页汇总（核对页指标条：这一页的活最终落在哪些产品 / 几家供应商上）----
-
-/** 单次汇总的行数上限（核对页一页 30 行；这是防呆上限，不是业务上限） */
-const MAX_ROLLUP_ROWS = 500;
-
-/** 本页涉及的产品 / 供应商（`supplier_id = 0` 的"未关联厂家"不计家数） */
-export interface OrderSkuRollup {
-  /** 本页商品已配到的**去重产品**数（0 = 一个都没配上，不是"这份数据没有这个维度"） */
-  products: number;
-  /** 这些产品涉及的**去重供应商**数 */
-  suppliers: number;
-}
-
-/**
- * ⭐ **本页**汇总：一批订单行（店铺**原文** + 商品ID）→ 已配到的产品数 / 供应商数。
- *
- * **为什么在数据层而不是渲染层算**：判"这个商品属于哪个产品"要经 `pl_shop_sku` 的
- * `(平台, 店铺, 商品ID)` 且必须**先按人工归一规则把店铺原文变成店铺实体** —— 这套规则
- * 落库（`autoAssignByMap`）、回流（`skuBackfillFromOrder`）、待关联队列三处已经在用，
- * 渲染层再写一份的下场是"队列说这家店已归一、这一页却统计不出来"，且两边分别看都正常。
- *
- * **为什么入参是订单原文的店铺名而不是店铺 id**：调用方是核对页，它手上只有订单行
- * （`OrderRecord.shop` 是报表原文），没有归一后的实体 —— 这与 `resolveOrderSku` 的处境相同。
- *
- * **刻意复用而不是新写匹配**（本仓最忌两块口径打架）：
- *   · 店铺原文 → (店铺 id, 平台)  走 `resolveShopRef`；
- *   · (平台, 店铺 id, 商品ID) → 产品  走 `resolveSkuBatch`（**一次算完一批**，不逐行查）。
- * 本函数只做"去重 + 计数 + 两条与 `resolveOrderSku` 对齐的跳过规则"。
- *
- * 两条跳过规则（都对 **少算** 的方向，不会把两件商品混成一件）：
- *   · 店铺没归一 / 没有商品ID ⇒ 这一行**无从查起**，不是"没配上"；
- *   · 映射指向的产品已删（悬空指针）⇒ 按未命中 —— 与 `resolveOrderSku` 同一支。
- *     两处不一致的症状是"这一页说配了 3 个产品、真去拿货只有 2 个"。
- *
- * ⚠️ 已知**欠算**：本页若把同一件商品拆成两种店铺写法（多一个空格 / 零宽字符），
- * 店铺原文去重算两次、`resolveShopRef` 都会命中同一家店 ⇒ 产品/供应商仍然各只算一次
- * （这两个数是**产品级**的，不受行数影响）。分子分母不在这里暴露，故不会出现"本页 2 个商品、
- * 3 个已配"这种自相矛盾的读数。
- */
-export function resolveOrderSkuRollup(rows: { shop?: unknown; itemId?: unknown }[]): OrderSkuRollup {
-  const out: OrderSkuRollup = { products: 0, suppliers: 0 };
-  const list = Array.isArray(rows) ? rows.slice(0, MAX_ROLLUP_ROWS) : [];
-  // 产品域还没建（老库还没跑交接）时**不报错**：本页就是"一个都没配上"，
-  // 界面据此提示"还没配映射"，而不是弹一条用户看不懂的技术原因。
-  if (!list.length || !productSchemaReady()) return out;
-
-  // 店铺原文 → 实体：原文先去重再查（一页里同一家店会重复出现很多次，别查 N 遍）
-  const refs = new Map<string, { platform: string; shopId: number }>();
-  for (const r of list) {
-    const key = toNameKey(r?.shop);
-    if (key && !refs.has(key)) refs.set(key, resolveShopRef(r?.shop));
-  }
-  const keys = list.map((r) => {
-    const ref = refs.get(toNameKey(r?.shop));
-    return { platform: ref?.platform ?? '', shopId: ref?.shopId ?? 0, itemId: toSkuKey(r?.itemId) };
-  });
-  const hits = resolveSkuBatch(keys);
-  const labels = productLabelMap();
-
-  const pids = new Set<number>();
-  const supplierIds = new Set<number>();
-  keys.forEach((k, i) => {
-    if (!k.shopId || !k.itemId) return;
-    const pid = num(hits[i]?.productId);
-    const label = pid ? labels.get(pid) : undefined;
-    if (!label) return;
-    pids.add(pid);
-    // `supplier_id = 0` = 还没关联厂家：把它算成"一家供应商"会让这个数虚高
-    if (label.supplierId > 0) supplierIds.add(label.supplierId);
-  });
-  out.products = pids.size;
-  out.suppliers = supplierIds.size;
-  return out;
-}
-
 /**
  * 款编码 → 产品库 id。`pl_products.code` 是订单域（`oi_styles.code`）与产品域之间**唯一**的锚点
  * （ADR-002 D1），映射行存的 `product_id` 必须是它 —— 拿 `oi_styles.id` 去填会指向别的产品，
@@ -1466,11 +1421,16 @@ function normPlatform(v: unknown): string {
  * **改绑 = 替换**（2026-09-29 裁定）：同一 `(platform, shop_id, item_id, spec)` 的映射行**只有一条**，
  * 提交另一个产品即替换它；一对多的「套装」不在此处维护，走「商品清单」的池行（`SKU_POOL_SOURCE`）。
  *
+ * **改色 = 改同一条绑定**（2026-10-10，补色通道）：5 列键只在 `spec` 上对不上、而该商品名下**同产品**
+ * 恰好只有**一条**映射行时，**替换它的 spec** 而不是并排新增 —— 用户"给这个商品补个颜色"之后，
+ * 旧的款级行（`*`）必须消失（否则映射列表里同商品两条、一条永远不会被命中，而人以为旧的那条已经变了）。
+ *
  * ⚠️ 不能再用 `ON CONFLICT(platform, shop_id, item_id, spec)`：表的一对多改造已把 UNIQUE 扩成
  * **5 列**（含 `product_id`，池行的 N 条关联需要它），该 target 不再匹配任何唯一约束 ——
  * 症状是**每次写入都失败**（`ON CONFLICT clause does not match ...`）且只在全新库上暴露
  * （老库的 4 列键因 `CREATE TABLE IF NOT EXISTS` 保留下来，把问题掩盖了）。
- * 故这里显式「查映射行 → 命中即替换，未命中才新增」，不再依赖唯一键形状。
+ * 故这里显式「查映射行 → 命中即替换；spec 对不上时再看是否属于'同一条绑定的改色'；都不是才新增」，
+ * 不再依赖唯一键形状。
  */
 /**
  * 按 (产品, 颜色) 取一个变体 id —— **不让用户在弹层里把颜色选两遍**（选产品、再选颜色），
@@ -1534,12 +1494,36 @@ export function upsertSkuMappings(rows: SkuMapInput[]): SkuMapOutcome {
           );
           out.updated++;
         } else {
-          dbRun(
-            `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, variant_id, status, source, note)
-             VALUES (?,?,?,?,?,?,?,'manual',?)`,
-            [platform, shopId, itemId, spec, productId, variantId, status, note],
+          // 5 列键只在 spec 上对不上：先看是不是"**同一条绑定的改色**"——该商品名下**同产品**
+          // 恰好已有**一条**映射行时，改色 = **替换它的 spec**，而不是在它旁边新增一条。
+          // 旁留的旧行永远命中不了（`resolveOrderSku` 只取一条、带色行优先），而人以为它已经变了
+          //（症状：映射列表里同商品两条，一条 `*` 一条带色，看不出哪条算数）。
+          // 判据带"同产品"是有意的：同商品把**不同颜色绑到不同产品**是既有合法形态（带色行优先
+          // 就是为它设计的），那种写入是在**新增一条绑定**，不能把既有行替换掉；
+          // 已有 2+ 条同产品行（历史数据）也无从判断该动哪条，维持"新增"。
+          const twin = dbQuery<{ id: number }>(
+            `SELECT id FROM pl_shop_sku
+              WHERE platform = ? AND shop_id = ? AND item_id = ? AND product_id = ? AND ${skuMappingSql()}
+              ORDER BY id LIMIT 2`,
+            [platform, shopId, itemId, productId],
           );
-          out.created++;
+          if (twin.length === 1) {
+            dbRun(
+              `UPDATE pl_shop_sku
+               SET spec = ?, variant_id = ?, status = ?, source = 'manual', note = ?,
+                   updated_at = datetime('now','localtime')
+               WHERE id = ?`,
+              [spec, variantId, status, note, twin[0].id],
+            );
+            out.updated++;
+          } else {
+            dbRun(
+              `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, variant_id, status, source, note)
+               VALUES (?,?,?,?,?,?,?,'manual',?)`,
+              [platform, shopId, itemId, spec, productId, variantId, status, note],
+            );
+            out.created++;
+          }
         }
       } catch (e) {
         out.failed.push({

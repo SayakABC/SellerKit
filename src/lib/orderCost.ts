@@ -240,8 +240,6 @@ export interface OrderCostRow {
   qtySource: QtySource;
   country: string;
   weightG: number | null;
-  /** 克重来自哪：`item` = 商品ID 克重（`pl_item_weights`）· `sku` = 按款色码回落产品库 SKU 克重 · null = 两处都没有 */
-  weightSource: 'item' | 'sku' | null;
   /** 运费（元）；null = 这一环缺（见 gaps） */
   shipping: number | null;
   /** 运费的拒算分类（`quoteOrders` 的 `reasonClass`）；'' = 算出来了 */
@@ -425,14 +423,19 @@ export function dateKey(raw: unknown): string {
 }
 
 /**
- * 取某款在某一业务日的成本单价（区间语义，口径同 `ae-engine.costAt`）。
- * @returns null = 该款一条成本行都没有（**不是 0**：0 会让"缺成本"看起来像"成本为零"）
+ * 取「该款在 `bizDate` 生效的那条成本区间」。
+ *
+ * 为什么要有这个函数（而不是让调用方自己挑）：`pickUnitCost`（算钱 / 拣货）与**成本维护界面**
+ * （要显示"当前生效的是哪条、来源是手工还是拿货"）必须挑出**同一条**。挑法里有排序 + 回落
+ * 两条规则，各写一份必然漂开 —— 页面上写着"当前价 12.34（手工）"，利润里算的却是 10.00（拿货对账）。
+ *
+ * 规则：生效日升序，同日 `manual` 优先；取 ≤ `bizDate` 的最后一条；一条都没有（或日期认不出）→ 取最早那条。
  */
-export function pickUnitCost(
+export function pickCostInterval(
   costs: CostInterval[],
   styleCode: string,
   bizDate: string,
-): number | null {
+): CostInterval | null {
   if (!styleCode) return null;
   const rows = (Array.isArray(costs) ? costs : []).filter(
     (c) => c && c.styleCode === styleCode && c.effectiveFrom,
@@ -447,13 +450,26 @@ export function pickUnitCost(
         ? -1
         : 1,
   );
-  if (!bizDate) return sorted[0].unitPrice; // 日期认不出 → 区间无从判定，取最早
+  if (!bizDate) return sorted[0]; // 日期认不出 → 区间无从判定，取最早
   let hit: CostInterval | undefined;
   for (const r of sorted) {
     if (r.effectiveFrom <= bizDate) hit = r;
     else break;
   }
-  return (hit ?? sorted[0]).unitPrice;
+  return hit ?? sorted[0];
+}
+
+/**
+ * 取「该款在 `bizDate` 生效的单价」（元）。
+ *
+ * @returns `null` = 该款在那一刻没有任何可用成本（**不是 0** —— 0 会被读成"零成本"）
+ */
+export function pickUnitCost(
+  costs: CostInterval[],
+  styleCode: string,
+  bizDate: string,
+): number | null {
+  return pickCostInterval(costs, styleCode, bizDate)?.unitPrice ?? null;
 }
 
 /** 统计维度：款（成本口径的天然维度）/ 目的国（运费口径的天然维度）/ 经营状态桶 */
@@ -617,9 +633,7 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
   const table = input?.rateTable ?? null;
 
   const skuWeights = input?.skuWeights ?? {};
-  // 在 `OrderShippingRow` 上加了一个**本层专用**的字段（`weightSource`）：真正的运费计价只读 id/orderNo/country/itemId/weightG，
-  // 多带一个字段无害 —— 而来源要一路带到行上，界面上得如实说"这克重是回落的"。
-  const shippingRows: (OrderShippingRow & { weightSource: 'item' | 'sku' | null })[] = orders.map((o) => {
+  const shippingRows: OrderShippingRow[] = orders.map((o) => {
     const ex = extractShipping(o?.rawFields ?? {});
     const weightG = resolveWeightG(o, skuWeights);
     return {
@@ -628,7 +642,6 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
       country: ex.country,
       itemId: ex.itemId,
       weightG,
-      weightSource: weightG === null ? null : 'sku',
     };
   });
 
@@ -794,7 +807,6 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
       qtySource,
       country: sr.country,
       weightG: sr.weightG,
-      weightSource: sr.weightSource,
       shipping,
       shippingReason: q && !q.ok ? q.reasonClass : '',
       rateVersion: versionFor(o),

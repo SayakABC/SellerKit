@@ -2,7 +2,8 @@
 //
 //   npm run goods:ui
 //
-// 为什么需要它：这一页是**写入面**（改克重会落库），而 `productVariantUpsert` 是**全量提交** ——
+// 为什么需要它：这一页是**写入面**（2026-10-09 起，改克重的唯一入口是「编辑」抽屉），
+// 而 `productVariantUpsert` 是**全量提交** ——
 // 只传 `weightG` 会把该 SKU 的颜色/尺码/名称静默清空（界面看着"保存成功"）。这条只能靠"点击后断言出参"抓。
 //
 // 做法与 `picking:ui` / `today:ui` 同款：build 产物 → 假桥 → 本地 HTTP → 无头 Chrome → 抓 `#smoke-result`。
@@ -51,14 +52,37 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
   // 断言脚本是**另一段 script**（与假桥不同作用域），要通过 window 转手。
   // 导出闭环那条断言要拿它比对"导出的图路径 == 库里主图的路径"—— 写死字面量两边就会各改各的。
   window.__smokeProductImg = PRODUCT_IMG;
+  /**
+   * S1 的款名特意取一个"长得像真的"的长名（18 字）。
+   *
+   * 为什么不能继续用「款一」：用户报的症状是"款式名展示不完全"，而短名在两行之内怎么排都放得下
+   * ⇒ scrollHeight <= clientHeight 那条断言**恒绿**（等于没测）。长名才让"放不下"有机会发生。
+   * ⚠️ 它是**常驻夹具**（不是开关）：早先试过"临时打开开关 + 点刷新 + 再刷新复位"，
+   *    结果污染了队列那条"缩略图只合批取一次"的绝对计数（每次页级刷新都会让右栏重新合批取图，
+   *    1 → 3 条，红的却是队列那条断言）。夹具里直接长名字最省事，也最不容易再撞上这类污染。
+   */
+  var LONG_STYLE_NAME = '圆领纯棉短袖上衣（宽松版·深藏青·含围巾与帽子）';
+  // 断言脚本是**另一段 script**（不同作用域）⇒ 那个名字也要转手一次（同 __smokeProductImg）。
+  window.__smokeLongStyleName = LONG_STYLE_NAME;
   var PRODUCTS = [
-    { id: 1, code: 'S1', name: '款一', supplierId: 7, supplierName: '厂A', category: '衣服', status: 'active', note: '', imageId: 1, imagePath: PRODUCT_IMG, createdAt: '', updatedAt: '' },
+    { id: 1, code: 'S1', name: LONG_STYLE_NAME, supplierId: 7, supplierName: '厂A', category: '衣服', status: 'active', note: '', imageId: 1, imagePath: PRODUCT_IMG, createdAt: '', updatedAt: '' },
     { id: 2, code: 'S2', name: '款二', supplierId: 0, supplierName: '', category: '衣服', status: 'active', note: '', imageId: 0, imagePath: '', createdAt: '', updatedAt: '' },
   ];
   var VARIANTS = [
     { id: 11, productId: 1, code: 'SKU-A', name: '黑 L', color: '黑', size: 'L', weightG: 320, status: 'active' },
     { id: 12, productId: 1, code: '', name: '黑 M', color: '黑', size: 'M', weightG: 0, status: 'active' },
     { id: 21, productId: 2, code: '', name: '白 XL', color: '白', size: 'XL', weightG: 400, status: 'active' },
+  ];
+
+  /**
+   * 成本表（ae_cost_map）夹具。
+   * S1 两条区间：2026-01-01 手工 12.34（**当前生效**）+ 2025-06-01 拿货对账 9.99（更早）——
+   * 一份夹具同时验「当前价挑哪条」「来源怎么说」「区间展开」「删了回落到哪」。
+   * S2 刻意**没有**成本行 → 缺价清单里必须有它（那是「进价」页相对导入模板的独有价值）。
+   */
+  var COSTS = [
+    { styleCode: 'S1', effectiveFrom: '2026-01-01', styleName: '款一', unitPriceCents: 1234, sampleCount: 0, source: 'manual', updatedAt: '' },
+    { styleCode: 'S1', effectiveFrom: '2025-06-01', styleName: '款一', unitPriceCents: 999, sampleCount: 0, source: 'purchase', updatedAt: '' },
   ];
 
   /* ==========================================================================
@@ -119,7 +143,7 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
     { id: 901, itemId: 'SKU-A1', productId: 1, productCode: 'S1', productName: '款一', createdAt: '2026-09-27 12:00' },
   ];
 
-  /** 本会话已建立的映射键（队列据此剔除\"已关联\"的组）—— 真实里是 pl_shop_sku WHERE status='confirmed' */
+  /** 本会话已建立的映射键（队列据此剔除"已关联"的组）—— 真实里是 pl_shop_sku WHERE status='confirmed' */
   var MAP = {};
 
   /* ==========================================================================
@@ -204,8 +228,60 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
     // 筛选语义镜像主进程 listProducts：**快捷筛选优先于 supplierId**（同时给时以快捷筛选为准）。
     // 夹具必须连"筛选真的会窄"一起复刻 —— 否则"点了指标条列表被筛窄"这条断言会恒绿
     // （界面发了参数、假桥原样返回全部，行数照样是 2）。
-    // 缺克重集合**每次现算**：假桥的 upsert 不改克重，但组件的乐观更新会改 VARIANTS 里的对象，
-    // 写死一份会在保存那一步之后失准。
+    // 缺克重集合**每次现算**：假桥的 upsert 会就地改夹具对象（2026-10-09 起，
+    // 与 productUpsert 同一口径），写死一份会在任何一次克重保存之后失准。
+    // 成本表（列表「进价」列 + 「进价」页共用这一份夹具）：S1 有价 12.34，S2 无 → 列表显示「—」。
+    // 写入口径与宿主同源：值没变就不写（这里也照做，否则"重复保存"那条断言会蒙对）。
+    'aeCostMapList': function () {
+      rec('aeCostMapList', {});
+      // 零成本样本（仅当断言脚本打开 window.__smokeEmptyCosts 时走）：用于验「进价」页的空态。
+      // ⚠️ 返回空数组而不是把 COSTS 清空 —— 夹具在后面的步里还要用，清空就再也回不来了。
+      //    没有这个反向样本，"一条成本都没有"这个状态造不出来 ⇒ 空态那条断言恒绿（本仓老坑）。
+      if (window.__smokeEmptyCosts) return { success: true, data: [] };
+      return { success: true, data: COSTS.slice() };
+    },
+    // ⚠️ 桩必须**真改夹具**（COSTS）—— 只记调用的话，"保存后表里出现 S2 那行"靠组件乐观更新
+    //    照样能蒙对，写入路径一改就断（2026-10-09 克重那轮踩过同一个坑）。
+    'aeCostMapUpsertManual': function (p) {
+      rec('aeCostMapUpsertManual', p);
+      var items = (p && p.items) || [];
+      var written = 0;
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var latest = null;
+        for (var j = 0; j < COSTS.length; j++) {
+          if (COSTS[j].styleCode === it.styleCode && COSTS[j].source === 'manual') latest = COSTS[j];
+        }
+        if (latest && latest.unitPriceCents === it.unitPriceCents) continue;
+        COSTS.push({
+          styleCode: it.styleCode,
+          effectiveFrom: it.effectiveFrom || (p && p.effectiveFrom) || '',
+          styleName: it.styleName || '',
+          unitPriceCents: it.unitPriceCents,
+          sampleCount: 0,
+          source: 'manual',
+          updatedAt: '',
+        });
+        written++;
+      }
+      return { success: true, data: { written: written, skipped: items.length - written } };
+    },
+    'aeCostMapDeleteManual': function (p) {
+      rec('aeCostMapDeleteManual', p);
+      var keys = (p && p.keys) || [];
+      var del = 0;
+      for (var k = 0; k < keys.length; k++) {
+        for (var i = COSTS.length - 1; i >= 0; i--) {
+          if (COSTS[i].styleCode === keys[k].styleCode &&
+              COSTS[i].effectiveFrom === keys[k].effectiveFrom &&
+              COSTS[i].source === 'manual') {
+            COSTS.splice(i, 1);
+            del++;
+          }
+        }
+      }
+      return { success: true, data: { deleted: del } };
+    },
     'productList': function (p) {
       rec('productList', p);
       var rows = PRODUCTS;
@@ -281,7 +357,24 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
       }
       return { success: true, data: { total: rows.length, byStatus: byStatus, byPlatform: [], byShop: byShop } };
     },
-    'productVariantUpsert': function (p) { rec('productVariantUpsert', p); return { success: true, data: { id: p.id, created: false } }; },
+    // ⚠️ 桩**真的改夹具对象**（与下面 productUpsert 同一口径）。
+    // 2026-10-09 之前它只记调用、不改数据 —— 那时"改克重后导出读到新值"这条断言能过，
+    // 靠的是**组件的乐观更新**恰好改了同一批对象（假桥返回的是同一份引用），属于蒙对：
+    // 换成任何"不就地改对象"的实现，断言就会变成"读到旧值也算过"。
+    // 现在克重的唯一写入入口是编辑抽屉，桩必须真的反映它，那条断言才有意义。
+    'productVariantUpsert': function (p) {
+      rec('productVariantUpsert', p);
+      var pid = Number((p && p.id) || 0);
+      for (var vi = 0; vi < VARIANTS.length; vi++) {
+        if (VARIANTS[vi].id !== pid) continue;
+        VARIANTS[vi].weightG = Number(p.weightG) || 0;
+        VARIANTS[vi].color = String(p.color || '');
+        VARIANTS[vi].size = String(p.size || '');
+        VARIANTS[vi].name = String(p.name || VARIANTS[vi].name);
+        VARIANTS[vi].code = String(p.code || '');
+      }
+      return { success: true, data: { id: p.id, created: false } };
+    },
     'productDbEnsure': function () { return { success: true, data: { ok: true } }; },
 
     /* ---- 产品表单 upsert（编辑抽屉的**即时保存**走它）---- */
@@ -358,11 +451,29 @@ try { localStorage.removeItem('sk.goods.simple'); } catch (e) {}
     'productImport': function (p) {
       rec('productImport', p);
       var items = (p && p.items) || [];
+      // ⚠️ 这两格必须**按夹具真算**，不能写死：结果页的「写入进价 N 条 / 新建供应商 N 家」
+      //    是 2026-10-10 新增的回执（进价没入库、供应商没写入这两件事，原先界面上一个字都不说）。
+      //    桩写死 0 ⇒ 那两条断言恒红；反过来写死 1 ⇒ 与夹具脱钩、换个夹具就骗过去了。
+      var knownSupplierNames = ['厂A', '厂B'];
+      var createdSeen = {};
+      var suppliersCreated = 0;
+      for (var si = 0; si < items.length; si++) {
+        var it = items[si];
+        var raw = String((it && it.supplierRaw) || '').trim();
+        if (!raw || Number((it && it.supplierId) || 0) > 0) continue;
+        if (knownSupplierNames.indexOf(raw) >= 0) continue;
+        if (createdSeen[raw]) continue;
+        createdSeen[raw] = 1;
+        suppliersCreated++;
+      }
       return { success: true, data: {
         created: items.length,
         updated: 0,
         skusWritten: items.reduce(function (n, r) { return n + (((r && r.skus) || []).length); }, 0),
         imagesAttached: items.filter(function (r) { return r && r.imageId > 0; }).length,
+        costsWritten: items.filter(function (r) { return typeof (r && r.costCents) === 'number'; }).length,
+        costsSkipped: 0,
+        suppliersCreated: suppliersCreated,
         failed: [],
       } };
     },
@@ -720,16 +831,8 @@ function lastToastWith(needle) {
 /** 图断言用的 dataUrl：由假桥那段脚本挂在 window 上（两段脚本不是同一作用域） */
 var SMOKE_IMG = window.__smokeImg || { order: '', thumb: '', big: '' };
 function productRows() { return document.querySelectorAll('[data-act="product-table"] tbody tr[data-product-id]'); }
-function variantRows() { return document.querySelectorAll('[data-act="variant-table"] tbody tr[data-variant-id]'); }
-function weightInput(rowIndex) {
-  var rows = variantRows();
-  return rows[rowIndex] ? rows[rowIndex].querySelector('[data-act="weight"]') : null;
-}
-/** 空安全的克重读法（子表/输入框不在时返回 null，而不是抛 TypeError 打断整段冒烟） */
-function weightValue(rowIndex) {
-  var el = weightInput(rowIndex);
-  return el ? el.value : null;
-}
+// ⚠️ 原先这里还有一个 「variantRows()」（数展开区 SKU 子表的行）。2026-10-10 展开区的 SKU 清单
+//    整块撤掉后它没有消费者了 —— 撤掉而不是留着：留着的那一行会让读代码的人以为展开区还有子表。
 
 /* ---- 迁入页签用到的通用小工具 ---- */
 function all(sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); }
@@ -883,7 +986,8 @@ async function narrowViewportChecks() {
     !!document.querySelector('.gd-list__empty .wb-empty__actions button'),
     'empty=' + !!document.querySelector('.gd-list__empty'));
   // 空态那一格必须横跨**全部列**。这一遍是"简洁模式（默认）"——左栏没有勾选框那一列 ⇒
-  // 正确的 colspan 是 6 而不是 7。写死 7 的症状是"右边缺一块"，不报错、不抛异常，只有看出来。
+  // 正确的 colspan 是 7 而不是 8（2026-10-09 加「进价」列后两档各 +1）。写死旧值的症状是
+  // "右边缺一块"，不报错、不抛异常，只有看出来。
   var emptyCell = document.querySelector('.gd-list__empty');
   var thCount = all('[data-act="product-table"] thead th').length;
   report('空态那一格横跨**全部列**（简洁模式少一列，colspan 必须跟着变，否则右边缺一块）',
@@ -916,16 +1020,51 @@ async function narrowViewportChecks() {
   await clickText('[data-act="refresh"]', '刷新');
   await settle(function () { return !!document.querySelector('[data-act="empty-go-today"]'); }, 8000);
   var eqActs = all('.gd-list__empty .wb-empty__actions button');
-  report('零款 + 队列也空 → 左栏空态把「去「今天」导入订单」放在**第一位**（顺序本身就是一个答案）',
-    eqActs.length >= 1 && flat(eqActs[0]).indexOf('今天') >= 0,
+  report('零款 + 队列也空 → 左栏空态把「去「发货台」导入订单」放在**第一位**（顺序本身就是一个答案）',
+    eqActs.length >= 1 && flat(eqActs[0]).indexOf('发货台') >= 0,
     eqActs.map(flat).join(' / '));
   report('那个按钮是**主按钮**（此刻该做的事，不是三个并列选项里的一个）',
-    eqActs.length >= 1 && flat(eqActs[0]).indexOf('今天') >= 0 &&
+    eqActs.length >= 1 && flat(eqActs[0]).indexOf('发货台') >= 0 &&
       eqActs[0].className.indexOf('wb-btn--primary') >= 0,
     eqActs.length ? eqActs[0].className : 'missing');
   report('空态说明点出"商品是从订单里长出来的"（别让用户猜右边为什么空着）',
     flat(document.querySelector('.gd-list__empty .wb-empty__desc')).indexOf('订单') >= 0,
     flat(document.querySelector('.gd-list__empty .wb-empty__desc')));
+
+  // ── 「进价」页在窄窗口下也必须能用（2026-10-10 整页改版新增）────────────
+  // 改版把这一页做成两栏（左=行动区 / 右=现状表）。窄窗口若只让某一栏被挤没、
+  // 或者堆叠后"行动区"被压扁到点不到，症状是**"补进价"这条唯一动线在默认窗口下断了**，
+  // 而存在性断言对它恒绿（元素在 DOM 里，只是被挤到容器外）。
+  // ⚠️ 判据与两栏工作台同一套：grid **轨道个数**（1 = 堆叠），不判"看起来像不像堆叠"。
+  step('viewport-narrow-cost');
+  window.__smokeEmptyProducts = false;
+  window.__smokeEmptyQueue = false;
+  await clickText('[data-act="refresh"]', '刷新');
+  await clickText('[data-act="tab-cost"]', '进价');
+  await settle(function () { return !!document.querySelector('[data-act="cost-table"]'); }, 10000);
+  var nCols = document.querySelector('.ct-cols');
+  var nTracks = nCols
+    ? getComputedStyle(nCols).gridTemplateColumns.split(' ').filter(function (s) { return s.length; }).length
+    : -1;
+  report('窄窗口（视口 ' + window.innerWidth + 'px < 1180px）：「进价」页两栏改为上下堆叠（grid 收成一列）',
+    nTracks === 1, 'tracks=' + nTracks + ' cols=' + (nCols ? getComputedStyle(nCols).gridTemplateColumns : 'missing'));
+  report('窄窗口下两栏**都还在**（堆叠，不是把行动区或价格表挤没）',
+    isShown(document.querySelector('.ct-aside')) && isShown(document.querySelector('.ct-list')),
+    'aside=' + isShown(document.querySelector('.ct-aside')) + ' list=' + isShown(document.querySelector('.ct-list')));
+  // 堆叠后行动区在价格表**上面**（先补价、再看现状 = 与宽屏同一套阅读顺序）
+  var nAside = document.querySelector('.ct-aside');
+  var nList = document.querySelector('.ct-list');
+  report('窄窗口下行动区排在价格表上面（堆叠顺序与宽屏的阅读顺序一致）',
+    !!nAside && !!nList && nAside.getBoundingClientRect().top <= nList.getBoundingClientRect().top + 1,
+    nAside && nList
+      ? 'asideT=' + Math.round(nAside.getBoundingClientRect().top) +
+        ' listT=' + Math.round(nList.getBoundingClientRect().top)
+      : 'missing');
+  // 最关键的一条：**保存按钮真的点得到**（堆叠时行动区若被压扁，它会被下一栏盖住）
+  reportReachable('窄窗口下「保存进价」可达（补价是这一页唯一的动线，点不到等于这页没用）',
+    '[data-act="cost-save"]');
+  await clickText('[data-act="tab-workbench"]', '建档与关联');
+  await settle(function () { return !!document.querySelector('[data-act="product-table"]'); }, 8000);
 }
 
 /**
@@ -1159,12 +1298,9 @@ async function main() {
       var el = d && d.querySelector('[data-act="' + act + '"]');
       return el ? flat(el) : null;
     }
-    var p1 = {
-      code: cellOf('p-code', 0), name: cellOf('p-name', 0),
-      sku: cellOf('p-sku', 0), missing: cellOf('missing-weight-cell', 0),
-    };
-    report('产品表主列：款编码 / 款式名 + 每款 SKU 数与缺克重数',
-      p1.code === 'S1' && p1.name === '款一' && p1.sku === '2' && p1.missing === '1',
+    var p1 = { code: cellOf('p-code', 0), name: cellOf('p-name', 0) };
+    report('产品表主列：款编码 / 款式名（SKU 与进价已整列撤掉，见下两条反向守卫）',
+      p1.code === 'S1' && p1.name === window.__smokeLongStyleName,
       JSON.stringify(p1));
     // 反向守卫：主表**不该**再有供应商/类目列 —— 分栏之后栏宽有限，这两列（外加"操作"）
     // 移进了行展开（方案 §7-1）。哪天有人"顺手"把它们加回主表，紧凑列表就白裁了，
@@ -1172,13 +1308,43 @@ async function main() {
     report('主表不再塞供应商/类目列（移进行展开；加回来等于没裁）',
       !productRows()[0].querySelector('[data-act="p-supplier"]') &&
         !productRows()[0].querySelector('[data-act="p-category"]'));
-    // 0 必须写 0：旧写法 missingOf(p.id) || '-' 把"这款不缺"渲染成「—」，用户读成"没生效"（2026-10-01 实报）
-    var p2missing = productRows()[1].querySelector('[data-act="missing-weight-cell"]');
-    report('缺克重为 0 时显示 0，不是「—」（— 会被读成"没有数据"）',
-      !!p2missing && flat(p2missing) === '0', 'cell=' + (p2missing ? flat(p2missing) : 'none'));
+    // 2026-10-10 用户口径：产品列表不展示 SKU 与进价（缺克重那一列随之整列撤掉 ——
+    // 它与 SKU 数合成过一格，单独留一个数字没有上下文）。
+    // 这条是**反向守卫**：撤掉的东西哪天被"顺手"加回来，款名又要开始显示不全，
+    // 而界面不会报错 —— 只会回到用户最初报的那个症状上。
+    // ⚠️ 撤列**不等于**撤能力（两条都另有入口，各有断言）：缺克重 → 工具栏「问题件 › 缺克重」筛选
+    //    （filter-issue，上面 filter 步与"唯一入口"那条一起守）；进价 → 同页「进价」页签
+    //    （cost-tab 步守它真的渲染出成本表 + 缺价清单）。
+    report('主表不再有 SKU 数 / 缺克重 / 进价三列（用户口径：产品列表不展示 SKU、进价）',
+      !productRows()[0].querySelector('[data-act="p-sku"]') &&
+        !productRows()[0].querySelector('[data-act="missing-weight-cell"]') &&
+        !productRows()[0].querySelector('[data-act="p-cost"]'),
+      'sku=' + !!productRows()[0].querySelector('[data-act="p-sku"]') +
+        ' missing=' + !!productRows()[0].querySelector('[data-act="missing-weight-cell"]') +
+        ' cost=' + !!productRows()[0].querySelector('[data-act="p-cost"]'));
 
-    // ── 行展开（S1 新增）：SKU 与"选中之后才关心"的东西都在这里 ──────────
-    // 为什么值得守：列裁剪把供应商/类目/SKU 子表/SKU 改克重全搬进了展开区 ——
+    // ── 款名"显示不全"（2026-10-10 用户报的症状）─────────────────────────
+    // 撤列只是给款名腾宽度的**一半**修法；另一半是款名自己做两行折行（.gd-pane__name-text）。
+    // ⚠️ 判据必须能真的红：短名在两行内怎么排都放得下 ⇒ 恒绿。夹具里 S1 就是一个 18 字的长款名，
+    //    旧布局（款名那列被 SKU / 进价挤到 ~130px）必然放不下，新布局两行放得下。
+    //    三条合起来才叫"显示完整"：整段字在（没被换短）+ 不横向溢出 + 不超过两行。
+    var nameCell = productRows()[0].querySelector('[data-act="p-name"]');
+    var nameBox = nameCell ? nameCell.querySelector('.gd-pane__name-text') : null;
+    report('长款名整段都渲染出来了（没有被"悄悄换短"或截成别的字串）',
+      !!nameCell && flat(nameCell) === window.__smokeLongStyleName,
+      'name=' + (nameCell ? flat(nameCell) : 'missing'));
+    report('长款名横向不溢出自己的格子（溢出就是又被裁掉了 —— 用户报的正是这个）',
+      !!nameCell && nameCell.scrollWidth <= nameCell.clientWidth + 1,
+      'w=' + (nameCell ? nameCell.scrollWidth + '/' + nameCell.clientWidth : 'missing'));
+    // ⚠️ 判据里必须带「clientHeight > 0」：折行盒是块级（-webkit-box）；哪天有人把里层那个 span
+    //    改回 display:inline（单行省略号那一版），它的 clientHeight/scrollHeight 会是 **0/0**，
+    //    而「0 <= 0 + 1」**恒真** —— 那样这条断言就成了空转（实测：变异回单行时它照样绿）。
+    report('长款名最多两行、不被切掉（「scrollHeight」超过「clientHeight」= 第三行没了）',
+      !!nameBox && nameBox.clientHeight > 0 && nameBox.scrollHeight <= nameBox.clientHeight + 1,
+      'h=' + (nameBox ? nameBox.scrollHeight + '/' + nameBox.clientHeight : 'missing'));
+
+    // ── 行展开：供应商/类目 与「已关联商品」都在这里 ──────────────────────
+    // 为什么值得守：列裁剪把供应商/类目/已关联商品全搬进了展开区 ——
     // 搬丢任何一样，界面上不会报错，只会"某个信息再也找不到"。
     step('row-expand');
     report('默认没有展开区：详情是"点出来的"（常驻会把紧凑列表撑回宽表）',
@@ -1189,9 +1355,12 @@ async function main() {
     report('展开区里给出供应商 / 类目（主表放不下的那两列）',
       detailCell('p-supplier') === '厂A' && detailCell('p-category') === '衣服',
       'supplier=' + detailCell('p-supplier') + ' category=' + detailCell('p-category'));
-    report('展开区里有 SKU 子表，列出这款的两个 SKU',
-      variantRows().length === 2 && flat(variantRows()[0]).indexOf('黑 L') >= 0,
-      Array.prototype.map.call(variantRows(), flat).join(' / '));
+    // 反向守卫：展开区也不再列 SKU 清单（用户口径："展开页中的 SKU 也去掉"）。
+    // ⚠️ 撤掉的只是**只读清单**：SKU 的增删改仍在「编辑」抽屉里 —— 下面 weight-save-in-drawer 步
+    //    用 「.wb-drawer .ed-sku__weight」 证明它还在（否则"去掉展示"就变成了"把能力删了"）。
+    report('展开区不再有 SKU 清单（去掉展示 ≠ 去掉能力：增删改仍在「编辑」抽屉）',
+      !document.querySelector('[data-act="row-detail"] [data-act="variant-table"]'),
+      'variantTables=' + document.querySelectorAll('[data-act="row-detail"] [data-act="variant-table"]').length);
 
     // ── 展开区布局（2026-10-09 修的样式缺陷）────────────────────────────
     // 背景：展开区住在 .wb-table 的 td 里，基座给 td 定了 white-space:nowrap ——
@@ -1200,7 +1369,7 @@ async function main() {
     step('row-detail-layout');
     var dl = detail();
     var noteEl = dl.querySelector('.gd-detail__note');
-    report('展开区文案可换行：克重说明在自己的列里放得下（nowrap 回来会横穿到列外）',
+    report('展开区文案可换行：块说明在自己的卡片里放得下（nowrap 回来会横穿到列外）',
       !!noteEl && noteEl.scrollWidth <= noteEl.clientWidth + 1,
       'note=' + (noteEl ? noteEl.scrollWidth + '/' + noteEl.clientWidth : 'missing'));
     var relEl = dl.querySelector('.gd-detail__relate');
@@ -1234,30 +1403,27 @@ async function main() {
     report('已关联区是**只读**的：没有任何解除/删除按钮（硬删会让关联率莫名回落）',
       !document.querySelector('[data-act="detail-links"] button'),
       flat(document.querySelector('[data-act="detail-links"]')).slice(0, 40));
-    // 值的读法要**空安全**：SKU 子表整个不见了的时候，weightInput(i).value 会抛
-    // TypeError 把整段冒烟打断，读日志的人只看到"异常"，看不出是"子表没了"。
-    report('克重已填的显示数值、未填的留空（0 不当成有效克重）',
-      weightValue(0) === '320' && weightValue(1) === '',
-      'v0=' + weightValue(0) + ' v1=' + weightValue(1));
-
-    step('save');
-    var input = weightInput(1);
-    input.value = '275';
-    input.dispatchEvent(new Event('change'));
-    await waitFor(function () { return calls('productVariantUpsert').length >= 1; }, 6000);
-    var sent = calls('productVariantUpsert')[0];
-    report('改克重真的落库，且**带上该行全部现有字段**（全量提交，漏字段会把颜色/尺码清空）',
-      !!sent && sent.id === 12 && Number(sent.weightG) === 275 && sent.productId === 1 &&
-        sent.color === '黑' && sent.size === 'M' && sent.name === '黑 M' && sent.status === 'active',
-      JSON.stringify(sent));
-    // 指标条撤了，改断言**那一行自己的**缺克重格归零 —— 这才是这条断言真正要守的：
-    // 保存后界面必须立刻反映出来（不能等下次刷新），顺带覆盖"行内计数是活的"。
-    await waitFor(function () { return cellOf('missing-weight-cell', 0) === '0'; }, 6000);
-    report('保存后该行的缺克重计数实时归零（不是等下次刷新）',
-      cellOf('missing-weight-cell', 0) === '0', cellOf('missing-weight-cell', 0));
-    report('界面给出保存回执（不只是一闪而过的 toast）',
-      flat(document.querySelector('[data-act="saved"]')).indexOf('黑 M') >= 0,
-      flat(document.querySelector('[data-act="saved"]')));
+    // ── 「克重只在编辑页」（2026-10-09）+「展开区不列 SKU」（2026-10-10）──────
+    // 展开区被两轮瘦身过：先搬走**克重的编辑**（2026-10-09），再撤掉**整块 SKU 只读清单**
+    // （2026-10-10 用户口径）。两条都只在"搬走"那一侧有可能被做成"降级"，于是各留一条守卫：
+    //   ① 展开区**不许**再出现克重输入框；
+    //   ② 剩下的那张卡（「已关联商品」）整卡**只读**，且自己说明"为什么没有按钮"。
+    // ⚠️ 撤走的东西必须有**另一处**的守卫，否则就是"把能力删了"：
+    //   · SKU 的增删改 → 下面 editor-save-model / weight-save-in-drawer 步（「.wb-drawer .ed-sku__weight」）；
+    //   · 缺克重 → 工具栏「问题件」筛选；进价 → 「进价」页签。没有哪一条是"因为撤走就删掉"的。
+    step('weight-in-editor-only');
+    report('展开区不再有克重输入框（克重只在「编辑」抽屉里改）',
+      document.querySelectorAll('[data-act="row-detail"] [data-act="weight"]').length === 0,
+      'weightInputs=' + document.querySelectorAll('[data-act="row-detail"] [data-act="weight"]').length);
+    var linksCard = document.querySelector('[data-act="detail-links"]');
+    linksCard = linksCard ? linksCard.closest('.gd-detail__block') : null;
+    report('「已关联商品」整卡只读（没有输入框 / 按钮 —— 可点却没保存语义比不可点更糟）',
+      !!linksCard && linksCard.querySelectorAll('input, button, select').length === 0,
+      'card=' + !!linksCard +
+        ' controls=' + (linksCard ? linksCard.querySelectorAll('input, button, select').length : 'n/a'));
+    var cardNote = detail() ? detail().querySelector('.gd-detail__note') : null;
+    report('那张卡自己说明"为什么这里没有按钮"（只读 + 认款在右栏）—— 不留说明用户会一直找「解除」',
+      !!cardNote && flat(cardNote).indexOf('只读') >= 0, cardNote ? flat(cardNote) : 'missing');
 
     // ── 编辑抽屉的保存模型（2026-10-08 R2 · UX-G3 + W1）──────────────────
     // 旧模型是"一半一半"：表单要按底部「保存」，主图 / SKU 却即时保存 ⇒ "填了名字直接点 ✕"
@@ -1304,8 +1470,10 @@ async function main() {
     report('页脚常显"还有 1 条 SKU 改动没保存"（不自动存的东西必须有别的兜底，且要**提前**说）',
       flat(document.querySelector('[data-act="ed-guard-hint"]')).indexOf('1 条 SKU 改动没保存') >= 0,
       flat(document.querySelector('[data-act="ed-guard-hint"]')));
-    report('没保存的 SKU 行不该被静默写库（判据：此刻仍然只有那一次表单写入）',
-      calls('productVariantUpsert').length === 1, 'calls=' + calls('productVariantUpsert').length);
+    // 基线是 **0**：展开区已经把克重的写入路径整块移除（weight-in-editor-only 步），
+    // 本轮唯一的 SKU 写入就只剩抽屉里这条还没保存的改动 —— 写进去就是"静默保存"。
+    report('没保存的 SKU 行不该被静默写库（判据：此刻一次 SKU 写入都没有）',
+      calls('productVariantUpsert').length === 0, 'calls=' + calls('productVariantUpsert').length);
     document.querySelector('.wb-drawer .ed-x').click();
     await settle(function () { return !!document.querySelector('[data-act="confirm-dialog"]'); }, 4000);
     report('带未保存的 SKU 改动点 ✕ → 先确认（不是无声关掉，"我改的没了"是新手最贵的一课）',
@@ -1323,20 +1491,52 @@ async function main() {
     report('选「放弃改动并关闭」→ 抽屉真的关掉（确认框不是又一个假动作）',
       !document.querySelector('.wb-drawer'));
 
+    // ── 克重的**唯一写入路径**（2026-10-09 起在编辑抽屉里）──────────────────
+    // 展开区把克重整块搬走后，这条链不能跟着消失：抽屉保存 → 全量提交（字段齐全）→
+    // 库里真的变了 → 导出读到的是**当下值**（下面 export 步等的就是 '320,333'）。
+    // ⚠️ 必须排在编辑器那一步**之后**：那一步要用"没保存的改动"验 ✕ 的确认框，提前存掉就没了。
+    step('weight-save-in-drawer');
+    document.querySelector('[data-act="edit-product"]').click();
+    await waitFor(function () {
+      return document.querySelectorAll('.wb-drawer .ed-sku__weight').length >= 2;
+    }, 6000);
+    var mWeight = document.querySelectorAll('.wb-drawer .ed-sku__weight')[1];
+    mWeight.value = '333';
+    mWeight.dispatchEvent(new Event('input'));
+    await settle(function () { return !!document.querySelector('.wb-drawer .ed-sku__ops button'); }, 4000);
+    document.querySelector('.wb-drawer .ed-sku__ops button').click();
+    await waitFor(function () { return calls('productVariantUpsert').length >= 1; }, 6000);
+    var wSent = calls('productVariantUpsert')[0];
+    report('抽屉里改克重 → 真的落库，且**带上该行全部现有字段**（全量提交，漏字段会清空颜色/尺码）',
+      !!wSent && wSent.id === 12 && Number(wSent.weightG) === 333 && wSent.productId === 1 &&
+        wSent.color === '黑' && wSent.size === 'M' && wSent.name === '黑 M' && wSent.status === 'active',
+      JSON.stringify(wSent));
+    // ⚠️ 必须等"脏标记清空"（保存按钮自己消失）再点 ✕ —— 保存是异步的（写库后还要重拉 SKU），
+    // 抢在它前面点 ✕ 会弹出"还有 N 条没保存"的确认框：那不但让本步断言红，
+    // 那个**模态遮罩**还会把后面几十步（批量编辑…）一起挡死，读日志的人只看到"batch-edit 超时"。
+    await settle(function () { return !document.querySelector('.wb-drawer .ed-sku__ops'); }, 6000);
+    document.querySelector('.wb-drawer .ed-x').click();
+    await settle(function () { return !document.querySelector('.wb-drawer'); }, 4000);
+    report('存完之后关抽屉不再弹确认框（没有未保存的改动，还弹一次就是假动作）',
+      !document.querySelector('.wb-drawer') && !document.querySelector('[data-act="confirm-dialog"]'));
+
     step('switch');
     productRows()[1].click();
-    await waitFor(function () {
-      var rows = variantRows();
-      return rows.length === 1 && flat(rows[0]).indexOf('白 XL') >= 0;
+    // 判据从"SKU 子表换成白 XL"改成"展开区换成这一款的档案 + 反查结果"（2026-10-10 撤掉 SKU 清单后
+    // 子表不再是可用判据）。**口径不变**：展开区必须属于刚点的这一款，不是"永远显示第一个款"。
+    await settle(function () {
+      return detailCell('p-supplier') === '(未关联)' &&
+        flat(document.querySelector('[data-act="detail-links"]')).indexOf('B0OLD') >= 0;
     }, 6000);
-    report('展开另一个款 → SKU 子表跟着换（不是"永远显示第一个款"）', true, flat(variantRows()[0]));
+    report('展开另一个款 → 展开区跟着换（不是"永远显示第一个款"）',
+      detailCell('p-supplier') === '(未关联)' &&
+        document.querySelectorAll('[data-act="detail-links"] [data-act="detail-link"]').length === 1,
+      'supplier=' + detailCell('p-supplier') +
+        ' links=' + document.querySelectorAll('[data-act="detail-links"] [data-act="detail-link"]').length);
     report('未关联供应商的款显示「(未关联)」（不静默留空）',
       detailCell('p-supplier') === '(未关联)', 'supplier=' + detailCell('p-supplier'));
     // S2 这个款有 2 条映射：1 条 confirmed + 1 条 invalid。夹具刻意留了这条失效行 ——
     // 只有"同款既有生效又有失效"的样本才抓得到"把失效也算成已关联"这种静默错账。
-    await waitFor(function () {
-      return flat(document.querySelector('[data-act="detail-links"]')).indexOf('B0OLD') >= 0;
-    }, 6000);
     report('失效的映射**不混进**「已关联」：列表里只有那 1 条 confirmed',
       document.querySelectorAll('[data-act="detail-links"] [data-act="detail-link"]').length === 1 &&
         flat(document.querySelector('[data-act="detail-links"]')).indexOf('B0OLD0002') >= 0 &&
@@ -1357,10 +1557,11 @@ async function main() {
     // S4（2026-10-08）：页签由 3 个收成 2 个 ——「产品」与「映射与关联」合并为「建档与关联」。
     // 合并的判据不是"少一个页签更清爽"，而是分栏的价值全在**同屏**：分成两个页签，
     // 左栏选款 → 右栏直连 / 对比这两条动线在物理上就不成立。
-    // 同日 R1 又加回一个「店铺登记」（从市场岛收进内建，解 D1 死锁）⇒ 现在是 3 个。
-    report('三个页签都在（建档与关联 / 店铺登记 / 供应商），且默认停在「建档与关联」',
-      ['建档与关联', '店铺登记', '供应商'].every(function (n) { return tabNames.indexOf(n) >= 0; }) &&
-        all('.gd-tabs .gd-tab').length === 3 &&
+    // 同日 R1 又加回一个「店铺登记」（从市场岛收进内建，解 D1 死锁）⇒ 3 个。
+    // 2026-10-09 P4：再加「进价」（款级成本维护）⇒ 现在是 4 个。
+    report('四个页签都在（建档与关联 / 店铺登记 / 供应商 / 进价），且默认停在「建档与关联」',
+      ['建档与关联', '店铺登记', '供应商', '进价'].every(function (n) { return tabNames.indexOf(n) >= 0; }) &&
+        all('.gd-tabs .gd-tab').length === 4 &&
         flat(document.querySelector('.gd-tabs .gd-tab.is-active')).indexOf('建档与关联') === 0,
       tabNames);
     // 「店铺登记」的存在性**必须单独钉一条**：它对用户的意义是"队列里「需先登记店铺」那几行的出口"，
@@ -2031,8 +2232,8 @@ async function main() {
     //    之后工作台已挂载 ⇒ 空队列信号推不下去 ⇒ 这一步 timeout）。
     await clickText('[data-act="refresh"]', '刷新');
     await waitFor(function () { return !!document.querySelector('[data-act="go-today"]'); }, 6000);
-    report('队列为空时给出「去「今天」导入订单」的真入口（不是一句"导入订单后…"）',
-      flat(document.querySelector('[data-act="go-today"]')).indexOf('今天') >= 0,
+    report('队列为空时给出「去「发货台」导入订单」的真入口（不是一句"导入订单后…"）',
+      flat(document.querySelector('[data-act="go-today"]')).indexOf('发货台') >= 0,
       flat(document.querySelector('[data-act="go-today"]')));
     // 全零的另一端（W2/全零）：五项全零时**一项都不列**，改说一句人话。
     // 「null」（队列没拉过）不能走进这一句 —— 那会替用户宣布一个它不知道的结论
@@ -2316,11 +2517,13 @@ async function main() {
       JSON.stringify((exPayload.rows || []).map(function (r) { return (r && r.imagePath) || ''; })));
     report('导出的 SKU 列来自 pl_variants（尺码/克重按颜色拼成一格）',
       (exPayload.rows || []).some(function (r) {
-        // 克重期望 '320,275' 而不是夹具初值 '320,'：上面的 save 步已把黑 M 改成 275，
-        // 导出读的是**库里的当下值** —— 导出真带出旧值反而说明读取链路是死的。
-        return r && r.cells && r.cells[5] === 'L,M' && r.cells[6] === '320,275';
+        // 克重期望 '320,333' 而不是夹具初值 '320,'：上面 weight-save-in-drawer 步已把黑 M 改成
+        // 333（2026-10-09 起克重只在编辑抽屉里改），导出读的是**库里的当下值** ——
+        // 导出真带出旧值反而说明读取链路是死的。
+        // ⚠️ 下标 6/7：2026-10-09 加「进价(元)」列后各 +1（原 5/6）。
+        return r && r.cells && r.cells[6] === 'L,M' && r.cells[7] === '320,333';
       }),
-      JSON.stringify((exPayload.rows || []).map(function (r) { return r && r.cells && r.cells.slice(4, 7); })));
+      JSON.stringify((exPayload.rows || []).map(function (r) { return r && r.cells && r.cells.slice(5, 8); })));
     report('图只挂在每个款的**第一行**（同一张图不重复嵌 N 遍）',
       (exPayload.rows || []).filter(function (r) { return r && r.imagePath; }).length === 1,
       String((exPayload.rows || []).filter(function (r) { return r && r.imagePath; }).length));
@@ -2343,8 +2546,9 @@ async function main() {
       return document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no]').length >= 3;
     }, 6000);
     var imgCells = all('[data-act="row-image"]');
-    report('「图片」列按行显示有没有图（3 行里 2 行有：第 2、4 行）',
-      imgCells.length === 3 &&
+    // 4 行 = 夹具的 4 条数据行（IMP-1..3 + 款二「厂新」那行）；图贴第 2、4 行（stub 的 byRow 键）。
+    report('「图片」列按行显示有没有图（4 行里 2 行有：第 2、4 行）',
+      imgCells.length === 4 &&
         imgCells.filter(function (e) { return e.getAttribute('data-has-image') === '1'; }).length === 2,
       imgCells.map(function (e) { return e.getAttribute('data-has-image'); }).join(','));
     report('⭐ 图贴给的是**抽图报的那一行**（第 4 行），不是第一个有数据的行',
@@ -2366,11 +2570,23 @@ async function main() {
     report('尺码/克重按顺序对应渲染：第 2 行 尺码=M,L、克重=120,',
       (function () {
         var tds = document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no="2"] td');
-        return tds.length > 8 && flat(tds[7]) === 'M,L' && flat(tds[8]) === '120,';
+        // 下标 8/9：2026-10-09 加「进价」列后各 +1（原 7/8）
+        return tds.length > 9 && flat(tds[8]) === 'M,L' && flat(tds[9]) === '120,';
       })(),
       (function () {
         var tds = document.querySelectorAll('[data-act="import-table"] tbody tr[data-row-no="2"] td');
-        return tds.length > 8 ? flat(tds[7]) + ' / ' + flat(tds[8]) : 'tds=' + tds.length;
+        return tds.length > 9 ? flat(tds[8]) + ' / ' + flat(tds[9]) : 'tds=' + tds.length;
+      })());
+    report('预览「进价」列：填了显示 12.34、没填显示「—」（导入前就能核对）',
+      (function () {
+        var r = document.querySelector('[data-act="import-table"] tbody tr[data-row-no="2"]');
+        var el = r && r.querySelector('[data-act="row-cost"]');
+        return !!el && flat(el) === '12.34';
+      })(),
+      (function () {
+        var r = document.querySelector('[data-act="import-table"] tbody tr[data-row-no="2"]');
+        var el = r && r.querySelector('[data-act="row-cost"]');
+        return el ? flat(el) : 'missing';
       })());
     report('⭐ 规格对不上的第 4 行标成「跳过」，而它**仍带着图**（图不改变合格性）',
       (function () {
@@ -2380,13 +2596,87 @@ async function main() {
       })(),
       flat(document.querySelector('[data-act="import-table"] tbody tr[data-row-no="4"]')).slice(0, 60));
 
+    // ── 2026-10-10：款编码列可见性 / 同名款 / 供应商新建 ────────────────────────
+    // ⭐ 用户报的「款编码没有回显」：那一列曾缩成"只剩右边一枚徽标"的宽度，输入框宽 0 ——
+    //    编码明明有值却看不见，而且**不报任何错**。判据必须是 value + clientWidth **两条**：
+    //    只看 innerText 会恒绿（input 没有文本节点），只看 value 又抓不到"塌成 0 宽"这一态。
+    var codeCells = all('[data-act="import-table"] tbody tr[data-row-no]').map(function (tr) {
+      var inp = tr.querySelector('.im-code-cell input');
+      return {
+        rowNo: tr.getAttribute('data-row-no'),
+        value: inp ? inp.value : null,
+        w: inp ? inp.clientWidth : 0,
+      };
+    });
+    report('⭐ 预览「款编码」列每一格都看得见（有值 + 宽度不为 0；那一格曾缩成 0 宽）',
+      codeCells.length >= 4 && codeCells.every(function (c) { return !!c.value && c.w >= 80; }),
+      JSON.stringify(codeCells));
+
+    var dupTr = document.querySelector('[data-act="import-table"] tbody tr[data-row-no="5"]');
+    report('⭐ 同名行（款式名「款二」库里已有）把库里的编码 S2 **回显**到编码格，并逐行标「同名」',
+      (function () {
+        if (!dupTr) return false;
+        var inp = dupTr.querySelector('.im-code-cell input');
+        var tag = dupTr.querySelector('[data-act="row-name-matched"]');
+        return !!inp && inp.value === 'S2' && !!tag && flat(tag) === '同名';
+      })(),
+      dupTr ? flat(dupTr).slice(0, 90) : 'missing');
+    report('⚠️ 同名行**不是**「自动生成」那一路（沿用已有款 / 新建款是两个相反的徽标，混了就看不出区别）',
+      (function () {
+        return !!dupTr && flat(dupTr.querySelector('.im-code-cell')).indexOf('自动') < 0;
+      })(),
+      dupTr ? flat(dupTr.querySelector('.im-code-cell')) : 'missing');
+    report('供应商名库里没有 → 标「新建」（否则用户以为名字白填了 —— 旧的实现正是静默落成"未关联"）',
+      (function () {
+        if (!dupTr) return false;
+        var sup = dupTr.querySelector('[data-act="row-supplier"]');
+        return !!sup && !!sup.querySelector('[data-act="row-supplier-new"]') && flat(sup).indexOf('厂新') >= 0;
+      })(),
+      dupTr ? flat(dupTr.querySelector('[data-act="row-supplier"]')) : 'missing');
+    report('汇总里报出同名款条数（点提交之前就该知道有几行会动到已有的款）',
+      (function () {
+        var el = document.querySelector('[data-act="dup-name-count"]');
+        return !!el && flat(el).indexOf('1') >= 0;
+      })(),
+      (function () {
+        var el = document.querySelector('[data-act="dup-name-count"]');
+        return el ? flat(el) : 'missing';
+      })());
+
+    // 同名款这一组开关：默认覆盖（待提交 3 行）→ 切「跳过」（2 行）→ 切回（3 行）。
+    // 判据落在**提交按钮的行数**上而不是 aria-pressed：开关"看着切了、提交却没少一行"是最坏的一种。
+    report('同名款开关默认停在「覆盖更新」，待提交 = 3 行',
+      document.querySelector('[data-act="same-name-overwrite"]').getAttribute('aria-pressed') === 'true' &&
+        flat(document.querySelector('[data-act="commit-import"]')).indexOf('3') >= 0,
+      flat(document.querySelector('[data-act="commit-import"]')));
+    document.querySelector('[data-act="same-name-skip"]').click();
+    await settle(function () {
+      return flat(document.querySelector('[data-act="commit-import"]')).indexOf('2') >= 0;
+    }, 4000);
+    report('同名款切「跳过不覆盖」→ 待提交行数立刻少 1（开关真的在管提交，不是装饰）',
+      flat(document.querySelector('[data-act="commit-import"]')).indexOf('2') >= 0,
+      flat(document.querySelector('[data-act="commit-import"]')));
+    document.querySelector('[data-act="same-name-overwrite"]').click();
+    await settle(function () {
+      return flat(document.querySelector('[data-act="commit-import"]')).indexOf('3') >= 0;
+    }, 4000);
+    report('切回「覆盖更新」→ 待提交行数回到 3',
+      flat(document.querySelector('[data-act="commit-import"]')).indexOf('3') >= 0,
+      flat(document.querySelector('[data-act="commit-import"]')));
+
     var impBefore = calls('productImport').length;
     document.querySelector('[data-act="commit-import"]').click();
     await settle(function () { return calls('productImport').length > impBefore; }, 10000);
     var items = (calls('productImport')[impBefore] || {}).items || [];
-    report('只提交能导入的行：规格对不上的 IMP-3 不在 items 里',
-      items.length === 2 && !items.some(function (x) { return x.code === 'IMP-3'; }),
+    report('只提交能导入的行：规格对不上的 IMP-3 不在 items 里（2026-10-10 起夹具多一行同名行 ⇒ 3 行）',
+      items.length === 3 && !items.some(function (x) { return x.code === 'IMP-3'; }),
       JSON.stringify(items.map(function (x) { return x.code; })));
+    report('⭐ items 里带上供应商**原文** —— 库里没有的名字靠它在主进程建档（只带 id 时"名字对不上"只剩一个 0）',
+      (function () {
+        var r = items.filter(function (x) { return x.code === 'S2'; })[0];
+        return !!r && r.supplierRaw === '厂新';
+      })(),
+      JSON.stringify(items.map(function (x) { return x.code + '=' + (x.supplierRaw || ''); })));
     report('⭐ items 里**没有** category 字段（模板去列 ⇒ 库层对已存在的款原样保留类目）',
       items.length > 0 && items.every(function (x) { return !('category' in x); }),
       items.length ? JSON.stringify(Object.keys(items[0])) : 'empty');
@@ -2397,6 +2687,13 @@ async function main() {
           JSON.stringify([{ color: '红', size: 'M', weightG: 120 }, { color: '红', size: 'L', weightG: 0 }]);
       })(),
       JSON.stringify((items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).skus));
+    report('⭐ items 里进价换算成**分**（12.34 元 → 1234），没填的传 null（= 不改库内已有价）',
+      (function () {
+        var a = items.filter(function (x) { return x.code === 'IMP-1'; })[0];
+        var b = items.filter(function (x) { return x.code === 'IMP-2'; })[0];
+        return !!a && a.costCents === 1234 && !!b && b.costCents === null;
+      })(),
+      JSON.stringify(items.map(function (x) { return x.code + '=' + x.costCents; })));
     report('抽到图的行把 imageId 带上（图跟着合格行走，进库即成主图）',
       (items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).imageId === 55,
       String((items.filter(function (x) { return x.code === 'IMP-1'; })[0] || {}).imageId));
@@ -2409,6 +2706,288 @@ async function main() {
         return t.indexOf('SKU') >= 0 && t.indexOf('主图') >= 0;
       })(),
       flat(document.querySelector('.im-result')).slice(0, 80));
+    report('结果页报出「写入进价 N 条 / 新建供应商 N 家」（进价没入库、供应商没写入原先一个字都不说）',
+      (function () {
+        var t = flat(document.querySelector('.im-result'));
+        return t.indexOf('写入进价') >= 0 && t.indexOf('新建供应商') >= 0;
+      })(),
+      flat(document.querySelector('.im-result')).slice(0, 140));
+
+    // ── 「进价」页（P4 成本维护）──────────────────────────────────────────
+    // 三件事各一条：页签点得开并渲染、当前价取「当前生效」那条、缺价清单点得出漏了哪个款
+    // ——最后一件事是本页相对「导入模板」的独有价值（导入不会告诉你漏了哪个款）。
+    step('cost');
+    // ⚠️ 前面的空态步把 window.__smokeEmptyProducts 置成了 true（假桥的 productList 返回空）。
+    //    不还原的话：产品库为空 ⇒ 缺价清单空 + 保存被"款不在产品库"拦住 —— 而这**不是**被测的缺陷。
+    window.__smokeEmptyProducts = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await clickText('[data-act="tab-cost"]', '进价');
+    await settle(function () { return !!document.querySelector('[data-act="cost-table"]'); }, 8000);
+    report('「进价」页签点得开，并渲染出成本表 + 录入框（不是空白页签）',
+      !!document.querySelector('[data-act="cost-table"]') &&
+        !!document.querySelector('[data-act="cost-save"]'),
+      'table=' + !!document.querySelector('[data-act="cost-table"]') +
+        ' save=' + !!document.querySelector('[data-act="cost-save"]'));
+
+    report('⭐ 当前进价取「当前生效」那条：S1 显示 12.34（2026-01-01 手工），不是更早的 9.99（拿货对账）',
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        if (!r) return false;
+        return flat(r.querySelector('[data-act="cost-current"]')) === '12.34' &&
+          flat(r.querySelector('[data-act="cost-source"]')).indexOf('手工') >= 0;
+      })(),
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        return r
+          ? flat(r.querySelector('[data-act="cost-current"]')) + ' / ' + flat(r.querySelector('[data-act="cost-source"]'))
+          : 'row-missing';
+      })());
+
+    report('⭐ 缺价清单里有 S2 —— 本页相对「导入模板」的独有价值（导入不告诉你漏了哪个款）',
+      (function () {
+        var ul = document.querySelector('[data-act="cost-missing"]');
+        return !!ul && flat(ul).indexOf('S2') >= 0;
+      })(),
+      flat(document.querySelector('[data-act="cost-missing"]')).slice(0, 60));
+
+    // ── 整页改版（2026-10-10）：两栏 + 回显 + 待办整行可点 ────────────────
+    // 改版前是**三块等宽平铺**的纵向堆叠：一屏从上到下全是同一重量的白卡，"先做什么 /
+    // 现在什么样"读不出来，宽屏下每块内部还大片留白。改版把信息架构改成
+    // **左=行动区（录入 + 待补）· 右=现状表** —— 也就是这一页唯一那条动线（缺 → 有）的两端。
+    step('cost-layout');
+    // ① 用 **grid 轨道个数**判并排（与窄视口那条同一套判据）：并排 = 两个轨道、堆叠 = 一个。
+    //    不判"看起来像不像"，因为改回单列在视觉上不难看，只是把动线拆散了 —— 属静默回归。
+    var costCols = document.querySelector('.ct-cols');
+    var costTracks = costCols
+      ? getComputedStyle(costCols).gridTemplateColumns.split(' ').filter(function (s) { return s.length; }).length
+      : -1;
+    report('进价页宽视口两栏并排（grid 两个轨道；改回单列 = 行动区与现状表又叠成上下）',
+      costTracks === 2, 'tracks=' + costTracks + ' cols=' + (costCols ? getComputedStyle(costCols).gridTemplateColumns : 'missing'));
+    // ② 左栏装的必须是**行动区**：录入框 + 待补清单都在里面，而价格表**不在**。
+    //    只断"两个容器都在"是不够的 —— 把表也塞进左栏、右边留空，那样照样"有两个容器"。
+    var costAside = document.querySelector('.ct-aside');
+    report('左栏 = 行动区：录入框与待补清单都在左栏，价格表在右栏（不是把表也塞进左栏）',
+      !!costAside && !!costAside.querySelector('[data-act="cost-code"]') &&
+        !!costAside.querySelector('[data-act="cost-missing"]') &&
+        !costAside.querySelector('[data-act="cost-table"]'),
+      'aside=' + !!costAside +
+        ' code=' + !!(costAside && costAside.querySelector('[data-act="cost-code"]')) +
+        ' missing=' + !!(costAside && costAside.querySelector('[data-act="cost-missing"]')) +
+        ' tableInAside=' + !!(costAside && costAside.querySelector('[data-act="cost-table"]')));
+    // ③ 真并排（几何）：行动区的右边界要落在价格表左边界之前。
+    //    ② 那条是"结构对不对"，这条是"真的分开了" —— 叠在一起时 ② 也绿。
+    var costList = document.querySelector('.ct-list');
+    report('两栏真的左右分开（行动区的右边界在价格表左边界之前，不是叠在一起）',
+      !!costAside && !!costList &&
+        costAside.getBoundingClientRect().right <= costList.getBoundingClientRect().left + 1,
+      costAside && costList
+        ? 'asideR=' + Math.round(costAside.getBoundingClientRect().right) +
+          ' listL=' + Math.round(costList.getBoundingClientRect().left) +
+          ' listR=' + Math.round(costList.getBoundingClientRect().right) + ' vw=' + window.innerWidth
+        : 'missing');
+
+    step('cost-echo');
+    // ④ 回显：填了款编码就当场说清"这是哪个款、它现在的价是多少、从哪来"。
+    //    改版前这里只有一个光秃秃的输入框 —— 而「ae_cost_map」里一行**挂错款**的价，
+    //    在表上看起来完全正常（只是永远没有订单取到它），所以"改之前先能核对"是这一页
+    //    最关键的一处防错，不是装饰。
+    report('没填款编码时不显示回显（空着也报一段话 = 噪音）',
+      !document.querySelector('[data-act="cost-echo"]'),
+      'echo=' + flat(document.querySelector('[data-act="cost-echo"]')));
+    setVal(document.querySelector('[data-act="cost-code"]'), 'S1');
+    await settle(function () { return !!document.querySelector('[data-act="cost-echo"]'); }, 3000);
+    var echoS1 = flat(document.querySelector('[data-act="cost-echo"]'));
+    report('填了款编码 → 回显**款名 / 当前价 / 来源**（改价前先能核对改的是谁）',
+      echoS1.indexOf('款一') >= 0 && echoS1.indexOf('12.34') >= 0 && echoS1.indexOf('手工') >= 0,
+      echoS1);
+    // 反向：S1 明明存在，回显**不许**冒"没有这个款"（回显自己误报会把用户劝退）
+    report('回显不误报「产品库里没有这个款」（S1 是存在的款）',
+      echoS1.indexOf('没有') < 0, echoS1);
+    // 打字打到一半（"S" 是 S1 / S2 的前缀）时也不许报 —— 那是"还没输完"，不是"查无此款"。
+    // ⚠️ 这条守卫的是**体验缺陷**而不是功能：逐字输入时每敲一下都闪一次"没有这个款"，
+    //    用户会以为自己打错了（判据是"前缀不算不存在"，不是"回显在不在"）。
+    setVal(document.querySelector('[data-act="cost-code"]'), 'S');
+    await settle(function () {
+      var e = document.querySelector('[data-act="cost-echo"]');
+      return !e || flat(e).indexOf('没有') >= 0;
+    }, 1200);
+    report('编码只填成前缀（S）时不报「产品库里没有」—— 打字打到一半不是查无此款',
+      flat(document.querySelector('[data-act="cost-echo"]')).indexOf('没有') < 0,
+      flat(document.querySelector('[data-act="cost-echo"]')));
+    setVal(document.querySelector('[data-act="cost-code"]'), 'ZZZ');
+    await settle(function () {
+      var e = document.querySelector('[data-act="cost-echo"]');
+      return !!e && flat(e).indexOf('没有') >= 0;
+    }, 3000);
+    report('编码真的不存在时才提示「产品库里没有这个款」（否则保存会被拦下而用户不知道）',
+      flat(document.querySelector('[data-act="cost-echo"]')).indexOf('没有') >= 0,
+      flat(document.querySelector('[data-act="cost-echo"]')));
+
+    step('cost-fill');
+    // ⑤ 待补清单**整行可点**。改版前是一行灰字 + 行尾一个文字链接：点在编码/名字上没反应，
+    //    而用户的意图就是"就这一款"。判据要同时看**标签**（是 button）与**行为**（点了真的带进去）。
+    var fillS2 = document.querySelector('[data-act="cost-fill-S2"]');
+    report('待补清单每行是一个按钮（点名字/编码也算，不是只有行尾小链接可点）',
+      !!fillS2 && fillS2.tagName === 'BUTTON', fillS2 ? fillS2.tagName : 'missing');
+    if (fillS2) fillS2.click();
+    await settle(function () {
+      var c = document.querySelector('[data-act="cost-code"]');
+      return !!c && c.value === 'S2';
+    }, 3000);
+    report('点待补清单那一行 → 款编码被带进录入框（"看见缺哪个"直接变成"填它"）',
+      (function () {
+        var c = document.querySelector('[data-act="cost-code"]');
+        return !!c && c.value === 'S2';
+      })(),
+      'code=' + (function () {
+        var c = document.querySelector('[data-act="cost-code"]');
+        return c ? c.value : 'missing';
+      })());
+    setVal(document.querySelector('[data-act="cost-code"]'), '');
+
+    document.querySelector('[data-cost-code="S1"] [data-act="cost-row-expand"]').click();
+    await settle(function () { return !!document.querySelector('[data-cost-detail="S1"]'); }, 4000);
+    report('展开看该款的生效区间（两条：手工 + 拿货对账）',
+      (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        if (!d) return false;
+        var rows = d.querySelectorAll('.ct-iv tbody tr');
+        return rows.length === 2 && flat(d).indexOf('拿货对账') >= 0;
+      })(),
+      (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        return d ? d.querySelectorAll('.ct-iv tbody tr').length + ' 条' : 'no-detail';
+      })());
+
+    report('⭐ 拿货对账那条不给「删除」（删了下次落账同步会原样写回来，用户会在"删不掉"里打转）',
+      (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        return !!d && d.querySelectorAll('[data-act="cost-iv-delete"]').length === 1;
+      })(),
+      '删按钮=' + (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        return d ? d.querySelectorAll('[data-act="cost-iv-delete"]').length : 'no-detail';
+      })());
+
+    // ⑥ 「哪条正在生效」必须**标出来**：改版前展开区只是一张按时间排的表，
+    //    要用户自己拿今天去比生效日 —— 而"当前价"这一格和它是同一次「pickCostInterval」的产物，
+    //    界面上却看不出来是哪条。判据带"只标一条"：两条都标等于没标。
+    report('展开区里标出**正在生效**的那条，且只标一条（两条都标 = 等于没标）',
+      (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        if (!d) return false;
+        var marked = d.querySelectorAll('.ct-iv tbody tr.is-current');
+        return marked.length === 1 && flat(marked[0]).indexOf('12.34') >= 0;
+      })(),
+      (function () {
+        var d = document.querySelector('[data-cost-detail="S1"]');
+        return d ? '标了 ' + d.querySelectorAll('.ct-iv tbody tr.is-current').length + ' 条' : 'no-detail';
+      })());
+
+    // ⑦ 单位的位置：「[data-act="cost-current"]」里**只能有数字**，「元」挂在它外面的兄弟元素上。
+    //    这条是给上面那条「=== '12.34'」立的**显式说明**：把单位合进去（12.34元）本身不算错，
+    //    但会让"当前进价取了哪条"这条断言变红 —— 与其让人去猜，不如把"单位在外面"写成契约。
+    report('当前进价的「元」在数字**外面**（data-act 里只有数字 —— 合进去就变成 12.34元）',
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        if (!r) return false;
+        var n = r.querySelector('[data-act="cost-current"]');
+        return !!n && flat(n) === '12.34' && flat(n.parentNode).indexOf('元') >= 0;
+      })(),
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        if (!r) return 'row-missing';
+        var n = r.querySelector('[data-act="cost-current"]');
+        return n ? '[' + flat(n) + '] 父=[' + flat(n.parentNode) + ']' : 'cell-missing';
+      })());
+
+    // 录入一条：S2 12.34 → 断言发出去的载荷 + **夹具真的变了**
+    (function () {
+      var c = document.querySelector('[data-act="cost-code"]');
+      var pr = document.querySelector('[data-act="cost-price"]');
+      c.value = 'S2';
+      c.dispatchEvent(new Event('input', { bubbles: true }));
+      pr.value = '12.34';
+      pr.dispatchEvent(new Event('input', { bubbles: true }));
+    })();
+    document.querySelector('[data-act="cost-save"]').click();
+    await settle(function () { return calls('aeCostMapUpsertManual').length > 0; }, 8000);
+    report('⭐ 录入走 aeCostMapUpsertManual，进价换算成**分**（12.34 → 1234）',
+      (function () {
+        var it = ((calls('aeCostMapUpsertManual')[0] || {}).items || [])[0] || {};
+        return it.styleCode === 'S2' && it.unitPriceCents === 1234;
+      })(),
+      JSON.stringify((calls('aeCostMapUpsertManual')[0] || {}).items));
+
+    await settle(function () { return !!document.querySelector('[data-cost-code="S2"]'); }, 8000);
+    report('保存后**表里真的多了 S2 那行** —— 不是靠组件乐观更新蒙对（桩真改了夹具）',
+      !!document.querySelector('[data-cost-code="S2"]'),
+      'S2 row=' + !!document.querySelector('[data-cost-code="S2"]'));
+
+    // 删除：S1 的手工那条 → 当前价应回落到拿货价的 9.99（确认框里承诺的就是这件事）
+    // ⚠️ 这里**不再点一次展开**：那一行从上面起就是展开状态，再点会**收起**（toggle），
+    //    下一步的 [data-cost-detail="S1"] 就成了 null（本轮实测踩到）。
+    document.querySelector('[data-cost-detail="S1"] [data-act="cost-iv-delete"]').click();
+    await settle(function () { return !!document.querySelector('.wb-mask'); }, 4000);
+    report('删除前有确认框，且明说删掉后会回落到更早的价',
+      (function () {
+        var m = document.querySelector('.wb-mask');
+        return !!m && flat(m).indexOf('回落到') >= 0;
+      })(),
+      flat(document.querySelector('.wb-mask')).slice(0, 60));
+    await clickText('.wb-mask .wb-btn--danger', '确认删除');
+    await settle(function () { return calls('aeCostMapDeleteManual').length > 0; }, 8000);
+    report('删除走 aeCostMapDeleteManual，带上（款编码 + 生效日）',
+      (function () {
+        var k = ((calls('aeCostMapDeleteManual')[0] || {}).keys || [])[0] || {};
+        return k.styleCode === 'S1' && k.effectiveFrom === '2026-01-01';
+      })(),
+      JSON.stringify((calls('aeCostMapDeleteManual')[0] || {}).keys));
+
+    await settle(function () {
+      var r = document.querySelector('[data-cost-code="S1"]');
+      return !!r && flat(r.querySelector('[data-act="cost-current"]')) === '9.99';
+    }, 8000);
+    report('⭐ 删掉手工那条后，当前价回落到更早的拿货价 9.99（确认框承诺的"回落"真的成立）',
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        return !!r && flat(r.querySelector('[data-act="cost-current"]')) === '9.99';
+      })(),
+      (function () {
+        var r = document.querySelector('[data-cost-code="S1"]');
+        return r ? flat(r.querySelector('[data-act="cost-current"]')) : 'row-missing';
+      })());
+
+    // ⑧ 零成本样本（反向夹具）：不造出"一条成本都没有"这个状态，空态那条断言就恒绿。
+    //    ⚠️ 这一步会临时让假桥的「aeCostMapList」返回空 —— **不动 COSTS 本身**（后面还要用）。
+    step('cost-empty');
+    window.__smokeEmptyCosts = true;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !!document.querySelector('[data-act="cost-empty"]'); }, 8000);
+    report('一条进价都没有时给的是**空态骨架**（不是"读不出来"的一屏空白，也不是只剩表头）',
+      (function () {
+        var e = document.querySelector('[data-act="cost-empty"]');
+        return !!e && flat(e).indexOf('还没有任何进价') >= 0 &&
+          document.querySelectorAll('[data-cost-code]').length === 0;
+      })(),
+      'empty=[' + flat(document.querySelector('[data-act="cost-empty"]')).slice(0, 30) + '] 行数=' +
+        document.querySelectorAll('[data-cost-code]').length);
+    report('零成本时缺价清单把**所有**款都列出来（S1 也回到待补里 —— 它此刻真的没有价）',
+      (function () {
+        var ul = document.querySelector('[data-act="cost-missing"]');
+        return !!ul && flat(ul).indexOf('S1') >= 0 && flat(ul).indexOf('S2') >= 0;
+      })(),
+      flat(document.querySelector('[data-act="cost-missing"]')).slice(0, 40));
+    window.__smokeEmptyCosts = false;
+    await clickText('[data-act="refresh"]', '刷新');
+    await settle(function () { return !!document.querySelector('[data-cost-code="S1"]'); }, 8000);
+    report('夹具复位：零成本开关关掉后 S1 那行回来了（后面的断言不该停在空态上）',
+      !!document.querySelector('[data-cost-code="S1"]'),
+      'S1 row=' + !!document.querySelector('[data-cost-code="S1"]'));
+
+    // 切回工作台，后续步（若有）依赖左栏
+    await clickText('[data-act="tab-workbench"]', '建档与关联');
+    await settle(function () { return !!document.querySelector('[data-act="product-table"]'); }, 8000);
 
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));
@@ -2427,19 +3006,29 @@ main();
 // 而这里要验的正是"**真文件**读出来的列与界面渲染的列一致、发出去的 items 形状对"。
 //
 // 三行的用意（每一行挡一类错）：
-//   IMP-1  尺码 2 个 / 克重写 `120,`（第二个留空）—— 顺序对应 + "空格位是有意义的位置"这条
+//   IMP-1  尺码 2 个 / 克重写 `120,`（第二个留空）—— 顺序对应 + "空格位是有意义的位置"这条；
+//          另带一个进价 `12.34` —— 验「进价随行发到 items、且落库前换算成**分**」
 //   IMP-2  只填尺码不填克重 —— 合法（0 = 没填），不该被当成错误
-//   IMP-3  尺码 2 个 / 克重 1 个 —— 对不上，必须标成"跳过"且**不**发去落库
+//   IMP-3  尺码 2 个 / 克重 **3 个** —— 对不上，必须标成"跳过"且**不**发去落库。
+//          ⚠️ 2026-10-09：原先是「2 尺码 / 1 克重」，但同一天加的**克重广播**规则让
+//          「1 个克重」变成合法（广播给所有尺码）—— 夹具必须跟着规则改，否则这条守卫
+//          会因"行本来就合格"而恒绿（实为恒红，只是以前 dist 陈旧没跑出来）。
+//   IMP-4（第 5 行）  款编码**留空** + 款式名取库里已存在的「款二」（S2）+ 供应商写一个**库里没有的**
+//          「厂新」—— 一行同时验 2026-10-10 的两条新口径：① 同名款要把库里的编码**回显**出来
+//          （留空却不是"自动生成 SUST-00x"，而是"沿用 S2"）；② 名字对不上的供应商会**自动新建**。
+//          ⚠️ 款编码那一列是本轮用户报的"没有回显"—— 它的判据必须是"输入框里真的有值且看得见"
+//          （`value` 非空 **且** `clientWidth` 不为 0），只看 innerText 会恒绿（input 没有文本节点）。
 //
 // ⚠️ 不在这份夹具里放图：嵌入图走的是主进程 exceljs（假桥 stub 了 `product-extract-images`），
 //    真抽取由 `scripts/product-xlsx-smoke.cjs` 单独钉住。两段各管一头，各自可单独跑。
 const XLSX_REQUIRE = createRequire(import.meta.url);
 const XLSX_LIB = XLSX_REQUIRE(path.join(ROOT, 'node_modules', 'xlsx'));
 const IMPORT_FIXTURE_AOA = [
-  ['款编码', '款式名', '供应商', '图片', '颜色', '尺码', '克重', '状态', '备注'],
-  ['IMP-1', '导入款一', '厂A', '', '红', 'M,L', '120,', '启用', ''],
-  ['IMP-2', '导入款二', '厂A', '', '蓝', 'S', '', '启用', ''],
-  ['IMP-3', '导入款三', '厂A', '', '白', 'S,T', '110', '启用', ''],
+  ['款编码', '款式名', '供应商', '进价(元)', '图片', '颜色', '尺码', '克重', '状态', '备注'],
+  ['IMP-1', '导入款一', '厂A', '12.34', '', '红', 'M,L', '120,', '启用', ''],
+  ['IMP-2', '导入款二', '厂A', '', '', '蓝', 'S', '', '启用', ''],
+  ['IMP-3', '导入款三', '厂A', '', '', '白', 'S,T', '110,110,110', '启用', ''],
+  ['', '款二', '厂新', '', '', '绿', 'L', '150', '启用', ''],
 ];
 const IMPORT_XLSX_B64 = (() => {
   const wb = XLSX_LIB.utils.book_new();

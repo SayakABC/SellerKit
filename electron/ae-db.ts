@@ -1015,6 +1015,40 @@ export function costMapUpsertManual(items: AeCostRowInput[]): { upserted: number
   return { upserted: rows.length };
 }
 
+/**
+ * 删除手工成本行（**只删 `source='manual'`**，按「款 + 生效日」精确定位）。
+ *
+ * 为什么不删 `purchase`：那是拿货对账**自动同步**的产物（`purchase-cost-sync.ts` 每次落账
+ * 全量替换那一批）—— 删掉它下一次同步会原样回来，用户会以为\"删不掉\"。要改拿货价请改拿货单。
+ *
+ * 删除的可见后果：该区间不再生效，读取侧（`pickUnitCost`）回落到**更早的区间**
+ * （没有更早的就回落到最早那条）—— 界面必须把这句话说出来，否则用户看到的是\"价悄悄变了\"。
+ *
+ * @returns `deleted` 真正删掉的条数（0 = 那条本来就不在，不是错误）
+ */
+export function costMapDeleteManual(
+  keys: { styleCode: string; effectiveFrom: string }[],
+): { deleted: number } {
+  const rows = (Array.isArray(keys) ? keys : [])
+    .map((k) => ({
+      code: clipStr(k?.styleCode, MAX_STR.styleCode),
+      from: clipStr(k?.effectiveFrom, 40),
+    }))
+    .filter((k) => k.code && k.from);
+  if (!rows.length) return { deleted: 0 };
+  let deleted = 0;
+  dbTransaction(() => {
+    for (const k of rows) {
+      const info = dbRun(
+        `DELETE FROM ae_cost_map WHERE style_code = ? AND effective_from = ? AND source = 'manual'`,
+        [k.code, k.from],
+      );
+      deleted += Number(info?.changes ?? 0);
+    }
+  });
+  return { deleted };
+}
+
 /** 成本表全量（前端展示 / 成本覆盖率提示用）。P4a 起一款可多行，按 (款, 生效日) 升序。 */
 export function costMapList(): AeCostMapItem[] {
   return dbQuery<Record<string, unknown>>(`SELECT style_code, effective_from, style_name, unit_price_cents, sample_count, last_biz_date, source, updated_at FROM ae_cost_map ORDER BY style_code, effective_from`).map((r) => ({

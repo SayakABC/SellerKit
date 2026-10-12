@@ -32,7 +32,7 @@
           data-act="fr-import-orders"
           @click="emit('import-orders')"
         >
-          去「今天」导入订单
+          去「发货台」导入订单
         </button>
         <button
           v-else-if="s.id === 'shops'"
@@ -58,7 +58,7 @@ import { FIRST_RUN_STEPS } from '../firstRun';
 const steps = FIRST_RUN_STEPS;
 
 const emit = defineEmits<{
-  /** 去「今天」导入订单（跨模块跳转由外壳执行 —— 本组件不认识模块表） */
+  /** 去「发货台」导入订单（跨模块跳转由外壳执行 —— 本组件不认识模块表） */
   'import-orders': [];
   /** 打开同一页的「店铺登记」页签（导航回调由外壳转手，同 `PoolPane` 的 `navigate`） */
   'open-registry': [];

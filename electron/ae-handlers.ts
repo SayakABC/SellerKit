@@ -6,7 +6,7 @@
 //   ae-summary          汇总（分币种，收入/费用分列）
 //   ae-receiver-status  接收端运行状态（端口 / 最近入库 / 错误）
 //   ae-profit-stats     M1 利润引擎总览（趋势 / TOP / 费用构成 / 覆盖率）
-//   ae-cost-map-*       M1 成本快照（D3：全量替换 / 列表）
+//   ae-cost-map-*       M1 成本快照（D3：全量替换 / 列表）；P4 起另有手工进价的 upsert / delete
 //   ae-rate-*           M1 汇率维护（列表 / upsert）
 //   settle-import       结算明细落库（AE 后台「订单明细」导出 → 解析在渲染层，本层只归一+存）
 //   settle-orders       按订单号取结算汇总（利润页"精准轨"用）
@@ -21,12 +21,15 @@ import {
   getAeSummary,
   costMapReplace,
   costMapList,
+  costMapDeleteManual,
   upsertSettleLines,
   settleOrders,
   settleStats,
   rateList,
   rateUpsert,
 } from './ae-db';
+// 手工进价的写入口径（与产品导入的「进价」列共用同一份；见该文件头）
+import { applyManualCosts } from './manual-costs';
 import { getProfitOverview } from './ae-engine';
 import { getAeReceiverStatus } from './ae-receiver';
 import { handle } from './ipc-util';
@@ -78,6 +81,58 @@ handle('ae-cost-map-import', (payload: any) => {
 handle('ae-cost-map-list', () => {
   ensureAeSchema();
   return costMapList();
+});
+
+// ---- 手工进价（P4 成本维护界面；写入口径与产品导入的「进价」列共用 `manual-costs.ts`）----
+
+/** 单次写入上限（界面逐款录入，给足余量但不放任大 payload） */
+const MAX_MANUAL_COST_ROWS = 2000;
+
+/**
+ * 手工录入 / 修改进价（`source='manual'`）。
+ *
+ * ⚠️ **不会**回落 `COST_LEGACY_FROM`（`0000-01-01`）：缺省生效日 = 当天。回落 legacy 会把该款
+ * **全部历史订单**的成本一起改掉。补录历史价请显式传 `effectiveFrom`。
+ */
+handle('ae-cost-map-upsert-manual', (payload: any) => {
+  ensureAeSchema();
+  const rows = Array.isArray(payload?.items) ? payload.items : [];
+  if (rows.length > MAX_MANUAL_COST_ROWS) {
+    throw new Error(
+      `ae-cost-map-upsert-manual: 单次最多 ${MAX_MANUAL_COST_ROWS} 条（收到 ${rows.length}）`,
+    );
+  }
+  const items = rows
+    .filter(
+      (it: any) => it && typeof it === 'object' && typeof it.styleCode === 'string' && it.styleCode.trim(),
+    )
+    .map((it: any) => ({
+      code: String(it.styleCode).trim().slice(0, 64),
+      name: typeof it.styleName === 'string' ? it.styleName.slice(0, 200) : '',
+      costCents: Number(it.unitPriceCents),
+      effectiveFrom: typeof it.effectiveFrom === 'string' ? it.effectiveFrom.slice(0, 40) : '',
+    }));
+  return applyManualCosts(items, String(payload?.effectiveFrom ?? ''));
+});
+
+/**
+ * 删除手工进价区间（只删 `manual`；`purchase` 行删了下次对账同步会原样回来）。
+ * 删掉后读取侧回落到更早的区间 —— 界面负责把这句话说给用户。
+ */
+handle('ae-cost-map-delete-manual', (payload: any) => {
+  ensureAeSchema();
+  const keys = Array.isArray(payload?.keys) ? payload.keys : [];
+  if (keys.length > MAX_MANUAL_COST_ROWS) {
+    throw new Error(
+      `ae-cost-map-delete-manual: 单次最多 ${MAX_MANUAL_COST_ROWS} 条（收到 ${keys.length}）`,
+    );
+  }
+  return costMapDeleteManual(
+    keys.map((k: any) => ({
+      styleCode: String(k?.styleCode ?? ''),
+      effectiveFrom: String(k?.effectiveFrom ?? ''),
+    })),
+  );
 });
 
 handle('ae-rate-list', () => {

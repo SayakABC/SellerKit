@@ -19,6 +19,16 @@
 // 缺数据**逐行标**（`missing*` / `noPricePieces` 计数挂在每个 SKU 组上，界面按它出标签）：
 // 缺图的没法看图拣、缺件数的没法知道拣几件、缺供应商的分不了单、未识别款的回不了产品库、
 // **缺进价的算不出金额**。一条都不许静默糊过去 —— 拣货单是"照它干活"的东西。
+//
+// **"已拿 / 还差"（2026-10-10）**：拣货单问的是"**还要**拿什么"，而不只是"这批订单要什么"。
+// `opts.taken`（键 `takenKey(款,色,码)`）来自**已提交拿货单**（与 `purchase-db.outstanding()`
+// 同一粒度、同一含义），`opts.ignored` 是「无需补货」的款色集合。两者都缺省时全部按 0 / 无忽略
+// ⇒ 输出与加这两项之前**逐字一致**（既有断言不会因为"多算了已拿"而变红）。
+// `remaining = max(0, pieces − taken)` 夹到 0：多拿了是"拿多了"，不是"还差负数"。
+//
+// **款色折叠层（2026-10-10，界面重设计）**：界面行从「款色码」改成「**款色一行、尺码并排**」，
+// 折叠与"待拿"口径都在本层（`groupByColor` / `pendingOf` / `pendingRollup`）——
+// 折叠只是展示（每个尺码格仍带自己那三个数），**忽略/已拿/开单粒度一个都没变**。
 
 import type { PickingRowProjection } from '@/types';
 import {
@@ -35,6 +45,22 @@ import {
 /** 默认天数窗（"近 30 天"是产品默认值，写在界面上可见） */
 export const DEFAULT_PICKING_DAYS = 30;
 
+/**
+ * 「已拿 / 还要拿」的键（款 · 色 · 码）—— **与 `electron/purchase-db.ts` 的 `outstanding()`
+ * 分组粒度逐字一致**（`style_code|color|size`，三个原文、不归一）。
+ *
+ * 为什么把它抬成导出函数：拣货单要显示"已拿多少、还差多少"，而"已拿"来自已提交的拿货单。
+ * 键只要两处拼得不一样，就会出现"明明拿过、拣货单还说没拿"——这种错不报错、只是数字不对。
+ */
+export function takenKey(styleCode: unknown, color: unknown, size: unknown): string {
+  return `${String(styleCode ?? '')}|${String(color ?? '')}|${String(size ?? '')}`;
+}
+
+/** 「无需补货」的键（款 · 色，**不含码**）—— 忽略是按整款色生效的（同 `purchase_ignore`） */
+export function ignoreKey(styleCode: unknown, color: unknown): string {
+  return `${String(styleCode ?? '')}|${String(color ?? '')}`;
+}
+
 /** 拣货单的范围选项（默认值在界面上以标签呈现，不藏进设置） */
 export interface PickingScope {
   /** 天数窗（下单日期在 `today - days` 之后）；<= 0 = 不限 */
@@ -49,6 +75,19 @@ export interface PickingScope {
    * 不传 / 空数组 → 全部行标「无进价」（**不按 0 算**，见 `noPricePieces`）。
    */
   costs?: CostInterval[] | null;
+  /**
+   * **已拿件数**（键 = `takenKey(款, 色, 码)`）—— 来自**已提交**的拿货单（宿主 `outstanding()` 的同一份口径）。
+   *
+   * 为什么必须有它：拣货单问的是"要拿什么"，而"要拿"= 需求 − 已拿。没有这一项，
+   * 开完拿货单后清单**一件不少**（订单还没发货），用户只能自己去第 5 步重新对一遍。
+   * 缺省 / 空对象 → 全部按 0（还没开过拿货单），行为与加它之前**逐字一致**。
+   */
+  taken?: Record<string, number> | null;
+  /**
+   * 已被标记「无需补货」的款色键集合（`ignoreKey(款, 色)`，整款色生效，忽略全部尺码）。
+   * 缺省 → 没有忽略（行为与加它之前一致）。
+   */
+  ignored?: Set<string> | null;
 }
 
 /** 拣货单的一行输入 = 宿主 `picking-rows` 的投影行。
@@ -61,11 +100,29 @@ export interface PickingGroup {
   /** 分组键（`skuKey` 的产物）：`S1 · 黑 · L` */
   key: string;
   styleCode: string;
+  /**
+   * 款名（`oi_styles.name`）。'' = 未识别款或该款没录名字。
+   *
+   * 为什么让它进拣货单（2026-10-10 并入「拿货」时加）：拿货单的明细行有「名称」一栏
+   * （`purchase_items.style_name`，编辑器里可改），原来那版靠 `outstanding()` 带过来；
+   * 清单本身只显示 `key`（`S1 · 黑 · L`）—— 合并后清单是"要拿什么"的**唯一**出处，
+   * 不带款名就得让用户开完单再逐行手打名字。
+   */
+  styleName: string;
   /** **有效颜色**（宿主侧已做回落：款色 → 订单原文色）。分组键用它，不直接用订单原文。 */
   color: string;
   size: string;
   /** **要拣几件** = 组内各行件数之和（分不清件数的行按 1 件，见 `missingQty`） */
   pieces: number;
+  /**
+   * **已拿件数**（同款色码，来自已提交拿货单；见 `PickingScope.taken`）。
+   * 可能大于 `pieces`（多拿了）—— 如实呈现，`remaining` 夹到 0，不把"多拿"伪装成"还差负数"。
+   */
+  taken: number;
+  /** **还差件数** = `max(0, pieces − taken)` —— 这才是"还要拿多少" */
+  remaining: number;
+  /** 该款色被标记「无需补货」（整款色，忽略全部尺码）—— 界面据此标"已忽略"，不计入待拿 */
+  ignored: boolean;
   /** 涉及订单数（按订单号去重；拆行后的多商品同单只算一单） */
   orders: number;
   /** 涉及订单号（升序去重；"这单里是不是还有别的 SKU"要能当场核对） */
@@ -133,6 +190,12 @@ export interface PickingSummary {
   rows: number;
   /** 件数合计 */
   pieces: number;
+  /** 已拿件数合计（见 `PickingGroup.taken`） */
+  takenPieces: number;
+  /** 还差件数合计（= Σ `max(0, pieces − taken)`，**含**被忽略的组 —— 它是"总需求还差多少"） */
+  remainingPieces: number;
+  /** **还差 > 0 且未被忽略**的组数 —— 界面用它答"还要拿几款"（被忽略的不算） */
+  remainingGroups: number;
   /** 涉及订单数（按订单号去重） */
   orders: number;
   /** 预估金额合计（**元**）= Σ(件数 × 进价)，只含有价的件数 */
@@ -208,6 +271,9 @@ export function aggregatePicking(
   const days = Number.isFinite(Number(opts?.days)) ? Number(opts.days) : DEFAULT_PICKING_DAYS;
   const cutoff = cutoffDate(String(opts?.today ?? '') || todayLocal(), days);
   const costs = Array.isArray(opts?.costs) ? opts.costs : [];
+  // 已拿 / 已忽略：缺省 = 空（行为与"还没有拿货单"逐字一致）
+  const takenMap = opts?.taken && typeof opts.taken === 'object' ? opts.taken : {};
+  const ignoredSet = opts?.ignored instanceof Set ? opts.ignored : null;
   const agg = new Map<string, PickingGroup>();
   const allOrders = new Set<string>();
   const summary: PickingSummary = {
@@ -215,6 +281,9 @@ export function aggregatePicking(
     suppliers: [],
     rows: 0,
     pieces: 0,
+    takenPieces: 0,
+    remainingPieces: 0,
+    remainingGroups: 0,
     orders: 0,
     amount: 0,
     noPricePieces: 0,
@@ -269,9 +338,15 @@ export function aggregatePicking(
       ({
         key,
         styleCode: String(r?.styleCode ?? ''),
+        styleName: String(r?.styleName ?? ''),
         color: String(r?.color ?? ''),
         size: String(r?.size ?? ''),
         pieces: 0,
+        // 已拿 / 还差 / 忽略在**组维度**上算（见下方 `for (const g of agg.values())`），
+        // 逐行累加会把同一行的 taken 加 N 次（taken 是"这款色码总共拿了多少"，不是"每行拿了多少"）。
+        taken: 0,
+        remaining: 0,
+        ignored: false,
         orders: 0,
         orderNos: [],
         supplierNames: [],
@@ -314,6 +389,11 @@ export function aggregatePicking(
       }
     }
     if (noStyle) g.missingStyle += 1;
+    // 款名：组内**第一个非空**的留着（同款的各行名字一致；识别链降级时可能整组都为空）
+    if (!g.styleName) {
+      const nm = String(r?.styleName ?? '');
+      if (nm) g.styleName = nm;
+    }
     if (qtySource === 'assumed') g.missingQty += 1;
 
     agg.set(key, g);
@@ -335,6 +415,14 @@ export function aggregatePicking(
     // 进价 = 有价件数的加权均价（同一 SKU 跨成本区间时各行单价可能不同 → 表里给的是均价）
     g.unitPrice = g.pricedPieces > 0 ? round2(g.amount / g.pricedPieces) : null;
     if (g.noPricePieces > 0) summary.noPriceGroups += 1;
+    // 已拿 / 还差 / 忽略：**组维度一次算**（逐行加会把同一行重复计）。
+    // `remaining` 夹到 0 —— 多拿了是"拿多了"，不是"还差负数"（负数会让"已拿够"看起来像"还缺"）。
+    g.taken = Math.max(0, Number(takenMap[takenKey(g.styleCode, g.color, g.size)]) || 0);
+    g.remaining = Math.max(0, g.pieces - g.taken);
+    g.ignored = !!(ignoredSet && ignoredSet.has(ignoreKey(g.styleCode, g.color)));
+    summary.takenPieces += g.taken;
+    summary.remainingPieces += g.remaining;
+    if (g.remaining > 0 && !g.ignored) summary.remainingGroups += 1;
   }
   summary.groups = [...agg.values()].sort(
     (a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
@@ -383,4 +471,221 @@ function groupBySupplier(groups: PickingGroup[]): PickingSupplierGroup[] {
       b.pieces - a.pieces ||
       (a.supplierName < b.supplierName ? -1 : a.supplierName > b.supplierName ? 1 : 0),
   );
+}
+
+// ─────────────────────────────── 款色行 / 待拿口径（2026-10-10 界面重设计） ───────────────────────────────
+//
+// 界面从「一个款色码一行、图逐码重复」改成「**款色一行、尺码并排**」，于是需要一个把
+// `PickingGroup[]`（款色码粒度）折叠成 `PickingColorGroup[]`（款色粒度）的纯函数；
+// 「按此生成拿货单」的按钮件数与主进程开单的明细行也必须从**同一条判据**取（见 `pendingOf`）。
+// 三条口径与上方 `aggregatePicking` 逐字同源（只是再向上折一层），不另讲一套：
+
+/** 款色行里的一个尺码格：主数是**还差**，需求/已拿进 tooltip（界面拼 title 用） */
+export interface PickingSizeCell {
+  size: string;
+  /** 需求件数 */
+  pieces: number;
+  /** 已拿件数 */
+  taken: number;
+  /** 还差件数（每码已夹 0） */
+  remaining: number;
+}
+
+/**
+ * **款色一行**（界面行的粒度）：同款同色的各尺码合成一行，尺码并排成小格。
+ *
+ * ⚠️ 这只是**折叠展示**，不是新的数据粒度：忽略仍是款色（`ignoreKey`）、已拿仍是款色码
+ * （`takenKey`）、开单明细仍是款色码 —— 折叠出来的每个尺码格都带着自己那三个数，
+ * 谁也没被平均掉（把 `L` 的还差摊进一行总账里，就等于让用户猜每个码拿几件）。
+ */
+export interface PickingColorGroup {
+  /** 分组键：`S1 · 黑`（缺哪段标哪段，与 `skuKey` 同一套占位词） */
+  key: string;
+  styleCode: string;
+  styleName: string;
+  color: string;
+  /** 主供应商（组内首个非 0，同 `PickingGroup.supplierId` 口径） */
+  supplierId: number;
+  supplierName: string;
+  /** 组内**首个非空**的图（同款色的订单图通常一致；逐码重复只是浪费） */
+  imagePath: string;
+  /** 尺码并排（**排序与输入顺序无关** —— 让同一行的格子不随件数/数据顺序跳位） */
+  sizes: PickingSizeCell[];
+  /** 需求件数合计（Σ 各码） */
+  pieces: number;
+  /** 已拿件数合计（Σ 各码） */
+  taken: number;
+  /** 还差件数合计（Σ 各码的夹 0 值） */
+  remaining: number;
+  /** 整款色被标「无需补货」（各码一致 —— 忽略键里没有码） */
+  ignored: boolean;
+  /**
+   * 进价（**元/件**）= 各码"有价需求件"的加权均价（口径同 `PickingGroup.unitPrice`，只向上折一层）。
+   * `null` = 这款色一件都没取到价（界面标「无进价」，**不是 0**）。
+   */
+  unitPrice: number | null;
+  /** **还差件**按进价估的金额（元）；只含**有价**的还差件（缺价件进 `pendingNoPricePieces`，不按 0 蒙） */
+  pendingAmount: number;
+  /** 还差件里没取到进价的件数（界面据此说"估算不含这几件"） */
+  pendingNoPricePieces: number;
+  /** 逐项缺口（Σ 各码；界面按它出"缺"标签） */
+  missingImage: number;
+  missingQty: number;
+  missingStyle: number;
+  /** 没取到进价的件数（按**需求**计；界面按它标「无进价」） */
+  noPricePieces: number;
+  /** 涉及订单数（各码订单号的**并集**去重 —— 同单跨码只算一单） */
+  orders: number;
+}
+
+/** 尺码的自然序：字母码 XS→XXXL、数字码按数值、其余按原串（`''` 的"无尺码"排最后）。
+ *  为什么要排序而不是随手用输入顺序：格子若随件数/取数顺序跳位，同一行两次生成会长得不一样。 */
+const SIZE_LETTER_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '2XL', '3XL', '4XL', '5XL'];
+
+function sizeOrder(a: string, b: string): number {
+  const rank = (raw: string): [number, number, string] => {
+    const t = raw.trim().toUpperCase();
+    const li = SIZE_LETTER_ORDER.indexOf(t);
+    if (li >= 0) return [1, li, ''];
+    const n = Number(t);
+    if (t !== '' && Number.isFinite(n)) return [2, n, ''];
+    return [3, 0, t];
+  };
+  const ra = rank(a);
+  const rb = rank(b);
+  return ra[0] - rb[0] || ra[1] - rb[1] || (ra[2] < rb[2] ? -1 : ra[2] > rb[2] ? 1 : 0);
+}
+
+/**
+ * 把（同一批）拣货项按**款色**折成界面行。
+ *
+ * 输入通常传一个厂家段里的 `PickingGroup[]`（`summary.suppliers[i].groups`），
+ * 也可传全量 `summary.groups`（顶部"待拿 X 款色"就这么算）。
+ * 排序：**需求件数降序 → 键升序**（与 `aggregatePicking` 同一规则，结果不随输入顺序漂移）。
+ *
+ * 图/款名取**首个非空**，供应商取**首个非 0** —— 与 `aggregatePicking` 组内回落同一手法；
+ * 缺哪一环的计数逐码求和（折叠不丢"缺"）。
+ */
+export function groupByColor(groups: PickingGroup[] | null | undefined): PickingColorGroup[] {
+  const list = Array.isArray(groups) ? groups : [];
+  const buckets = new Map<string, { row: PickingColorGroup; groups: PickingGroup[] }>();
+  for (const g of list) {
+    const key = `${g.styleCode || '(未识别款)'} · ${g.color || '(无颜色)'}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        row: {
+          key,
+          styleCode: g.styleCode,
+          styleName: '',
+          color: g.color,
+          supplierId: 0,
+          supplierName: '',
+          imagePath: '',
+          sizes: [],
+          pieces: 0,
+          taken: 0,
+          remaining: 0,
+          ignored: g.ignored,
+          unitPrice: null,
+          pendingAmount: 0,
+          pendingNoPricePieces: 0,
+          missingImage: 0,
+          missingQty: 0,
+          missingStyle: 0,
+          noPricePieces: 0,
+          orders: 0,
+        },
+        groups: [],
+      };
+      buckets.set(key, b);
+    }
+    b.groups.push(g);
+    const row = b.row;
+    row.sizes.push({ size: g.size, pieces: g.pieces, taken: g.taken, remaining: g.remaining });
+    row.pieces += g.pieces;
+    row.taken += g.taken;
+    row.remaining += g.remaining;
+    if (!row.styleName && g.styleName) row.styleName = g.styleName;
+    if (!row.imagePath && g.imagePath) row.imagePath = g.imagePath;
+    if (!row.supplierId && g.supplierId) {
+      row.supplierId = g.supplierId;
+      row.supplierName = g.supplierName;
+    }
+    row.missingImage += g.missingImage;
+    row.missingQty += g.missingQty;
+    row.missingStyle += g.missingStyle;
+    row.noPricePieces += g.noPricePieces;
+    // 还差件按进价估：只统计**有价**的还差件（缺价的报出来，不按 0 蒙 —— 与 `aggregatePicking` 同一条纪律）
+    if (g.remaining > 0) {
+      if (g.unitPrice === null) row.pendingNoPricePieces += g.remaining;
+      else row.pendingAmount = round2(row.pendingAmount + g.remaining * g.unitPrice);
+    }
+  }
+  const out: PickingColorGroup[] = [];
+  for (const { row, groups: gs } of buckets.values()) {
+    row.sizes.sort((a, b) => sizeOrder(a.size, b.size));
+    // 进价 = 有价需求件的加权均价（与 `PickingGroup.unitPrice` 同一口径，只是再向上折一层）
+    let paid = 0;
+    let paidPieces = 0;
+    for (const g of gs) {
+      if (g.unitPrice !== null) {
+        paid += g.unitPrice * g.pricedPieces;
+        paidPieces += g.pricedPieces;
+      }
+    }
+    row.unitPrice = paidPieces > 0 ? round2(paid / paidPieces) : null;
+    const orders = new Set<string>();
+    for (const g of gs) for (const no of g.orderNos) orders.add(no);
+    row.orders = orders.size;
+    out.push(row);
+  }
+  return out.sort((a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/**
+ * **待拿**的拣货项 = 「还差 > 0 且未被忽略」（可选再按厂家筛一层）。
+ *
+ * 为什么必须是导出函数（而不是各调用点自己 filter）：界面上「按此生成拿货单（N 件）」的 N、
+ * 以及主进程真正写进订单的明细行，回答的是**同一个问题** —— 两者只要各自写一遍 filter，
+ * 就会出现"按钮说 12 件、单里 14 件"这种没人查得出的错。
+ *
+ * `supplierId` 缺省 = 不限厂家（"总共有哪些要拿"）；给数则**精确匹配**（含 `0`：未指定厂家段）。
+ */
+export function pendingOf(
+  groups: PickingGroup[] | null | undefined,
+  supplierId?: number | null,
+): PickingGroup[] {
+  const list = Array.isArray(groups) ? groups : [];
+  return list.filter(
+    (g) =>
+      !g.ignored &&
+      g.remaining > 0 &&
+      (supplierId === undefined || supplierId === null || g.supplierId === supplierId),
+  );
+}
+
+/** 「待拿」的合计（款色数 / 件数 / 预估金额 / 缺价件数）—— 顶部条件条与厂家段标题共用 */
+export interface PendingRollup {
+  /** 待拿款色数（款色行里还差 > 0 且未忽略的行数） */
+  colors: number;
+  /** 待拿件数合计（Σ 还差） */
+  pieces: number;
+  /** 预估金额（元，只含有价的还差件） */
+  amount: number;
+  /** 还差件里没取到进价的件数（金额里不含它们） */
+  noPricePieces: number;
+}
+
+/** 按款色行汇总"待拿"（口径 = `pendingOf` 的款色折叠版；被忽略/已拿完的行不进任何一项） */
+export function pendingRollup(rows: PickingColorGroup[] | null | undefined): PendingRollup {
+  const out: PendingRollup = { colors: 0, pieces: 0, amount: 0, noPricePieces: 0 };
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r.ignored || r.remaining <= 0) continue;
+    out.colors += 1;
+    out.pieces += r.remaining;
+    out.amount = round2(out.amount + r.pendingAmount);
+    out.noPricePieces += r.pendingNoPricePieces;
+  }
+  return out;
 }

@@ -75,20 +75,27 @@ const TINY_JPEG_BASE64 =
   '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
 const IMG = { base64: TINY_JPEG_BASE64, width: 160, height: 160 };
 
-/** 一行导出的构造器（默认有价、有图） */
-const row = (over = {}) => ({
-  supplierName: '厂A',
-  styleCode: 'S1',
-  color: '黑',
-  size: 'L',
-  pieces: 1,
-  orders: 1,
-  unitPrice: 10,
-  amount: 10,
-  gaps: '',
-  image: IMG,
-  ...over,
-});
+/** 一行导出的构造器（默认有价、有图）。`remaining` 默认按 `pieces − taken` 推（与渲染层同口径） */
+const row = (over = {}) => {
+  const pieces = over.pieces === undefined ? 1 : over.pieces;
+  const taken = over.taken === undefined ? 0 : over.taken;
+  const remaining = over.remaining === undefined ? Math.max(0, pieces - taken) : over.remaining;
+  return {
+    supplierName: '厂A',
+    styleCode: 'S1',
+    color: '黑',
+    size: 'L',
+    pieces,
+    taken,
+    remaining,
+    orders: 1,
+    unitPrice: 10,
+    amount: 10,
+    gaps: '',
+    image: IMG,
+    ...over,
+  };
+};
 
 async function main() {
   console.log('拣货单带图 xlsx 冒烟\n');
@@ -117,9 +124,9 @@ async function main() {
     assert.strictEqual(xlsx.safeSheetName('   '), '未指定厂家');
   });
 
-  // ---- 真正的工作簿：厂A 两行（有价、有图）+ 未指定一行（无价、无图）----
+  // ---- 真正的工作簿：厂A 两行（有价、有图；第一行已拿一部分）+ 未指定一行（无价、无图）----
   const buf = await xlsx.buildPickingWorkbook([
-    row({ styleCode: 'S1', pieces: 17, orders: 3, unitPrice: 12.5, amount: 212.5, image: IMG }),
+    row({ styleCode: 'S1', pieces: 17, taken: 5, remaining: 12, orders: 3, unitPrice: 12.5, amount: 212.5, image: IMG }),
     row({ styleCode: 'S2', color: '白', pieces: 4, orders: 1, unitPrice: 10, amount: 40, image: IMG }),
     row({ supplierName: '', styleCode: 'S9', pieces: 41, orders: 2, unitPrice: null, amount: null, gaps: '无进价 · 未识别款', image: null }),
   ]);
@@ -170,32 +177,41 @@ async function main() {
   });
 
   await check('各表的数来自**各自的行**（不是同一批复制两份）', () => {
-    // 列：1 图片 2 款编码 3 款色 4 尺码 5 件数 6 订单数 7 进价 8 金额 9 缺什么
+    // 列：1 图片 2 款编码 3 款色 4 尺码 5 需求 6 已拿 7 还差 8 订单数 9 进价 10 金额 11 缺什么
     assert.strictEqual(wsA.getRow(2).getCell(2).value, 'S1');
     assert.strictEqual(wsA.getRow(2).getCell(5).value, 17);
-    assert.strictEqual(wsA.getRow(2).getCell(7).value, 12.5);
-    assert.strictEqual(wsA.getRow(2).getCell(8).value, 212.5);
+    assert.strictEqual(wsA.getRow(2).getCell(9).value, 12.5);
+    assert.strictEqual(wsA.getRow(2).getCell(10).value, 212.5);
     assert.strictEqual(wsA.getRow(3).getCell(5).value, 4);
     assert.strictEqual(wsN.getRow(2).getCell(2).value, 'S9');
     assert.strictEqual(wsN.getRow(2).getCell(5).value, 41);
     assert.notStrictEqual(wsN.getRow(2).getCell(2).value, 'S1', '未指定厂家的表里不该出现厂A 的款');
   });
 
+  await check('「需求 / 已拿 / 还差」三列各自成列（拿货单是拿"还差"，不是拿"需求"）', () => {
+    assert.strictEqual(wsA.getRow(2).getCell(5).value, 17, '需求');
+    assert.strictEqual(wsA.getRow(2).getCell(6).value, 5, '已拿');
+    assert.strictEqual(wsA.getRow(2).getCell(7).value, 12, '还差 = 需求 − 已拿');
+    assert.strictEqual(wsA.getRow(3).getCell(6).value, 0, '没拿过 → 已拿 0');
+    assert.strictEqual(wsA.getRow(3).getCell(7).value, 4, '没拿过 → 还差 = 需求');
+  });
+
   await check('无进价的行**留空**（读回来是 null，不是 0 —— 0 会被当成"这件免费"）', () => {
-    assert.strictEqual(wsN.getRow(2).getCell(7).value, null, '进价列应为空');
-    assert.strictEqual(wsN.getRow(2).getCell(8).value, null, '金额列应为空');
-    assert.ok(/无进价/.test(String(wsN.getRow(2).getCell(9).value)), '「缺什么」列要说清为什么没数');
+    assert.strictEqual(wsN.getRow(2).getCell(9).value, null, '进价列应为空');
+    assert.strictEqual(wsN.getRow(2).getCell(10).value, null, '金额列应为空');
+    assert.ok(/无进价/.test(String(wsN.getRow(2).getCell(11).value)), '「缺什么」列要说清为什么没数');
   });
 
   await check('每张表末尾有「合计」行，且合计 = 本表各行之和', () => {
-    for (const [ws, pieces, amount] of [
-      [wsA, 17 + 4, 212.5 + 40],
-      [wsN, 41, null],
+    for (const [ws, pieces, remaining, amount] of [
+      [wsA, 17 + 4, 12 + 4, 212.5 + 40],
+      [wsN, 41, 41, null],
     ]) {
       const last = ws.getRow(ws.rowCount);
       assert.strictEqual(last.getCell(2).value, '合计', `${ws.name} 末行不是合计行`);
-      assert.strictEqual(last.getCell(5).value, pieces, `${ws.name} 合计件数`);
-      assert.strictEqual(last.getCell(8).value, amount, `${ws.name} 合计金额`);
+      assert.strictEqual(last.getCell(5).value, pieces, `${ws.name} 合计需求`);
+      assert.strictEqual(last.getCell(7).value, remaining, `${ws.name} 合计还差`);
+      assert.strictEqual(last.getCell(10).value, amount, `${ws.name} 合计金额`);
     }
   });
 

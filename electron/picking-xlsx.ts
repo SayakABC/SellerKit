@@ -39,8 +39,12 @@ export interface PickingExportRow {
   styleCode: string;
   color: string;
   size: string;
-  /** 要拣几件 */
+  /** 要拣几件（需求） */
   pieces: number;
+  /** 已拿件数（已提交拿货单合计；与 `purchase-db.outstanding()` 同一口径） */
+  taken: number;
+  /** 还差件数 = `max(0, pieces − taken)` —— 厂家照着拿的就是这个数 */
+  remaining: number;
   /** 涉及订单数 */
   orders: number;
   /** 进价（元/件）；`null` = 无进价（表里留空，**不写 0**） */
@@ -80,12 +84,14 @@ export function safeSheetName(raw: string, fallback = '未指定厂家'): string
 }
 
 // 表头（顺序与界面一致：图在最前，钱在最后，缺口收尾）
-const HEAD = ['图片', '款编码', '款色', '尺码', '件数', '订单数', '进价(元)', '金额(元)', '缺什么'];
-const WIDTHS = [16, 16, 12, 8, 8, 9, 10, 11, 22];
+const HEAD = ['图片', '款编码', '款色', '尺码', '需求', '已拿', '还差', '订单数', '进价(元)', '金额(元)', '缺什么'];
+const WIDTHS = [22, 16, 12, 8, 8, 8, 8, 9, 10, 11, 22];
 // Excel 无"图片作为单元格内容"的存储格式（除 Excel 365 IMAGE()，兼容性差）⇒ 浮动图锚定 A 列。
 // 默认字号下 1 字符≈7px + 5px 边距；留边距避免压到 B 列。
-const A_COL_PX = Math.round(WIDTHS[0] * 7 + 5); // A 列宽 16 → 约 117px
-const IMG_W = Math.min(96, A_COL_PX - 14); // 图片显示宽度（像素）
+// ⚠️ A 列宽 22 → 图约 140px：**尺码×件数的角标已经烧进图里**（渲染层 canvas 合成），
+//    图太小角标就读不出来 —— "拿图就能拿货"这条链正好卡在这个尺寸上。
+const A_COL_PX = Math.round(WIDTHS[0] * 7 + 5); // A 列宽 22 → 约 159px
+const IMG_W = Math.min(140, A_COL_PX - 14); // 图片显示宽度（像素）
 const COL_OFF = Math.max(0, Math.round((A_COL_PX - IMG_W) / 2)); // 水平居中偏移
 
 /** 生成拣货单工作簿（**一个厂家一张 sheet**）。返回 xlsx 字节。 */
@@ -114,11 +120,13 @@ export async function buildPickingWorkbook(rows: PickingExportRow[]): Promise<Bu
     });
 
     let piecesTotal = 0;
+    let remainTotal = 0;
     let amountTotal = 0;
     let priced = false;
     part.rows.forEach((it, i) => {
       const r = i + 2;
       piecesTotal += Number(it.pieces) || 0;
+      remainTotal += Number(it.remaining) || 0;
       if (it.amount !== null && Number.isFinite(Number(it.amount))) {
         amountTotal += Number(it.amount);
         priced = true;
@@ -129,6 +137,8 @@ export async function buildPickingWorkbook(rows: PickingExportRow[]): Promise<Bu
         it.color || '(无颜色)',
         it.size || '(无尺码)',
         Number(it.pieces) || 0,
+        Number(it.taken) || 0,
+        Number(it.remaining) || 0,
         Number(it.orders) || 0,
         it.unitPrice === null ? undefined : it.unitPrice, // 无进价 → 留空（写 0 会被当成"免费"）
         it.amount === null ? undefined : it.amount, // 无进价 → 留空（写 0 会被当成"免费"）
@@ -136,8 +146,8 @@ export async function buildPickingWorkbook(rows: PickingExportRow[]): Promise<Bu
       ]);
       const row = ws.getRow(r);
       row.alignment = { vertical: 'middle' };
-      if (it.unitPrice !== null) row.getCell(7).numFmt = '0.00';
-      if (it.amount !== null) row.getCell(8).numFmt = '0.00';
+      if (it.unitPrice !== null) row.getCell(9).numFmt = '0.00';
+      if (it.amount !== null) row.getCell(10).numFmt = '0.00';
       const h = embedCellImage(wb, ws, r, it.image, { width: IMG_W, colOff: COL_OFF });
       if (h !== null) row.height = h;
     });
@@ -150,12 +160,14 @@ export async function buildPickingWorkbook(rows: PickingExportRow[]): Promise<Bu
       '',
       piecesTotal,
       '',
+      remainTotal,
+      '',
       '',
       priced ? +amountTotal.toFixed(2) : undefined,
       part.rows.some((x) => x.unitPrice === null) ? '含未计价的款' : '',
     ]);
     sum.font = { bold: true };
-    if (priced) sum.getCell(8).numFmt = '0.00';
+    if (priced) sum.getCell(10).numFmt = '0.00';
   }
 
   return (await wb.xlsx.writeBuffer()) as Buffer;

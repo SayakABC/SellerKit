@@ -318,9 +318,9 @@ check('先导订单、后配映射 → 回填存量订单（不必把 Excel 重�
   assert.strictEqual(after.color, '白色');
 });
 
-check('回填只碰未归款的图（已归款的不重算 —— 人工/识别结论优先）', () => {
+check('回填不碰已定色的图（人工/识别结论/补过的色都算数 —— 改一次映射不会把历史订单全改判）', () => {
   const n = odb.reassignOrdersByItemIds(['IT-BF']);
-  assert.strictEqual(n, 0, '图 12 已归款，不该被重算');
+  assert.strictEqual(n, 0, '图 12 已定色，不该被重判');
 });
 
 check('未配颜色的映射（spec 缺省）行为不变 —— 颜色回落订单原文，不会凭空多出色', () => {

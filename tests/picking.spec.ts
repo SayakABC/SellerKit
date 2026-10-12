@@ -9,7 +9,16 @@
 //   · 排序确定（件数降序 → 键升序），结果不随输入顺序漂移。
 // ⚠️ 用例一律用**显式 `today`**（或把 orderTime 留空），别让断言随系统日期漂移。
 import { describe, expect, it } from 'vitest';
-import { aggregatePicking, type PickingRow } from '../src/lib/picking';
+import {
+  aggregatePicking,
+  groupByColor,
+  ignoreKey,
+  pendingOf,
+  pendingRollup,
+  takenKey,
+  type PickingGroup,
+  type PickingRow,
+} from '../src/lib/picking';
 import { settleQtyKey, skuKey, type CostInterval } from '../src/lib/orderCost';
 
 const infoBlock = (qty: number) => `【1】 某款 (产品属性:Color:黑、Size:L)\n(商品数量:${qty} piece)`;
@@ -21,6 +30,7 @@ function row(over: Partial<PickingRow> = {}): PickingRow {
     shop: '店A',
     orderTime: '', // 默认无日期（照收）；日期口径由专门的范围用例显式给
     styleCode: 'S1',
+    styleName: '', // 默认空（识别链降级时整组都可能为空）；款名口径由专门用例给
     styleColor: '红',
     color: '黑',
     size: 'L',
@@ -71,6 +81,13 @@ describe('aggregatePicking：分组与件数', () => {
     ].sort());
     expect(s.groups.reduce((n, g) => n + g.rows, 0)).toBe(5);
     expect(s.missingStyle).toBe(1);
+  });
+
+  it('款名取组内**第一个非空**（供拿货单明细预填；整组都空时留空串，不编名字）', () => {
+    const s = aggregatePicking([row({ id: 1 }), row({ id: 2, orderNo: 'O2', styleName: '某款' })]);
+    expect(s.groups[0].styleName).toBe('某款');
+    const none = aggregatePicking([row({ id: 3 })]);
+    expect(none.groups[0].styleName).toBe('');
   });
 
   it('排序：件数降序 → 键升序（不随输入顺序漂移）', () => {
@@ -400,5 +417,320 @@ describe('aggregatePicking：按厂家分组', () => {
   it('空输入 → suppliers 为空数组（不炸）', () => {
     expect(aggregatePicking([]).suppliers).toEqual([]);
     expect(aggregatePicking(null).suppliers).toEqual([]);
+  });
+});
+
+// 2026-10-10：「已拿 / 还差 / 已忽略」—— 拣货单问的是"**还要**拿什么"。
+//
+// 钉住的是**键的粒度**（这是唯一能把这件事做错的地方）：
+//   · 已拿（`taken`）按 **款 × 色 × 码** —— 与 `purchase-db.outstanding()` 的行粒度一致；
+//     粒度粗一档（只按款色）会把 XL 的货算到 L 头上，而且不报错；
+//   · 已忽略（`ignored`）按 **款 × 色**（整组生效，尺码不参与）—— 与 `purchase_ignore` 表一致；
+//   · **不是"两个都不要"**：忽略是"这款色不用补"，已拿是"这几件已经拿过了"，两件事各算各的。
+//
+// 另一条同样重要：**不传这两个选项时输出与本改造前逐字一致**（`taken 0 / remaining = pieces /
+// ignored false`）。拣货单是照它干活的东西，默认口径漂一点就是少发/多发一件货。
+describe('aggregatePicking：已拿 / 还差 / 已忽略', () => {
+  it('键的口径就是「款|色|码」与「款|色」（与宿主 outstanding() 的行粒度同源，不许改拼接符）', () => {
+    expect(takenKey('S1', '黑', 'L')).toBe('S1|黑|L');
+    expect(ignoreKey('S1', '黑')).toBe('S1|黑');
+    // 缺值也不能塌成同一个键（'' 与 undefined 拼出来必须一样，且不与有值的撞）
+    expect(takenKey('S1', '', '')).toBe('S1||');
+    expect(ignoreKey('S1', '')).not.toBe(ignoreKey('S1', '黑'));
+  });
+
+  it('不传 taken / ignored 时与改造前逐字一致：已拿 0、还差 = 需求、未忽略', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', rawFields: { 商品信息: infoBlock(2) } }),
+      row({ id: 2, orderNo: 'O2', rawFields: { 商品信息: infoBlock(3) } }),
+    ]);
+    expect(s.groups[0].taken).toBe(0);
+    expect(s.groups[0].remaining).toBe(5);
+    expect(s.groups[0].ignored).toBe(false);
+    expect(s.takenPieces).toBe(0);
+    expect(s.remainingPieces).toBe(5);
+    expect(s.remainingGroups).toBe(1);
+  });
+
+  it('已拿按**款色码**扣：同款同色的**另一个尺码**不受影响', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(6) } }),
+        row({ id: 2, orderNo: 'O2', size: 'XL', rawFields: { 商品信息: infoBlock(4) } }),
+      ],
+      { taken: { 'S1|黑|L': 4 } },
+    );
+    const L = s.groups.find((g) => g.key === 'S1 · 黑 · L')!;
+    const XL = s.groups.find((g) => g.key === 'S1 · 黑 · XL')!;
+    expect([L.taken, L.remaining]).toEqual([4, 2]);
+    expect([XL.taken, XL.remaining]).toEqual([0, 4]); // 粒度写粗一档时这里会变成 4/0
+    expect(s.takenPieces).toBe(4);
+    expect(s.remainingPieces).toBe(6);
+  });
+
+  it('已拿只认**同款同色**：款不同 / 色不同都不串味', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1' }),
+        row({ id: 2, orderNo: 'O2', styleCode: 'S2' }),
+        row({ id: 3, orderNo: 'O3', color: '白' }),
+      ],
+      { taken: { 'S1|黑|L': 1 } },
+    );
+    // ⚠️ 断言按**键取组**而不是按下标：组的排列由"件数降序 → 键升序"另外管（上面有专门用例），
+    //    在这里再钉一次顺序，会让这条用例将来因为排序策略调整而误红。
+    const takenOf = (key: string) => s.groups.find((g) => g.key === key)!.taken;
+    expect(takenOf('S1 · 黑 · L')).toBe(1);
+    expect(takenOf('S2 · 黑 · L')).toBe(0);
+    expect(takenOf('S1 · 白 · L')).toBe(0);
+  });
+
+  it('已拿多于需求 → 还差**夹到 0**，不出负数（拿了 8 件但只需要 6 件是真的会发生）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(6) } })], { taken: { 'S1|黑|L': 8 } });
+    expect(s.groups[0].taken).toBe(8); // 已拿照实报（那 8 件确实是拿过的）
+    expect(s.groups[0].remaining).toBe(0); // 但"还要拿"不能是 -2
+    expect(s.remainingGroups).toBe(0);
+  });
+
+  it('忽略按**款色**整组生效：同款同色的所有尺码一起被忽略', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L' }),
+        row({ id: 2, orderNo: 'O2', size: 'XL' }),
+        row({ id: 3, orderNo: 'O3', color: '白' }),
+      ],
+      { ignored: new Set(['S1|黑']) },
+    );
+    // 同样按键取组（见上一条用例的说明）
+    const ignoredOf = (key: string) => s.groups.find((g) => g.key === key)!.ignored;
+    expect(ignoredOf('S1 · 黑 · L')).toBe(true);
+    expect(ignoredOf('S1 · 黑 · XL')).toBe(true);
+    expect(ignoredOf('S1 · 白 · L')).toBe(false); // 只忽略「黑」，白的不受影响
+  });
+
+  it('被忽略的组**不进** remainingGroups（"还要拿"是可执行口径），但**仍计入** remainingPieces（总需求还差多少）', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', color: '白', rawFields: { 商品信息: infoBlock(5) } }),
+      ],
+      { ignored: new Set(['S1|黑']) },
+    );
+    expect(s.remainingGroups).toBe(1); // 只有「白」那一组还要拿
+    expect(s.remainingPieces).toBe(8); // 3 + 5：两个数各说一件事，别互相替
+  });
+
+  it('忽略 + 已拿同时命中同一组：两件事各算各的（不是二选一）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(6) } })], {
+      taken: { 'S1|黑|L': 4 },
+      ignored: new Set(['S1|黑']),
+    });
+    expect(s.groups[0]).toMatchObject({ taken: 4, remaining: 2, ignored: true });
+    expect(s.remainingGroups).toBe(0);
+  });
+
+  it('已拿不影响件数 / 金额 / 缺价件数（金额是"这批货值多少"，不是"还剩多少没拿"）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], {
+      taken: { 'S1|黑|L': 2 },
+      costs: [cost('S1', '2026-01-01', 10)],
+    });
+    expect(s.groups[0].pieces).toBe(3);
+    expect(s.groups[0].amount).toBe(30);
+    expect(s.amount).toBe(30);
+    expect(s.noPricePieces).toBe(0);
+  });
+
+  it('形状不对的入参当"没有"（不是对象 / 不是 Set）—— 只影响这一列，清单本身照出', () => {
+    for (const bad of [null, undefined, [], 'x', 7]) {
+      const s = aggregatePicking([row()], { taken: bad as never, ignored: bad as never });
+      expect(s.groups).toHaveLength(1);
+      expect(s.groups[0].taken).toBe(0);
+      expect(s.groups[0].ignored).toBe(false);
+    }
+  });
+
+  it('taken 的值非数字 / 负数 → 按 0 处理（脏数据不该造出"已拿 -3 件"）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(4) } })], {
+      taken: { 'S1|黑|L': 'abc' as never, 'S1|白|L': -5 },
+    });
+    expect(s.groups[0].taken).toBe(0);
+    expect(s.groups[0].remaining).toBe(4);
+  });
+});
+
+// ─────────────── 款色折叠层（2026-10-10 界面重设计：款色一行、尺码并排） ───────────────
+// 折叠的是**展示**，不是口径：每个尺码格仍带着自己那三个数（需求/已拿/还差），
+// 忽略/已拿/开单的粒度一个都没变 —— 这里逐条把"折叠后没丢事"钉住。
+
+describe('groupByColor：款色折叠', () => {
+  it('同款同色各尺码合成一行：尺码并排、三个数各是各的（不被平均掉）', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(6) } }),
+        row({ id: 2, orderNo: 'O2', size: 'XL', rawFields: { 商品信息: infoBlock(4) } }),
+      ],
+      { taken: { 'S1|黑|L': 4 } },
+    );
+    const rows = groupByColor(s.groups);
+    expect(rows).toHaveLength(1);
+    const r = rows[0];
+    expect(r.key).toBe('S1 · 黑');
+    expect(r.sizes).toEqual([
+      { size: 'L', pieces: 6, taken: 4, remaining: 2 },
+      { size: 'XL', pieces: 4, taken: 0, remaining: 4 },
+    ]);
+    expect([r.pieces, r.taken, r.remaining]).toEqual([10, 4, 6]);
+  });
+
+  it('尺码格排序与输入顺序无关：字母码 XS→XXXL、数字码按数值、无尺码排最后', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', size: 'L' }),
+      row({ id: 2, orderNo: 'O2', size: 'S' }),
+      row({ id: 3, orderNo: 'O3', size: 'M' }),
+      row({ id: 4, orderNo: 'O4', size: '40' }),
+      row({ id: 5, orderNo: 'O5', size: '38' }),
+      row({ id: 6, orderNo: 'O6', size: '' }),
+    ]);
+    expect(groupByColor(s.groups)[0].sizes.map((c) => c.size)).toEqual(['S', 'M', 'L', '38', '40', '']);
+  });
+
+  it('缺哪段标哪段：未识别款 / 无颜色的行也各自成款色行（不丢行）', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1' }),
+      row({ id: 2, orderNo: 'O2', styleCode: '' }),
+      row({ id: 3, orderNo: 'O3', color: '' }),
+    ]);
+    expect(groupByColor(s.groups).map((r) => r.key).sort()).toEqual([
+      'S1 · 黑',
+      'S1 · (无颜色)',
+      '(未识别款) · 黑',
+    ].sort());
+  });
+
+  it('图 / 款名取首个非空、供应商取首个非 0（与 aggregatePicking 组内回落同一手法）', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', size: 'L', imagePath: '', styleName: '', supplierId: 0, supplierName: '' }),
+      row({ id: 2, orderNo: 'O2', size: 'M', imagePath: '/tmp/b.jpg', styleName: '款一', supplierId: 7, supplierName: '厂A' }),
+    ]);
+    const r = groupByColor(s.groups)[0];
+    expect(r.imagePath).toBe('/tmp/b.jpg');
+    expect(r.styleName).toBe('款一');
+    expect([r.supplierId, r.supplierName]).toEqual([7, '厂A']);
+  });
+
+  it('涉及订单数按**并集**去重：同单跨码只算一单', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', size: 'L' }),
+      row({ id: 2, orderNo: 'O1', size: 'M' }),
+    ]);
+    expect(groupByColor(s.groups)[0].orders).toBe(1);
+  });
+
+  it('缺口逐码求和（折叠不丢"缺"）；忽略整款色一致', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', imagePath: '' }),
+        row({ id: 2, orderNo: 'O2', size: 'M', rawFields: {} }), // 无商品信息块 → 件数按 1 并标缺
+        row({ id: 3, orderNo: 'O3', size: 'M', supplierId: 0, supplierName: '' }),
+      ],
+      { ignored: new Set(['S1|黑']) },
+    );
+    const r = groupByColor(s.groups)[0];
+    expect(r.missingImage).toBe(1);
+    expect(r.missingQty).toBe(1);
+    expect(r.ignored).toBe(true);
+  });
+
+  it('进价 = 有价需求件的加权均价；还差金额**只含有价的还差件**，缺价件另报（不按 0 蒙）', () => {
+    // 同款两码落在不同成本区间（L 走 1 月那条 10 元、M 走 6 月那条 12 元）——
+    // 这也是"同一款色的各码单价可以不同"的真实来源。
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', orderTime: '2026-02-01', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', orderTime: '2026-07-01', rawFields: { 商品信息: infoBlock(2) } }),
+      ],
+      { days: 0, costs: [cost('S1', '2026-01-01', 10), cost('S1', '2026-06-01', 12)], taken: { 'S1|黑|L': 1 } },
+    );
+    const r = groupByColor(s.groups)[0];
+    expect(r.unitPrice).toBe(10.8); // (3×10 + 2×12) / 5
+    expect(r.pendingAmount).toBe(44); // L 还差 2 × 10 + M 还差 2 × 12
+    expect(r.pendingNoPricePieces).toBe(0);
+  });
+
+  it('一件价都没有 → unitPrice null、还差金额 0 且件数全进 pendingNoPricePieces（0 元 ≠ 不知道多少钱）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], { costs: null });
+    const r = groupByColor(s.groups)[0];
+    expect(r.unitPrice).toBeNull();
+    expect(r.pendingAmount).toBe(0);
+    expect(r.pendingNoPricePieces).toBe(3);
+    expect(r.noPricePieces).toBe(3);
+  });
+
+  it('排序与 aggregatePicking 同规则：需求件数降序 → 键升序', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', color: '白', rawFields: { 商品信息: infoBlock(2) } }),
+      row({ id: 2, orderNo: 'O2', color: '黑', rawFields: { 商品信息: infoBlock(5) } }),
+      row({ id: 3, orderNo: 'O3', color: '蓝', rawFields: { 商品信息: infoBlock(2) } }),
+    ]);
+    expect(groupByColor(s.groups).map((r) => r.key)).toEqual(['S1 · 黑', 'S1 · 白', 'S1 · 蓝']);
+  });
+
+  it('形状不对的入参当"没有"（不是数组 / null）', () => {
+    for (const bad of [null, undefined, 'x']) {
+      expect(groupByColor(bad as never)).toEqual([]);
+    }
+  });
+});
+
+describe('pendingOf / pendingRollup：待拿口径（按钮件数与开单明细的唯一判据）', () => {
+  /** 造一个拿得出手的组：款 S1 黑 L / M 两码（L 还差 2、M 拿完），款 S2 黑 L（忽略），S3 白 L（另一厂家） */
+  function fixture(): PickingGroup[] {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 3, orderNo: 'O3', styleCode: 'S2' }),
+        row({ id: 4, orderNo: 'O4', styleCode: 'S3', color: '白', supplierId: 8, supplierName: '厂B' }),
+      ],
+      { taken: { 'S1|黑|L': 1, 'S1|黑|M': 2 }, ignored: new Set(['S2|黑']) },
+    );
+    return s.groups;
+  }
+
+  it('待拿 = 还差 > 0 且未被忽略（拿完的不进、忽略的不进）', () => {
+    const keys = pendingOf(fixture())
+      .map((g) => g.key)
+      .sort();
+    expect(keys).toEqual(['S1 · 黑 · L', 'S3 · 白 · L']);
+  });
+
+  it('按厂家精确筛：只回该厂家的待拿项（含 supplierId = 0 的精确匹配）', () => {
+    expect(pendingOf(fixture(), 7).map((g) => g.key)).toEqual(['S1 · 黑 · L']);
+    expect(pendingOf(fixture(), 8).map((g) => g.key)).toEqual(['S3 · 白 · L']);
+    expect(pendingOf(fixture(), 0)).toEqual([]);
+  });
+
+  it('形状不对的入参当"没有"；不传厂家 = 不限厂家', () => {
+    expect(pendingOf(null)).toEqual([]);
+    expect(pendingOf(fixture()).length).toBe(2);
+  });
+
+  it('款色合计：款色数 / 件数 / 预估金额（只含有价的还差件）/ 缺价件数', () => {
+    const s = aggregatePicking(
+      [
+        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', styleCode: 'S2', color: '白', rawFields: { 商品信息: infoBlock(4) } }),
+      ],
+      { costs: [cost('S1', '2026-01-01', 10)], taken: { 'S1|黑|L': 1 }, ignored: new Set(['S1|黑']) },
+    );
+    const rows = groupByColor(s.groups);
+    // S1 被忽略 → 整行不进；S2 无价 → 件数照报、金额不含它
+    expect(pendingRollup(rows)).toEqual({ colors: 1, pieces: 4, amount: 0, noPricePieces: 4 });
+  });
+
+  it('一件待拿都没有 → 全 0（顶部那格就该消失）', () => {
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], { taken: { 'S1|黑|L': 3 } });
+    expect(pendingRollup(groupByColor(s.groups))).toEqual({ colors: 0, pieces: 0, amount: 0, noPricePieces: 0 });
+    expect(pendingRollup(null)).toEqual({ colors: 0, pieces: 0, amount: 0, noPricePieces: 0 });
   });
 });

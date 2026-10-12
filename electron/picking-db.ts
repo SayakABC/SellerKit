@@ -28,6 +28,8 @@ export interface PickingRowProjection {
   shop: string;
   orderTime: string;
   styleCode: string;
+  /** 款名（权威在 `pl_products.name`，按 `code` 关联；未识别款 / 该款没名字为 ''）——「拿货单」明细拿它预填「名称」栏 */
+  styleName: string;
   /** 款色（识别链 / 映射的**权威结论**；'' = 没结论）。仅作事实呈现，分组键用的是下面的 `color` */
   styleColor: string;
   /** **有效颜色** —— 款色优先、回落订单原文色。
@@ -81,15 +83,19 @@ export function pickingRows(
   const shop = typeof input?.shop === 'string' ? input.shop.trim().slice(0, 200) : '';
   const includeShipped = input?.includeShipped === true;
 
-  // 供应商可选（`suppliers` / `pl_products` 属采购与产品域，可能还没建表）→ 先探再拼 JOIN，
-  // 缺表时回落 0/''，不抛 `no such table`（与 `shippingRows` 同一策略）
-  const hasSupplier = tableExists('suppliers') && tableExists('pl_products');
+  // 款名（权威在 `pl_products.name`）与供应商（`suppliers`）都寄在产品表上 —— 按 `code` 关联
+  // （`oi_styles.code` ≡ `pl_products.code`，与 order/purchase 域的 `styleNameJoin` 同口径）。
+  // 两张表属产品/采购域、可能还没建 → 先探再拼 JOIN，缺表时降级为空名/0，不抛 `no such table`
+  //（把"产品域还没建"报成"拣货域坏了"会整个反掉排查方向 —— 与 `shippingRows` 同一策略）。
+  const hasProduct = tableExists('pl_products');
+  const hasSupplier = hasProduct && tableExists('suppliers');
+  const styleNameSel = hasProduct ? `COALESCE(p.name, '') AS style_name` : `'' AS style_name`;
   const supplierSel = hasSupplier
     ? `COALESCE(p.supplier_id, 0) AS supplier_id, COALESCE(sup.name, '') AS supplier_name`
     : `0 AS supplier_id, '' AS supplier_name`;
-  const supplierJoin = hasSupplier
-    ? `LEFT JOIN pl_products p ON p.code = s.code
-       LEFT JOIN suppliers sup ON sup.id = p.supplier_id`
+  const domainJoin = hasProduct
+    ? `LEFT JOIN pl_products p ON p.code = s.code` +
+      (hasSupplier ? `\n       LEFT JOIN suppliers sup ON sup.id = p.supplier_id` : '')
     : '';
 
   const conds: string[] = [];
@@ -108,13 +114,14 @@ export function pickingRows(
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT o.id, o.order_no, o.shop, o.order_time, o.raw_fields, o.color, o.size,
             o.ship_time, o.status, o.biz_status,
-            COALESCE(s.code, '') AS style_code, COALESCE(sc.color, '') AS style_color,
+            COALESCE(s.code, '') AS style_code, ${styleNameSel},
+            COALESCE(sc.color, '') AS style_color,
             ${supplierSel}
      FROM oi_orders o
      LEFT JOIN oi_images i ON o.image_id = i.id
      LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
      LEFT JOIN oi_styles s ON sc.style_id = s.id
-     ${supplierJoin}
+     ${domainJoin}
      ${where}
      ORDER BY o.id DESC LIMIT ?`,
     args,
@@ -151,6 +158,7 @@ export function pickingRows(
       shop: String(r.shop ?? ''),
       orderTime,
       styleCode: String(r.style_code ?? ''),
+      styleName: String(r.style_name ?? ''),
       styleColor: String(r.style_color ?? ''),
       // 有效颜色 = 款色（映射 / 识别结论）→ 订单原文（见 `PickingRowProjection.color` 的注释）
       color: String(r.style_color ?? '').trim() || String(r.color ?? ''),

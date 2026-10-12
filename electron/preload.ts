@@ -347,6 +347,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveTemplate: (filePath: string, content: string) =>
     ipcRenderer.invoke('save-template', filePath, content),
   writeClipboard: (text: string) => ipcRenderer.invoke('write-clipboard', text),
+  // 写图片剪贴板（PNG dataURL）：「复制给厂家」把发厂清单图送进系统剪贴板
+  writeClipboardImage: (dataUrl: string) =>
+    ipcRenderer.invoke('write-clipboard-image', dataUrl),
   // 模块命名空间持久化（Phase 1）
   getModuleState: (moduleId: string) => ipcRenderer.invoke('get-module-state', moduleId),
   setModuleState: (moduleId: string, data: any) =>
@@ -408,21 +411,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
           ? !!payload.corrected
           : undefined,
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : undefined,
+      // 导入日过滤：只放行 `yyyy-mm-dd`（主进程再按 `date(created_at)` 比）
+      importDate: typeof payload?.importDate === 'string' ? payload.importDate.slice(0, 10) : undefined,
     }),
   orderClear: () => ipcRenderer.invoke('order-clear'),
-  // 本页汇总（核对页指标条）：订单行的（店铺原文 + 商品ID）→ 已配到的产品/供应商数。
-  // ⚠️ 载荷形状必须与主进程 `order-sku-rollup` 的读取方式对齐（它读 `payload.rows` 的
-  //    `shop`/`itemId`）：**声明收裸数组而这里包成 `{items:[]}` 会得到"成功但空"**，
-  //    页面只是显示 0，一条报错都没有（先例见 docs/notes/2026-10-04-preload-payload-shape.md）。
-  orderSkuRollup: (rows: any) =>
-    ipcRenderer.invoke('order-sku-rollup', {
-      rows: Array.isArray(rows)
-        ? rows.slice(0, 500).map((r: any) => ({
-            shop: typeof r?.shop === 'string' ? r.shop.slice(0, 200) : '',
-            itemId: typeof r?.itemId === 'string' ? r.itemId.slice(0, 64) : '',
-          }))
-        : [],
-    }),
   // 运费原始行（oi_orders 最小投影 id/order_no/raw_fields，只读；供按订单算运费的宿主 op 提取）
   orderAssignShop: (payload: any) =>
     ipcRenderer.invoke('order-assign-shop', {
@@ -438,6 +430,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
           ? Math.min(Math.max(Math.round(payload.limit), 1), 2000)
           : 500,
       source: typeof payload?.source === 'string' ? payload.source : 'all',
+      // 导入日过滤（`yyyy-mm-dd`）；空串 = 不筛（与主进程 `shippingRows` 的默认值一致）
+      importDate: typeof payload?.importDate === 'string' ? payload.importDate.slice(0, 10) : '',
     }),
   orderDownloadImage: (url: string) =>
     ipcRenderer.invoke('order-download-image', { url: String(url ?? '') }),
@@ -577,10 +571,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       id: typeof payload?.id === 'number' ? payload.id : 0,
     }),
   // 手动归并款式：订单图片挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
+  // ⭐ 送**款编码**（不是 id）：下拉的数据源是产品库全集，手工新建的款在识别池里可能还没有行，
+  //    主进程按编码 `ensureStyleByCode` 补占位款。`styleId` 兼容老形状，照旧透传。
   orderStyleAssign: (payload: any) =>
     ipcRenderer.invoke('order-style-assign', {
       orderId: typeof payload?.orderId === 'number' ? payload.orderId : 0,
       styleId: typeof payload?.styleId === 'number' ? payload.styleId : 0,
+      styleCode: typeof payload?.styleCode === 'string' ? payload.styleCode.slice(0, 64) : '',
       color: typeof payload?.color === 'string' ? payload.color : '',
       fingerprint: typeof payload?.fingerprint === 'string' ? payload.fingerprint : '',
     }),
@@ -640,6 +637,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
             .slice(0, 10000)
         : [],
     }),
+  // 退回待核对（归类核对页「已核对」范围里的行内动作）：把已核对的行置回 corrected=0。
+  // ⚠️ 入参只有裸数组（**没有** mark-corrected 那样的 { all } 形态）：退回一律点名，
+  //    没有"全部退回"这条路（口径见 order-db.ts 的 reopenOrdersCorrected 注释）。
+  orderReopenCorrected: (ids: any) =>
+    ipcRenderer.invoke('order-reopen-corrected', {
+      ids: Array.isArray(ids)
+        ? ids
+            .filter((n: any) => typeof n === 'number' && Number.isInteger(n) && n > 0)
+            .slice(0, 10000)
+        : [],
+    }),
   // --- 速卖通利润追踪（M0：入站走 localhost 接收端，本区仅查询类 IPC）---
   aeDbEnsure: () => ipcRenderer.invoke('ae-db-ensure'),
   aeOrderList: (payload: any) =>
@@ -666,6 +674,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       items: Array.isArray(payload?.items) ? payload.items.slice(0, 20000) : [],
     }),
   aeCostMapList: () => ipcRenderer.invoke('ae-cost-map-list'),
+  aeCostMapUpsertManual: (payload: any) =>
+    ipcRenderer.invoke('ae-cost-map-upsert-manual', {
+      items: Array.isArray(payload?.items) ? payload.items.slice(0, 2000) : [],
+      effectiveFrom:
+        typeof payload?.effectiveFrom === 'string' ? payload.effectiveFrom.slice(0, 40) : '',
+    }),
+  aeCostMapDeleteManual: (payload: any) =>
+    ipcRenderer.invoke('ae-cost-map-delete-manual', {
+      keys: Array.isArray(payload?.keys) ? payload.keys.slice(0, 2000) : [],
+    }),
   // ---- 结算明细（AE 后台「订单明细」导出；解析在渲染层 src/lib/settleImport.ts，主进程只归一+存）----
   settleImport: (payload: any) =>
     ipcRenderer.invoke('settle-import', {
@@ -720,7 +738,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       supplierId: typeof payload?.supplierId === 'number' ? payload.supplierId : 0,
       bizDate: typeof payload?.bizDate === 'string' ? payload.bizDate.slice(0, 10) : '',
       mode: payload?.mode === 'package' ? 'package' : 'detail',
-      note: typeof payload?.note === 'string' ? payload.note.slice(0, 500) : '',
       totalCents: typeof payload?.totalCents === 'number' ? payload.totalCents : 0,
       items: sanitizePurchaseItems(payload?.items),
       sources: Array.isArray(payload?.sources)
@@ -741,7 +758,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('purchase-order-update', {
       id: typeof payload?.id === 'number' ? payload.id : 0,
       bizDate: typeof payload?.bizDate === 'string' ? payload.bizDate.slice(0, 10) : undefined,
-      note: typeof payload?.note === 'string' ? payload.note.slice(0, 500) : undefined,
       totalCents: typeof payload?.totalCents === 'number' ? payload.totalCents : undefined,
       items: Array.isArray(payload?.items) ? sanitizePurchaseItems(payload?.items) : undefined,
     }),
@@ -816,6 +832,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       items: sanitizePurchaseItems(payload?.items),
       defaultName:
         typeof payload?.defaultName === 'string' ? payload.defaultName.slice(0, 120) : '',
+    }),
+  // 编辑器行图：按款色批量取本地图路径（**顺序与入参一致**，未命中为 null）
+  purchaseStyleImages: (payload: any) =>
+    ipcRenderer.invoke('purchase-style-images', {
+      items: Array.isArray(payload?.items)
+        ? payload.items.slice(0, 500).map((it: any) => ({
+            styleCode: typeof it?.styleCode === 'string' ? it.styleCode.slice(0, 50) : '',
+            color: typeof it?.color === 'string' ? it.color.slice(0, 50) : '',
+            // ⚠️ `size` 必须透传：主进程按「款色+尺码」挑该行自己那件的图；
+            // 漏掉它 ⇒ 同款所有行回落到同一张（用户报的"图片都是一样的"）。
+            size: typeof it?.size === 'string' ? it.size.slice(0, 50) : '',
+          }))
+        : [],
     }),
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位的店群账号维护；密码经主进程 safeStorage 加密落库，渲染层不存明文）----
   shopAccountDbEnsure: () => ipcRenderer.invoke('shop-account-db-ensure'),
@@ -909,6 +938,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
             code: typeof r?.code === 'string' ? r.code.slice(0, 64) : '',
             name: typeof r?.name === 'string' ? r.name.slice(0, 200) : '',
             supplierId: typeof r?.supplierId === 'number' ? r.supplierId : 0,
+            /**
+             * 供应商**原文**（2026-10-10 新增）。
+             *
+             * 为什么必须带它：`supplierId` 只在"库里已有这个名字"时非 0；名字对不上时它是 0，
+             * 主进程就再也看不到用户到底写了哪家 —— 于是"按名称查找、不存在就新建"这条
+             * 根本无从执行（漏了这个字段的症状正是"供应商没有写入"，且**不报错**）。
+             */
+            supplierRaw: typeof r?.supplierRaw === 'string' ? r.supplierRaw.slice(0, 100) : '',
             // 类目**不在这里**：模板与导出都没有这一列，库层对已存在的产品原样保留（见 product-db）。
             status: typeof r?.status === 'string' ? r.status.slice(0, 20) : 'active',
             note: typeof r?.note === 'string' ? r.note.slice(0, 2000) : '',
@@ -926,9 +963,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
               typeof r?.imageId === 'number' && Number.isInteger(r.imageId) && r.imageId > 0
                 ? r.imageId
                 : 0,
+            /**
+             * 手工进价（**分**；2026-10-10 补）。
+             *
+             * ⚠️ 这一格曾经被这段白名单**静默丢掉** —— 渲染层照发、`src/types.ts` 也声明了，
+             *    唯独这里没抄进来，于是主进程 `typeof r.costCents === 'number'` 恒为假、
+             *    进价一条都写不进库，而界面上没有任何报错（症状：进价没有入库）。
+             * 形状口径：`null`/缺省 = 这行没填 ⇒ **不修改**库内已有价（不是 0）。
+             */
+            costCents:
+              typeof r?.costCents === 'number' && Number.isFinite(r.costCents)
+                ? Math.round(r.costCents)
+                : null,
           }))
         : [],
       mode: payload?.mode === 'insertOnly' ? 'insertOnly' : 'upsert',
+      /**
+       * 手工进价的生效日 `yyyy-mm-dd`（缺省 = 导入当日）。
+       * 同样曾经漏传 ⇒ 主进程只能回落"今天"。补上后"补录历史价"这条才真的成立。
+       * 非法值由主进程回落当天（`manual-costs.ts` 自己校验形状，这里不做业务判断）。
+       */
+      effectiveFrom: typeof payload?.effectiveFrom === 'string' ? payload.effectiveFrom.slice(0, 20) : '',
     }),
   // 导入侧：抽 xlsx 里的**嵌入图**（渲染层的 SheetJS 读不到浮动图，只能主进程用 exceljs）
   productExtractImages: (payload: any) =>

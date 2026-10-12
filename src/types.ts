@@ -8,6 +8,8 @@ export interface ElectronAPI {
   selectTemplate: () => Promise<APIResult<TemplateFileResult>>;
   saveTemplate: (filePath: string, content: string) => Promise<APIResult<void>>;
   writeClipboard: (text: string) => Promise<APIResult<void>>;
+  /** 写图片剪贴板（PNG dataURL）：「复制给厂家」的发厂清单图，粘进微信发给供应商 */
+  writeClipboardImage: (dataUrl: string) => Promise<APIResult<void>>;
   /** 模块命名空间持久化（§1.4）：读取 `modules.<moduleId>` 下的数据，无数据返回 null */
   getModuleState: (moduleId: string) => Promise<APIResult<unknown>>;
   /** 模块命名空间持久化（§1.4）：写入 `modules.<moduleId>`，模块之间互不污染 */
@@ -45,15 +47,15 @@ export interface ElectronAPI {
     corrected?: boolean;
     /** 关键字（单号/店铺/分类/颜色/logo/款编码/款名/款色），匹配为空串视为不筛选 */
     search?: string;
+    /**
+     * 只看**这一天导入**的行（`yyyy-mm-dd`，本地时区，按 `oi_orders.created_at` 取日期部分）。
+     *
+     * 「发货台」的每日口径：一天一导（导出"昨天 → 导出时点"的全部订单），中间追加的也算同一天。
+     * 缺省 = 不筛（独立模块如「算钱」看全库）。
+     */
+    importDate?: string;
   }) => Promise<APIResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear: () => Promise<APIResult<void>>;
-  /**
-   * 本页汇总（「归类核对」页指标条的产品维度）：这批订单行已配到哪些产品 / 几家供应商。
-   *
-   * 入参是**订单行原文**（`shop` 是报表里的店铺名，不是归一后的店铺实体）—— 归一与匹配都在主进程做，
-   * 渲染层只交出它手上有的东西。数据层实现见 `electron/product-db.ts` 的 `resolveOrderSkuRollup`。
-   */
-  orderSkuRollup: (rows: { shop: string; itemId: string }[]) => Promise<APIResult<OrderSkuRollup>>;
   /** 把若干订单号归属到某店铺（写 `oi_orders.shop` 原文；AE 导出按店铺、无店铺列，故由人指定） */
   orderAssignShop: (payload: {
     orderNos: string[];
@@ -64,6 +66,8 @@ export interface ElectronAPI {
     limit?: number;
     /** 只看某条摄取通道；缺省 = 两条都看 */
     source?: 'all' | 'import' | 'collect';
+    /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`）；缺省 = 全库（见 `orderList` 同名参数） */
+    importDate?: string;
   }) => Promise<APIResult<UnifiedOrderRow[]>>;
   orderDownloadImage: (url: string) => Promise<APIResult<OrderImageRecord>>;
   /** 拣货投影（只读）：未发货订单行 + 三层回落图 + 款色码/供应商（聚合在渲染层纯函数） */
@@ -144,12 +148,19 @@ export interface ElectronAPI {
     color: string;
     styleName?: string;
   }) => Promise<APIResult<{ styleCode: string; styleColorCode: string }>>;
+  /**
+   * 款选项列表（「归属款」下拉的数据源）：**产品库驱动的全集**，含「货与成本」里手工新建、
+   * 还没出过订单的款（旧实现按识别池驱动 ⇒ 那些款一个都不出现，用户报的"展示不全"即此）。
+   * 每项带可选颜色（产品库 SKU 颜色在前、识别链款色在后）。
+   */
   orderStyleList: () => Promise<APIResult<StyleRecord[]>>;
   orderStyleDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
+  // ⭐ 主用 `styleCode`（下拉的值就是编码）；`styleId` 保留兼容老形状
   orderStyleAssign: (payload: {
     orderId: number;
-    styleId: number;
+    styleCode: string;
+    styleId?: number;
     color: string;
     fingerprint?: string;
   }) => Promise<APIResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
@@ -172,6 +183,9 @@ export interface ElectronAPI {
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected: (input: number[] | { all: true }) => Promise<APIResult<{ updated: number }>>;
+  // 退回待核对（归类核对页「已核对」范围里的行内动作）：把点名的已核对行置回 corrected=0。
+  // 入参只有裸数组 —— **没有** { all: true } 形态（退回一律点名，理由见 order-db.ts 的实现注释）。
+  orderReopenCorrected: (ids: number[]) => Promise<APIResult<{ updated: number }>>;
   // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
   aeDbEnsure: () => Promise<APIResult<void>>;
   aeOrderList: (payload?: {
@@ -190,6 +204,18 @@ export interface ElectronAPI {
     items: AeCostMapImportItem[];
   }) => Promise<APIResult<{ replaced: number }>>;
   aeCostMapList: () => Promise<APIResult<AeCostMapItem[]>>;
+  /**
+   * P4 成本维护：手工录入 / 修改进价（`source='manual'`）。
+   * 缺省生效日 = 当天（**不会**回落 `0000-01-01`）；逐条带 `effectiveFrom` 可补录历史价。
+   */
+  aeCostMapUpsertManual: (payload: {
+    items: ManualCostItemInput[];
+    effectiveFrom?: string;
+  }) => Promise<APIResult<{ written: number; skipped: number }>>;
+  /** P4 成本维护：删除手工进价区间（只删 `manual`；`purchase` 行归拿货对账同步管） */
+  aeCostMapDeleteManual: (payload: {
+    keys: { styleCode: string; effectiveFrom: string }[];
+  }) => Promise<APIResult<{ deleted: number }>>;
   /** ---- 结算明细（AE 后台导出的订单明细；解析在渲染层，主进程只落库）---- */
   settleImport: (payload: { rows: unknown[] }) => Promise<
     APIResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
@@ -251,7 +277,6 @@ export interface ElectronAPI {
     supplierId: number;
     bizDate: string;
     mode: 'detail' | 'package';
-    note?: string;
     totalCents?: number;
     items?: PurchaseItem[];
     /** 来源订单快照（从数据统计跳转生成时锁定店铺归属；缺省时主进程按缺口自动推导） */
@@ -260,7 +285,6 @@ export interface ElectronAPI {
   purchaseOrderUpdate: (payload: {
     id: number;
     bizDate?: string;
-    note?: string;
     totalCents?: number;
     items?: PurchaseItem[];
   }) => Promise<APIResult<void>>;
@@ -316,6 +340,10 @@ export interface ElectronAPI {
     items: PurchaseItem[];
     defaultName?: string;
   }) => Promise<APIResult<{ filePath: string }>>;
+  /** 拿货单编辑器行图：按「款编码 + 款色」批量取本地图路径（**顺序与入参一致**，未命中为 null） */
+  purchaseStyleImages: (payload: {
+    items: { styleCode: string; color: string; size?: string }[];
+  }) => Promise<APIResult<{ paths: (string | null)[] }>>;
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
   /** 幂等建表（视图首次激活时调用） */
   shopAccountDbEnsure: () => Promise<APIResult<void>>;
@@ -397,6 +425,8 @@ export interface ElectronAPI {
   productImport: (payload: {
     items: ProductImportRowInput[];
     mode?: 'upsert' | 'insertOnly';
+    /** 手工进价的生效日 `yyyy-mm-dd`（缺省 = 导入当日）；主进程对非法值回落当天 */
+    effectiveFrom?: string;
   }) => Promise<APIResult<ProductImportOutcome>>;
   /**
    * 导出 / 下载模板：渲染层给「每格写什么 + 每行的图路径」，**主进程**用 exceljs 生成并嵌图。
@@ -447,7 +477,7 @@ export interface ElectronAPI {
     maxRows?: number;
   }) => Promise<APIResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>>;
   /** 批量关联 / 改绑（单事务；行级失败逐行报回，不做整批回滚）
-   *  `reassigned` = 顺带回填的**存量订单行数**（映射写入后重跑确定性归款）
+   *  `reassigned` = 顺带处理的**存量订单行数**（映射写入后重跑确定性归款：新归款 + 补色）
    *  `adopted` = 顺手把订单图采纳为**款主图**的张数（只补空、已有主图的款不动） */
   productSkuMap: (payload: {
     rows: SkuMapInputPayload[];
@@ -889,33 +919,26 @@ export interface OrderRecord {
   features?: string[];
 }
 
-/** 款色（款式 × 颜色，oi_style_colors 表） */
-export interface StyleColorRecord {
-  id: number;
-  styleId: number;
-  color: string;
-  code: string;
-  /** 归属该款色的图片数 */
-  imageCount: number;
-  /** 代表图路径（最新一张，产品库展示用） */
-  imagePath?: string;
-}
-
-/** 款编码（产品库主数据，oi_styles 表） */
+/**
+ * 款选项（「归类核对」页「归属款」下拉的一行）。
+ *
+ * ⚠️ 数据源是**产品库**（`pl_products`），不是识别池（`oi_styles`）—— 只有进过识别链路的款
+ * 才在识别池里，于是「货与成本」手工新建、还没出过订单的款在下拉里一个都不出现
+ * （2026-10-10 用户报的「当前数据展示不全」就是这个）。两处 code 是**同一编码池**（D1）。
+ *
+ * `colors` 给「先选款、再选颜色」用：产品库 SKU 的颜色在前（主数据），识别链已学到的
+ * 款色在后（历史结论），去重。**空数组是合法状态**（这个款还没录任何颜色）⇒ 界面必须
+ * 回落成"自己填"，不能给一个空下拉。
+ */
 export interface StyleRecord {
-  id: number;
+  /** 产品编码（`pl_products.code` ≡ `oi_styles.code`） */
   code: string;
-  /** 展示名（可改，不参与匹配） */
+  /** 展示名（唯一权威在 `pl_products.name`） */
   name: string;
-  /** 款式指纹（匹配键） */
-  fingerprint: string;
-  colorCount: number;
-  imageCount: number;
-  orderCount: number;
-  /** 封面图路径（最新一张，产品库展示用） */
-  coverPath?: string;
-  colors: StyleColorRecord[];
-  createdAt?: string;
+  /** `active` / `archived`（停用款仍要能选：历史订单可能正指向它） */
+  status: string;
+  /** 可选颜色（去重；产品库 SKU 颜色在前） */
+  colors: string[];
 }
 
 /** 产品库 Excel 导入项（渲染层已生成指纹） */
@@ -1391,6 +1414,8 @@ export interface PickingRowProjection {
   orderTime: string;
   /** 识别链结果；未识别为空串 */
   styleCode: string;
+  /** 款名（`oi_styles.name`）；未识别款 / 该款没录名字为空串（供「拿货单」明细预填名称） */
+  styleName: string;
   styleColor: string;
   /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
   color: string;
@@ -1433,7 +1458,12 @@ export interface PickingExportRow {
   styleCode: string;
   color: string;
   size: string;
+  /** **需求件数**（这批订单要几件） */
   pieces: number;
+  /** **已拿件数**（已提交拿货单的合计；与 `purchase-db.outstanding()` 同一口径） */
+  taken: number;
+  /** **还差件数** = `max(0, pieces − taken)` —— 厂家照着拿的就是这个数 */
+  remaining: number;
   orders: number;
   /** 进价（元/件）；`null` = 无进价（导出表里留空，**不写 0**） */
   unitPrice: number | null;
@@ -1487,12 +1517,25 @@ export interface ProductImportRowInput {
   code: string;
   name: string;
   supplierId: number;
+  /**
+   * 供应商**原文**（Excel 里写的那个名字；2026-10-10 新增）。
+   *
+   * 为什么两样都要：`supplierId` 只在"库里已有这个名字"时非 0；名字对不上时它是 0，
+   * 主进程就看不到用户写的到底是哪家 ⇒「按名称查找、不存在则新建」无从执行。
+   * 空串 = 用户没填供应商（**不是**"未关联"）。
+   */
+  supplierRaw?: string;
   status: string;
   note: string;
   /** 该行声明的 SKU；空数组 = 这行没说 SKU（不是"删掉该款现有 SKU"） */
   skus: { color: string; size: string; weightG: number }[];
   /** 该行 Excel 里那张图（`product-extract-images` 的产物）；0 = 没图，不覆盖款上已有主图 */
   imageId: number;
+  /**
+   * 手工进价（**分**；落 `ae_cost_map`，`source='manual'`，生效日 = 导入当日）。
+   * `null` / 缺省 = 这行没填进价 ⇒ **不修改**库内已有价（**不是清 0**）。
+   */
+  costCents?: number | null;
 }
 
 /** 批量导入结果（`failed` 为库层才拦得住的失败行，如 insertOnly 模式下编码已存在） */
@@ -1503,6 +1546,16 @@ export interface ProductImportOutcome {
   skusWritten: number;
   /** 本次设为款主图的张数 */
   imagesAttached: number;
+  /** 本次写入 `ae_cost_map` 的手工进价条数 */
+  costsWritten: number;
+  /** 因与库内现价相同（幂等）或未填而被跳过的进价条数 */
+  costsSkipped: number;
+  /**
+   * 本次**新建**的供应商条数（2026-10-10）。
+   * 单独回报是因为"名字对不上 ⇒ 静默落成未关联"曾经是默认行为，
+   * 用户看不见有没有真的建档 —— 这个数字就是那句话。
+   */
+  suppliersCreated?: number;
   failed: { rowNo: number; code: string; message: string }[];
 }
 
@@ -1616,22 +1669,6 @@ export interface SkuBackfillOutcome {
   spec: string;
   /** `conflict` 时对方的产品编码（说清"没覆盖掉谁"） */
   conflictCode: string;
-}
-
-/**
- * 「本页汇总」结果（「归类核对」页指标条的产品维度）：这一页的商品已配到哪些产品 / 几家供应商。
- *
- * 与主进程 `electron/product-db.ts` 的 `OrderSkuRollup` 结构一致（两端各自声明，
- * 主进程不 import 渲染层）。
- *
- * ⚠️ `products === 0` 的正确读法是「**本页商品还没配过映射**」——它是一个待办，
- * 不是"这份数据没有产品维度"（对照 `OrderRecord.itemId` 为空时「本页 N 个商品」整格不显示）。
- */
-export interface OrderSkuRollup {
-  /** 本页商品已配到的**去重产品**数 */
-  products: number;
-  /** 这些产品涉及的**去重供应商**数（`supplier_id = 0` 的"未关联厂家"不计家数） */
-  suppliers: number;
 }
 
 /** 待关联队列的一行（`status='shopUnresolved'` 时**不允许**写映射：不拿空平台硬塞） */
@@ -1999,7 +2036,6 @@ export interface PurchaseOrder {
   mode: 'detail' | 'package';
   status: 'draft' | 'submitted';
   totalCents: number;
-  note: string;
   editedAt: string | null;
   createdAt: string;
   items: PurchaseItem[];
@@ -2168,6 +2204,18 @@ export interface AeCostMapItem extends AeCostMapImportItem {
   /** 该行来源：purchase = 对账快照导入，manual = 界面手工录入 */
   source: string;
   updatedAt: string;
+}
+
+/**
+ * 手工进价的一条（P4 成本维护界面 / 产品导入的「进价」列**共用形状**）。
+ * `unitPriceCents` 是**分**；生效日缺省用 payload 上的 `effectiveFrom`（= 当天）。
+ */
+export interface ManualCostItemInput {
+  styleCode: string;
+  styleName?: string;
+  unitPriceCents: number;
+  /** 生效日 yyyy-mm-dd；缺省用 payload 的 `effectiveFrom`，再缺省 = 当天 */
+  effectiveFrom?: string;
 }
 
 /** 汇率行（1 fromCurrency = rateToCny CNY） */

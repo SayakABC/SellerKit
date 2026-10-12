@@ -4,9 +4,10 @@
 //   # = tsc -p tsconfig.electron.json && electron scripts/preload-ipc-shape-smoke.cjs
 //   # 受限/沙箱环境（起不了 Chromium sandbox）加：--no-sandbox --disable-gpu
 //
-// 覆盖两族通道（判据同形：**渲染层按声明调用 → 载荷真的过到主进程 → 回来的是真值**）：
-//   ① 图片族（orderImageThumb / ThumbBatch / ReadImage / ReadLocalImage）—— 原始动机，见下；
-//   ② `orderSkuRollup`（核对页的「本页汇总」）—— 同为裸数组入参、包装在 preload 里，同一类风险。
+// 覆盖**图片族通道**（orderImageThumb / ThumbBatch / ReadImage / ReadLocalImage）+ **剪贴板图片通道**
+// （write-clipboard-image，「复制给厂家」）+ **拿货单行图通道**（purchase-style-images，按款色查本地图）；
+// 判据同形：**渲染层按声明调用 → 载荷真的过到主进程 → 回来的是真值**。
+// （曾经还覆盖 `orderSkuRollup`（核对页「本页汇总」），那条通道随页头指标条一起删了，见 ⑥ 段的说明。）
 //
 // 为什么值得单独一个冒烟：`npm run verify`（check-ipc-contract.mjs）只核**通道名**三方一致，
 // 看不见**载荷形状**。而形状错了的后果恰好是最难查的一种 —— **静默**：
@@ -30,7 +31,7 @@ const path = require('path');
 const Module = require('module');
 
 const realElectron = require('electron');
-const { app, nativeImage } = realElectron;
+const { app, nativeImage, clipboard, ClipboardItem } = realElectron;
 
 // 早退护栏：`ELECTRON_RUN_AS_NODE=1`（或从纯 Node 直接 run 这个文件）时 electron 只是个字符串路径，
 // `app` 会是 undefined —— 那时下面第一句 `app.setPath` 会报 "Cannot read properties of undefined"，
@@ -129,8 +130,12 @@ app.whenReady().then(async () => {
     // 真 preload（取它暴露给渲染层的 API）+ 真 handler
     require(path.join(ROOT, 'dist', 'electron', 'preload.js'));
     require(path.join(ROOT, 'dist', 'electron', 'order-handlers.js'));
+    // 剪贴板两条通道的 handler 住在独立文件（main.ts 是应用入口，冒烟不能加载它 —— 会起窗口）
+    require(path.join(ROOT, 'dist', 'electron', 'clipboard-handlers.js'));
     // product 域一并加载：⑦ 段要验「认款顺手采纳款主图」这条真链路（复制文件 + 登记 pl_images）
     require(path.join(ROOT, 'dist', 'electron', 'product-handlers.js'));
+    // purchase 域：⑨ 段验「拿货单行图」按款色查图这条真链路
+    require(path.join(ROOT, 'dist', 'electron', 'purchase-handlers.js'));
     assert.ok(exposed, 'preload 没有 exposeInMainWorld');
 
     section('准备素材（真实 PNG，落进图片缓存目录）');
@@ -201,11 +206,11 @@ app.whenReady().then(async () => {
     check('{ items: [...] } 也能出图', r5?.data?.dataUrls?.[0]?.startsWith('data:image/') === true,
       JSON.stringify(r5?.data?.dataUrls)?.slice(0, 60));
 
-    section('⑥ 本页汇总（order-sku-rollup）：裸数组 → { rows } 的包装必须真的过到主进程');
-    // 与 ① 同一类风险：渲染层按声明传**裸数组**（`src/types.ts` 的 `orderSkuRollup(rows)`），
-    // 包装成 `{ rows }` 发生在 preload 里，而主进程 handler 读的是 `payload.rows`。
-    // 包装写歪（少一层 / 换个键名）的症状是**成功但空**：返回 0 个产品、0 家供应商，
-    // 一条报错都没有 —— 核对页的指标格安静地显示 0，看着像"还没配映射"。
+    // 夹具：一家归一后的店铺 + 一个产品 + 一条映射。**后面两段都要用这套**（`shopId` / `pid`
+    // 被 ⑥ 与 ⑦ 引用），所以夹具留在这里、段号不再有它自己的那一段。
+    // ⚠️ 这一段**曾经**是「⑥ 本页汇总（order-sku-rollup）」：那条通道随「归类核对」页页头的指标条
+    //    一起删掉了（2026-10-10，用户判指标条"看不懂" ⇒ 零消费者即删）。删的是**那三条断言**，
+    //    不是夹具 —— 连夹具一起删会让下面两段跟着废掉，那是把无关的东西一并拆了。
     const pdb = require(path.join(ROOT, 'dist', 'electron', 'product-db.js'));
     const sdb = require(path.join(ROOT, 'dist', 'electron', 'shop-db.js'));
     pdb.ensureProductSchema();
@@ -221,24 +226,7 @@ app.whenReady().then(async () => {
     }).id;
     pdb.upsertSkuMappings([{ platform: 'amazon', shopId, itemId: 'SHAPE-ITEM', productId: pid }]);
 
-    invokes.length = 0;
-    const r6 = await exposed.orderSkuRollup([{ shop: '店1', itemId: 'SHAPE-ITEM' }]);
-    check('orderSkuRollup(裸数组) → 1 个产品 / 1 家供应商（形状不匹配时会静默回 0）',
-      r6?.success === true && r6?.data?.products === 1 && r6?.data?.suppliers === 1,
-      `success=${r6?.success} data=${JSON.stringify(r6?.data)}`);
-    check('发出去的载荷就是主进程能消费的形状（rows 非空且带 shop / itemId）',
-      Array.isArray(invokes.at(-1)?.[1]?.rows) &&
-        invokes.at(-1)[1].rows.length === 1 &&
-        invokes.at(-1)[1].rows[0].shop === '店1' &&
-        invokes.at(-1)[1].rows[0].itemId === 'SHAPE-ITEM',
-      JSON.stringify(invokes.at(-1)?.[1]));
-    // 反面：同一个店、没配过映射的商品 → 0/0（证明上面那个"1"不是恒真读数）
-    const r6b = await exposed.orderSkuRollup([{ shop: '店1', itemId: 'NOT-MAPPED' }]);
-    check('未配映射的商品 → 0 个产品 / 0 家供应商（证明上一个「1」不是恒真）',
-      r6b?.success === true && r6b?.data?.products === 0 && r6b?.data?.suppliers === 0,
-      `success=${r6b?.success} data=${JSON.stringify(r6b?.data)}`);
-
-    section('⑦ 认款顺手采纳订单图为款主图（真 handler：复制文件 + 登记 pl_images + 写 image_id）');
+    section('⑥ 认款顺手采纳订单图为款主图（真 handler：复制文件 + 登记 pl_images + 写 image_id）');
     // 前一段（product:sku:smoke）只守"挑哪个款、挑哪张图"的挑选逻辑；**换图这件事真的发生了吗**
     // 只能在真 handler 上验：复制文件、算指纹、登记 pl_images、写 pl_products.image_id 四步
     // 任一步漏了，界面上都只是"款还是没图"，一条错都不报。
@@ -291,7 +279,7 @@ app.whenReady().then(async () => {
     check('已有主图的款再认一次 → adopted=0 且 image_id 一个字节没动（不覆盖人的决定）',
       r7b?.data?.adopted === 0 && afterId === adoptedImageId,
       `adopted=${r7b?.data?.adopted} image_id=${afterId}（应为 ${adoptedImageId}）`);
-    section('⑧ 反向过滤：product-sku-list 带 productId（产品侧「已关联商品」的取数）');
+    section('⑦ 反向过滤：product-sku-list 带 productId（产品侧「已关联商品」的取数）');
     // 风险与 ⑥ 同形：渲染层声明里新加了 `productId`，而 preload 若没把它透传出去，主进程就按
     // **不过滤**处理 —— 于是每一款点开都显示"全库的映射"，看着像"这款关联了几十条商品"，
     // 一条错都不报。所以这里既断言结果，也断言**发出去的载荷带上了它**。
@@ -319,6 +307,157 @@ app.whenReady().then(async () => {
     check('换一个款 → 只回它自己的那一行（反过来证明过滤方向没写反）',
       otherMaps?.data?.total === 1 && otherMaps?.data?.rows?.[0]?.itemId === 'SHAPE-ITEM-2',
       `total=${otherMaps?.data?.total} items=${(otherMaps?.data?.rows ?? []).map((r) => r.itemId).join(',')}`);
+
+    section('⑧ 写图片剪贴板（真系统剪贴板，读回验证）——「复制给厂家」的最后一跳');
+    // 为什么在这里守：Electron 44 移除了 clipboard.writeImage（升级实测，改用 ClipboardItem + Blob），
+    // 而 tsc / verify 全拦不住 —— require('electron') 是 any，通道名三方一致也照样过；只有真写一次
+    // 系统剪贴板才会暴露（2026-10-10 线上症状：「复制失败：写入剪贴板失败」）。
+    // 判据不止 success（那可能只是"发起了"）：**读回来**，且内容对得上（非空转）。
+    let savedPng = null;
+    let savedText = '';
+    try {
+      savedText = await clipboard.readText();
+      if (await clipboard.has('image/png')) {
+        const items = await clipboard.read();
+        const t = items[0] && (await items[0].getType('image/png'));
+        if (t && t.size > 0) savedPng = Buffer.from(await t.arrayBuffer());
+      }
+    } catch {
+      // 读侧失败不阻断（还原退化为写回空文本）
+    }
+    // 基态清空：hasPng 的"真"必须由**这次写入**造成 —— 不清的话上次运行/人手动复制的图
+    // 会让断言蒙对（写实现退化成 writeText 也绿）。
+    clipboard.clear();
+
+    const du = 'data:image/png;base64,' + pngBuf.toString('base64');
+    const rc = await exposed.writeClipboardImage(du);
+    check('writeClipboardImage(真 PNG dataURL) → success:true',
+      rc?.success === true, `success=${rc?.success} err=${rc?.error || ''}`);
+    const hasPng = await clipboard.has('image/png');
+    check('系统剪贴板真的有 image/png（只报 success 可能是空转）', hasPng === true);
+    let backSize = null;
+    try {
+      const items = await clipboard.read();
+      const t = items[0] && (await items[0].getType('image/png'));
+      if (t && t.size > 0) backSize = nativeImage.createFromBuffer(Buffer.from(await t.arrayBuffer())).getSize();
+    } catch {
+      // 读不回则 backSize 保持 null，下一条断言自然红
+    }
+    check('读回的图就是发出去的那张（64×64，内容级非空转）',
+      backSize && backSize.width === 64 && backSize.height === 64,
+      `readBack=${JSON.stringify(backSize)}`);
+
+    const rcBad = await exposed.writeClipboardImage('data:text/plain;base64,aGk=');
+    check('非 PNG dataURL → 拒绝且理由明确（不是"写入剪贴板失败"这类兜底）',
+      rcBad?.success === false && rcBad?.error === 'invalid image payload',
+      `success=${rcBad?.success} err=${rcBad?.error}`);
+    const rcBig = await exposed.writeClipboardImage('data:image/png;base64,' + 'A'.repeat(8 * 1024 * 1024));
+    check('超 8MB 上限 → 拒绝（image too large）',
+      rcBig?.success === false && rcBig?.error === 'image too large',
+      `success=${rcBig?.success} err=${rcBig?.error}`);
+
+    // 文本通道同批改过（Electron 44 的 writeText 也变成 async）—— 一并读回验证：
+    // 图片修好了、文本在升级里静默坏掉（"发起即成功"，错误落进 unhandled rejection）属同类隐患。
+    const txt = 'sk-smoke-剪贴板文本';
+    const rt = await exposed.writeClipboard(txt);
+    check('writeClipboard(文本) → success:true', rt?.success === true, `success=${rt?.success} err=${rt?.error}`);
+    const backText = await clipboard.readText();
+    check('读回的文本就是写进去的那句（非空转）', backText === txt, `readBack=${JSON.stringify(backText)}`);
+
+    // 还原原剪贴板（别给跑冒烟的人留下测试残留）
+    try {
+      if (savedPng) {
+        await clipboard.write([new ClipboardItem({ 'image/png': new Blob([savedPng], { type: 'image/png' }) })]);
+      } else {
+        await clipboard.writeText(savedText);
+      }
+    } catch {
+      // 还原失败可接受（不影响断言结果）
+    }
+
+    section('⑨ 拿货单行图：purchase-style-images 按「款色 + 尺码」批量查图（真 handler + 真库 JOIN）');
+    // 风险与 ① 同形：这条通道的渲染层契约是 `{ items: [{styleCode, color, size}] }`，preload 若没把 items
+    // 透传出去（或截断/丢项/**把 size 丢了**），主进程就只能按款色挑"最新一张" → 同一款的多行
+    // 全显示同一张图（2026-10-11 用户报的"拿货单明细的图片都是一样的"）；漏掉 items 更糟 ——
+    // 回来一串 null，**每行都显示"缺图"**，一条错都不报（界面上只是"这个款没有图"）。
+    const siA = dbRun(`INSERT INTO oi_styles (code, fingerprint) VALUES (?,?)`, ['SHAPE-S1', 'fp-shape-si-s1']).lastInsertRowid;
+    const siB = dbRun(`INSERT INTO oi_styles (code, fingerprint) VALUES (?,?)`, ['SHAPE-S2', 'fp-shape-si-s2']).lastInsertRowid;
+    const scA = dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [siA, '黑', 'SHAPE-S1-黑']).lastInsertRowid;
+    dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [siA, '白', 'SHAPE-S1-白']);
+    const scB = dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [siB, '蓝', 'SHAPE-S2-蓝']).lastInsertRowid;
+    const siImgB = path.join(tmpDir, 'order-images', 'style-b.png');
+    makeRealPng(siImgB);
+    dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
+      ['fp-shape-si-a', 'ufp-si-a', '', orderImgPath, scA]);
+    dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
+      ['fp-shape-si-b', 'ufp-si-b', '', siImgB, scB]);
+
+    invokes.length = 0;
+    const rs = await exposed.purchaseStyleImages({
+      items: [
+        { styleCode: 'SHAPE-S1', color: '黑' }, // 有图
+        { styleCode: 'SHAPE-S2', color: '蓝' }, // 有图（另一张）
+        { styleCode: 'SHAPE-S1', color: '白' }, // 查得到款色但没有图
+        { styleCode: '', color: '黑' }, // 空款编码：守卫必须直接给 null，不白查
+        { styleCode: 'SHAPE-S9', color: '黑' }, // 款不存在
+      ],
+    });
+    const sp = rs?.data?.paths ?? [];
+    check('命中 / 没图 / 空款编码 / 款不存在 逐项对位（顺序 + 数量，不许静默丢项错位）',
+      rs?.success === true && sp.length === 5 &&
+        sp[0] === orderImgPath && sp[1] === siImgB && sp[2] === null && sp[3] === null && sp[4] === null,
+      `success=${rs?.success} paths=${JSON.stringify(sp)}`);
+    check('发出去的载荷真的带着 5 项 items（preload 漏传 = 每行都显示缺图且不报错）',
+      invokes.at(-1)?.[1]?.items?.length === 5,
+      JSON.stringify(invokes.at(-1)?.[1]));
+    const rsEmpty = await exposed.purchaseStyleImages({ items: [] });
+    check('空清单 → 空 paths（不报错、不编造）',
+      rsEmpty?.success === true && (rsEmpty?.data?.paths ?? []).length === 0,
+      `success=${rsEmpty?.success} data=${JSON.stringify(rsEmpty?.data)}`);
+    const rsCap = await exposed.purchaseStyleImages({
+      items: Array.from({ length: 501 }, () => ({ styleCode: 'SHAPE-S1', color: '黑' })),
+    });
+    check('超出 500 的部分由 preload 截断（上限之外的拆批是渲染层的事，此处只钉现状）',
+      (rsCap?.data?.paths ?? []).length === 500, `len=${(rsCap?.data?.paths ?? []).length}`);
+
+    // ---- 「款色 + 尺码」取图（2026-10-11，用户报"拿货单明细的图片都是一样的"）----
+    // 真形状：订单 Excel 解析出来的图挂在**订单行**上（oi_orders.image_id → oi_images.local_path），
+    // 而拿货单明细行的粒度是「款色 × 尺码」（= outstanding 的聚合键 = purchase_items 唯一键）
+    // ⇒ 取图必须带上尺码，否则同一款的多行全落到"该款色最新那张"。
+    // 这里造的就是最小区分场景：同款同色，L 行挂一张、M 行挂另一张。
+    const siC = dbRun(`INSERT INTO oi_styles (code, fingerprint) VALUES (?,?)`, ['SHAPE-S3', 'fp-shape-si-s3']).lastInsertRowid;
+    const scC = dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [siC, '灰', 'SHAPE-S3-灰']).lastInsertRowid;
+    const szL = path.join(tmpDir, 'order-images', 'size-l.png');
+    const szM = path.join(tmpDir, 'order-images', 'size-m.png');
+    makeRealPng(szL);
+    makeRealPng(szM);
+    const idL = dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
+      ['fp-shape-si-sl', 'ufp-si-sl', '', szL, scC]).lastInsertRowid;
+    const idM = dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
+      ['fp-shape-si-sm', 'ufp-si-sm', '', szM, scC]).lastInsertRowid;
+    dbRun(`INSERT INTO oi_orders (image_id, order_no, size, raw_fields) VALUES (?,?,?,?)`, [idL, 'SI-SIZE-L', 'L', '{}']);
+    dbRun(`INSERT INTO oi_orders (image_id, order_no, size, raw_fields) VALUES (?,?,?,?)`, [idM, 'SI-SIZE-M', 'M', '{}']);
+
+    invokes.length = 0;
+    const rsSize = await exposed.purchaseStyleImages({
+      items: [
+        { styleCode: 'SHAPE-S3', color: '灰', size: 'L' },
+        { styleCode: 'SHAPE-S3', color: '灰', size: 'M' },
+      ],
+    });
+    const spSize = rsSize?.data?.paths ?? [];
+    check('同款同色、只差尺码 → 各取各那件的图（只按款色取会两行拿到同一张）',
+      rsSize?.success === true && spSize.length === 2 && spSize[0] === szL && spSize[1] === szM,
+      `paths=${JSON.stringify(spSize)} want=[${szL}, ${szM}]`);
+    check('载荷把尺码也透传下去了（preload 漏传 size ⇒ 主进程只能按款色挑，同款全同一张）',
+      invokes.at(-1)?.[1]?.items?.length === 2 &&
+        invokes.at(-1)[1].items.every((it) => it.size === 'L' || it.size === 'M'),
+      JSON.stringify(invokes.at(-1)?.[1]));
+    const rsFallback = await exposed.purchaseStyleImages({
+      items: [{ styleCode: 'SHAPE-S3', color: '灰', size: 'XXXL' }],
+    });
+    check('该尺码没有订单行（手工加的行）→ 回落款色级最新图，不是"缺图"',
+      rsFallback?.data?.paths?.[0] === szM, JSON.stringify(rsFallback?.data?.paths));
   } catch (e) {
     check(`冒烟自身异常：${e && e.message}`, false, e && e.stack ? String(e.stack).split('\n')[1] : '');
   }

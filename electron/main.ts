@@ -4,7 +4,7 @@
 // 标记为 ES 模块，避免顶层声明进入全局作用域与其他主进程文件冲突
 export {};
 
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -14,6 +14,8 @@ const DEV_SERVER_URL = 'http://localhost:5173';
 
 // 网络请求 IPC（渲染进程经 axios IPC adapter 调用，主进程用 Electron net 发起请求）
 require('./ipc-handlers');
+// 剪贴板 IPC（文本 + 图片；图片通道是「复制给厂家」的最后一跳）
+require('./clipboard-handlers');
 // 订单归类模块 IPC（SQLite 数据访问 + 主图下载/读取）
 require('./order-handlers');
 // 数据备份/恢复 IPC（换机迁移：导出/导入备份文件夹 + 选择目录 + 打开数据目录）
@@ -325,15 +327,6 @@ ipcMain.handle('read-file', async (_event: any, filePath: string) => {
       const content = fs.readFileSync(filePath, 'utf-8');
       return { success: true, data: { filePath, content } };
     }
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-});
-
-ipcMain.handle('write-clipboard', async (_event: any, text: string) => {
-  try {
-    clipboard.writeText(text);
-    return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
   }

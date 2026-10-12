@@ -42,6 +42,7 @@ import type {
   AeProfitOverview,
   AeCostMapImportItem,
   AeCostMapItem,
+  ManualCostItemInput,
   AeRateItem,
   PurchaseCostSnapshotItem,
   ShopAccountItem,
@@ -71,7 +72,6 @@ import type {
   UnmappedShopRow,
   NameMapKind,
   SkuBackfillOutcome,
-  OrderSkuRollup,
   SkuMapStatus,
   ShopSkuRow,
   SkuMapInputPayload,
@@ -124,6 +124,8 @@ export interface ElectronApi {
   selectTemplate(): Promise<ApiResult<TemplateFilePayload>>;
   saveTemplate(filePath: string, content: string): Promise<ApiResult<unknown>>;
   writeClipboard(text: string): Promise<ApiResult<unknown>>;
+  /** 写图片剪贴板（PNG dataURL）：「复制给厂家」的发厂清单图，粘进微信发给供应商 */
+  writeClipboardImage(dataUrl: string): Promise<ApiResult<unknown>>;
   // 模块命名空间持久化（Phase 1 新增）
   getModuleState(moduleId: string): Promise<ApiResult<unknown>>;
   setModuleState(moduleId: string, data: unknown): Promise<ApiResult<unknown>>;
@@ -160,21 +162,20 @@ export interface ElectronApi {
     corrected?: boolean;
     /** 关键字（单号/店铺/分类/颜色/logo/款编码/款名/款色），匹配为空串视为不筛选 */
     search?: string;
+    /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`）；缺省 = 全库 */
+    importDate?: string;
   }): Promise<ApiResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear(): Promise<ApiResult<unknown>>;
-  /**
-   * 本页汇总（「归类核对」页指标条的产品维度）：这批订单行已配到哪些产品 / 几家供应商。
-   * 入参是**订单行原文**（`shop` 未归一）—— 归一与匹配都在主进程，渲染层不自己推。
-   */
-  orderSkuRollup(rows: { shop: string; itemId: string }[]): Promise<ApiResult<OrderSkuRollup>>;
   /** 运费原始行（oi_orders 最小投影，只读；供按订单算运费的宿主 op 提取） */
   orderAssignShop(payload: { orderNos: string[]; shopName: string }): Promise<
     ApiResult<{ updated: number }>
   >;
-  /** 统一订单行投影（主干 `oi_orders`；`source` 过滤可选） */
+  /** 统一订单行投影（主干 `oi_orders`；`source` / `importDate` 过滤可选） */
   orderShippingRows(payload?: {
     limit?: number;
     source?: 'all' | 'import' | 'collect';
+    /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
+    importDate?: string;
   }): Promise<ApiResult<UnifiedOrderRow[]>>;
   orderDownloadImage(url: string): Promise<ApiResult<OrderImageRecord>>;
   /** 拣货投影（只读；聚合在渲染层纯函数 `src/lib/picking.ts`） */
@@ -253,12 +254,15 @@ export interface ElectronApi {
     color: string;
     styleName?: string;
   }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
+  /** 款选项列表（「归属款」下拉的数据源）：**产品库全集** + 每项的可选颜色 */
   orderStyleList(): Promise<ApiResult<StyleRecord[]>>;
   orderStyleDelete(payload: { id: number }): Promise<ApiResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
+  // ⭐ 主用 `styleCode`（下拉的值就是编码）；`styleId` 保留兼容老形状
   orderStyleAssign(payload: {
     orderId: number;
-    styleId: number;
+    styleCode: string;
+    styleId?: number;
     color: string;
     fingerprint?: string;
   }): Promise<ApiResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
@@ -278,6 +282,9 @@ export interface ElectronApi {
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected(input: number[] | { all: true }): Promise<ApiResult<{ updated: number }>>;
+  // 退回待核对（归类核对页「已核对」范围里的行内动作）：把点名的已核对行置回 corrected=0。
+  // 入参只有裸数组 —— **没有** { all: true } 形态（退回一律点名，理由见 order-db.ts 的实现注释）。
+  orderReopenCorrected(ids: number[]): Promise<ApiResult<{ updated: number }>>;
   // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
   aeDbEnsure(): Promise<ApiResult<unknown>>;
   aeOrderList(payload?: {
@@ -296,6 +303,15 @@ export interface ElectronApi {
     items: AeCostMapImportItem[];
   }): Promise<ApiResult<{ replaced: number }>>;
   aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>>;
+  /** P4 成本维护：手工录入 / 修改进价（`source='manual'`；缺省生效日 = 当天） */
+  aeCostMapUpsertManual(payload: {
+    items: ManualCostItemInput[];
+    effectiveFrom?: string;
+  }): Promise<ApiResult<{ written: number; skipped: number }>>;
+  /** P4 成本维护：删除手工进价区间（只删 `manual`） */
+  aeCostMapDeleteManual(payload: {
+    keys: { styleCode: string; effectiveFrom: string }[];
+  }): Promise<ApiResult<{ deleted: number }>>;
   settleImport(payload: { rows: unknown[] }): Promise<
     ApiResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
   >;
@@ -353,7 +369,6 @@ export interface ElectronApi {
     supplierId: number;
     bizDate: string;
     mode: 'detail' | 'package';
-    note?: string;
     totalCents?: number;
     items?: PurchaseItem[];
     sources?: PurchaseSourceRow[];
@@ -361,7 +376,6 @@ export interface ElectronApi {
   purchaseOrderUpdate(payload: {
     id: number;
     bizDate?: string;
-    note?: string;
     totalCents?: number;
     items?: PurchaseItem[];
   }): Promise<ApiResult<unknown>>;
@@ -412,6 +426,11 @@ export interface ElectronApi {
     items: PurchaseItem[];
     defaultName?: string;
   }): Promise<ApiResult<{ filePath: string }>>;
+  /** 拿货单编辑器行图：按「款编码 + 款色 + 尺码」批量取本地图路径（顺序与入参一致，未命中为 null）。
+   *  `size` 决定挑哪张：同一款下每个订单商品各有自己的图，只按款色挑会让同款所有行显示同一张。 */
+  purchaseStyleImages(payload: {
+    items: { styleCode: string; color: string; size?: string }[];
+  }): Promise<ApiResult<{ paths: (string | null)[] }>>;
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
   shopAccountDbEnsure(): Promise<ApiResult<unknown>>;
   shopAccountList(payload?: {
@@ -778,6 +797,27 @@ export function aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>> {
   return ipc.aeCostMapList();
 }
 
+/**
+ * 手工录入 / 修改进价（P4：成本维护界面）。写入口径与产品导入的「进价」列**同一份**
+ * （`electron/manual-costs.ts`）—— 两边都不会重复写"值没变"的区间行。
+ */
+export function aeCostMapUpsertManual(payload: {
+  items: ManualCostItemInput[];
+  effectiveFrom?: string;
+}): Promise<ApiResult<{ written: number; skipped: number }>> {
+  return ipc.aeCostMapUpsertManual(payload);
+}
+
+/**
+ * 删除手工进价区间（只删 `manual`）。
+ * 删掉后该区间不再生效，读取侧回落到**更早的区间** —— 界面负责把这句话说给用户。
+ */
+export function aeCostMapDeleteManual(payload: {
+  keys: { styleCode: string; effectiveFrom: string }[];
+}): Promise<ApiResult<{ deleted: number }>> {
+  return ipc.aeCostMapDeleteManual(payload);
+}
+
 /** 汇率全量 */
 export function aeRateList(): Promise<ApiResult<AeRateItem[]>> {
   return ipc.aeRateList();
@@ -811,6 +851,20 @@ export function purchaseCostSnapshot(): Promise<
   ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>
 > {
   return ipc.purchaseCostSnapshot();
+}
+
+/**
+ * 待拿货缺口（只读）：**全部订单** − 已提交拿货单 − 已忽略，按「款|色|码」。
+ * 拣货单取它的 `taken` 字段当"已拿"（`src/lib/picking.aggregatePicking`）——
+ * 与「拿货」页同源，两处不各算一次（见 `purchase-db.outstanding`）。
+ */
+export function purchaseOutstanding(): Promise<ApiResult<OutstandingRow[]>> {
+  return ipc.purchaseOutstanding();
+}
+
+/** 忽略清单（只读）：不想再补货的「款|色」，整组生效 —— 拣货单据此把该组标「已忽略」 */
+export function purchaseIgnoreList(): Promise<ApiResult<IgnoreRow[]>> {
+  return ipc.purchaseIgnoreList();
 }
 
 // ---- 店铺账号管家（shop-accounts 视图插件）----
@@ -1168,6 +1222,8 @@ export function productSummary(): Promise<ApiResult<ProductSummary>> {
 export function productImport(payload: {
   items: ProductImportRowInput[];
   mode?: 'upsert' | 'insertOnly';
+  /** 手工进价的生效日 `yyyy-mm-dd`（缺省 = 导入当日） */
+  effectiveFrom?: string;
 }): Promise<ApiResult<ProductImportOutcome>> {
   return ipc.productImport(payload);
 }
@@ -1452,6 +1508,8 @@ export function orderAssignShop(payload: { orderNos: string[]; shopName: string 
 export function orderShippingRows(payload?: {
   limit?: number;
   source?: 'all' | 'import' | 'collect';
+  /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
+  importDate?: string;
 }): Promise<ApiResult<UnifiedOrderRow[]>> {
   return ipc.orderShippingRows(payload);
 }

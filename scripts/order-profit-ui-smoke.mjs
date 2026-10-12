@@ -293,15 +293,20 @@ async function main() {
     // ⚠️ 判据从"整段 .oc-topbar 拼串"升级为**按 data-act 取元素**：改一个标签文案
     //    （比如「算齐」→「各环齐全」）不该把整条断言带红 —— 那是用测试迁就实现。
     var mRows = flat(document.querySelector('[data-act="metric-rows"]'));
-    var mCmp = flat(document.querySelector('[data-act="metric-complete"]'));
     var mRev = flat(document.querySelector('[data-act="metric-revenue"]'));
     var mCost = flat(document.querySelector('[data-act="metric-cost"]'));
     var mGross = flat(document.querySelector('[data-act="metric-gross"]'));
     var mMargin = flat(document.querySelector('[data-act="metric-margin"]'));
-    report('指标条：订单行 1 / 各环齐全 1 / 收入合计 165.18 / 成本合计 40.00 / 毛利合计 125.18',
-      /订单行 1/.test(mRows) && /各环齐全 1/.test(mCmp) &&
-        mRev.indexOf('165.18') >= 0 && mCost.indexOf('40.00') >= 0 && mGross.indexOf('125.18') >= 0,
-      [mRows, mCmp, mRev, mCost, mGross].join(' | '));
+    // 2026-10-11 二改：指标条**只留钱的五个数**，撤掉「各环齐全 N」那一格 ——
+    // 它与下一行的缺口说的是同一件事（齐不齐），而缺口的说法具体得多（缺哪一环、几行）。
+    // 所以这条断言同时钉住"那格不再回来"：'metric-complete' 存在 = 同一件事又说了一遍。
+    report('指标条只有五个数：订单行 1 / 收入 165.18 / 成本 40.00 / 毛利 125.18 / 毛利率 75.8%',
+      /订单行 1/.test(mRows) && mRev.indexOf('165.18') >= 0 && mCost.indexOf('40.00') >= 0 &&
+        mGross.indexOf('125.18') >= 0 && mMargin.indexOf('75.8%') >= 0,
+      [mRows, mRev, mCost, mGross, mMargin].join(' | '));
+    report('「齐不齐」在页面上只剩一处说法（指标条不再占一格「各环齐全」）',
+      !document.querySelector('[data-act="metric-complete"]'),
+      'metric-complete=' + !!document.querySelector('[data-act="metric-complete"]'));
     // 成本合计 = 运费 30 + 产品成本 10 —— 与明细表两列相加、与毛利算式同一个数。
     // 这条同时钉住"成本合计和收入合计**同口径**"（都只含非关闭单）：不一致时会出现成本比收入还大。
     report('成本合计 = 运费 + 产品成本（40.00），与明细两列相加一致',
@@ -612,7 +617,7 @@ async function main() {
 
     step('collected-merge');
     // C1 合并：两条摄取通道进同一模型 —— 采集行要在同一张表里出现，并**如实暴露它的缺口**
-    report('首屏可见「数据来源」与「税口径」（默认平台代征代缴）',
+    report('首屏可见两个会改数字的开关：来源筛选 + 税口径（默认平台代征代缴）',
       !!document.querySelector('[data-act="source"]') && !!document.querySelector('[data-act="tax-default"]') &&
         document.querySelector('[data-act="tax-default"]').value === 'platform');
     var srcChips = Array.prototype.map.call(document.querySelectorAll('[data-act="source-count"]'), function (el) { return flat(el); }).join(' | ');
@@ -669,6 +674,42 @@ async function main() {
     srcSel.dispatchEvent(new Event('change'));
     await waitFor(function () { return flat(detailTable()).indexOf('SMOKE-1') >= 0; }, 6000);
     report('切回「全部」→ 两行都在', flat(detailTable()).indexOf('C-1') >= 0 && flat(detailTable()).indexOf('SMOKE-1') >= 0);
+
+    step('gap-filter');
+    // ⭐ 缺口是**筛子**，不是**提示**（2026-10-11）：点「缺成本 1」→ 明细表只留那一行。
+    //    原先它只是一句话：告诉你"1 行缺成本"，却没有任何办法知道**是哪一行** ——
+    //    几百行的表里只能逐格去找。这是本仓「提示不是入口」那条规矩的又一例。
+    //    ⚠️ 判据必须三件一起：① 行数真的变了（2 → 1）② 筛选态看得见 ③ 撤得掉。
+    //      只断言"点下去有点反应"是空转 —— 弹个 toast、闪一下，都能让它绿。
+    var gapCost = document.querySelector('[data-act="gap-cost"]');
+    report('缺口 chip 做成了可点按钮（不再是点不动的提示）',
+      !!gapCost && gapCost.tagName === 'BUTTON', gapCost ? gapCost.tagName : 'missing');
+    var beforeN = document.querySelectorAll('[data-act="detail-table"] tbody tr').length;
+    if (gapCost) {
+      gapCost.click();
+      await waitFor(function () {
+        return !!document.querySelector('[data-act="gap-filter"]') &&
+          flat(detailTable()).indexOf('SMOKE-1') < 0;
+      }, 6000);
+      var afterT = flat(detailTable());
+      var afterN = document.querySelectorAll('[data-act="detail-table"] tbody tr').length;
+      report('点「缺成本 1」→ 明细只剩那一行（2 行 → 1 行，留下的正是缺成本那行）',
+        beforeN === 2 && afterN === 1 && afterT.indexOf('C-1') >= 0 && afterT.indexOf('SMOKE-1') < 0,
+        'before=' + beforeN + ' after=' + afterN + ' 表=' + afterT.slice(0, 80));
+      report('筛选态看得见且带撤掉的口（面板头写明「只看 缺成本」，并挂 ×）',
+        !!document.querySelector('[data-act="gap-filter"]') &&
+          flat(document.querySelector('[data-act="gap-filter"]')).indexOf('缺成本') >= 0 &&
+          !!document.querySelector('[data-act="clear-filter"]'),
+        flat(document.querySelector('[data-act="gap-filter"]')));
+      document.querySelector('[data-act="clear-filter"]').click();
+      await waitFor(function () {
+        return document.querySelectorAll('[data-act="detail-table"] tbody tr').length === 2;
+      }, 6000);
+      report('点 × 撤掉筛选 → 明细回到全部行',
+        document.querySelectorAll('[data-act="detail-table"] tbody tr').length === 2 &&
+          !document.querySelector('[data-act="gap-filter"]'),
+        'rows=' + document.querySelectorAll('[data-act="detail-table"] tbody tr').length);
+    }
 
     step('weight-source');
     // 克重**只有一个来源**（2026-10-01 领域裁定）：产品库 SKU（款 × 色 × 码 → pl_variants.weight_g）。
@@ -753,8 +794,14 @@ async function main() {
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () { return document.querySelector('[data-act="empty-import"]'); }, 8000);
     var emptyText = flat(document.querySelector('.oc-empty'));
-    report('空态说清怎么办，且指向宿主的导入入口（不再指向要装插件）',
-      emptyText.indexOf('导入 Excel') >= 0 && emptyText.indexOf('订单归类') < 0, emptyText);
+    // 末两条是 2026-10-11 补的：原文案拿「宿主 / 插件」向用户解释内部架构（§1.10 禁用词），
+    // 修好后钉住"不再出现" —— 只是把「导入 Excel」找回来，文字里照样能把内部词抄回来。
+    // 2026-10-11 二改：原文案写「点『导入 Excel』…」，而这一页**没有**这个按钮
+    // （按钮写的是「去『导入订单』」）—— 文案点了一个不存在的按钮。现在说明只讲"能得到什么"，
+    // "点哪里"交给那颗按钮（它另有一条断言钉着"派发 switch-module → today"）。
+    report('空态说清能得到什么，且指向宿主的导入入口（不再指向要装插件）',
+      emptyText.indexOf('订单报表') >= 0 && emptyText.indexOf('订单归类') < 0 &&
+        emptyText.indexOf('宿主') < 0 && emptyText.indexOf('插件') < 0, emptyText);
     document.querySelector('[data-act="empty-import"]').click();
     await waitFor(function () { return (window.__navs || []).length >= 1; }, 4000);
     report('空态按钮派发 switch-module → today',

@@ -2,7 +2,12 @@
   <div class="wb-page oc-view" :class="{ 'is-embedded': embedded }">
     <!-- 页头：原先整页没有标题，第一行就是四个统计数字 —— 用户不知道这页在算什么。
          `embedded` 时只藏**标题那两行**（外层页签已经交代了），
-         ⚠️ **不能整块藏掉**：未归属 / 刷新 / 更多 三个动作都在这个 header 里（同拣货页的教训）。 -->
+         ⚠️ **不能整块藏掉**：未归属 / 费率与归属 两个动作都在这个 header 里（同拣货页的教训）。
+         「刷新」是唯一例外（2026-10-11）：内嵌时藏掉 —— 容器页头已有一个「刷新」且是超集
+         （`bump()` 波及所有面板，含本页），同一屏两个同名按钮只会让人停下来想"点哪个"。
+         ⚠️ 冒烟取 `[data-act="refresh"]` 是 `querySelector`（**取文档序第一个**）：内嵌时它
+            命中的必须是容器那个 —— 把这里换成 v-show 之类的"藏而不断"，第一个就变成藏起来的
+            这个按钮，断言会点到一个看不见的按钮上。 -->
     <header class="wb-head" :class="{ 'is-toolbar': embedded }">
       <div v-if="!embedded" class="wb-head__main">
         <h1 class="wb-head__title">算钱</h1>
@@ -24,7 +29,13 @@
         >
           未归属 {{ unassignedCount }} 单 · 去归属
         </button>
-        <button class="wb-btn oc-btn" data-act="refresh" :disabled="loading" @click="load">
+        <button
+          v-if="!embedded"
+          class="wb-btn oc-btn"
+          data-act="refresh"
+          :disabled="loading"
+          @click="load"
+        >
           刷新
         </button>
         <button
@@ -39,23 +50,25 @@
       </div>
     </header>
 
-    <!-- 概览卡：**一行结论 + 一行体检**。
-         原先「指标条 / 口径条 / 经营状态 / 缺哪一环」是 4 条各自带边框的全宽横条，
-         底色还三套（surface / surface-2 交替），可它们都是"一眼扫过"的同级信息 ——
-         4 层同权重的东西摞在表格之上，读的人分不出主次，这才是"杂乱"的来源。
-         现在归成一张卡：第一行是数字，第二行是这批数据的体检结果。
-         ⚠️ `.oc-topbar` 类名与各 `data-act="metric-*"` 锚点仍被冒烟断言（按锚点取元素，
-         不按整串拼）——可以加格、可以改标签文案，不能把"标签 <b>数字</b>"拆成兄弟元素。 -->
+    <!-- 概览卡：**这页的结论**，两行。
+         第一行 = 钱的五个数。原先是六个格，其中「各环齐全 N」与下一行的缺口说的是同一件事
+         （"数据齐不齐"），而缺口的说法具体得多（缺哪一环、几行）⇒ 撤掉那一格，
+         「齐不齐」在页面上**只剩一处说法**。
+         第二行 = 这批数据的状态：左边缺什么、右边按经营状态各多少，中间一条淡分隔线。
+         ⭐ **每个缺口都是一颗可点的筛子**（2026-10-11）：点「缺克重 1」→ 明细表只留那一行。
+            原先它是纯提示 —— 用户被告知"有 1 行缺克重"，却没有任何办法知道**是哪一行**，
+            只能自己在几百行里逐格找。这与本仓既有的「提示不是入口」是同一条规矩。
+         ⚠️ `.oc-topbar` / `.oc-gaps` / `.oc-buckets` 与各 `data-act` 锚点仍被冒烟按锚点取用；
+            「标签 <b>数字</b>」不能被拆成兄弟元素。 -->
     <div class="oc-overview">
       <div class="wb-metabar oc-topbar">
+        <!-- 口径标签（2026-10-11）：内嵌在「发货台」里时只算**今天导入**的订单行。
+             ⚠️ 独立打开「算钱」模块时**不加这个筛**（那时用户问的是"这批订单赚不赚"，
+                不限今天）—— 所以标签跟着 `importDate` 走：没有筛就不写。
+                不写出来的话，同一页在两个入口下的数字不一样，用户只会以为其中一个坏了。 -->
+        <span v-if="importDate" class="wb-tag oc-scope" data-act="oc-scope">今天导入</span>
         <span class="wb-metric" data-act="metric-rows"
           >订单行 <b>{{ summary.total }}</b></span
-        >
-        <span
-          class="wb-metric"
-          data-act="metric-complete"
-          :class="{ 'is-warn': summary.ok < summary.total }"
-          >各环齐全 <b>{{ summary.ok }}</b></span
         >
         <span class="wb-metric" data-act="metric-revenue"
           >收入合计 <b>{{ money(summary.revenueTotal) }}</b></span
@@ -65,30 +78,41 @@
         <span class="wb-metric" data-act="metric-cost"
           >成本合计 <b>{{ money(summary.costTotal) }}</b></span
         >
-        <span class="wb-metric" data-act="metric-gross"
+        <span class="wb-metric" data-act="metric-gross" :title="grossTitle"
           >毛利合计 <b>{{ money(summary.grossTotal) }}</b></span
         >
         <span class="wb-metric" data-act="metric-margin" :title="marginTitle"
           >毛利率 <b>{{ marginText }}</b></span
         >
+        <!-- 关闭单不进上面任何一个合计。这句话**只在真有**关闭单时出现 ——
+             没有的时候摆一句"不含已关闭 0 行"就是噪声（零的正确表达是不出现）。 -->
+        <span v-if="closedRows" class="oc-topbar__note" title="关闭单单列一桶，不进收入/成本/毛利合计（混进来会让整体虚高）">
+          不含已关闭 {{ closedRows }} 行
+        </span>
       </div>
 
-      <!-- 体检行：只在数据到位时出现（加载中不摆一排 0 出来） -->
+      <!-- 体检行：只在数据到位时出现（加载中不摆一排 0 出来）。
+           ⚠️ 2026-10-11 二改：撤掉「缺哪一环：」「在途单结算前平台不给费用，只能估」
+              「经营状态（利润合计只含非关闭单）：」三句，以及「多件…（多件合并计费尚未支持）」的长尾 ——
+             屏幕上只留"是什么"，"为什么"进 title。 -->
       <div v-if="!loading && !error" class="oc-health">
         <div class="oc-gaps">
-          <span class="oc-gaps__title">缺哪一环：</span>
-          <!-- 这一行的目的就是"哪里缺"，所以**只在缺的时候列出来**。
-               原来无论 0 都渲染 8 个「缺X 0」：数据齐全时用户得逐个读完才知道"都齐了" ——
+          <!-- 只为**真的缺**的那些环渲染；每个都是按钮：点了筛明细。
+               原先无论 0 都渲染 8 个「缺X 0」：数据齐全时用户要逐个读完才知道"都齐了" ——
                全 0 的正确表达是一句话，不是 8 个零。 -->
           <template v-if="activeGaps.length">
-            <span
+            <button
               v-for="g in activeGaps"
               :key="g.key"
-              class="wb-tag oc-tag is-warn"
+              class="wb-tag oc-tag is-warn oc-tag--act"
+              :class="{ 'is-on': gapFilter === g.key }"
+              type="button"
               :data-act="`gap-${g.key}`"
+              :title="`只显示「${g.label}」的 ${g.count} 行（再点一次取消）`"
+              @click="toggleGap(g.key)"
             >
               {{ g.label }} {{ g.count }}
-            </span>
+            </button>
           </template>
           <!-- 「没有缺项」是**对整行**下的断言，所以必须整行真的都没有才能显示：
                平台费未配也是这一行里的一项（它虽是**全局标志**、不做成逐行缺口，见 orderCost.ts），
@@ -111,19 +135,24 @@
           >
             平台费未扣 · 去配费率
           </button>
-          <span v-if="summary.platformFeeMissing" class="oc-muted">
-            在途单结算前平台不给费用，只能估
-          </span>
           <span v-else class="wb-tag oc-tag is-on">
-            平台费按 {{ feeRatePercent }}% 近似（结算后以真值替换）
+            平台费按 {{ feeRatePercent }}% 近似
           </span>
-          <span v-if="multiPieceRows" class="wb-tag oc-tag is-warn" data-act="multi-piece-hint">
-            多件 {{ multiPieceRows }} 行 · 成本/运费仍按 1 件算（多件合并计费尚未支持）
+          <!-- ⚠️ 仍是 **span 不是按钮**：它没有可做的动作，做成按钮就是"假动作"。
+               长句（"成本/运费仍按 1 件算、多件合并计费尚未支持"）进 title。 -->
+          <span
+            v-if="multiPieceRows"
+            class="wb-tag oc-tag is-warn"
+            data-act="multi-piece-hint"
+            :title="`${multiPieceRows} 行的件数大于 1，但成本与运费仍按 1 件算（多件合并计费尚未支持）`"
+          >
+            多件 {{ multiPieceRows }} 行按 1 件计
           </span>
         </div>
 
+        <span class="oc-health__sep" aria-hidden="true"></span>
+
         <div class="oc-buckets">
-          <span class="oc-buckets__title">经营状态（利润合计只含非关闭单）：</span>
           <span v-for="b in summary.bucketTotals" :key="b.bucket" class="wb-tag oc-tag is-on">
             {{ bucketLabel(b.bucket) }} {{ b.rows }} 行 · 毛利 {{ money(b.gross) }}
           </span>
@@ -194,17 +223,21 @@
       </div>
     </div>
 
-    <!-- 数据来源与税口径：**写在首屏**（C1 后两条摄取通道在同一页；口径看不见用户就会怀疑数字） -->
+    <!-- 口径条：**只放两个会改变上面数字的开关**，一句说明都不写。
+         · 「数据来源」到底指什么，紧邻的两枚「采集 N 行 / 导入 N 行」已经说完；
+         · 「税口径」只作用于订单自己没写税的行 ⇒ 进 title；选项里的括号**只留后果**
+           （税记 0 / 标缺口），删掉"默认""不按 0 算"这类句子。
+         ⚠️ 两枚 `data-act="source-count"` 的文案仍被冒烟按词取用（"采集 1 行"）。 -->
     <div class="oc-scope">
-      <span class="oc-scope__title">数据来源</span>
       <select
         v-model="sourceFilter"
         class="wb-input wb-input--sm"
         data-act="source"
         aria-label="只算哪个来源的订单行"
+        title="采集 = 从店铺抓回来的；导入 = Excel 导进来的"
         @change="onFilterChange"
       >
-        <option value="all">全部（采集 + 导入）</option>
+        <option value="all">全部来源</option>
         <option value="collect">仅采集</option>
         <option value="import">仅导入</option>
       </select>
@@ -215,18 +248,17 @@
         >导入 {{ summary.sourceCounts.import }} 行</span
       >
 
-      <span class="oc-scope__title">税口径</span>
       <select
         v-model="taxDefault"
-        class="wb-input wb-input--sm"
+        class="wb-input wb-input--sm oc-scope__tax"
         data-act="tax-default"
         aria-label="订单自己没说税时按哪种口径算"
+        title="只作用于订单自己没写税的行"
         @change="onFilterChange"
       >
-        <option value="platform">平台代征代缴（默认，税记 0）</option>
-        <option value="unknown">不知道（标缺口、不按 0 算）</option>
+        <option value="platform">平台代征代缴（税记 0）</option>
+        <option value="unknown">不知道（标缺口）</option>
       </select>
-      <span class="oc-muted">只作用于订单自己没写税的行</span>
     </div>
 
     <div v-if="loading" class="oc-hint">读取中…</div>
@@ -289,7 +321,9 @@
             <option value="month">按月</option>
             <option value="day">按日</option>
           </select>
-          <span class="oc-muted">只含非关闭单</span>
+          <!-- 面板头**不再重复口径**（2026-10-11）："金额只算非关闭单"这件事在页面上只说一次，
+               就在指标条上 —— 且只在真有已关闭单时出现（`不含已关闭 N 行`）。
+               原来这里那句「只含非关闭单」是同一句话的第二遍，常在的句子读多了就成噪声。 -->
         </div>
 
         <div v-show="statView === 'summary'" class="wb-table-wrap" data-act="stat-summary">
@@ -361,7 +395,26 @@
       <section class="wb-panel">
         <div class="wb-panel__head">
           <span>订单行明细</span>
-          <span class="wb-muted">{{ summary.rows.length }} 行</span>
+          <span class="wb-muted"
+            >{{ shownRows.length }} 行<template v-if="gapFilter"
+              >（全 {{ summary.rows.length }}）</template
+            ></span
+          >
+          <!-- 筛选态**必须看得见、也必须撤得掉**：表格忽然只剩一行而不说明原因，
+               用户会以为"数据没了"。这条 chip 就是那个开关（点 × 或再点上面那颗缺口都行）。 -->
+          <span v-if="gapFilter" class="wb-tag oc-tag is-warn oc-filter" data-act="gap-filter">
+            只看 {{ gapLabel(gapFilter) }}
+            <button
+              class="oc-filter__x"
+              type="button"
+              data-act="clear-filter"
+              title="取消筛选"
+              aria-label="取消筛选"
+              @click="gapFilter = null"
+            >
+              ×
+            </button>
+          </span>
         </div>
         <!-- ⚠️ 必须套 .wb-table-wrap：这张表 14 列，窄窗口下比可用宽度更宽，
              而 .wb-panel 是 overflow:hidden —— 直接放进去会被**静默裁掉右半截**
@@ -404,7 +457,7 @@
             </thead>
             <tbody>
               <tr
-                v-for="r in summary.rows"
+                v-for="r in shownRows"
                 :key="r.id"
                 :class="{ 'is-closed': r.bucket === 'closed' }"
               >
@@ -509,9 +562,12 @@
                 <td colspan="14" class="oc-empty">
                   <span class="wb-empty__icon" v-html="EMPTY_ICON"></span>
                   <p class="oc-empty__title">还没有订单行</p>
+                  <!-- 空态 = 一段"导入后会得到什么"的承诺 + 一个可点的下一步。
+                       原文案里的「（宿主自己会拆行入库，不需要装插件）」已删（2026-10-11）：
+                       它拿内部架构向用户解释（§1.10 禁用词），而用户只需要"去哪、点哪个"。
+                       也不再提"再回来点刷新" —— 内嵌时 token 会自动重算、独立打开时重挂即取。 -->
                   <p class="oc-empty__desc">
-                    在「今天」页点「导入
-                    Excel」选一份订单报表即可（宿主自己会拆行入库，不需要装插件）， 再回来点「刷新」。
+                    导一份订单报表，这里就按订单行算收入、运费、成本与毛利；缺的那一环逐行标出来。
                   </p>
                   <div class="wb-empty__actions">
                     <button
@@ -519,7 +575,7 @@
                       data-act="empty-import"
                       @click="goImport"
                     >
-                      去「今天」导入
+                      {{ embedded ? '去「导入订单」' : '去「发货台」导入' }}
                     </button>
                   </div>
                 </td>
@@ -572,8 +628,6 @@ import { loadSkuWeights } from '@/core/services/skuWeights';
 import * as ipc from '@/core/services/ipc';
 import type { UnifiedOrderRow } from '@/types';
 import {
-  collectItemIds,
-  skuWeightKey,
   computeOrderCosts,
   settleQtyKey,
   summarizeOrderCosts,
@@ -591,13 +645,16 @@ import CostRatesSection from './components/CostRatesSection.vue';
 import type { RateTable } from '@/lib/shipRate';
 
 /**
- * `embedded` = 被「今天」页的页签内嵌（藏掉本页自己的页头，避免双层标题）。
+ * `embedded` = 被「发货台」页的页签内嵌（藏掉本页自己的页头，避免双层标题）。
  * `refreshToken` = 宿主的数据版本号：订单/成本一变，`today` 那边 +1 ⇒ 本页重算。
  *   页签是 `KeepAlive` 保活的，没有它就会一直显示"导入之前"那份利润 —— 保活的代价必须还回去。
+ * `importDate` = **「发货台」的每日口径**（`yyyy-mm-dd`）：内嵌时只算**今天导入**的订单行。
+ *   ⚠️ 独立打开本模块（「算钱」）时**不传** ⇒ 全库（用户问的是"这批订单赚不赚"，不限今天）。
+ *   两种入口给两个数是有意的，页面上用 `oc-scope` 标签写清楚（不写 = 用户以为其中一个坏了）。
  */
 const props = withDefaults(
-  defineProps<{ embedded?: boolean; refreshToken?: number }>(),
-  { embedded: false, refreshToken: 0 }
+  defineProps<{ embedded?: boolean; refreshToken?: number; importDate?: string }>(),
+  { embedded: false, refreshToken: 0, importDate: '' }
 );
 
 /** 内嵌时"去导订单"交给外层页签系统（本组件不认识页签，只发意图） */
@@ -639,6 +696,38 @@ const gapList = ref(GAPS.map((g) => ({ ...g, count: 0 })));
  */
 const activeGaps = computed(() => gapList.value.filter((g) => g.count > 0));
 
+/**
+ * 缺口筛选（2026-10-11）：点指标下的任一缺口 chip ⇒ 明细表只留**带这个缺口**的行。
+ *
+ * 为什么值得做：缺口 chip 原本是纯提示 —— 它说"1 行缺克重"，用户却无法知道是哪一行，
+ * 500 行的表里只能逐格去找（这正是本仓「提示不是入口」那条规矩要治的东西）。
+ * `null` = 不筛。**每次重算都清空**（见 `recompute`）：换来源/改税口径之后，
+ * 原来那个缺口可能已经不存在了，留着筛选会出现"表里空的但头上写着只看缺成本"——静默失效。
+ */
+const gapFilter = ref<OrderCostGap | null>(null);
+
+/** 明细表真正渲染的行（不筛时就是全部） */
+const shownRows = computed(() =>
+  gapFilter.value ? summary.value.rows.filter((r) => r.gaps.includes(gapFilter.value as OrderCostGap)) : summary.value.rows
+);
+
+function toggleGap(k: OrderCostGap): void {
+  gapFilter.value = gapFilter.value === k ? null : k;
+}
+
+function gapLabel(k: OrderCostGap): string {
+  return GAPS.find((g) => g.key === k)?.label ?? k;
+}
+
+/** 已关闭单的行数（不进任何金额合计）。只在 > 0 时于指标条尾注一句，说清"订单行 3 但合计只算 2 行"。 */
+const closedRows = computed(
+  () => summary.value.bucketTotals.find((b) => b.bucket === 'closed')?.rows ?? 0
+);
+
+/** 毛利合计的悬停口径：它是四个数的差，用户对不上账时最先想知道的就是这个式子 */
+const grossTitle =
+  '毛利 = 收入 − 运费 − 产品成本 − 税 − 平台费（近似）；已结算的行改用平台结算净收入，见明细里的「精准」标签';
+
 const BUCKET_LABELS: Record<BizBucket, string> = {
   completed: '已完成',
   intransit: '在途',
@@ -676,7 +765,7 @@ function qtyTitle(source: QtySource): string {
 }
 
 /** 克重单元格的悬停说明：克重只有一个来源（产品库 SKU 表），把"按哪一行 SKU 取的"说清楚 */
-function weightTitle(r: { weightG: number | null; weightSource: 'item' | 'sku' | null }): string {
+function weightTitle(r: { weightG: number | null }): string {
   if (r.weightG === null) {
     return '没查到克重：这一行没识别出款/色/码，或该 SKU 在「货与成本」里没维护克重';
   }
@@ -688,7 +777,8 @@ async function load(): Promise<void> {
   error.value = '';
   try {
     // **一个读口**：主干 `oi_orders` 的投影（`source` 由宿主标好，页面不再自己打标签）
-    const ord = await ipc.orderShippingRows({ limit: limit.value });
+    // ⚠️ `importDate` 为空串 = 不筛（独立模块）；内嵌在发货台时是今天 ⇒ 只算今天导入的那批。
+    const ord = await ipc.orderShippingRows({ limit: limit.value, importDate: props.importDate });
     if (!ord.success || !ord.data) throw new Error(ord.error || '读取订单失败');
     const orders: UnifiedOrderRow[] = ord.data;
 
@@ -751,7 +841,11 @@ async function load(): Promise<void> {
     };
     recompute();
     if (!rateSnapshots.length && !rateTable) {
-      toast('还没读到运价表 —— 先去「无忧物流运费」导入一次报价单，运费才算得出来', 'info');
+      // ⚠️ 指路指向**宿主自己的导入入口**（发货台 › 导入订单），不再指向岛「无忧物流运费」
+      //   （2026-10-11 改）：统一导入已能导报价单（`importSheet.importShipRate` 落到
+      //   `sr_rate_snapshots`），而那个岛可能根本没装 —— 指一个装没装都不一定的入口，
+      //   对没装的用户就是"死路"。
+      toast('还没读到运价表 —— 去「发货台」的「导入订单」导一份报价单（Excel），运费才算得出来', 'info');
     }
     costRatesKey.value += 1; // 成本表可能刚被拿货对账改动，跟着主刷新一起重取
   } catch (e: unknown) {
@@ -913,6 +1007,9 @@ function recompute(): void {
     taxDefault: taxDefault.value,
   });
   gapList.value = GAPS.map((g) => ({ ...g, count: summary.value.gapCounts[g.key] }));
+  // 缺口筛选跟着「这一批数据」走：重算后原来那个缺口可能已经不存在了（补了成本、换了来源），
+  // 留着筛选会变成"表格空着、头上还写着只看缺X"——**静默失效**。每次重算一律清掉。
+  gapFilter.value = null;
 }
 
 /** 改费率：立即重算 + 防抖落盘（`order-cost` 命名空间） */
@@ -951,9 +1048,8 @@ async function assignShop(): Promise<void> {
   }
 }
 
-/** 导入结算明细（AE 后台「订单明细」导出）：选文件 → 解析（渲染层）→ 落库 → 重取 */
-/** 空态里的下一步：切到「今天」（那儿有统一导入入口，也是"该干什么"的工作台） */
-/** 空态里的下一步：去导订单。内嵌时发事件（`switchModule('today')` 等于跳到本页再跳回来） */
+/** 空态里的下一步：去导订单。内嵌时发事件（`switchModule('today')` 等于跳到本页再跳回来）；
+ *  独立打开时切到「发货台」模块（那儿的「导入 Excel」/导入页签是统一入口）。 */
 function goImport(): void {
   if (props.embedded) {
     emit('go-import');
@@ -962,6 +1058,7 @@ function goImport(): void {
   switchModule('today');
 }
 
+/** 导入结算明细（AE 后台「订单明细」导出）：选文件 → 解析（渲染层）→ 落库 → 重取 */
 async function importSettle(): Promise<void> {
   importing.value = true;
   error.value = '';
@@ -1028,7 +1125,7 @@ onMounted(async () => {
 /* 页面外壳（栅格 / 内边距 / 滚动）由全局 .wb-page 提供。
    `.oc-topbar` 交给全局 .wb-metabar；`.oc-view` 类名保留（冒烟用它判"挂载成功"）。 */
 
-/* 内嵌在「今天」页签里：顶上紧邻页签栏，把全局那 18px 顶部留白收一点
+/* 内嵌在「发货台」页签里：顶上紧邻页签栏，把全局那 18px 顶部留白收一点
    （其余边距不动 —— 与独立打开时保持同一套栅格）。 */
 .oc-view.is-embedded {
   padding-top: 12px;
@@ -1037,6 +1134,13 @@ onMounted(async () => {
 /* 内嵌时页头只剩动作按钮 ⇒ 当工具栏用：靠左（不留 `margin-left:auto` 顶到右边）。 */
 .oc-view.is-embedded .wb-head__actions {
   margin-left: 0;
+}
+
+/* 口径标签「今天导入」（仅内嵌在发货台时出现）：它是**下面所有数字的作用域**，
+   所以贴在指标条最左端、比指标低一档 —— 读数字之前先读到范围。 */
+.oc-scope {
+  align-self: center;
+  margin-right: 2px;
 }
 
 /* 概览卡：**一行结论 + 一行体检**装进同一张卡。
@@ -1056,6 +1160,14 @@ onMounted(async () => {
   background: transparent;
   box-shadow: none;
 }
+/* 指标条尾注（"不含已关闭 N 行"）：与数字同排但**降一档** —— 它是给数字打的补丁，不是第七个数。 */
+.oc-topbar__note {
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
 /* 体检行：与指标行同卡、用一条淡分隔线分层（而不是再起一张卡） */
 .oc-health {
   display: flex;
@@ -1068,6 +1180,13 @@ onMounted(async () => {
   border-radius: 0 0 calc(var(--wb-radius-md) - 1px) calc(var(--wb-radius-md) - 1px);
   font-size: 13px;
 }
+/* 「缺什么」与「按状态各多少」是两件事，用一条竖线分开 —— 比再写两个标签省一半的字 */
+.oc-health__sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 0;
+  background: var(--wb-border);
+}
 /* 分桶 / 缺口 在卡片里退成"一行内容"，不再各自带边框当卡片 */
 .oc-health .oc-buckets,
 .oc-health .oc-gaps {
@@ -1079,6 +1198,30 @@ onMounted(async () => {
   border: 0;
   background: transparent;
   box-shadow: none;
+}
+
+/* 可点的缺口 chip：**形状必须跟右边那些只读标签区分开**，否则用户根本不知道它点得动 ——
+   交互藏在看不出来的地方，等于没做。做法：实心药丸 ⇒ 描边按钮（悬停填底、按下变实心）。
+   于是体检行天然分成两半：**左边是"要做的事"（可点），右边是"现状"（只读）**。
+   ⚠️ 只补 `<button>` 缺失的那几项（UA 默认边框/字体），**不写 font 简写** ——
+      它会把全局 `.wb-tag` 的 0.75rem 一并覆盖掉，标签就比旁边那颗大一号。 */
+.oc-tag--act {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--wb-warning);
+  background: transparent;
+  color: var(--wb-warning);
+  font-family: inherit;
+  font-weight: 400;
+  cursor: pointer;
+}
+.oc-tag--act:hover {
+  background: var(--wb-warning-soft);
+}
+.oc-tag--act.is-on {
+  border-color: var(--wb-warning);
+  background: var(--wb-warning);
+  color: #fff;
 }
 
 /* 口径条：数据来源 / 税口径。装进白卡 —— 原先是一条横贯整屏的浅灰带，
@@ -1096,8 +1239,36 @@ onMounted(async () => {
   font-size: 13px;
 }
 
-.oc-scope__title {
-  color: var(--wb-text-muted);
+/* 税口径靠右：左边是"看哪些行"，右边是"怎么算税"，两组之间留白分开
+   （都不再写标签，靠这条空白和 select 自己的文案区分） */
+.oc-scope__tax {
+  margin-left: auto;
+}
+
+/* 明细面板头里的筛选 chip：它就是"当前只看什么"的开关，× 直接撤掉 */
+.oc-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.oc-filter__x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.oc-filter__x:hover {
+  background: rgb(0 0 0 / 12%);
 }
 
 .oc-more {
@@ -1147,7 +1318,9 @@ onMounted(async () => {
 }
 
 /* 分桶 / 缺口：各自的卡片外观已由 .oc-health 里的覆盖规则去掉（同卡内只是一行内容），
-   这里只留最基础的字号 —— 若将来它们又被单独使用，仍是可读的一行。 */
+   这里只留最基础的字号 —— 若将来它们又被单独使用，仍是可读的一行。
+   2026-10-11：两侧的「缺哪一环：」「经营状态（…）：」标签已删（详见模板注释），
+   所以这里不再有 `__title` 那一档样式。 */
 .oc-buckets,
 .oc-gaps {
   display: flex;
@@ -1155,11 +1328,6 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-}
-
-.oc-gaps__title,
-.oc-buckets__title {
-  color: var(--wb-text-muted);
 }
 
 /* ---- 明细表：把"这一行是谁"的三样（单号/店铺/状态）压进一列 ---- */

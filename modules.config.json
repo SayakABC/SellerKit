@@ -16,7 +16,7 @@
     "",
     "已下记的模块（均转为 ui-plugins/<id>，从插件中心安装）：",
     "  店铺账号管家  → ui-plugins/shop-accounts",
-    "  订单归类      → 已整体下架（2026-10-05）：功能收回内建「今天」发货台七页签，无岛",
+    "  订单归类      → 已整体下架（2026-10-05）：功能收回内建「今天」发货台，无岛",
     "  TV模版        → ui-plugins/excel-copy",
     "下记 ≠ 删除：宿主侧业务库与 db 能力域原样保留（electron/order-db.ts、purchase-db.ts、",
     "excel-copy 域等），供岛照常调用，数据零迁移；extensions/<id>/ 源码留作算法参考，不再进构建。",

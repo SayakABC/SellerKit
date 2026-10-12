@@ -121,6 +121,10 @@ export default tseslint.config(
       'src/registry.generated.ts',
       // 与 .gitignore 对齐：本地暂时性文件
       'debug-name.js',
+      // WorkBuddy 工具私有目录（入 .gitignore）：memory 草稿 + retired/ 归档的旧岛 dist 产物。
+      // 归档产物是**打包后的第三方 bundle**，混入 lint 会把这些噪声记成 41 个 error，
+      // 掩盖真问题（2026-10-10 实测：43 errors 里 41 个来自 .workbuddy/retired）。
+      '.workbuddy/**',
     ],
   },
 

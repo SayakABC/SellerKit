@@ -14,13 +14,13 @@
 | `shop-accounts` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 店群「店铺套」集中管理，密码经系统安全存储（Keychain/DPAPI）加密落库 |
 | `ae-profit` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 速卖通订单采集接收端（Chrome 扩展推送或 curl 样例），写入宿主订单主干 |
 | `shipping-rate` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 导入物流报价单，按克重 / 按订单 / 按产品试算到各国的实际运费 |
-| `today` / `goods` / `order-cost` / `picking` / `quick-note` | 内建模块（`src/modules/`） | 随宿主分发：**发货台**（导入→归类→拣货→算钱→拿货→对账，一页七页签）、货与成本、算钱、拣货、便签 |
+| `today` / `goods` / `order-cost` / `picking` / `quick-note` | 内建模块（`src/modules/`） | 随宿主分发：**发货台**（导入→归类→算钱→拿货→对账，一页六页签）、货与成本、算钱、拣货、便签 |
 
 > 形态说明（判定规则见 `AGENTS.md` §1.9）：**市场 UI 岛**独立构建、打成 zip 走插件市场分发，运行时由宿主 iframe 加载，只经 `window.__sk` 桥调用宿主能力；
 > 这些岛的 id 已从 `modules.config.json` 的构建预设里移除，源码在仓库 `ui-plugins/<id>/`，宿主侧数据层（SQLite / IPC / `db` 能力域）保留给岛调用。
 > 因此上表 4 个岛均**不随安装包分发**，需从插件市场安装。
 > 已整体下架的岛（功能收回内建，源码留档不入库）：**`product-library`**（2026-10-01，→ `src/modules/goods/**`）、
-> **`order-insight`**（2026-10-05，→ `src/modules/today/**` 发货台七页签）—— 见 `docs/notes/2026-10-01-ui-island-retirement.md`。
+> **`order-insight`**（2026-10-05，→ `src/modules/today/**` 发货台）—— 见 `docs/notes/2026-10-01-ui-island-retirement.md`。
 > **这里不写版本号**（版本每次发版都变）—— 权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 / §5。
 
 支撑能力：集中收件箱（IMAP 多账号同步 / FTS 全文检索 / 附件缓存）、店铺账号管家、订单队列、AI 识别（OpenAI 兼容接口）、自动更新（electron-updater）。

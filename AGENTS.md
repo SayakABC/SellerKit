@@ -78,13 +78,13 @@ src/
 │   ├── ai/                     # OpenAI 兼容 AI 客户端（types / openaiCompatible / index）
 │   ├── layout/                 # SplitPane.vue（分栏布局）
 │   └── types.ts                # ModuleMeta / ModuleDefinition / ModuleCommand 等
-├── modules/<module-id>/        # 内建业务模块（快速迭代用；当前 today / quick-note / order-cost（显示名「算钱」）/ picking）
+├── modules/<module-id>/        # 内建业务模块（快速迭代用；当前 today / quick-note / order-cost（显示名「算钱」）/ picking / goods（「货与成本」））
 │   ├── meta.ts                 # 模块元信息（必须）
 │   ├── index.ts                # ModuleDefinition（必须）
 │   ├── store.ts                # Pinia store（setup 语法）
 │   ├── <Xxx>View.vue           # 模块主视图
 │   └── components/             # 模块内组件
-├── lib/                        # 纯函数工具（无副作用）：excelParser / templateEngine / fieldProcessor / styleMatcher / orderClassifier / orderRowSplitter / orderImportRow / aggregator
+├── lib/                        # 纯函数工具（无副作用）：colorSwatch / excelParser / fieldProcessor / importDetect / orderClassifier / orderCost / orderImportRow / orderRowSplitter / picking / pickingExport / productImport / settleImport / shipRate / shipRateOrders / shipRateProducts / shipRateQuote / styleMatcher
 extensions/<id>/                # 随宿主分发视图插件包（Phase 5）★ 与 ui-plugins/ 语义不同，见 §1.9
                                 # ⚠️ 当前**目录不存在**：最后两个留档源码包已于 2026-09-30（C3）删除，机制保留
 │   └── src/                    # = 原业务模块代码（meta/index/store/view/components…自包含）
@@ -262,7 +262,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 | 数据访问 | 直接用自己的 store（Pinia + `useModuleStorage`）                                                                                                                                                 | 只能经 host 能力域（`storage` / `db` / `clipboard` / `dialog` / `secrets` / `mail`），受 `gatedHost` 权限门约束                                            |
 | 分发     | `npm run dist` 随包                                                                                                                                                                              | 打成 zip 走插件市场（`market-out/`）                                                                                                                       |
 | 注册登记 | 必须在 `modules.config.json` 的 profile 中登记                                                                                                                                                   | **禁止**登记进 profile（否则内建记录占用同名 id，市场安装的 UI 岛无法注册）                                                                                |
-| 当前实例 | **无，且目录不存在**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记；最后两个**留档源码包**已于 **2026-09-30（C3）删除** —— 机制保留，要用再建；脚手架在 `scripts/templates/`） | **4 个**：`shop-accounts` / `excel-copy` / `ae-profit` / `shipping-rate`（原样例岛 `sk-ui-starter` 已于 2026-09-24 删除；**`product-library` 已于 2026-10-01 整体下架** —— 功能收回内建「货与成本」，见 `docs/features/PRODUCT_LIBRARY.md` §0-A；**`order-insight` 已于 2026-10-05 整体下架** —— 功能收回内建「今天」发货台七页签，见 `docs/notes/2026-10-01-ui-island-retirement.md` §6）。**这里不写版本号** —— 版本会随每次发版变，权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 |
+| 当前实例 | **无，且目录不存在**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记；最后两个**留档源码包**已于 **2026-09-30（C3）删除** —— 机制保留，要用再建；脚手架在 `scripts/templates/`） | **4 个**：`shop-accounts` / `excel-copy` / `ae-profit` / `shipping-rate`（原样例岛 `sk-ui-starter` 已于 2026-09-24 删除；**`product-library` 已于 2026-10-01 整体下架** —— 功能收回内建「货与成本」，见 `docs/features/PRODUCT_LIBRARY.md` §0-A；**`order-insight` 已于 2026-10-05 整体下架** —— 功能收回内建「今天」发货台，见 `docs/notes/2026-10-01-ui-island-retirement.md` §6）。**这里不写版本号** —— 版本会随每次发版变，权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 |
 
 ⚠️ **脚手架已归位（2026-09-22，T4）**：`npm run plugins:create` 的**模板**与**示例**曾寄居在 `extensions/` 下（`_template` / `sk-hello`），
 现全部迁到 `scripts/templates/` —— L2 后台插件模板 `scripts/templates/l2-plugin/`、L2 演示插件 `scripts/templates/l2-demo/`。
@@ -464,7 +464,7 @@ npm run test:watch   # 单元测试 watch 模式
 npm run schema:smoke # schema 迁移冒烟（改了 electron/db.ts 的 migrate 或任何域的表形状后必跑）
 npm run mail:inline:smoke # 邮件内联图离线冒烟（改了 content_id 补列 / cid 改写 / 远程图 CSP 两态必跑；不需凭据）
 npm run mail:body:smoke   # 邮件正文渲染通道（sk-mail://）端到端冒烟（改了协议 / 岛 index.html 的 meta CSP 必跑；需真 Electron）
-npm run ipc:shape:smoke   # preload ↔ 主进程「图片通道」载荷形状端到端冒烟（改了 preload 的图片方法 / 批量缩略图包装必跑；需真 Electron）
+npm run ipc:shape:smoke   # preload ↔ 主进程「图片 / 剪贴板通道」载荷形状端到端冒烟（改了 preload 的图片方法 / 批量缩略图包装 / 剪贴板通道必跑；⑧ 段真写系统剪贴板并读回；需真 Electron）
 npm run ae:settle:smoke # 结算明细冒烟（改了 ae_settle_lines 的落库 / 聚合 / 件数明细后必跑）
 npm run picking:smoke # 拣货投影冒烟（改了 electron/picking-db.ts 的筛选 / JOIN / 取图回落必跑）
 npm run picking:ui    # 拣货页假桥无头冒烟（改了拣货页接线 / 导出必跑；需本机 Chrome）
@@ -557,14 +557,16 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 `npm test` → vitest（`vitest.config.mts`，`environment: 'node'`，固定 `TZ=Asia/Shanghai` 以免日期断言随机器时区漂移）。
 
 - **覆盖范围**（当前 37 个文件；用例数随门禁输出为准，不在此写死）：
-  ① `src/lib/` 纯函数层——`excelParser` / `templateEngine` / `fieldProcessor` /
+  ① `src/lib/` 纯函数层——`excelParser` / `fieldProcessor` / `importDetect`（统一导入的纯检测层）/
   `orderRowSplitter` / `orderImportRow`（一行订单→落库字段：店铺名/主图 URL 的口径）/
-  `aggregator` / `orderClassifier` / `styleMatcher` / `colorSwatch` /
-  `orderCost`（订单利润口径）/ `settleImport`（结算明细解析：等式校验 + 行类型判定）；
+  `orderClassifier` / `styleMatcher` / `colorSwatch` /
+  `orderCost`（订单利润口径）/ `settleImport`（结算明细解析：等式校验 + 行类型判定）/
+  `picking` + `pickingExport`（拣货口径与导出）/ `productImport`（产品导入解析）/
+  `shipRate` 族（运价表归一化 / 按订单 / 按产品试算）；
   ①' **主进程侧的纯函数层**同样单独成文件以便被 vitest 覆盖：`electron/shopName.ts` / `shopSku.ts`（零依赖），
   以及 `electron/orderMoney.ts`（订单金额/状态/时点解析）——`*-db.ts` 因 Electron ABI 进不了 vitest，故摘出来；
   ② `electron/ipc-util.ts` 的 IPC 注册契约（`tests/ipcUtil.spec.ts` 用 `vi.mock('electron')` 假 ipcMain，
-  钉住返回形状、异常兜底、两套 fallback 文案——**主进程现注册 137 个通道**都经它注册，改错即全盘失效。
+  钉住返回形状、异常兜底、两套 fallback 文案——**主进程现注册 187 个通道**都经它注册，改错即全盘失效。
   该数字随 handler 增减变化，以 `npm run verify` 输出为准）；
   ③ **插件体系静态守卫**——`pluginManifest`（manifest schema）/ `pluginSettingsIsland`（岛设置分类聚合）/
   `pluginTriage`（红线 23：预设不得占用岛 id；岛的 db 调用必须全在 manifest 声明内）/ `uiIslandThemeTokens`（岛主题令牌 =
@@ -618,3 +620,4 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 | 主进程多 .ts 文件顶层变量全局冲突       | 每个主进程 .ts 文件头部加 `export {}` 模块标记（见红线 12）                           |
 | 渲染层跨域（CORS）                      | 走网络模块：axios IPC adapter → Electron `net`（见 §1.7），禁止业务侧自行 fetch       |
 | vue-tsc 版本不兼容                      | 已装本地 devDependency `vue-tsc@2.x`（匹配 TS 5.4）；勿用 npx 装最新版                |
+| Electron 44 移除 clipboard 窄 API（`writeImage` 等） | 写图用 `clipboard.write([ClipboardItem + Blob])`、clipboard 全部方法已转 async；守卫 `ipc:shape:smoke` ⑧ 段（真写 + 读回）。见 `docs/notes/2026-10-10-electron44-clipboard-writeimage.md`（升级时其余窄 API 同批清理，遇到 `is not a function` 先查 v44 变更） |

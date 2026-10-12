@@ -127,6 +127,10 @@ const DELIBERATELY_MISSING = new Map([
     '同上（同次一起删的；笔记与计划里"9 条断言"记的是当时实跑结果）',
   ],
   [
+    'electron/product-cost-sync.ts',
+    'P4（2026-10-09）把手工进价的写入口径提到 electron/manual-costs.ts 后删除；CHANGELOG 续十七 的句子正是在陈述「删了它」（移走后它只剩没实质的薄壳），改指现存文件则句子不成立',
+  ],
+  [
     'src/stores/app.ts',
     '陈述"重构前是单体"，该文件已拆除；改指现存文件则句子不成立',
   ],
@@ -201,6 +205,10 @@ const DELIBERATELY_MISSING = new Map([
   [
     'src/lib/productWeight.ts',
     '**删除记录**（2026-10-01 领域裁定）：克重是 SKU 属性而非商品ID 属性，`pl_item_weights` + 该解析文件整条删除、改挂 `pl_variants.weight_g`。CHANGELOG 与运费岛计划里的引用是"当时做过、现已删"，三处均已就地标注 ⚠️；改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/today/tabs/PickingPanel.vue',
+    '**删除记录**（2026-10-10）：「生成拣货单」页签并入「拿货」后该整页组件删除（清单改为 `PickingView` 以 `embedded` 复用）；笔记与 CHANGELOG 的句子正是在陈述"它被删了"，改指现存文件则句子不成立',
   ],
   [
     'scripts/order-insight-picking-ui-smoke.mjs',

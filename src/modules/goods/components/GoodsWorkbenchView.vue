@@ -23,6 +23,7 @@
       v-if="showFirstRun"
       @import-orders="goImportOrders"
       @open-registry="goRegistry"
+      @goto-purchase="goPurchase"
     />
 
     <div class="gd-wb" data-act="goods-workbench">
@@ -131,6 +132,16 @@ const queueEmpty = computed<boolean | null>(() =>
  */
 function goImportOrders(): void {
   switchModule('today');
+}
+
+/**
+ * 第三步的出口：**发货台的「拿货」页签**（2026-10-28 第三步由"点一款认款"改成"看要拿什么"）。
+ *
+ * 带 `action='purchase'` 而不是只给模块 id：`switchModule('today')` 会落在总览（或用户上次
+ * 停留的页签）—— 那一步写着"看要拿什么"，落点却是"今天要发几单"，就是"指路指到半路"。
+ */
+function goPurchase(): void {
+  switchModule('today', 'purchase');
 }
 </script>
 

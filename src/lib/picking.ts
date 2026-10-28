@@ -757,6 +757,48 @@ export function pendingOf(
   );
 }
 
+/**
+ * 门 2（拿货前检查）：**这一批现在能不能开单**。
+ *
+ * 拦两件事，都只拦"真的会开出一张错单"的：
+ *   ① `unclassifiedRows`：这批里有行还没归到款色。开进单里它们只会得到
+ *      `purchase_items.style_color_id = 0`，"已拿"从此只能按**色名文本**兜底 ——
+ *      以后谁给这个色改个名，这条已拿就永久失联，缺口永远消不掉。
+ *   ② `noSupplierRows`：款色归好了、款却没有厂家。开单时主进程直接抛"厂商不存在"，
+ *      用户拿到的是一句技术错误，而真正该做的是去指定厂家。
+ *
+ * **不拦**色名（这点很容易照着旧计划抄错）：色名是标签，不是身份。把 58 个色名做成
+ * 开单前置，等于把"导入完就能拿货"这件事又推回成 58 次人工输入 —— 那正是这轮改造要拆掉的门。
+ * 未命名的色在单子上按平台原文出（`5`），照样能拿；起名随时可补。
+ *
+ * ⚠️ 判据看**身份**（`styleColorId` / `supplierId`），不看 `styleCode` 是否为空串：
+ *    "款编码空"是展示层的事（真库里存在有款色但款没编码的行），拿它当门会误伤。
+ */
+export interface PurchaseGate {
+  /** 这批里还没归到款色的行数（款色码行） */
+  unclassifiedRows: number;
+  /** 这批里已归类、但款还没指定厂家的行数 */
+  noSupplierRows: number;
+  /** 两个都为 0 才开得成 */
+  ok: boolean;
+}
+
+/** 入参必须是**这一批**（`pendingOf` 的结果），不是全库 —— 门的作用域跟着动作走 */
+export function purchaseGateOf(rows: PickingGroup[] | null | undefined): PurchaseGate {
+  const list = Array.isArray(rows) ? rows : [];
+  let unclassifiedRows = 0;
+  let noSupplierRows = 0;
+  for (const g of list) {
+    if (g.styleColorId <= 0) unclassifiedRows += 1;
+    else if (g.supplierId === 0) noSupplierRows += 1;
+  }
+  return {
+    unclassifiedRows,
+    noSupplierRows,
+    ok: unclassifiedRows === 0 && noSupplierRows === 0,
+  };
+}
+
 /** 「待拿」的合计（款色数 / 件数 / 预估金额 / 缺价件数）—— 顶部条件条与厂家段标题共用 */
 export interface PendingRollup {
   /** 待拿款色数（款色行里还差 > 0 且未忽略的行数） */

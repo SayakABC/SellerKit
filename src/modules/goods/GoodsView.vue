@@ -78,6 +78,16 @@
                 >
                   打开「店名归一」
                 </button>
+                <!-- 第三步（2026-10-28 起是"看要拿什么"）的出口：帮到这里的人一次跳到落点，
+                     而不是让他自己在「发货台」里找页签。 -->
+                <button
+                  class="wb-btn wb-btn--sm"
+                  type="button"
+                  data-act="help-go-purchase"
+                  @click="goPurchase"
+                >
+                  去「发货台」看要拿什么
+                </button>
               </div>
             </div>
           </div>
@@ -328,6 +338,18 @@ function goImportOrders(): void {
 function goRegistry(): void {
   helpOpen.value = false;
   switchModule('shop-accounts', 'registry');
+}
+
+/**
+ * 「看要拿什么」的出口（2026-10-28 第三步改文案后加的）。
+ *
+ * 落到**拿货页签**（`switchModule('today', 'purchase')`），不是落在发货台的总览：
+ * 这一步的动作是"看要拿什么"，而总览那四个数是"今天要发几单" —— 落在总览上，
+ * 用户还得自己再点一次页签（"指路指到半路"，同 `TodayView` 里那次修的坑）。
+ */
+function goPurchase(): void {
+  helpOpen.value = false;
+  switchModule('today', 'purchase');
 }
 
 /**

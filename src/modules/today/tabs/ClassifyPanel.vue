@@ -18,6 +18,64 @@
 
     <p v-if="error" class="wb-notice wb-notice--error" data-act="cl-error">{{ error }}</p>
 
+    <!-- ── 门 1：店铺归一（2026-10-28，P5）────────────────────────────────────
+         为什么挂在这一页：本页是"款/色的身份"成型的地方，而键里带店名 ——
+         一个店名没归一，它名下每个 listing 都自成一款，同一件货在统计与拿货里分成两行。
+         ⚠️ 它**不阻断任何按钮**（这是与门 2 的区别，别照着抄成禁用）：
+            它保护的是"数字口径"，不是某个动作；而归类在导入那一刻就已经自动发生了，
+            事后把它拦在某个按钮上，只能做成一个点不到的门。
+         ⚠️ 作用域：**全库订单**，不是"今天这批"（所以它不进页签徽标 —— 那个数只看今天，
+            两处放在一起会被读成同一个作用域）。
+         ⚠️ 只在真有问题时渲染：全归一了这块 DOM 不存在，不留一条"已完成"的常驻条。 -->
+    <section v-if="shopGate.pending.length" class="wb-notice wb-notice--warn cl-gate" data-act="cl-gate-shop">
+      <span class="cl-gate__t" data-act="cl-gate-shop-count">
+        <b>{{ shopGate.pending.length }}</b> 家店还没归一，涉及 <b>{{ shopGate.orders }}</b> 行订单
+      </span>
+      <span class="cl-gate__why wb-muted" data-act="cl-gate-shop-why">
+        它们的商品会各自算一款（键里带店名）—— 同一件货在统计和拿货里会分成两行
+      </span>
+      <button
+        type="button"
+        class="wb-btn wb-btn--sm"
+        data-act="cl-gate-shop-open"
+        @click="shopGateOpen = !shopGateOpen"
+      >
+        {{ shopGateOpen ? '收起' : '看是哪几家' }}
+      </button>
+      <button
+        type="button"
+        class="wb-btn wb-btn--sm wb-btn--primary"
+        data-act="cl-gate-shop-go"
+        @click="openModule('shop-accounts', 'registry')"
+      >
+        去「店名归一」
+      </button>
+      <ul v-if="shopGateOpen" class="cl-gate__list" data-act="cl-gate-shop-list">
+        <li v-for="s in shopGate.pending" :key="s.key" :data-act="`cl-gate-shop-${s.key}`">
+          <b>{{ s.raw }}</b>
+          <span class="wb-muted">· {{ s.orders }} 行</span>
+          <span v-if="s.autoShopName" class="wb-muted">· 能认成「{{ s.autoShopName }}」</span>
+          <span v-else class="wb-muted">· 库里还没有这家店，先登记再认</span>
+        </li>
+      </ul>
+    </section>
+
+    <!-- 命名板（P3，2026-10-28）：订单进来就按变体键归好之后，这一页的**人工动作**从
+         "逐行选款选色"变成了"给颜色起个名"。它放在核对表**上面**，因为它是现在唯一还能做
+         的事；核对表在改造后通常一进来就是空的（"这批核对完了"）。
+         ⚠️ 它是**可选**动作：不起名照样统计/拿货，卡片自己会收成一行 —— 不要给它加"必须做完"
+            的措辞，也不要把它做成进入本页的前置（那会把 58 次输入变成门槛）。 -->
+    <VariantNamingCard />
+
+    <!-- 款合并（P4，2026-10-28）：同一个厂家下几个款其实是同一件货时，合并成 1 个。
+         为什么和命名板并排、而不是放拿货页：两者是同一件事的两个动作（**人给结构**）——
+         给色起名、认出一件货有两个链接；人在这页刚看完一屏 listing，判断成本最低。
+         也有一条实测理由：拿货页是固定高度 flex + 内部滚动，往里插一块折叠卡会把宫格卡尾
+         按钮挤出可点区（`today:ui` 的几何守卫 elementFromPoint 直接红）—— 那页的主活是
+         开单，不能为了低频整理动它。
+         ⚠️ 它**不是门**：默认折叠、可完全不碰，合并只影响"按款汇总"的口径。 -->
+    <StyleMergeCard />
+
     <section class="wb-panel">
       <div class="wb-panel__head">
         <!-- ── 范围切换（2026-10-12）──────────────────────────────────────────────
@@ -643,14 +701,18 @@ import BulkStylePicker from './BulkStylePicker.vue';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
 import { groupByProduct, pickColorFor, productKeyOf, type BulkGroupView } from '@/lib/classifyBulk';
 import { localDayKey } from '@/lib/localDay';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered } from '@/types';
+import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered, ShopGate } from '@/types';
 import { useShipping } from '../flowCtx';
 import { styleImages } from '../purchase';
+// 命名板（P3）：本页多出来的一块**可选**动作，见该组件头注释
+import VariantNamingCard from './VariantNamingCard.vue';
+import StyleMergeCard from './StyleMergeCard.vue';
 import {
   PAGE_SIZE,
   listCorrected,
   listPending,
   listStyleOptions,
+  loadShopGate,
   markCorrected,
   pendingCounts,
   reopenCorrected,
@@ -699,6 +761,10 @@ const scope = ref<Scope>('pending');
 
 const rows = ref<OrderRecord[]>([]);
 const total = ref(0);
+/** 门 1（店铺归一）的派生状态：空 = 门是开的。派生不存档，每次 `load()` 重算 */
+const shopGate = ref<ShopGate>({ pending: [], orders: 0 });
+/** 门 1 的清单是否展开（默认收起：常驻的只有一句带数字的话，不占半屏） */
+const shopGateOpen = ref(false);
 /** 归属款下拉的数据源：**产品库全集**（不是识别池 —— 见 script 头注释 ④） */
 const styleOptions = ref<StyleRecord[]>([]);
 const counts = reactive({ pending: 0, corrected: 0, unclassified: 0 });
@@ -1375,6 +1441,11 @@ async function load(): Promise<void> {
       listStyleOptions(),
       pendingCounts({ importDate: day }),
     ]);
+    // 门 1 与上面三个**并行**取（不 await 等它）：它只影响一条提示，
+    // 让它参与 `loading` 会让"表格已经出来了、整页还在转圈"。
+    void loadShopGate().then((g) => {
+      shopGate.value = g;
+    });
     rows.value = pend.rows;
     total.value = pend.total;
     if (total.value > 0 && page.value > totalPages.value - 1) {
@@ -1756,6 +1827,34 @@ watch(
 .cl-search {
   width: 300px;
   max-width: 40vw;
+}
+/* 门 1（店铺归一）那条提示：一句话 + 两个按钮，展开后才是清单。
+   ⚠️ 必须 flex-wrap：窄窗口下"店名 + 行数 + 能认成什么"会很长，不换行会把按钮顶出去。 */
+.cl-gate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--wb-text);
+}
+.cl-gate__t {
+  font-size: 13px;
+}
+.cl-gate__why {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12px;
+}
+.cl-gate__list {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.8;
+  max-height: 132px;
+  overflow: auto;
 }
 /* 面板头右侧动作区（`.wb-panel__head` 是 flex，无"推右"工具类） */
 .cl-actions {

@@ -21,10 +21,12 @@
           <p class="gd-firstrun__t">{{ s.title }}</p>
           <p class="wb-muted gd-firstrun__d">{{ s.desc }}</p>
         </div>
-        <!-- 前两步的按钮指向**真的在别处**的东西（另一个模块）——
+        <!-- 三步的按钮分别指向**真的在别处**的东西（另两个模块）——
              这正是本仓"提示不是入口"那条结论要求的形态。
-             第 3 步**刻意不给按钮**：它的动作就是"回到这一页点开左边一款"，而用户此刻
-             已经在这一页 —— 给一个"去认款"的按钮只能是把当前页再切一次（假动作）。
+             ⚠️ 第三步 2026-10-28 起也带按钮了：它从"回到这一页点开左边一款"（假动作，
+                用户本来就在这一页）改成了"去发货台的拿货页看要拿什么"—— 归款已经自动完成，
+                这一页没有"第三件事"可做。**别再改回"就在这一页"那种说明**：
+                那会让这一步既没有出口、也说不清它在讲什么。
              2026-10-14：「打开店铺登记」从"同页另一个页签"改为**跨模块**跳「基础数据」。 -->
         <button
           v-if="s.id === 'orders'"
@@ -44,7 +46,15 @@
         >
           打开「店名归一」
         </button>
-        <span v-else class="wb-muted gd-firstrun__here" data-act="fr-step-here">就在这一页</span>
+        <button
+          v-else
+          class="wb-btn gd-firstrun__act"
+          type="button"
+          data-act="fr-goto-purchase"
+          @click="emit('goto-purchase')"
+        >
+          去「发货台」看要拿什么
+        </button>
       </li>
     </ol>
   </section>
@@ -63,6 +73,8 @@ const emit = defineEmits<{
   'import-orders': [];
   /** 跳去「基础数据」的「店名归一」项（跨模块跳转由外壳执行，2026-10-14 前是同页页签） */
   'open-registry': [];
+  /** 去「发货台」的「拿货」页签看要拿什么（第三步；归款已自动完成，这一页没有第三步可做） */
+  'goto-purchase': [];
 }>();
 </script>
 

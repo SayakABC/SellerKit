@@ -291,7 +291,7 @@ import { productMoveSupplier } from '@/core/services/ipc';
 import ProductPicker from '@/modules/goods/components/ProductPicker.vue';
 import { skuMap } from '@/modules/goods/api';
 import type { IgnoreRow, PurchaseOrder, Supplier } from '@/types';
-import { ignoreKey, pendingOf, type PickingGroup } from '@/lib/picking';
+import { ignoreKey, pendingOf, purchaseGateOf, type PickingGroup } from '@/lib/picking';
 import {
   coverageInputs,
   coverageSummary,
@@ -523,6 +523,29 @@ async function onMoveSupplier(intent: {
 async function createFromPick(supplierId: number): Promise<void> {
   const rows = pendingOf(pickRows.value, supplierId);
   if (!rows.length) return toast('这家厂没有要拿的货', 'error');
+  // ── 门 2（拿货前检查）────────────────────────────────────────────────────
+  // ⚠️ 拦在**这一处**（唯一的写入口），不是把按钮 disabled：
+  //    · 一张卡上常常只有一两行没归类，禁用整张卡的按钮会连带挡掉另外十几行能拿的货
+  //      —— 门的作用域是"这批里的那几行"，不是"这家厂"；
+  //    · 用户 2026-10-12 已拍板过拦截形态：拿货页**不禁用开单**，把缺什么说清、给入口。
+  // 拒绝时把原话写进 `error`（页面上的错误条），而不是只弹一条 3 秒就消失的 toast ——
+  // 用户要照着这句话去补数据，它得留在屏幕上。
+  const gate = purchaseGateOf(rows);
+  if (!gate.ok) {
+    const parts: string[] = [];
+    if (gate.unclassifiedRows > 0) {
+      parts.push(
+        `${gate.unclassifiedRows} 行还没归到款色（开进单里以后改个色名就再也对不上账）`,
+      );
+    }
+    if (gate.noSupplierRows > 0) {
+      parts.push(`${gate.noSupplierRows} 个款色还没指定厂家（开单会直接报"厂商不存在"）`);
+    }
+    const msg = `先补数据再开单：${parts.join('；')}。到「归类核对」把这几行归好 / 给款选个厂家，或把它们标「暂不拿」`;
+    error.value = msg;
+    toast(msg, 'error');
+    return;
+  }
   busy.value = true;
   error.value = '';
   try {

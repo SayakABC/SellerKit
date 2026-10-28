@@ -18,7 +18,16 @@
 
 import { ipc, type ApiResult } from '@/core/services/ipc';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered } from '@/types';
+import type {
+  OrderRecord,
+  SkuBackfillOutcome,
+  StyleRecord,
+  ColorAliasRemembered,
+  VariantNamingBoard,
+  RenameColorOutcome,
+  SaveStyleBasicsOutcome,
+  ShopGate,
+} from '@/types';
 
 /** 取单个值：失败抛错 */
 async function need<T>(p: Promise<ApiResult<T>>): Promise<T> {
@@ -87,6 +96,72 @@ export async function listStyleOptions(): Promise<StyleRecord[]> {
   const r = await ipc.orderStyleList();
   if (!r.success) throw new Error(r.error || '读取产品库款式失败');
   return r.data ?? [];
+}
+
+// ─────────────────────────────────────────────────────────── 命名板（P3）
+
+/**
+ * 命名板：按 listing 分组的色键（未命名在前）。
+ *
+ * 这一页存在的理由：归类自动化之后，人这一端唯一还剩的判断是"这个色在我生意里叫什么"。
+ * 它**不是**核对页 —— 核对是"这行属于哪个款色"（现在由变体键回答），命名是"那个款色叫什么"。
+ *
+ * 失败抛错（与 `listPending` 同口径）：静默空表会被读成"没有要命名的"，
+ * 而那恰好是本页动作的反面。
+ */
+export async function loadNamingBoard(): Promise<VariantNamingBoard> {
+  const r = await ipc.orderVariantNaming();
+  if (!r.success) throw new Error(r.error || '读取待命名颜色失败');
+  return r.data ?? { groups: [], unnamedKeys: 0, totalKeys: 0 };
+}
+
+/**
+ * 门 1（店铺归一）的派生状态：**订单里**出现过、还没归成店铺实体的店名。
+ *
+ * 作用域说明（写在这里，因为调用点很容易读错）：它数的是**全库订单**，不是"今天这批"。
+ * 理由是它保护的东西不按天变 —— 一个店名没归一，它名下的所有 listing 键都分叉
+ * （同一款在统计里两行），明天的订单也一样。页签徽标那个数只看今天，两者不能混在一起说。
+ *
+ * 失败时**返回空门**（不让整块归类页报错）：这个门只做提示，取不到等于"没发现问题"，
+ * 比一屏红字更接近真相（数据层都读不出来时，用户要修的不是店铺）。
+ */
+export async function loadShopGate(): Promise<ShopGate> {
+  try {
+    const r = await ipc.shopGate();
+    if (!r.success || !r.data) return { pending: [], orders: 0 };
+    return r.data;
+  } catch {
+    return { pending: [], orders: 0 };
+  }
+}
+
+/**
+ * 给一个款色起名（唯一写入口）。
+ *
+ * ⚠️ 主进程会用 `ok:false` 表达**业务拒绝**（同款重名 / 空名 / 超长），不是通道失败 ——
+ *    调用方必须把 `error` 原话显示出来，不要统一改写成"保存失败"：
+ *    用户要知道的是"为什么不能叫这个"，不是"没成功"。
+ */
+export async function renameVariantColor(styleColorId: number, name: string): Promise<RenameColorOutcome> {
+  const r = await need(ipc.orderVariantRename({ styleColorId, name }));
+  return r;
+}
+
+/**
+ * 改款名 / 指定厂家（命名板组头）。
+ *
+ * 与 `renameVariantColor` 同一套拒绝语义：`ok:false` 是**业务判断**（厂家不存在 / 超长 /
+ * 款已被删），`error` 是给用户看的原话，必须显示出来。
+ *
+ * `supplierId` 只在显式传入时改 —— `undefined`（不传）与 `0`（清空厂家）是两件事，
+ * 混成一个会让"我只想改个款名"顺手把厂家清掉。
+ */
+export async function saveVariantStyle(input: {
+  styleId: number;
+  name?: string;
+  supplierId?: number;
+}): Promise<SaveStyleBasicsOutcome> {
+  return need(ipc.orderStyleBasics(input));
 }
 
 export interface PendingCounts {

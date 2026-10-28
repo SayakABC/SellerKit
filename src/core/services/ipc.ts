@@ -11,6 +11,12 @@ import type {
   ImageDataUrl,
   ExportExcelResult,
   StyleRecord,
+  VariantNamingBoard,
+  MergeStylesOutcome,
+  RenameColorOutcome,
+  StyleMergeBoard,
+  UnmergeOutcome,
+  SaveStyleBasicsOutcome,
   OrderUpdateInput,
   OrderUpdateStatusInput,
   OrderStatus,
@@ -60,6 +66,7 @@ import type {
   ShopListItem,
   ShopUpsertInput,
   ShopSummary,
+  ShopGate,
   UnmappedShopRow,
   NameMapKind,
   SkuBackfillOutcome,
@@ -250,6 +257,28 @@ export interface ElectronApi {
   }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
   /** 款选项列表（「归属款」下拉的数据源）：**产品库全集** + 每项的可选颜色 */
   orderStyleList(): Promise<ApiResult<StyleRecord[]>>;
+  /** 命名板（P3）：按 listing 分组的色键，未命名在前。只读。 */
+  orderVariantNaming(): Promise<ApiResult<VariantNamingBoard>>;
+  /** 给一个款色起名 —— 命名板唯一的写入口（同款重名/空名/超长由主进程拒绝） */
+  /** 款的基本信息（命名板组头）：款名 + 厂家一次保存。`0` 厂家 = 清空。 */
+  orderStyleBasics(payload: {
+    styleId: number;
+    name?: string;
+    supplierId?: number;
+  }): Promise<ApiResult<SaveStyleBasicsOutcome>>;
+  orderVariantRename(payload: {
+    styleColorId: number;
+    name: string;
+  }): Promise<ApiResult<RenameColorOutcome>>;
+  /** 合并候选 + 已合并记录（拿货页「可能是同一件货」那块） */
+  orderStyleMergeBoard(): Promise<ApiResult<StyleMergeBoard>>;
+  /** 把 sourceStyleIds 并进 targetStyleId（一次 N→1，可按批次拆开） */
+  orderStyleMerge(payload: {
+    targetStyleId: number;
+    sourceStyleIds: number[];
+  }): Promise<ApiResult<MergeStylesOutcome>>;
+  /** 拆开一次合并（按批次） */
+  orderStyleUnmerge(payload: { batchId: string }): Promise<ApiResult<UnmergeOutcome>>;
   orderStyleDelete(payload: { id: number }): Promise<ApiResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
   // ⭐ 主用 `styleCode`（下拉的值就是编码）；`styleId` 保留兼容老形状
@@ -266,6 +295,12 @@ export interface ElectronApi {
       skuBackfill?: SkuBackfillOutcome;
       /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
       colorAlias?: ColorAliasRemembered | null;
+      /** 归到套装款时自动展开的部位（`missingColor` = 该色号还没配配色，一件也没写） */
+      bundleMaterialize?: {
+        status: 'written' | 'already' | 'notBundle' | 'missingColor' | 'noProduct' | 'noItemId';
+        roles: string[];
+        expanded: Array<{ role: string; styleCode: string; color: string; qty: number }>;
+      };
     }>
   >;
   // 修改款式展示名（款编码级）
@@ -559,6 +594,8 @@ export interface ElectronApi {
   shopUpsert(payload: ShopUpsertInput): Promise<ApiResult<{ id: number; created: boolean }>>;
   shopSummary(): Promise<ApiResult<ShopSummary>>;
   shopUnmapped(): Promise<ApiResult<UnmappedShopRow[]>>;
+  /** 门 1（店铺归一）：只数**订单里**出现过的店名（与 `shopUnmapped` 的差别只有作用域） */
+  shopGate(): Promise<ApiResult<ShopGate>>;
   shopMap(payload: {
     raw: string;
     refId?: number;
@@ -1646,6 +1683,16 @@ export function shopSummary(): Promise<ApiResult<ShopSummary>> {
 /** 未归一的历史店铺名（实时聚合三处文本） */
 export function shopUnmapped(): Promise<ApiResult<UnmappedShopRow[]>> {
   return ipc.shopUnmapped();
+}
+
+/**
+ * 门 1（店铺归一）的派生状态。
+ *
+ * ⚠️ 与 `shopUnmapped` 不是同一件事，别合并：那个回答"还有哪些店名没整理"（含历史拿货单里的旧店名），
+ *    这个回答"订单里有哪些店名还没归成店铺实体"（这才会让款/色的键分叉）。
+ */
+export function shopGate(): Promise<ApiResult<ShopGate>> {
+  return ipc.shopGate();
 }
 
 /** 归一指派 / 标记忽略 */

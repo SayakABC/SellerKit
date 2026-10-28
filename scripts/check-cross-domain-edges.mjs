@@ -52,11 +52,21 @@ const DB_EDGES = [
     to: './product-db',
     symbols: [
       'adoptProduct',
+      // 2026-10-28（套装）：归到套装款后自动展开成部件快照
+      //   `isBundleProduct` 判"这个产品是不是套装"、`resolveBundleParts` 按 (产品,商品ID,色号)
+      //   查出各部件色名、`bundleRolesOf` 在配色缺失时告诉用户"差哪个部位"。
+      //   ⚠️ 展开**不猜**：色号没配过就 `missingColor` + 一件不写（写错就是少发一条裤子）。
+      'bundleRolesOf',
       'ensureProductSchema',
+      'isBundleProduct',
+      // 2026-10-28（命名板组头）：款名与厂家一起改。厂家唯一权威在采购域 `suppliers`，
+      //   产品层只存 `supplier_id`，所以只能经它这个窄接口写（code 定位、只改一列）。
+      'moveProductSupplier',
       'orderColorByItemImage',
       'productIdByCode',
       'productSchemaReady',
       'renameProduct',
+      'resolveBundleParts',
       'resolveOrderSku',
       'resolveShopRef',
       // 2026-10-21（C2 v9）：退役旧价目表前，把每个款最新的价镜像进产品「当前进价」
@@ -77,10 +87,26 @@ const DB_EDGES = [
     why: '拣货行取「商品池」图（三层回落图的最后一层）',
   },
   {
+    from: 'picking-db.ts',
+    to: './order-db',
+    symbols: ['ITEM_STYLE_COLOR_ID'],
+    why:
+      '拣货行的款色/款编码/供应商必须按「订单行优先、图回落」取（ITEM_STYLE_COLOR_ID 是唯一一份）；' +
+      '改造前只认图，订单行自动归类后这 9/75 行在拿货页仍是"未识别款无供应商"',
+  },
+  {
     from: 'purchase-db.ts',
     to: './product-db',
     symbols: ['productSchemaReady'],
     why: '拿货建单前判产品库是否已就绪（各域表按域懒建，不能假定都初始化过）',
+  },
+  {
+    from: 'purchase-db.ts',
+    to: './order-db',
+    symbols: ['ITEM_STYLE_COLOR_ID', 'ITEM_STYLE_COLOR_SRC'],
+    why:
+      '待拿货缺口按「订单行 → 款色」展开（套装 = 一件实物多个款色）：口径必须与 itemStyleColorIds 同一份，各写一遍必然漂移；' +
+      'ITEM_STYLE_COLOR_ID 是「这一行归哪个款色」的唯一身份表达式（订单行优先、图回落）',
   },
   {
     from: 'shop-accounts-db.ts',

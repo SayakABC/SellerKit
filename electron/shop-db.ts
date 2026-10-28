@@ -1305,6 +1305,75 @@ export function getShop(id: number): ShopListItem | null {
   return mapShopRow(row, aliasCounts());
 }
 
+/** 门 1 的一行：订单里出现过、但还没归成店铺实体的店名 */
+export interface ShopGateRow {
+  /** 归一后的键（`sk_name_map.raw_key` 用的就是它） */
+  key: string;
+  /** 原文（展示用） */
+  raw: string;
+  /** 这个店名在订单里有多少行 */
+  orders: number;
+  /** 同名候选店铺（空 = 库里还没有这家店，得先去登记，不是"点一下认下来"） */
+  autoShopName: string;
+  autoShopPlatform: string;
+}
+
+export interface ShopGate {
+  /** 未归一的店铺（按订单行数倒序 —— 大店先做） */
+  pending: ShopGateRow[];
+  /** 覆盖的订单行数合计（"够不够严重"看这个数，不看店铺家数） */
+  orders: number;
+}
+
+/**
+ * 门 1（店铺归一）：**订单里出现过、却还没归成店铺实体**的店名。
+ *
+ * 为什么判据是派生的、不是一张"已归一"表：每导一次订单都可能有新店名冒出来，
+ * 存标志的后果是第二次导入后标志还说"已完成"（本仓"派生非幂等就必然漂移"）。
+ *
+ * 三处口径要说清：
+ *   ① **"未归一"只有一个实现** —— 本函数不自己判 `sk_name_map` / 忽略标记 / 精确命中，
+ *      直接复用 `listUnmapped()`；自己再写一遍，迟早出现"归一页说 3 家、门说 5 家"。
+ *   ② **作用域收窄到订单**：`purchase_sources.shop` 是订单导出的下游，把历史拿货单里的旧店名
+ *      也算进来，门就永远关不上（那条来源不会因为归一而消失）。
+ *   ③ **空店名不进名单**：`toNameKey` 判空（全角空格 / 零宽字符也算空），否则噪音淹没真问题。
+ *
+ * ⚠️ 这个门**不阻断任何按钮**（原因见 `docs/notes/2026-10-28-order-driven-classify-plan.md` §9.9）：
+ *    它保护的是"数字口径"（同一家店被当成两家 ⇒ 同一件货在统计里两行），不是某个动作；
+ *    真去拦一个不存在的动作，只会做成一个点不到的门。
+ */
+export function shopNormalizeGate(): ShopGate {
+  const counts = new Map<string, number>();
+  if (tableExists('oi_orders')) {
+    // `oi_orders` 在别的域、且本域会在建表前被调用 ⇒ 表不在就返回空门，不炸
+    for (const r of dbQuery<{ raw: unknown; n: number }>(
+      `SELECT shop AS raw, COUNT(*) AS n FROM oi_orders
+        WHERE shop IS NOT NULL AND shop <> ''
+        GROUP BY shop`,
+    )) {
+      const key = toNameKey(String(r.raw ?? ''));
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + num(r.n));
+    }
+  }
+  const pending: ShopGateRow[] = [];
+  if (counts.size) {
+    for (const u of listUnmapped()) {
+      const orders = counts.get(u.key);
+      if (!orders) continue; // 只出现在拿货单里的旧店名：不是这个门的事
+      pending.push({
+        key: u.key,
+        raw: u.raw,
+        orders,
+        autoShopName: u.autoShopName,
+        autoShopPlatform: u.autoShopPlatform,
+      });
+    }
+  }
+  pending.sort((a, b) => b.orders - a.orders || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { pending, orders: pending.reduce((n, r) => n + r.orders, 0) };
+}
+
 /**
  * 未归一的历史店铺名（**实时聚合**，不是缓存表 —— 见文件头口径 3）。
  * 已归一（ref_id > 0）与已标记忽略的不出现在这里。

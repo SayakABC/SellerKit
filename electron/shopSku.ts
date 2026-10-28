@@ -65,6 +65,29 @@ export function pickField(rawFields: Record<string, string> | null | undefined, 
   return { key: '', value: '' };
 }
 
+/**
+ * 展示用标题：**优先标题列，其次「产品信息」的首行**，都没有才回空串。
+ *
+ * 为什么不能直接用 `extractSkuFields().title`：速卖通（芒果店长）导出的全字段报表里
+ * **没有标题列**，标题只出现在「产品信息」那段文本的第一行
+ * （`【1】Men's Fashion Thickened Jacket...`）。真库实测：37 个商品里标题列命中 0 个、
+ * 而「产品信息」命中 100%（74/75 行），`pl_shop_items.title` 只覆盖 3 个。
+ * 命名页要按 listing 分组展示，没有标题就只能显示一串商品ID —— 人认不出那是哪件货。
+ *
+ * ⚠️ **只用于展示**，不进任何键、不参与匹配（`extractSkuFields` 的行为保持原样：
+ *    它喂着"同商品"分组与队列聚合，改它的返回值会改变那些地方的语义）。
+ * ⚠️ 多商品拼在一个单元格（`【1】A【2】B`）时取**第一块**：命名页一行只对应一个键，
+ *    而那种行在导入时就已经被拆行器拆开了（`orderRowSplitter`），这里只是兜底不为空。
+ */
+export function productTitleOf(rawFields: Record<string, string> | null | undefined): string {
+  const direct = pickField(rawFields, TITLE_KEYS).value;
+  if (direct) return direct;
+  const info = pickField(rawFields, [/^产品信息$/, /^商品信息$/, /产品信息/, /商品信息/, /产品详情/, /商品详情/]).value;
+  if (!info) return '';
+  const first = info.split('\n')[0] ?? '';
+  return first.replace(/^【\d+】\s*/, '').trim();
+}
+
 // ─────────────────────────────────────────────────────────── 按图定色（采集色图 ↔ 订单图）
 
 /**

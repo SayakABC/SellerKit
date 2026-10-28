@@ -17,6 +17,9 @@ import {
   type MigrationStep,
 } from './db';
 import { productSchemaReady } from './product-db';
+// 「一个订单行 → 它的款色」的唯一展开口径（套装 = 一件实物多个款色）。
+// 进货口的**需求**必须与核对页/拣货同一份口径，否则套装会被算成一个款、子商品永远不进拿货单。
+import { ITEM_STYLE_COLOR_ID, ITEM_STYLE_COLOR_SRC } from './order-db';
 
 /**
  * 款式展示名的派生片段（ADR-002 D1：款名权威在 `pl_products`，按 `code` 关联）。
@@ -371,7 +374,7 @@ function addSourceOrderItem(): void {
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
        LEFT JOIN oi_images i ON oi.image_id = i.id
-       LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
       WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
       ORDER BY oi.id`,
@@ -735,8 +738,8 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
               COALESCE(NULLIF(oi.qty, 0), 1) AS qty
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       JOIN oi_images i ON oi.image_id = i.id
-       JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_images i ON oi.image_id = i.id
+       JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
        WHERE s.code = ? AND sc.color = ? AND oi.size = ?
@@ -1119,11 +1122,16 @@ export function outstanding(): OutstandingRow[] {
             COALESCE(sc.id, 0) AS style_color_id, COALESCE(sc.color, '') AS style_color,
             COALESCE(oi.color, '') AS color_raw, oi.size AS size,
             COALESCE(json_extract(oi.raw_fields, '$."产品ID"'), '') AS item_id,
-            SUM(COALESCE(NULLIF(oi.qty, 0), 1)) AS demand, COUNT(*) AS orders
+            -- 件数 = 订单件数 × 每套几件（一套含两条裤子 = 2）。单品行 qty_per_set 恒为 1 ⇒ 老数据不变。
+            -- orders 用 DISTINCT：套装展开成 N 行是**同一个订单行**，COUNT(*) 会把"几行在要"算成 N 倍。
+            SUM(COALESCE(NULLIF(oi.qty, 0), 1) * v.qty_per_set) AS demand,
+            COUNT(DISTINCT oi.id) AS orders
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
-     LEFT JOIN oi_images i ON oi.image_id = i.id
-     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     -- 款色从**同一份展开口径**取（ITEM_STYLE_COLOR_SRC）：一行订单行 → N 个款色（套装展开）。
+     -- 这里不自己 JOIN 图：那会让套装只算成一个款，子商品永远不进拿货单。
+     JOIN ${ITEM_STYLE_COLOR_SRC} v ON v.order_item_id = oi.id
+     LEFT JOIN oi_style_colors sc ON sc.id = v.style_color_id
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${n.join}
      WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
@@ -1200,7 +1208,7 @@ export function orderCoverage(): OrderCoveragePayload {
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
        LEFT JOIN oi_images i ON oi.image_id = i.id
-       LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
        LEFT JOIN (

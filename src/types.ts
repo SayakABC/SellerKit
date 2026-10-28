@@ -176,6 +176,41 @@ export interface ElectronAPI {
    * 每项带可选颜色（产品库 SKU 颜色在前、识别链款色在后）。
    */
   orderStyleList: () => Promise<APIResult<StyleRecord[]>>;
+  /**
+   * 命名板（P3）：按 listing 分组的色键，未命名在前。
+   * 只读；写走 {@link orderVariantRename}。
+   */
+  orderVariantNaming: () => Promise<APIResult<VariantNamingBoard>>;
+  /**
+   * 给一个款色起名 —— 命名板**唯一**的写入口。
+   * 同款重名 / 空名 / 超长会被主进程拒绝（`ok:false` + 原话），不静默改。
+   */
+  orderStyleBasics: (payload: {
+    styleId: number;
+    /** 缺省 = 不改款名（`''` 是合法的"清空回占位"） */
+    name?: string;
+    /** 缺省 = 不改厂家（`0` 是合法的"清空厂家"） */
+    supplierId?: number;
+  }) => Promise<APIResult<SaveStyleBasicsOutcome>>;
+  orderVariantRename: (payload: {
+    styleColorId: number;
+    name: string;
+  }) => Promise<APIResult<RenameColorOutcome>>;
+  /**
+   * 合并候选 + 已合并记录（拿货页「这几个款可能是同一件货」那块的唯一数据面）。
+   * 只读。
+   */
+  orderStyleMergeBoard: () => Promise<APIResult<StyleMergeBoard>>;
+  /**
+   * 把 `sourceStyleIds` 并进 `targetStyleId`（一次 N→1）。
+   * 色只按**同名**配对，同名走改键、不同名搬色；不猜相似度。
+   */
+  orderStyleMerge: (payload: {
+    targetStyleId: number;
+    sourceStyleIds: number[];
+  }) => Promise<APIResult<MergeStylesOutcome>>;
+  /** 拆开一次合并（按批次）。`ok:false` 时 `error` 是给用户看的原话。 */
+  orderStyleUnmerge: (payload: { batchId: string }) => Promise<APIResult<UnmergeOutcome>>;
   orderStyleDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
   // ⭐ 主用 `styleCode`（下拉的值就是编码）；`styleId` 保留兼容老形状
@@ -192,6 +227,17 @@ export interface ElectronAPI {
       skuBackfill?: SkuBackfillOutcome;
       /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
       colorAlias?: ColorAliasRemembered | null;
+      /**
+       * 归到**套装款**时自动展开的部位快照（单品恒为 `notBundle`）。
+       *
+       * `missingColor` 是**正常结局**（该平台色号还没配过配色）——此时一件部件都没写，
+       * 界面应提示"这套还没配这个色号的配色"，而不是当成失败弹错。
+       */
+      bundleMaterialize?: {
+        status: 'written' | 'already' | 'notBundle' | 'missingColor' | 'noProduct' | 'noItemId';
+        roles: string[];
+        expanded: Array<{ role: string; styleCode: string; color: string; qty: number }>;
+      };
     }>
   >;
   // 全库重放已确认映射：修「映射在、订单没吃到」的历史漏网（`dryRun` 只报数不改库）
@@ -764,6 +810,14 @@ export interface ElectronAPI {
   shopSummary: () => Promise<APIResult<ShopSummary>>;
   /** 未归一的历史店铺名（实时聚合两处文本，非缓存表） */
   shopUnmapped: () => Promise<APIResult<UnmappedShopRow[]>>;
+  /**
+   * 门 1（店铺归一）：**订单里**出现过、还没归成店铺实体的店名 + 各自的订单行数。
+   *
+   * 与 `shopUnmapped` 的差别只有一个，但很关键：**作用域**。那个是两处历史文本的合集
+   * （含历史拿货单里的旧店名，那部分归一了也不会消失），这个只数订单 ——
+   * 因为它保护的是"款/色的身份"（键含店名），而不是"还有哪些店名没整理"。
+   */
+  shopGate: () => Promise<APIResult<ShopGate>>;
   /** 归一指派 / 标记忽略（ignored=true 时不要求 refId） */
   shopMap: (payload: {
     raw: string;
@@ -1137,6 +1191,135 @@ export interface StyleRecord {
   status: string;
   /** 可选颜色（去重；产品库 SKU 颜色在前） */
   colors: string[];
+}
+
+// ─────────────────────────────────────────── 命名板（P3，2026-10-28）
+//
+// 为什么要有这一组类型：归类自动化之后，订单进来就已经按变体键归好，人这一端唯一还剩的
+// 判断是"这个色在我生意里叫什么"。命名板就是那个判断的界面 —— 它按 **listing** 分组
+// （一个 listing 常有 4-6 个色键，必须一屏填完），组内一行是一个色键。
+//
+// ⚠️ 这些字段是**投影**，不是表：`named` 由「当前名 vs 平台原文」现算（不存档），
+//    所以改名之后刷新一次，标记就跟着变 —— 存成标志位会漂。
+
+/** 命名板的一行 = 一个变体键（`oi_variant_keys.variant_key`） */
+export interface VariantColorItem {
+  styleColorId: number;
+  styleCode: string;
+  /** 款名（产品库 `pl_products.name`；空串 = 还没起款名，不冒充） */
+  styleName: string;
+  /** 当前落库的色名（可能就是平台原文） */
+  colorName: string;
+  /** 平台色原文（订单行 `color` 列，导入时原样落库的值） */
+  colorRaw: string;
+  /** 是否已有人给过名字（派生：`colorName` 与 `colorRaw` 不同） */
+  named: boolean;
+  orderRows: number;
+  /** 件数（`SUM(qty)`；存量行件数缺失时用行数兜） */
+  qty: number;
+  /** 代表图的本地路径（用 `orderImageThumbBatch` 换成 dataURL 显示） */
+  localPath: string;
+}
+
+/** 命名板的一组 = 一个 listing（店铺 + 商品ID）下的全部色键 */
+export interface VariantNamingGroup {
+  shop: string;
+  itemId: string;
+  /** 产品标题（取不到时回落商品ID） */
+  title: string;
+  /** 组内各色**共属**的款 id；`0` = 分属多个款（人工合并过），不给整组编辑入口 */
+  styleId: number;
+  styleCode: string;
+  /** 款名（`pl_products.name`；空串 = 占位款，还没人起名） */
+  styleName: string;
+  /** 厂家 id（0 = 未指定） */
+  supplierId: number;
+  /** 组内涉及的款数（>1 时界面要说明为什么不能整组改） */
+  styleCount: number;
+  colors: VariantColorItem[];
+}
+
+/** 改款名 / 改厂家的结果（`ok=false` 时 `error` 是给用户看的原话） */
+export interface SaveStyleBasicsOutcome {
+  ok: boolean;
+  error?: string;
+  styleId: number;
+  styleCode: string;
+  /** 保存后的实际值（主进程回读，不用界面送来的值回显） */
+  name: string;
+  supplierId: number;
+}
+
+export interface VariantNamingBoard {
+  groups: VariantNamingGroup[];
+  /** 还没人给过名字的键数（页签角标 / 折叠标题读它） */
+  unnamedKeys: number;
+  totalKeys: number;
+}
+
+/** 改色名的结果（`ok=false` 时 `error` 是给用户看的原话） */
+export interface RenameColorOutcome {
+  ok: boolean;
+  error?: string;
+  styleColorId: number;
+  name: string;
+  /** 这次改名覆盖到的键数 */
+  keys: number;
+}
+
+// ── 款合并（拿货页的"这几个款其实是同一件货"）────────────────────────────────
+
+/** 候选里的一个款 */
+export interface MergeStyleBrief {
+  styleId: number;
+  styleCode: string;
+  styleName: string;
+  keyCount: number;
+  colorCount: number;
+  rowCount: number;
+  /** 色名/原文（最多 10 个） */
+  colors: string[];
+  /** 示例图本地路径（可能空） */
+  imagePath: string;
+}
+
+/** 同厂家下的一组候选 */
+export interface MergeCandidateGroup {
+  supplierId: number;
+  supplierName: string;
+  styles: MergeStyleBrief[];
+}
+
+/** 一次已发生的合并（按**批次**聚合：一次操作可能并进多个款） */
+export interface StyleMergeRecord {
+  batchId: string;
+  targetStyleId: number;
+  targetStyleCode: string;
+  sources: Array<{ styleId: number; styleCode: string }>;
+  movedColors: number;
+  movedKeys: number;
+  createdAt: string;
+}
+
+export interface StyleMergeBoard {
+  groups: MergeCandidateGroup[];
+  merges: StyleMergeRecord[];
+}
+
+export interface MergeStylesOutcome {
+  ok: boolean;
+  error?: string;
+  batchId: string;
+  targetStyleId: number;
+  movedColors: number;
+  movedKeys: number;
+}
+
+export interface UnmergeOutcome {
+  ok: boolean;
+  error?: string;
+  restored: number;
+  skipped: number;
 }
 
 /** 产品库 Excel 导入项（渲染层已生成指纹） */
@@ -2163,6 +2346,29 @@ export interface ShopUpsertInput {
   score?: number;
   openedAt?: string;
   note?: string;
+}
+
+/** 门 1 的一行：订单里出现过、但还没归成店铺实体的店名 */
+export interface ShopGateRow {
+  key: string;
+  raw: string;
+  /** 这个店名在订单里有多少行（"值不值得现在做"看它，不看店铺家数） */
+  orders: number;
+  /** 同名候选店铺（空 = 库里还没有这家店，得先去登记） */
+  autoShopName: string;
+  autoShopPlatform: string;
+}
+
+/**
+ * 门 1（店铺归一）的派生状态。`pending` 为空 = 门是开的。
+ *
+ * ⚠️ **不阻断任何按钮**：它保护的是"数字口径"（同一家店被当成两家 ⇒ 同一件货在统计里两行），
+ *    不是某个动作。理由见 `docs/notes/2026-10-28-order-driven-classify-plan.md` §9.9。
+ */
+export interface ShopGate {
+  pending: ShopGateRow[];
+  /** 覆盖的订单行数合计 */
+  orders: number;
 }
 
 /** 未归一的历史店铺名（一次实时聚合的结果） */

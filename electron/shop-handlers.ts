@@ -7,6 +7,7 @@
 //   shop-upsert     新增 / 更新（**局部更新**：缺省 = 不动；同平台同名冲突即报错）
 //   shop-summary    汇总（店铺数 / 按平台 / 按状态 + 两处历史文本的归一进度）
 //   shop-unmapped   未归一的历史店铺名（实时聚合 oi_orders / purchase_sources）
+//   shop-gate       门 1（店铺归一）：**订单里**出现过、还没归成店铺实体的店名 + 订单行数
 //   shop-map        归一指派 / 标记忽略
 //   shop-unmap      撤销归一
 // 入参在 preload 层已做形状消毒，本层再做一次业务口径校验（双防线，见 AGENTS.md §2.3）。
@@ -22,6 +23,7 @@ import {
   upsertShop,
   shopSummary,
   listUnmapped,
+  shopNormalizeGate,
   mapName,
   unmapName,
   SHOP_STATUSES,
@@ -143,6 +145,14 @@ handle('shop-summary', () => {
 handle('shop-unmapped', () => {
   ensureShopSchema();
   return listUnmapped();
+});
+
+// 门 1：派生，不存档（每次调用按当前库重算）。`ensureOrderSchema` 不在这里跑 ——
+// 本函数对"订单表还没建"的情况返回空门（见 `shopNormalizeGate`），
+// 而为了一个只读的判断去建别域的表，会让"打开基础数据"顺手改订单库的形状。
+handle('shop-gate', () => {
+  ensureShopSchema();
+  return shopNormalizeGate();
 });
 
 // 归一指派 / 标记忽略。**写入方唯一是这里**（`source='manual'`）—— 见 shop-db.ts 头注口径 3。

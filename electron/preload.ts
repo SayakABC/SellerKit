@@ -782,10 +782,50 @@ contextBridge.exposeInMainWorld('electronAPI', {
       styleName: typeof payload?.styleName === 'string' ? payload.styleName.slice(0, 50) : '',
     }),
   orderStyleList: () => ipcRenderer.invoke('order-style-list'),
+  // 命名板（P3）：按 listing 分组的色键，未命名在前
+  orderVariantNaming: () => ipcRenderer.invoke('order-variant-naming'),
+  // 给一个款色起名（命名板唯一的写入口）。⚠️ 只送 id + 名字：
+  // 款名 / 款编码 / 平台原文都由主进程回读，界面送过来的只能是"要改成什么"。
+  orderVariantRename: (payload: any) =>
+    ipcRenderer.invoke('order-variant-rename', {
+      styleColorId: typeof payload?.styleColorId === 'number' ? payload.styleColorId : 0,
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 80) : '',
+    }),
+  // 款的基本信息（命名板组头）：款名 + 厂家一次保存。只送 id 与"要改成什么"，
+  // 当前值由主进程回读（避免界面拿旧值覆盖别人的改动）。
+  // `supplierId` 缺省 = 不动；`0` 是合法的"清空厂家"。
+  orderStyleBasics: (payload: any) =>
+    ipcRenderer.invoke('order-style-basics', {
+      styleId: typeof payload?.styleId === 'number' ? payload.styleId : 0,
+      ...(typeof payload?.name === 'string' ? { name: payload.name.slice(0, 80) } : {}),
+      ...(typeof payload?.supplierId === 'number' ? { supplierId: payload.supplierId } : {}),
+    }),
   // 删除款式（款编码）：级联删款色、图片解除归属、订单保留
   orderStyleDelete: (payload: any) =>
     ipcRenderer.invoke('order-style-delete', {
       id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  // 款合并候选 + 已合并记录（拿货页「这几个款可能是同一件货」）
+  orderStyleMergeBoard: () => ipcRenderer.invoke('order-style-merge-board'),
+  // 合并：一次 N→1。⚠️ 源款 id 去重 + 剔掉目标自己在这里做一遍，
+  // 主进程还会再做一遍 —— 界面这层只是让"手滑把目标当源送出去"不会变成一次空写。
+  orderStyleMerge: (payload: any) => {
+    const target = typeof payload?.targetStyleId === 'number' ? payload.targetStyleId : 0;
+    const sources = Array.isArray(payload?.sourceStyleIds)
+      ? [
+          ...new Set(
+            payload.sourceStyleIds.filter(
+              (n: unknown) => typeof n === 'number' && n > 0 && n !== target,
+            ),
+          ),
+        ].slice(0, 50)
+      : [];
+    return ipcRenderer.invoke('order-style-merge', { targetStyleId: target, sourceStyleIds: sources });
+  },
+  // 拆开一次合并（按批次 id，不是行 id：一次 N→1 写 N 行）
+  orderStyleUnmerge: (payload: any) =>
+    ipcRenderer.invoke('order-style-unmerge', {
+      batchId: typeof payload?.batchId === 'string' ? payload.batchId.slice(0, 40) : '',
     }),
   // 手动归并款式：订单图片挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
   // ⭐ 送**款编码**（不是 id）：下拉的数据源是产品库全集，手工新建的款在识别池里可能还没有行，
@@ -1447,6 +1487,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   shopSummary: () => ipcRenderer.invoke('shop-summary'),
   shopUnmapped: () => ipcRenderer.invoke('shop-unmapped'),
+  // 门 1（店铺归一）—— 只读派生，无入参
+  shopGate: () => ipcRenderer.invoke('shop-gate'),
   shopMap: (payload: any) =>
     ipcRenderer.invoke('shop-map', {
       raw: typeof payload?.raw === 'string' ? payload.raw.slice(0, 200) : '',

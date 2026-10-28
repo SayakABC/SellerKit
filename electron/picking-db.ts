@@ -18,6 +18,7 @@
 export {};
 
 import { initDb, dbQuery, tableExists } from './db';
+import { ITEM_STYLE_COLOR_ID } from './order-db';
 import { itemImagePool } from './product-db';
 import { extractSkuFields, toSkuKey } from './shopSku';
 
@@ -118,14 +119,14 @@ export function pickingRows(
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT oi.id, o.order_no, o.shop, o.order_time, oi.raw_fields, oi.color, oi.size,
             o.ship_time, oi.status, o.biz_status, oi.cost_cents, oi.actual_cost_cents,
-            COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0) AS style_color_id,
+            ${ITEM_STYLE_COLOR_ID} AS style_color_id,
             COALESCE(s.code, '') AS style_code, ${styleNameSel},
             COALESCE(sc.color, '') AS style_color,
             ${supplierSel}, ${productCostSel}
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
      LEFT JOIN oi_images i ON oi.image_id = i.id
-     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${domainJoin}
      ${where}

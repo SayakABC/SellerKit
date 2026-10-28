@@ -331,6 +331,66 @@ register('order-style-list', async () => {
   return { success: true, data: orderDb.listStyles() };
 });
 
+// 命名板（P3）：按 listing 分组的色键，未命名在前。**只读**。
+// 为什么不带任何参数：本页要回答的是"还剩多少没起名"（口径必须与页签角标一致），
+// 加个筛子就等于多一套口径 —— 筛选在渲染层做（数据量是"当前库里的键数"，最多几百行）。
+register('order-variant-naming', async () => {
+  orderDb.ensureOrderSchema();
+  return { success: true, data: orderDb.variantNamingBoard() };
+});
+
+// 给一个款色起名：命名板唯一的写入口。payload { styleColorId, name }
+// ⚠️ `ok:false` 也要回 `success:true`：拒绝的原因是**业务判断**（同款重名 / 空名），
+//    不是通道失败。走 `success:false` 会让界面弹出"操作失败"并丢掉那句原话，
+//    而用户需要知道的正是"为什么不能叫这个"。
+register('order-variant-rename', async (payload) => {
+  if (!isPlainObject(payload)) return { success: false, error: 'invalid payload' };
+  orderDb.ensureOrderSchema();
+  return { success: true, data: orderDb.renameStyleColor(payload.styleColorId as number, payload.name) };
+});
+
+// 款的基本信息（命名板组头）：款名 + 厂家一次保存。payload { styleId, name?, supplierId? }
+// 为什么与改色名分成两个通道：色名写 `oi_style_colors`，款名/厂家写产品主数据
+//   （`pl_products`，ADR-002 C1 的唯一权威）—— 一个通道写两张不同域的表，
+//   迟早有人以为它只改了一边。
+// ⚠️ 同 `order-variant-rename`：`ok:false` 也回 `success:true`，拒绝原因是业务判断。
+register('order-style-basics', async (payload) => {
+  if (!isPlainObject(payload)) return { success: false, error: 'invalid payload' };
+  orderDb.ensureOrderSchema();
+  return {
+    success: true,
+    data: orderDb.saveStyleBasics(payload.styleId as number, {
+      name: payload.name,
+      supplierId: payload.supplierId,
+    }),
+  };
+});
+
+// 合并候选 + 已合并记录（拿货页「这几个款可能是同一件货」）。payload 无
+register('order-style-merge-board', async () => {
+  orderDb.ensureOrderSchema();
+  return { success: true, data: orderDb.styleMergeBoard() };
+});
+
+// 合并款：把 sourceStyleIds 并进 targetStyleId（一次 N→1）。payload { targetStyleId, sourceStyleIds[] }
+// ⚠️ 同 `order-variant-rename`：`ok:false` 也回 `success:true` —— 拒绝原因（目标不存在 /
+//    源款已被删）是**业务判断**，要原话显示给用户，不能变成一条 IPC 异常。
+register('order-style-merge', async (payload) => {
+  if (!isPlainObject(payload)) return { success: false, error: 'invalid payload' };
+  orderDb.ensureOrderSchema();
+  return {
+    success: true,
+    data: orderDb.mergeStylesInto(payload.targetStyleId, payload.sourceStyleIds),
+  };
+});
+
+// 拆开一次合并（按批次 id）。payload { batchId }
+register('order-style-unmerge', async (payload) => {
+  if (!isPlainObject(payload)) return { success: false, error: 'invalid payload' };
+  orderDb.ensureOrderSchema();
+  return { success: true, data: orderDb.unmergeStyles(payload.batchId) };
+});
+
 // 删除款式（款编码）：级联删款色、图片解除归属、订单保留。payload { id }
 register('order-style-delete', async (payload) => {
   if (!isPlainObject(payload) || typeof payload.id !== 'number' || payload.id <= 0) {

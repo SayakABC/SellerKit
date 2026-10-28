@@ -46,6 +46,8 @@ import {
   type QueueStats,
   type SkuOrderRow,
 } from './shopSku';
+// 色号归一只留一份：套装配色与单品别名的键必须同口径，否则同一个 `8` 在两处算两个键
+import { colorAliasKey } from './colorAlias';
 
 // ---- 类型（与渲染层 src/types.ts 对应结构保持一致；两端各自声明，避免主进程 import 渲染层） ----
 
@@ -141,10 +143,46 @@ function ensureProductColumns(): void {
   }
 }
 
+/**
+ * 套装 = 产品**关联子商品**。子商品本来就是独立的 `pl_products` 行（能单独卖、有自己的
+ * 变体/成本/图片/订单），本表只存"关联关系"，**不复制子商品的任何字段** ——
+ * 复制一份就是第二个真相：改子商品的价格或名称时，套装那份会静默过期。
+ *
+ * 为什么关联键里必须有 **`alias_key`（平台色号）**：
+ *   关联的不是"这个套装 ↔ 那些子商品"，而是"**这个套装的这个色号** ↔ 那些子商品的那些颜色"。
+ *   套装自由搭配（同一款：色号 8 = 红上衣+黑裤，色号 9 = 黑上衣+黑裤），少了色号这一列，
+ *   两个色号会拆成同一堆东西 —— 拿货单上颜色就没了。而平台色号是商品级编号
+ *   （真库实测 `"8"`，见 `pl_shop_items.sku_json`），名字里没有语义可推，只能人认一次。
+ *
+ * 不建 `pl_products.kind='bundle'`：**"是不是套装"= 有没有关联行**，这是派生事实。
+ * 写成列就会出现"删了关联忘改 kind"的第二个真相。
+ *
+ * `item_id`：'' = 该套装产品所有商品通用；非空 = 只有这个平台商品这么配
+ *（同款套装的不同供货商品可能用各自的色号体系）。
+ */
+const BUNDLE_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS pl_bundle_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL DEFAULT '',
+    alias_key TEXT NOT NULL,
+    role TEXT NOT NULL,
+    child_product_id INTEGER NOT NULL,
+    child_color TEXT NOT NULL,
+    qty INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(product_id, item_id, alias_key, role)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_pl_bundle_links_product ON pl_bundle_links(product_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_pl_bundle_links_child ON pl_bundle_links(child_product_id)`,
+];
+
 /** 幂等初始化（视图首次激活 / 每个 handler 入口调用） */
 export function ensureProductSchema(): void {
   initDb();
   dbMigrate(SCHEMA);
+  dbMigrate(BUNDLE_SCHEMA);
   ensureProductColumns();
 }
 
@@ -967,7 +1005,7 @@ const SKU_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_pl_shop_sku_product ON pl_shop_sku(product_id)`,
 ];
 
-/** 幂等补列（老库）—— image_url / imported_at 只写进了 CREATE TABLE 的话老库拿不到 */
+/** 幂等补列（老库）—— image_url / imported_at 只写进 CREATE TABLE 的话老库拿不到 */
 function ensureSkuColumns(): void {
   const info = dbQuery<{ name: string }>(`PRAGMA table_info(pl_shop_sku)`);
   // 表还不存在 = 新库（迁移先于 dbMigrate 跑）→ 直接跳过，别去 ALTER 一张没有的表
@@ -997,6 +1035,11 @@ const SKU_COPY_COLS = `id, platform, shop_id, item_id, spec, product_id, variant
 function normalizeSkuUniqueKey(): void {
   const sql = tableSql('pl_shop_sku');
   if (!sql) return; // 表尚不存在（新库由 dbMigrate 建）——不该发生，保守返回
+  // ⚠️ 重建要按 `SKU_COPY_COLS` 逐列搬数据，而这份清单会随着加列变长。
+  //    老库可能还没那些列（它停在 v1，v1 当时只补 image_url/imported_at），直接 SELECT 会抛
+  //    `no such column` 并把整个迁移事务回滚 —— 症状是"升级卡死"而报错指向一句看不懂的 SQL。
+  //    故先跑一遍**幂等**补列，保证 legacy 表至少有清单里的每一列（以后再加列也不会重犯）。
+  ensureSkuColumns();
   if (/unique\s*\([^)]*product_id[^)]*\)/i.test(sql)) return; // 已含 product_id
 
   dbRun(`ALTER TABLE pl_shop_sku RENAME TO pl_shop_sku_legacy_struct`);
@@ -1473,6 +1516,9 @@ export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
   // 映射行的 `platform` 是副本，用它当条件会让"改一次店铺平台"废掉该店全部映射。
   // 同 (店,商品ID) 若遗留多平台重复行，下面的 ORDER BY 已定序（带色优先 → id 最小），结果确定。
   const platform = shopLabelMap().get(shopId)?.platform ?? '';
+  // 一个商品只映射**一个产品**：套装商品也走这里 —— 它映射到"套装产品"本身，
+  // 再按 `resolveBundleParts(产品, 商品ID, 色号)` 展开成部件。
+  // 所以这一层不需要任何套装分支：部件是产品之间的关联（`pl_bundle_links`），不是映射行的分裂。
   const row = dbGet<{ product_id: number; variant_id: number; spec: string }>(
     `SELECT product_id, variant_id, spec FROM pl_shop_sku
      WHERE shop_id = ? AND item_id = ? AND status = 'confirmed'
@@ -2309,3 +2355,274 @@ export function pendingProductImages(
   return out;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 套装（产品关联子商品）
+//
+// 一个套装 = 一组关联行：`(套装产品, 商品ID?, 色号) → (子商品, 子颜色, 件数)`。
+// 子商品是**独立产品**（`pl_products` 的一行），本层不复制它的名称/价格/图片 ——
+// 所以子商品照常单独卖，套装这边不会出现"改了子商品、套装那份没跟上"。
+//
+// 展开出来的东西只回答"这一套该拆成哪些 (款, 色, 件数)"，**不碰尺码**：
+// 尺码属于订单行，展开时继承给每一件（同码套装是常态；真要上衣 L 裤 M 再加 size_override）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一个套装最多几个部件（防误操作刷出一万个；三件套/四件套远用不到 12） */
+const MAX_BUNDLE_PARTS = 12;
+const MAX_BUNDLE_QTY = 99;
+/** 部件名长度上限（`上衣`/`裤子`/`马甲`；不校验取值范围 —— 自由文本，别替用户规定叫法） */
+const MAX_BUNDLE_ROLE = 20;
+
+export interface BundleLinkInput {
+  /** 部件名（同一套装同一色号内唯一；也是唯一键的一半） */
+  role: string;
+  childProductId: number;
+  /** 子商品的颜色（自家色名）。**必填**：宁可报缺，也不拿父级或别的色凑 */
+  childColor: string;
+  /** 每套几件 */
+  qty?: number;
+}
+
+export interface BundleLinkRow {
+  id: number;
+  productId: number;
+  /** '' = 该套装产品所有商品通用 */
+  itemId: string;
+  /** 已按 `colorAliasKey` 归一（平台色号 `8` / `Khaki`） */
+  aliasKey: string;
+  role: string;
+  childProductId: number;
+  /** 子商品编码/名称（由 `pl_products` 派生，不落库） */
+  childCode: string;
+  childName: string;
+  childColor: string;
+  qty: number;
+}
+
+export interface ResolvedBundlePart {
+  role: string;
+  childProductId: number;
+  childCode: string;
+  childName: string;
+  color: string;
+  qty: number;
+}
+
+export interface ResolvedBundle {
+  /** 该产品在任何色号下有没有关联行（= 它是不是套装） */
+  isBundle: boolean;
+  /** 这个色号**配过**没有。false ⇒ 调用方进"待配"，不许回落别的色号 */
+  matched: boolean;
+  /** 命中的作用域：商品级（点名）优先于产品级（提示） */
+  matchedScope: 'item' | 'product' | 'none';
+  parts: ResolvedBundlePart[];
+}
+
+const NO_BUNDLE: ResolvedBundle = { isBundle: false, matched: false, matchedScope: 'none', parts: [] };
+
+/** 全部关联行（按色号 → 部件名稳定排序，与录入顺序无关） */
+export function bundleLinksOf(productId: unknown): BundleLinkRow[] {
+  const pid = toId(productId);
+  if (!pid) return [];
+  return dbQuery<Record<string, unknown>>(
+    `SELECT b.id, b.product_id, b.item_id, b.alias_key, b.role, b.child_product_id,
+            b.child_color, b.qty,
+            COALESCE(p.code, '') AS child_code, COALESCE(p.name, '') AS child_name
+       FROM pl_bundle_links b
+       LEFT JOIN pl_products p ON p.id = b.child_product_id
+      WHERE b.product_id = ?
+      ORDER BY b.alias_key, b.role`,
+    [pid],
+  ).map((r) => ({
+    id: num(r.id),
+    productId: num(r.product_id),
+    itemId: String(r.item_id ?? ''),
+    aliasKey: String(r.alias_key ?? ''),
+    role: String(r.role ?? ''),
+    childProductId: num(r.child_product_id),
+    childCode: String(r.child_code ?? ''),
+    childName: String(r.child_name ?? ''),
+    childColor: String(r.child_color ?? ''),
+    qty: num(r.qty) || 1,
+  }));
+}
+
+/** 这个产品是不是套装 —— 判据只看"有没有关联行"（不设 kind 列，避免两个真相） */
+export function isBundleProduct(productId: unknown): boolean {
+  const pid = toId(productId);
+  if (!pid) return false;
+  return !!dbGet(`SELECT id FROM pl_bundle_links WHERE product_id = ? LIMIT 1`, [pid]);
+}
+
+/**
+ * 该套装用过的部件名（去重、排序）—— 供界面在"新色号还没配"时提示
+ * 「这个套装通常是 上衣 + 裤子，请逐个指定颜色」。**不是权威**：只是提示，别拿它校验。
+ */
+export function bundleRolesOf(productId: unknown): string[] {
+  const pid = toId(productId);
+  if (!pid) return [];
+  return dbQuery<{ role: string }>(
+    `SELECT DISTINCT role FROM pl_bundle_links WHERE product_id = ? ORDER BY role`,
+    [pid],
+  ).map((r) => String(r.role ?? ''));
+}
+
+/**
+ * 整组替换「某套装 × 某色号」的关联行（事务内先删后插）。
+ *
+ * 为什么按"色号"整组替换而不是逐行增删：一个色号对应的搭配是一个**整体**——
+ * 改搭配时"先删裤子再加马甲"这种中间态对读取方毫无意义，还容易留下半套。
+ *
+ * 校验**全部前置**：先算完错误再进事务。半途抛错会把已存关联留在"删了一半"的状态，
+ * 用户看到的是"保存失败但搭配没了"。
+ *
+ * 三条硬约束：
+ *   · 子商品不能是自己（自引用）、也不能**本身是套装**（不嵌套）—— 两者都是环的入口。
+ *     真实业务是"套装由几个单款组成"，一层足够；要嵌套时再开，并同时补环检测。
+ *   · `role` 在同一 (套装, 商品, 色号) 内唯一 —— 「裤子」写两行不是两件裤子，
+ *     是两件裤子该用 `qty=2`。
+ *   · 子颜色必填：留空等于"到展平时再猜"，而猜错的表现是**拿货单少一条裤子**。
+ */
+export function replaceBundleLinks(input: {
+  productId: unknown;
+  itemId?: unknown;
+  aliasKey?: unknown;
+  parts: BundleLinkInput[];
+}): { ok: boolean; error?: string; links: BundleLinkRow[] } {
+  const pid = toId(input?.productId);
+  if (!pid) return { ok: false, error: '产品 id 无效', links: [] };
+  if (!dbGet(`SELECT id FROM pl_products WHERE id = ?`, [pid])) {
+    return { ok: false, error: '产品不存在', links: [] };
+  }
+  const aliasKey = colorAliasKey(String(input?.aliasKey ?? ''));
+  if (!aliasKey) return { ok: false, error: '平台色号不能为空', links: [] };
+  const itemId = str(String(input?.itemId ?? ''), 64);
+
+  const list = Array.isArray(input?.parts) ? input.parts : [];
+  if (!list.length) return { ok: false, error: '至少要有一样子商品（清空请用删除）', links: [] };
+  if (list.length > MAX_BUNDLE_PARTS) {
+    return { ok: false, error: `子商品不能超过 ${MAX_BUNDLE_PARTS} 个`, links: [] };
+  }
+
+  const seen = new Set<string>();
+  const clean: { role: string; childProductId: number; childColor: string; qty: number }[] = [];
+  for (const raw of list) {
+    const role = str(String(raw?.role ?? ''), MAX_BUNDLE_ROLE);
+    if (!role) return { ok: false, error: '部件名称不能为空（上衣/裤子…）', links: [] };
+    const roleKey = role.toLowerCase();
+    if (seen.has(roleKey)) return { ok: false, error: `部件名称重复：${role}`, links: [] };
+    seen.add(roleKey);
+
+    const child = toId(raw?.childProductId);
+    if (!child) return { ok: false, error: `部件「${role}」没有选子商品`, links: [] };
+    if (child === pid) return { ok: false, error: '套装不能把自己当子商品', links: [] };
+    if (!dbGet(`SELECT id FROM pl_products WHERE id = ?`, [child])) {
+      return { ok: false, error: `部件「${role}」的子商品不存在`, links: [] };
+    }
+    // 禁嵌套：子商品本身若是套装，展开就成环（A 含 B、B 含 A 会无限递归）
+    if (dbGet(`SELECT id FROM pl_bundle_links WHERE product_id = ? LIMIT 1`, [child])) {
+      return { ok: false, error: `部件「${role}」本身是套装，不支持套装套套装`, links: [] };
+    }
+
+    const childColor = str(String(raw?.childColor ?? ''), MAX.name);
+    if (!childColor) return { ok: false, error: `部件「${role}」还没定颜色`, links: [] };
+
+    const qty = Math.trunc(Number(raw?.qty ?? 1));
+    if (!Number.isFinite(qty) || qty < 1 || qty > MAX_BUNDLE_QTY) {
+      return { ok: false, error: `部件「${role}」的件数须在 1~${MAX_BUNDLE_QTY}`, links: [] };
+    }
+    clean.push({ role, childProductId: child, childColor, qty });
+  }
+
+  dbTransaction(() => {
+    dbRun(`DELETE FROM pl_bundle_links WHERE product_id = ? AND item_id = ? AND alias_key = ?`, [
+      pid,
+      itemId,
+      aliasKey,
+    ]);
+    for (const c of clean) {
+      dbRun(
+        `INSERT INTO pl_bundle_links (product_id, item_id, alias_key, role, child_product_id, child_color, qty)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [pid, itemId, aliasKey, c.role, c.childProductId, c.childColor, c.qty],
+      );
+    }
+  });
+  return { ok: true, links: bundleLinksOf(pid) };
+}
+
+/** 删掉「某套装 × 某色号」这一组关联（含商品级/产品级，按传入作用域精确删） */
+export function deleteBundleLinks(input: {
+  productId: unknown;
+  itemId?: unknown;
+  aliasKey?: unknown;
+}): { removed: number } {
+  const pid = toId(input?.productId);
+  if (!pid) return { removed: 0 };
+  const aliasKey = colorAliasKey(String(input?.aliasKey ?? ''));
+  if (!aliasKey) return { removed: 0 };
+  const itemId = str(String(input?.itemId ?? ''), 64);
+  const r = dbRun(
+    `DELETE FROM pl_bundle_links WHERE product_id = ? AND item_id = ? AND alias_key = ?`,
+    [pid, itemId, aliasKey],
+  );
+  return { removed: Number(r.changes) || 0 };
+}
+
+/** 解除整个套装关系（产品本身不删） */
+export function clearBundle(productId: unknown): { removed: number } {
+  const pid = toId(productId);
+  if (!pid) return { removed: 0 };
+  const r = dbRun(`DELETE FROM pl_bundle_links WHERE product_id = ?`, [pid]);
+  return { removed: Number(r.changes) || 0 };
+}
+
+/**
+ * 展开一个套装：`(套装产品, 商品ID, 平台色号) → [{部件名, 子商品, 颜色, 件数}]`。
+ *
+ * 查找顺序 **点名先于提示**：`(商品ID, 色号)` → `('', 色号)`。
+ * 商品级是"这件事就这么定"，产品级是"同款套装一般都这样"；顺序反了会让用户
+ * 配了商品级却不生效（改一次不生效，第二次就会以为是没保存）。
+ *
+ * **该色号没配过就报 `matched: false`，绝不回落别的色号**。这一条是"数据精准"的底线：
+ * 拿别的色号顶上，统计会安静地给出**错误的拿货单** —— 少发一条裤子是发货后才发现的事。
+ * 调用方拿到 `matched: false` 应进"待配"队列（可见、可修），不要混进已确认的需求。
+ */
+export function resolveBundleParts(input: {
+  productId?: unknown;
+  itemId?: unknown;
+  color?: unknown;
+}): ResolvedBundle {
+  const pid = toId(input?.productId);
+  if (!pid) return NO_BUNDLE;
+  const rows = bundleLinksOf(pid);
+  if (!rows.length) return NO_BUNDLE;
+
+  const aliasKey = colorAliasKey(String(input?.color ?? ''));
+  if (!aliasKey) return { ...NO_BUNDLE, isBundle: true }; // 色号都没采到 ⇒ 无从判断，按"未配"
+
+  const itemId = str(String(input?.itemId ?? ''), 64);
+  // 点名（item_id 非空且相等）→ 提示（产品级 item_id=''）
+  const sameAlias = rows.filter((r) => r.aliasKey === aliasKey);
+  const scopes: [string, 'item' | 'product'][] = [];
+  if (itemId) scopes.push([itemId, 'item']);
+  scopes.push(['', 'product']);
+  for (const [want, scope] of scopes) {
+    const hit = sameAlias.filter((r) => r.itemId === want);
+    if (!hit.length) continue;
+    return {
+      isBundle: true,
+      matched: true,
+      matchedScope: scope,
+      parts: hit.map((r) => ({
+        role: r.role,
+        childProductId: r.childProductId,
+        childCode: r.childCode,
+        childName: r.childName,
+        color: r.childColor,
+        qty: r.qty,
+      })),
+    };
+  }
+  return { isBundle: true, matched: false, matchedScope: 'none', parts: [] };
+}

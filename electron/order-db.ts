@@ -39,11 +39,15 @@ import {
 } from './db';
 import {
   adoptProduct,
+  bundleRolesOf,
   ensureProductSchema,
+  isBundleProduct,
+  moveProductSupplier,
   orderColorByItemImage,
   productIdByCode,
   productSchemaReady,
   renameProduct,
+  resolveBundleParts,
   resolveOrderSku,
   resolveShopRef,
   setProductCostByCode,
@@ -54,7 +58,8 @@ import { extractOrderMoney } from './orderMoney';
 // 采集侧口径的**纯原语**（收入 = 商品+买家运费；外币 × 汇率 → 分）。
 // 回填走**同一组**函数而不是另写一遍算式 —— 两份口径必然漂移（AGENTS §4.2）。
 import { orderIncomeCcy, parseOrderPropsColor, parseOrderQty, parseSkuProps, toCentsCny } from './aeMoney';
-import { extractSkuFields } from './shopSku';
+import { extractSkuFields, productTitleOf } from './shopSku';
+import { provisionalStyleCode, splitVariantKey, variantKeyOf } from './variantKey';
 // 「平台色名 → 我的色名」的查表/归一（纯函数；口径见其文件头）
 import { colorAliasKey, pickColorAlias, translateColor, type ColorAliasRow } from './colorAlias';
 // 店名归一（纯函数；与店铺主表 UNIQUE / 名称映射同一口径）。订单只存店名原文，
@@ -255,6 +260,13 @@ const ORDER_ITEM_COLS: { name: string; ddl: string }[] = [
   // 取数 `actual > estimate > 缺`；**0 一律当缺失**（见 `src/lib/orderCost.ts`）。
   { name: 'cost_cents', ddl: 'cost_cents INTEGER' },
   { name: 'actual_cost_cents', ddl: 'actual_cost_cents INTEGER' },
+  // 变体键（2026-10-28）：`(店铺, 商品ID, 平台色原文)` 的归一复合键（口径见 `electron/variantKey.ts`）。
+  // **必须在导入那一刻算好并落库**，不在查询时从 `raw_fields` 现算 —— 理由有两条：
+  //   ① `raw_fields` 的键名族不唯一（`产品ID` / `商品ID` / `SKU` / `货号`），`json_extract` 只认
+  //      死键名，换一家店就整批落空且不报错（`outstanding` 现在正是这么写的）；
+  //   ② `color` 列会被人改（真库已有 1 行 `5 → 红色`），而键不能被改 —— 落在独立列上，
+  //      改名只动标签、不动聚合关系。
+  { name: 'variant_key', ddl: "variant_key TEXT NOT NULL DEFAULT ''" },
 ];
 
 /**
@@ -319,7 +331,73 @@ const ORDER_LEGACY_SPINE_DDL = `CREATE TABLE IF NOT EXISTS oi_orders (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`;
 
+/** `oi_variant_keys` 建表语句（`SCHEMA` 与迁移 v12 共用这一份，避免两处形状分叉） */
+const VARIANT_KEYS_DDL = `CREATE TABLE IF NOT EXISTS oi_variant_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    variant_key TEXT NOT NULL UNIQUE,
+    style_color_id INTEGER NOT NULL REFERENCES oi_style_colors(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'auto',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`;
+
+/**
+ * 款合并的两张表：`oi_style_merges`（一次操作 = 一行）+ `oi_style_merge_items`（明细）。
+ *
+ * 为什么必须有明细而不是"改完键就算"：合并的第一条验收是**可拆**（47 listing → 12 款，
+ * 拆开回到 47）。只改 `oi_variant_keys.style_color_id` 的实现，改完源色信息就没了 ——
+ * 那时"拆开"只能靠人回忆原来挂在哪个色上。
+ *
+ * 明细有两种 `kind`，因为"合并"在库里是两件不同的事：
+ *   · `color` **搬色**：目标款下没有同名色 ⇒ 直接把这行款的 `style_id` 改到目标款。
+ *     色 id 不变 ⇒ 键、订单行、套装拆件**一个都不用动**（这是默认路径，最不容易出错）。
+ *   · `key`   **改键**：目标款下已有同名色 ⇒ 把源色的键改指到那条，源色行留着不删
+ *     （留着才拆得回去；它变成源款下一个不挂键的空色，拿货/统计都看不见它）。
+ *
+ * `from_state` 一并记：拆完键要回到 `auto`/`named`，不能一律写成 `merged`
+ * （那会让命名板把它们当成"人工合并过的"而不再提示命名）。
+ */
+const STYLE_MERGES_DDL = `CREATE TABLE IF NOT EXISTS oi_style_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NOT NULL DEFAULT '',
+    source_style_id INTEGER NOT NULL,
+    target_style_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`;
+
+const STYLE_MERGE_ITEMS_DDL = `CREATE TABLE IF NOT EXISTS oi_style_merge_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    merge_id INTEGER NOT NULL REFERENCES oi_style_merges(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    color_id INTEGER NOT NULL DEFAULT 0,
+    variant_key TEXT NOT NULL DEFAULT '',
+    from_style_id INTEGER NOT NULL DEFAULT 0,
+    to_style_id INTEGER NOT NULL DEFAULT 0,
+    from_style_color_id INTEGER NOT NULL DEFAULT 0,
+    to_style_color_id INTEGER NOT NULL DEFAULT 0,
+    from_state TEXT NOT NULL DEFAULT 'auto'
+  )`;
+
 const SCHEMA = [
+  // ── 变体键 → 款色（2026-10-28，订单驱动归类）────────────────────────────────
+  // 这**一张表**同时承担三件事，所以它必须存在（而不是"从订单行现推"）：
+  //   ① 幂等：重导同一批订单时，同键必须落回同一个款色，而不是长出一条新款色；
+  //   ② 可存活：订单被清理后，键与款色的绑定不能跟着消失（从行现推就做不到）；
+  //   ③ 可合并：**N:1 是合法的** —— 真库已有 9 次"一个款色含多个键"的人工合并，
+  //      所以映射必须是表，不能靠"同键行的 style_color_id 相同"反推。
+  //
+  // `state` 三态（都只是**标签**，不参与匹配）：
+  //   `auto`   导入自动建（款色名 = 平台色原文，如 `5` / `Khaki` —— 诚实的不确定，等人命名）
+  //   `named`  人给过名（`oi_style_colors.color` 已换成自家色名）
+  //   `merged` 人显式把它并到别的键的款色上（跨 listing 同款、或同款多色号）
+  //
+  // ⚠️ `variant_key` 上是 UNIQUE，但**不加外键**到 `oi_order_items`（键是值不是行）——
+  //    同键有多行订单，指向任意一行都会随该行删除而级联掉整条记忆。
+  VARIANT_KEYS_DDL,
+  STYLE_MERGES_DDL,
+  STYLE_MERGE_ITEMS_DDL,
+  `CREATE INDEX IF NOT EXISTS idx_oi_style_merge_items_merge ON oi_style_merge_items(merge_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_oi_style_merges_target ON oi_style_merges(target_style_id)`,
   `CREATE TABLE IF NOT EXISTS oi_images (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     fingerprint TEXT NOT NULL UNIQUE,
@@ -414,6 +492,42 @@ const SCHEMA = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(product_id, alias_key)
   )`,
+  // ── 套装部件（2026-10-28）─────────────────────────────────────────────────
+  // 场景：一件实物由多个**款色**组成（上衣与裤子各自不同款、不同色），平台把它当一个商品卖。
+  //
+  // 为什么挂在**订单行**而不是图片：款色归属的权威是订单行（`ITEM_STYLE_COLOR_ID`：
+  //   订单行优先、图回落；所有列表/采购/拣货都按它 JOIN 款色），
+  //   而那张图是"按图找色"的**共享记忆**（内容指纹命中即继承）。一张套装图挂上单个款色后，
+  //   同一张图在别的订单里出现就会被读成那个单品 —— 记忆从此被污染，且没有任何地方能纠正它。
+  //   所以套装事实必须落在**行级**（这张订单到底买的是哪几件），并且读取时**压过**图级记忆。
+  //
+  // `style_color_id` 是 `NOT NULL` 而不是 `DEFAULT 0`：0 是 `oi_order_items.style_color_id` 的
+  //   "未归属"哨兵；部件没有"未归属"这个合法状态 —— 挂不上款色的部件等于没录，写 0 只会让
+  //   下游把它当成一个真实的款色去求和（拿货单上多出一行空白款）。
+  //
+  // `UNIQUE(order_item_id, role)`：同一件实物里「上衣」只能有一个款色。同部位要两件
+  //   （比如套装含两条裤子）用 `qty_per_set=2` 表达，不写两条 —— 两条同 role 会让采购需求算重，
+  //   也会让"这个部位是什么款"失去唯一答案。
+  //
+  // **不存** `bundle_key`：组合键 = 排序后的 `style_color_id` 串，是纯派生值。落库必然与部件表
+  //   漂移（改一个部件忘更新键），需要时用 `bundleKeyOf` 现算。
+  //
+  // 老数据零迁移：表里没行 ⇒ 该行不是套装 ⇒ 读取口径回落图/行的单品款色（见 `itemStyleColorIds`）。
+  `CREATE TABLE IF NOT EXISTS oi_item_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_item_id INTEGER NOT NULL REFERENCES oi_order_items(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    style_color_id INTEGER NOT NULL REFERENCES oi_style_colors(id),
+    qty_per_set INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(order_item_id, role)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_oi_item_parts_item ON oi_item_parts(order_item_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_oi_item_parts_sc ON oi_item_parts(style_color_id)`,
+  VARIANT_KEYS_DDL,
+  `CREATE INDEX IF NOT EXISTS idx_oi_variant_keys_sc ON oi_variant_keys(style_color_id)`,
+  // 「这一行属于哪个变体键」的查询索引（回填、命名页、重导去重都走它）
+  `CREATE INDEX IF NOT EXISTS idx_oi_order_items_variant ON oi_order_items(variant_key)`,
 ];
 
 /** 幂等初始化：迁移 + 建表/索引 + 款式主数据权威交接（应用启动 / 首次使用自动调用）
@@ -425,6 +539,11 @@ export function ensureOrderSchema(): void {
   migrate('order.main', orderMigrationSteps());
   dbMigrate(SCHEMA);
   ensureProductSchema();
+  // 存量收口：v12 只补了**键**，款色要等产品库就绪才建得出来 ⇒ 放在最后补一次。
+  // 幂等（已归的行不再扫）且带 limit，启动路径不会因为老库大而卡住。
+  // 不 catch 的是**归款本身**：这里的失败只有"表结构坏"一种，吞掉就变成"看着升级了却没归类"。
+  // 但要挡住一个真实场景：`oi_variant_keys` 尚未建出来时（迁移中途异常）不该把启动整死。
+  if (tableExists('oi_variant_keys')) backfillVariantStyleColors();
 }
 
 /** `oi_orders` / `oi_images` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`）
@@ -484,6 +603,11 @@ function orderMigrationSteps(): MigrationStep[] {
       name: '删表：退役 oi_queue（待识别队列；云端识别链同步删除）',
       up: dropRetiredOrderQueue,
     },
+    {
+      version: 12,
+      name: '订单行 += variant_key（店铺+商品ID+平台色）· 从 raw_fields 回填 · oi_variant_keys 建表',
+      up: addVariantKeys,
+    },
   ];
 }
 
@@ -516,6 +640,61 @@ function dropRetiredCostMap(): void {
  */
 function dropRetiredOrderQueue(): void {
   dbRun(`DROP TABLE IF EXISTS oi_queue`);
+}
+
+/**
+ * 一行的变体键：`(店铺, 商品ID, 平台色原文)`。
+ *
+ * 色**优先取 `raw_fields` 里的规格串**（`产品属性:Color:5`），只在解析不出时才吃 `color` 列 ——
+ * `color` 列会被人改（真库已有 1 行 `5 → 红色`），而键必须回到事实。
+ * 商品ID 的列名族解析复用 `extractSkuFields`（探测规则只能有一份）。
+ */
+function variantKeyOfRow(shop: string, rawFieldsJson: string, colorColumn: string): string {
+  let rf: Record<string, string> = {};
+  try {
+    const parsed: unknown = JSON.parse(rawFieldsJson || '{}');
+    if (parsed && typeof parsed === 'object') rf = parsed as Record<string, string>;
+  } catch {
+    rf = {};
+  }
+  const { itemId } = extractSkuFields(rf);
+  const colorKey = parseOrderPropsColor(rf) || String(colorColumn ?? '').trim();
+  return variantKeyOf({ shopKey: shop, itemKey: itemId, colorKey });
+}
+
+/**
+ * **v12：订单行 + `variant_key`，并把存量回填**（2026-10-28，订单驱动归类 P1）。
+ *
+ * 键要落库而不是查询时现算，理由见 `ORDER_ITEM_COLS` 里 `variant_key` 的注释。
+ * 只写键、**不建款色**：迁移是纯结构步骤，而建款色要碰产品库（那一刻 `pl_products` 可能还没建）；
+ * 收口交给 `backfillVariantStyleColors()`，它在 `ensureOrderSchema` 末尾、产品库就绪之后跑。
+ */
+function addVariantKeys(): void {
+  const d = getDb();
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(oi_order_items)`).map((c) =>
+    String(c.name),
+  );
+  // 新库：自定义迁移**先于** `dbMigrate(SCHEMA)` 跑，此刻明细表还没建出来。
+  // 直接空转即可 —— 列与键表都会由 SCHEMA 一次建好（v5/v6 几个迁移也是这么守的）。
+  if (!cols.length) return;
+  if (!cols.includes('variant_key')) {
+    dbRun(`ALTER TABLE oi_order_items ADD COLUMN variant_key TEXT NOT NULL DEFAULT ''`);
+  }
+  // 回填要有落点；`SCHEMA` 里那条是给新库的，这里补老库
+  d.exec(VARIANT_KEYS_DDL);
+
+  const rows = dbQuery<{ id: number; shop: string; raw_fields: string; color: string }>(
+    `SELECT oi.id AS id, COALESCE(o.shop, '') AS shop,
+            COALESCE(oi.raw_fields, '') AS raw_fields, COALESCE(oi.color, '') AS color
+       FROM oi_order_items oi
+       LEFT JOIN oi_orders o ON o.id = oi.order_id
+      WHERE COALESCE(oi.variant_key, '') = ''`,
+  );
+  for (const r of rows) {
+    const key = variantKeyOfRow(r.shop, r.raw_fields, r.color);
+    // 键为空（无商品ID）的行保持空串：它们仍走"未归类"，不会被这把键吞掉
+    if (key) dbRun(`UPDATE oi_order_items SET variant_key = ? WHERE id = ?`, [key, r.id]);
+  }
 }
 
 /**
@@ -1195,12 +1374,16 @@ export function insertImage(rec: OrderImageRecord): OrderImageId {
 }
 
 /** 更新图片归属款色（识别确认后挂接）—— **同时**把结论投影到订单行（见 `projectImageColorToOrders`） */
-export function setImageStyleColor(imageId: number, styleColorId: number | null): void {
+export function setImageStyleColor(
+  imageId: number,
+  styleColorId: number | null,
+  opts?: { onlyUnset?: boolean },
+): void {
   dbRun(`UPDATE oi_images SET style_color_id = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [
     styleColorId,
     imageId,
   ]);
-  projectImageColorToOrders(imageId, styleColorId);
+  projectImageColorToOrders(imageId, styleColorId, opts);
 }
 
 /**
@@ -1210,24 +1393,70 @@ export function setImageStyleColor(imageId: number, styleColorId: number | null)
  * 每个消费者各走一遍、各拼一套文本键 ⇒ 3 套需求口径；色名一改，全部文本键失联（用户实报"全待拿"）。
  * 订单行有了 id 列之后，需求/已拿/取图只认 id。
  *
- * 三条纪律：
+ * 四条纪律：
  *   · **一处写**：所有改 `oi_images.style_color_id` 的地方都走 `setImageStyleColor` / 本函数
  *     （多一个写者，就回到"同一事实多个写入方"的老坑）；
  *   · **值未变不写**（`WHERE style_color_id <> ?`）：避免每次进页自愈都白写一遍、把 WAL 撑大；
- *   · 一张图可能被多行订单共用（同单同 SKU 拆行）⇒ 按 `image_id` 全量投影，它们是同一个结论。
+ *   · 一张图可能被多行订单共用（同单同 SKU 拆行）⇒ 按 `image_id` 全量投影，它们是同一个结论；
+ *   · **`onlyUnset` 只在"图不是结论源头"时用**（自动按变体键归款、导入后补投影）：
+ *     一个商品多个色共用一张主图是常态，那些行的 `variant_key` 不同、结论本来也不同。
+ *     全量投影会让后进的那行把先归好的行**改判**（症状：同款两色的单，先导的那色变成后导的色）。
+ *     人工改图（识别确认 / 纠正 / 点名归款）要的就是"这张图整片改成 X"，仍走全量。
  */
-function projectImageColorToOrders(imageId: number | null | undefined, styleColorId: number | null): void {
+function projectImageColorToOrders(
+  imageId: number | null | undefined,
+  styleColorId: number | null,
+  opts?: { onlyUnset?: boolean },
+): void {
   const imgId = Number(imageId);
   if (!imgId) return;
   const next = Number(styleColorId) || 0;
-  dbRun(`UPDATE oi_order_items SET style_color_id = ? WHERE image_id = ? AND COALESCE(style_color_id, 0) <> ?`, [
-    next,
-    imgId,
-    next,
-  ]);
+  dbRun(
+    `UPDATE oi_order_items SET style_color_id = ?
+      WHERE image_id = ? AND COALESCE(style_color_id, 0) <> ?
+      ${opts?.onlyUnset ? 'AND COALESCE(style_color_id, 0) = 0' : ''}`,
+    [next, imgId, next],
+  );
+  // 人工/自动给出的结论同时记进键表：**这是"下次同款同色不用再设一遍"的记忆本体**。
+  // 只写这一处（`projectImageColorToOrders` 是全部分类结论的唯一投影点），就不会出现
+  // "行上归了、键表没记" ⇒ 重导时又新建一个 provisional 款色的分裂。
+  if (next > 0) rememberVariantBinding(next);
 }
 
-/** 从图片反查一次结论并投影（订单落库后用：图可能**在导入前**就已被识别/人工归过色） */
+/**
+ * 把「现在**行上就是这个款色**的键」记进 `oi_variant_keys`（**只补新，不改已有**）。
+ *
+ * 为什么按行上的款色（而不是按 `image_id` 取这张图的全部键）：
+ *   一张图可能被**不同变体键**的行共用（一个商品多个色共用一张主图）。按图取键，会把
+ *   "图上没有、但键有自己的结论"的那些键也一起绑到这次的值上 —— 记忆从此记错，且
+ *   `DO NOTHING` 会让这个错误永久化。按"行上确实持有这个结论"取，作用域与投影一模一样。
+ *
+ * 为什么用 `DO NOTHING` 而不是覆盖：键表是**记忆**，它的价值在于"上次人做过什么"。
+ * 覆盖会让一次误点（把某键临时改到错的款色）永久改写记忆，而正确的那次再也回不来。
+ * 要改结论就走"重新归类"（那条路会经 `setImageStyleColor` 再写一次行，但人的显式合并
+ * 记在 `state='merged'` 上，语义不同）。
+ */
+function rememberVariantBinding(styleColorId: number): void {
+  if (!tableExists('oi_variant_keys')) return;
+  const id = Number(styleColorId) || 0;
+  if (id <= 0) return;
+  dbRun(
+    `INSERT INTO oi_variant_keys (variant_key, style_color_id, state)
+     SELECT DISTINCT oi.variant_key, ?, 'auto'
+       FROM oi_order_items oi
+      WHERE oi.style_color_id = ? AND COALESCE(oi.variant_key, '') <> ''
+     ON CONFLICT(variant_key) DO NOTHING`,
+    [id, id],
+  );
+}
+
+/**
+ * 从图片反查一次结论并投影（订单落库后用：图可能**在导入前**就已被识别/人工归过色）。
+ *
+ * **只补空**：图上的结论是"粗"的（一张图可能挂着几个不同变体键的行），它只能补到
+ * 还没有结论的行上；已经有结论的行按键更细，不许被图改判。全量把图上的值刷下去，
+ * 症状是"先导的那色被后导的那色顶掉"。
+ */
 function syncOrderClassificationFromImage(imageId: number | null | undefined): void {
   const imgId = Number(imageId);
   if (!imgId) return;
@@ -1236,7 +1465,46 @@ function syncOrderClassificationFromImage(imageId: number | null | undefined): v
     [imgId],
   );
   if (!row) return;
-  projectImageColorToOrders(imgId, row.style_color_id);
+  projectImageColorToOrders(imgId, row.style_color_id, { onlyUnset: true });
+}
+
+/**
+ * 「这条归类结论是**系统猜的、还没人认过**」的**唯一**判据（SQL 片段；`col` 给 `style_color_id` 表达式）。
+ *
+ * 两条判据，全部取**可重算的事实**，不存标记位、不看名字像不像：
+ *   ① 该色上没有任何 `state <> 'auto'` 的键绑定 —— 命名（`named`）/ 人工合并（`merged`）都算人认过；
+ *   ② 色名还是订单原文：存在挂在它上面的行，其 `color` 与色名逐字相同 ——
+ *      用户在命名板把 `Khaki` 改成 `卡其` 的那一刻，这条就不成立了
+ *      （与 `variantNamingBoard` 的 `named` 派生**同一口径**）。
+ * 两条都成立才算"猜的"；少一条一律按"人的结论"对待 —— 宁可少改几行，不可推翻人的判定。
+ *
+ * 为什么必须有它（2026-10-28 P5 收尾实测）：P2 让**导入即归类**以后，图和行上永远有值，
+ * 旧判据「未归款 / 占位色」再也不可能成立 ⇒ 「先导订单、后配映射」的回填**静默失效**：
+ * 用户配完映射看不到任何变化，和"没配过"长得一模一样（铁律④的静默失败）。
+ * 判据必须从"有没有值"换成"这个值是不是猜的"。
+ *
+ * @param col 必须是能安全内联的**列表达式**（如 `i.style_color_id` / `t.style_color_id`），
+ *            不接受外部字符串 —— 本片段直接拼进 SQL。
+ */
+function guessedScSql(col: string): string {
+  return `(COALESCE(${col}, 0) = 0 OR (
+    NOT EXISTS (SELECT 1 FROM oi_variant_keys v
+                 WHERE v.style_color_id = ${col} AND v.state <> 'auto')
+    AND EXISTS (SELECT 1 FROM oi_order_items x
+                  JOIN oi_style_colors s2 ON s2.id = ${col}
+                 WHERE x.style_color_id = ${col}
+                   AND TRIM(COALESCE(x.color, '')) = TRIM(COALESCE(s2.color, '')))
+  ))`;
+}
+
+/** `guessedScSql` 的 JS 版（同一份判据，靠 `(SELECT ? AS style_color_id)` 造一个单行表来复用片段） */
+function isGuessedStyleColor(styleColorId: number): boolean {
+  const id = Math.trunc(Number(styleColorId) || 0);
+  const r = dbGet<{ g: number }>(
+    `SELECT ${guessedScSql('t.style_color_id')} AS g FROM (SELECT ? AS style_color_id) t`,
+    [id],
+  );
+  return Number(r?.g ?? 0) === 1;
 }
 
 /**
@@ -1495,6 +1763,8 @@ export function assignOrderStyle(input: {
   skuBackfill: SkuBackfillOutcome;
   /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
   colorAlias: ColorAliasRemembered | null;
+  /** 归到**套装款**时自动展开的部位快照（单品行为 `notBundle`；不影响归属是否成功） */
+  bundleMaterialize: MaterializeOutcome;
 } {
   const d = getDb();
   const color = String(input.color ?? '').trim();
@@ -1561,7 +1831,12 @@ export function assignOrderStyle(input: {
     styleCode: assigned.styleCode,
     color,
   });
-  return { ...assigned, skuBackfill, colorAlias };
+  // ⭐ 套装展开（同一条纪律：事务外、失败不影响已提交的归属）：
+  //   用户把这一行归到**套装款**后，部件应当自动出现 —— 否则"今天要拿哪些款色码"永远是空的，
+  //   而用户得逐个部位手填，等于把产品库已经定义过的目录事实再抄一遍。
+  //   它内部**不猜**：色号没配过配色 ⇒ `missingColor` + 一件也不写（宁可当单品等人补）。
+  const bundleMaterialize = materializeItemParts(input.orderId);
+  return { ...assigned, skuBackfill, colorAlias, bundleMaterialize };
 }
 
 /** 修改款式展示名（款编码级，全局生效；仅展示，不参与指纹匹配）。
@@ -2198,18 +2473,1024 @@ function rememberColorFromAssignment(input: {
  * "订单看着导入成功却没归款"变成查不出的问题。订单此时已落库，调用方重试会走 `insertOrder`
  * 的幂等分支并**再次尝试本函数** —— 也就是一次可自愈的重试。
  */
+/** 变体键归类的统计（回执 / 排障用；不参与业务判定） */
+export interface VariantAssignStats {
+  /** 扫到的候选行（键非空且还没归款） */
+  candidateRows: number;
+  /** 其中被落上款色的行 */
+  fixedRows: number;
+  /** 本次**新建**的键→款色绑定数（判断"重导会不会涨"看它：稳态应为 0） */
+  createdStyleColors: number;
+}
+
+/**
+ * 键 → 款色：**取已存在的那条，没有就建一条 provisional**。
+ *
+ * 这是"同样的商品、同样的图片不用再人工设一次"的落点 —— 同键第二次进来直接命中，
+ * 一条 `oi_style_colors` 都不会新增。
+ *
+ * 三条纪律：
+ *   · **款编码由商品ID 推出**（`provisionalStyleCode`）而不是自增：自增只在"这次不撞"上成立，
+ *     重导/换店会让同一件货拿到两个编码，款又裂成两个 —— 那正是这轮要消灭的东西；
+ *   · **款色名留平台色原文**（`5` / `Khaki`），不猜标准色名：裸数字会让人警惕去看图，
+ *     写成"黑色"就没人再核了（真库已有一批 `红色` 底下是黄/黑/黑/红）；
+ *   · **产品库补一行空名占位**：供应商/成本/拿货都按款挂，没有这行就什么都挂不上。
+ *     名字故意留空 —— 命名是要人给的判断，自动填一个"像名字"的东西只会让人不再去核。
+ */
+function ensureStyleColorByVariant(
+  key: string,
+  itemKey: string,
+  colorLabel: string,
+  stats?: { createdStyleColors: number },
+): number {
+  const known = dbGet<{ style_color_id: number }>(
+    `SELECT style_color_id FROM oi_variant_keys WHERE variant_key = ?`,
+    [key],
+  );
+  const knownId = Number(known?.style_color_id ?? 0);
+  // 款色可能已被删（`ON DELETE CASCADE` 会把绑定行一起带走，但也可能被手工删过）⇒ 兜一次
+  if (knownId > 0 && dbGet<{ id: number }>(`SELECT id FROM oi_style_colors WHERE id = ?`, [knownId])) {
+    return knownId;
+  }
+  const code = provisionalStyleCode(itemKey);
+  // 没商品ID 就推不出款编码 ⇒ 放弃（调用方本来就只在键非空时才走到这里，这是最后一道）
+  if (!code) return 0;
+  return dbTransaction(() => {
+    const style = ensureStyleByCode(code);
+    const color = String(colorLabel ?? '').trim() || MAPPED_FALLBACK_COLOR;
+    const sc = ensureStyleColor(style.id, style.code, color);
+    if (productSchemaReady()) {
+      adoptProduct({ code: style.code, name: '' });
+    }
+    dbRun(
+      `INSERT INTO oi_variant_keys (variant_key, style_color_id, state)
+       VALUES (?, ?, 'auto')
+       ON CONFLICT(variant_key) DO UPDATE SET
+         style_color_id = excluded.style_color_id,
+         updated_at = datetime('now','localtime')`,
+      [key, sc.id],
+    );
+    if (stats) stats.createdStyleColors += 1;
+    return sc.id;
+  });
+}
+
+/**
+ * 把一行的款色按**变体键**落定（行 + 图两处都写；图只补**还没有结论**的其它行）。
+ *
+ * 键**回读**库里那一列而不是现算：键只在导入时算一次，这里再算一遍就是第二份实现
+ * （改了一处忘了另一处 ⇒ 同一行两个键，症状是"明明同款却分成两派"）。
+ *
+ * 只补空：行上已有款色（人工纠正 / 识别结论 / 上次归过）一律不动 —— 这条以前只是注释，
+ * 实现却是经 `setImageStyleColor` 全量投影（把同图其它键的行也一起改判）。现在用
+ * `{ onlyUnset: true }` 让它和注释一致。
+ */
+function assignByVariantKey(
+  rowId: number,
+  rec: Pick<OrderRecord, 'imageId' | 'shop' | 'color' | 'rawFields'>,
+  itemId: string,
+  stats?: { createdStyleColors: number },
+): void {
+  const id = Number(rowId) || 0;
+  const stored =
+    id > 0
+      ? dbGet<{ variant_key: string; style_color_id: number; color: string }>(
+          `SELECT COALESCE(variant_key, '') AS variant_key,
+                  COALESCE(style_color_id, 0) AS style_color_id,
+                  COALESCE(color, '') AS color
+             FROM oi_order_items WHERE id = ?`,
+          [id],
+        )
+      : undefined;
+  if (stored && Number(stored.style_color_id) > 0) return; // 不覆盖已有的结论
+  const key =
+    String(stored?.variant_key ?? '') ||
+    variantKeyOf({ shopKey: rec.shop, itemKey: itemId, colorKey: rec.color });
+  if (!key) return;
+  const label = String(stored?.color ?? '').trim() || String(rec.color ?? '').trim();
+  const scId = ensureStyleColorByVariant(key, itemId, label, stats);
+  if (!scId) return;
+  // **只补空**（本函数上面那句"只补空"必须真的成立）：一张图可能被同商品的几个色共用，
+  // 全量投影会把别的键已经归好的行改判成这一行的色。
+  if (rec.imageId) setImageStyleColor(rec.imageId, scId, { onlyUnset: true });
+  if (id > 0) {
+    dbRun(
+      `UPDATE oi_order_items SET style_color_id = ? WHERE id = ? AND COALESCE(style_color_id, 0) <> ?`,
+      [scId, id, scId],
+    );
+  }
+}
+
+/**
+ * **存量收口**：把「有键但未归款」的行按变体键归上（幂等；`ensureOrderSchema` 末尾自愈跑一次）。
+ *
+ * 为什么要有：键是 v12 迁移补写的，而**款色**要在产品库就绪之后才能建（迁移那一刻可能还没有
+ * `pl_products`）。两件事分两步，历史 75 行才不会在升级后一直停在"未归类"。
+ *
+ * `limit`：单次最多处理这么多行 —— 启动路径上的自愈不能因为库里有几万条老数据就卡住启动。
+ * 返回的 `candidateRows` 与 `fixedRows` 不等，说明中途有行建不出款（无商品ID / 建表失败），
+ * 这种情况要**报出来**而不是静默（回执里能看见）。
+ */
+export function backfillVariantStyleColors(limit = 2000): VariantAssignStats {
+  const stats: VariantAssignStats = { candidateRows: 0, fixedRows: 0, createdStyleColors: 0 };
+  if (!tableExists('oi_variant_keys')) return stats;
+  // ① 先把**已经归类过**的行补记成绑定（存量那 65 行是人工归的，键表里一条都没有）。
+  //    不补的后果：一旦订单被清理重导，同一件货会新建一套 provisional 款色，
+  //    与人工那个款分裂成两个 —— 正是这轮要消灭的现象。`DO NOTHING` 保住已有记忆。
+  const needBind = dbGet<{ one: number }>(
+    `SELECT 1 AS one FROM oi_order_items oi
+      WHERE COALESCE(oi.variant_key, '') <> '' AND COALESCE(oi.style_color_id, 0) > 0
+        AND NOT EXISTS (SELECT 1 FROM oi_variant_keys v WHERE v.variant_key = oi.variant_key)
+      LIMIT 1`,
+  );
+  if (needBind) {
+    dbRun(
+      `INSERT INTO oi_variant_keys (variant_key, style_color_id, state)
+       SELECT oi.variant_key, MIN(oi.style_color_id), 'auto'
+         FROM oi_order_items oi
+        WHERE COALESCE(oi.variant_key, '') <> '' AND COALESCE(oi.style_color_id, 0) > 0
+        GROUP BY oi.variant_key
+       ON CONFLICT(variant_key) DO NOTHING`,
+    );
+  }
+  const rows = dbQuery<{
+    id: number;
+    image_id: number | null;
+    shop: string;
+    color: string;
+    raw_fields: string;
+  }>(
+    `SELECT oi.id AS id, oi.image_id AS image_id, COALESCE(o.shop, '') AS shop,
+            COALESCE(oi.color, '') AS color, COALESCE(oi.raw_fields, '') AS raw_fields
+       FROM oi_order_items oi
+       JOIN oi_orders o ON o.id = oi.order_id
+      WHERE COALESCE(oi.style_color_id, 0) = 0
+        AND COALESCE(oi.variant_key, '') <> ''
+      ORDER BY oi.id
+      LIMIT ?`,
+    [Math.max(1, Number(limit) || 2000)],
+  );
+  stats.candidateRows = rows.length;
+  for (const r of rows) {
+    let rf: Record<string, string> = {};
+    try {
+      const parsed: unknown = JSON.parse(r.raw_fields || '{}');
+      if (parsed && typeof parsed === 'object') rf = parsed as Record<string, string>;
+    } catch {
+      rf = {};
+    }
+    const { itemId } = extractSkuFields(rf);
+    if (!itemId) continue;
+    assignByVariantKey(
+      r.id,
+      { imageId: r.image_id, shop: r.shop, color: r.color, rawFields: rf },
+      itemId,
+      stats,
+    );
+    const after = dbGet<{ style_color_id: number }>(
+      `SELECT COALESCE(style_color_id, 0) AS style_color_id FROM oi_order_items WHERE id = ?`,
+      [r.id],
+    );
+    if (Number(after?.style_color_id ?? 0) > 0) stats.fixedRows += 1;
+  }
+  return stats;
+}
+
+// ─────────────────────────────────────────── 命名板（P3）：把「平台原文」变成「人给的词」
+
+/**
+ * 一个色键在命名板上的投影（**一个变体键一行**，不是一个订单行一行）。
+ *
+ * 为什么按键而不是按款色聚合：一个款色可能被多个键指向（那 9 次人工跨 listing 合并就是
+ * N:1）。命名板要显示「这个键的平台原文是什么」，而那正是 58 个键各自的事实；
+ * 拿款色当行的话，一个色下有 3 个 `5/6/10` 就只能显示其中一个的原文。
+ */
+export interface VariantColorItem {
+  styleColorId: number;
+  styleCode: string;
+  styleName: string;
+  /** 当前落库的色名（可能就是平台原文） */
+  colorName: string;
+  /** 平台色原文（取该键下订单行的 `color` 列，导入时原样落的值） */
+  colorRaw: string;
+  /**
+   * 是否**已经有人给过名字**。
+   *
+   * 派生，不存档：`colorName` 与 `colorRaw` 不同 ⇒ 有人改过。
+   * 为什么不读 `oi_variant_keys.state`：存量那 65 行是人工归类后回填的绑定，`state` 一律
+   * 写成 `auto`（写的时候不知道人改没改过），拿它判"未命名"会把 13 个人工色名也算成待办。
+   * 而"名字还是不是平台原文"是能从数据本身重算的事实，且改名后立刻成立。
+   */
+  named: boolean;
+  /** 该键下的订单行数 */
+  orderRows: number;
+  /** 该键下的件数（`SUM(qty)`；为 0 时用行数兜，见下方注释） */
+  qty: number;
+  /** 代表图（本地路径，渲染层用 `orderImageThumbBatch` 换成 dataURL） */
+  localPath: string;
+}
+
+/** 命名板的一组 = 一个 listing（`店铺 + 商品ID`）下的全部色键 */
+export interface VariantNamingGroup {
+  shop: string;
+  itemId: string;
+  /** 产品标题（`raw_fields` 里那一行；取不到时回落商品ID，**不冒充款名**） */
+  title: string;
+  /**
+   * 组内各色共属的款 id（`0` = 这组的色分属多个款 —— 人工做过跨 listing 合并，
+   * 整组改款名/厂家会改到别人头上，所以那种情况不给整组编辑入口）。
+   */
+  styleId: number;
+  styleCode: string;
+  /** 款名（权威在 `pl_products.name`；占位款为空串 = 还没人给它起名） */
+  styleName: string;
+  /** 厂家 id（0 = 未指定）。拿货按厂家统计靠它，缺了这些款就落在「未指定厂家」里 */
+  supplierId: number;
+  /** 组内涉及的款数（>1 时说明这是合并过的组，界面据此说明为什么不能整组改） */
+  styleCount: number;
+  colors: VariantColorItem[];
+}
+
+export interface VariantNamingBoard {
+  groups: VariantNamingGroup[];
+  /** 还没人给过名字的**键**数（页签角标 / 折叠标题读它） */
+  unnamedKeys: number;
+  /** 参与统计的键总数（分母；两者相等时说明"全都命名过了"） */
+  totalKeys: number;
+}
+
+/**
+ * 命名板取数：按 listing 分组，组内是色键。
+ *
+ * 三条口径：
+ *   ① **只取有键的**（`oi_variant_keys` 是记忆本体），没有键的款色不在这里出现 ——
+ *      它们的归属不由订单驱动，给了入口反而会让人以为能在这一页重建。
+ *   ② `colorRaw` 取该键下订单行的 `color`（导入时原样落库的值），**不从键里反解**：
+ *      键里的色段是 `toNameKey` 归一过的（`Khaki` → `khaki`），拿来展示会让人以为
+ *      平台写的就是小写。
+ *   ③ `title` 用 `extractSkuFields`（与导入 / 采集同**一份**实现）：标题不是键，只用于
+ *      "这行是哪个商品"的可读性，所以取不到就回落商品ID，不猜。
+ */
+export function variantNamingBoard(limit = 400): VariantNamingBoard {
+  if (!tableExists('oi_variant_keys')) return { groups: [], unnamedKeys: 0, totalKeys: 0 };
+  const rows = dbQuery<{
+    variant_key: string;
+    style_color_id: number;
+    style_id: number;
+    color_name: string;
+    style_code: string;
+    shop: string;
+    order_rows: number;
+    qty: number;
+    color_raw: string;
+    local_path: string;
+    raw_fields: string;
+    state: string;
+  }>(
+    `SELECT v.variant_key AS variant_key,
+            v.style_color_id AS style_color_id,
+            COALESCE(sc.style_id, 0) AS style_id,
+            COALESCE(sc.color, '') AS color_name,
+            COALESCE(st.code, '') AS style_code,
+            COALESCE(v.state, 'auto') AS state,
+            (SELECT COALESCE(o.shop, '')
+               FROM oi_order_items x JOIN oi_orders o ON o.id = x.order_id
+              WHERE x.variant_key = v.variant_key LIMIT 1) AS shop,
+            (SELECT COUNT(*) FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS order_rows,
+            (SELECT COALESCE(SUM(COALESCE(x.qty, 0)), 0)
+               FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS qty,
+            (SELECT MAX(COALESCE(x.color, ''))
+               FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS color_raw,
+            (SELECT COALESCE(i.local_path, '')
+               FROM oi_order_items x JOIN oi_images i ON i.id = x.image_id
+              WHERE x.variant_key = v.variant_key AND COALESCE(i.local_path, '') <> ''
+              ORDER BY x.id LIMIT 1) AS local_path,
+            (SELECT COALESCE(x.raw_fields, '')
+               FROM oi_order_items x WHERE x.variant_key = v.variant_key
+              ORDER BY x.id LIMIT 1) AS raw_fields
+       FROM oi_variant_keys v
+       JOIN oi_style_colors sc ON sc.id = v.style_color_id
+       JOIN oi_styles st ON st.id = sc.style_id
+      ORDER BY v.variant_key
+      LIMIT ?`,
+    [Math.max(1, Number(limit) || 400)],
+  );
+
+  const prodMeta = productMetaMap();
+  const catalogTitles = shopItemTitleMap(rows.map((r) => splitVariantKey(r.variant_key).itemKey));
+  const groups = new Map<string, VariantNamingGroup>();
+  /** 组 → 该组涉及的全部款 id（用来判"这组的色是不是分属几个款"） */
+  const groupStyles = new Map<string, Set<number>>();
+  let unnamedKeys = 0;
+  for (const r of rows) {
+    const parts = splitVariantKey(r.variant_key);
+    const shop = String(r.shop ?? '').trim() || parts.shopKey;
+    const itemId = parts.itemKey;
+    if (!itemId) continue; // 键里没商品ID（不该有：`variantKeyOf` 就不产出这种键）⇒ 不入板
+    let rf: Record<string, string> = {};
+    try {
+      const parsed: unknown = JSON.parse(r.raw_fields || '{}');
+      if (parsed && typeof parsed === 'object') rf = parsed as Record<string, string>;
+    } catch {
+      rf = {};
+    }
+    const { title } = extractSkuFields(rf);
+    const shownTitle = title || productTitleOf(rf) || catalogTitles.get(itemId) || '';
+    const colorRaw = String(r.color_raw ?? '').trim();
+    const colorName = String(r.color_name ?? '').trim();
+    // "未命名" = 名字仍是**平台原文**（或仍是兜底占位）。空原文的键在导入时被写成
+    // `未分类`，所以那一档要跟兜底常量比，否则空色键永远算"已命名"。
+    const named =
+      String(r.state ?? '') !== 'auto' ||
+      (colorRaw
+        ? toNameKey(colorName) !== toNameKey(colorRaw)
+        : toNameKey(colorName) !== toNameKey(MAPPED_FALLBACK_COLOR));
+    if (!named) unnamedKeys += 1;
+    const gk = `${shop}\u0000${itemId}`;
+    let g = groups.get(gk);
+    if (!g) {
+      g = {
+        shop,
+        itemId,
+        title: shownTitle || itemId,
+        styleId: 0,
+        styleCode: String(r.style_code ?? ''),
+        styleName: '',
+        supplierId: 0,
+        styleCount: 0,
+        colors: [],
+      };
+      groups.set(gk, g);
+      groupStyles.set(gk, new Set());
+    }
+    const sid = Number(r.style_id) || 0;
+    if (sid) groupStyles.get(gk)?.add(sid);
+    g.colors.push({
+      styleColorId: Number(r.style_color_id) || 0,
+      styleCode: String(r.style_code ?? ''),
+      styleName: prodMeta.get(String(r.style_code ?? ''))?.name ?? '',
+      colorName,
+      colorRaw,
+      named,
+      orderRows: Number(r.order_rows) || 0,
+      // `SUM(qty)` 在存量行上可能全为 NULL（早期导入没写件数）⇒ 用行数兜，
+      // 不能让命名板显示"0 件"——那会让人以为这批货没量、不值得命名。
+      qty: Number(r.qty) || Number(r.order_rows) || 0,
+      localPath: String(r.local_path ?? ''),
+    });
+  }
+
+  const list = [...groups.values()];
+  // 款信息（组级）：只有全组的色都挂在**同一个款**下，才允许整组改款名/厂家 ——
+  // 那种 1 个 listing 的色被人工分到两个款的组（跨 listing 合并的产物）如果也给你一个
+  // 输入框，保存一次就会把另一个款的名字/厂家一起改掉，而界面上完全看不出来。
+  for (const g of list) {
+    const ids = groupStyles.get(`${g.shop}\u0000${g.itemId}`) ?? new Set<number>();
+    g.styleCount = ids.size;
+    if (ids.size === 1) {
+      g.styleId = [...ids][0];
+      const meta = prodMeta.get(g.styleCode);
+      g.styleName = meta?.name ?? '';
+      g.supplierId = meta?.supplierId ?? 0;
+    }
+  }
+  // 组内：未命名的排前面（要人做的事在眼前），同状态按平台原文排（同一 listing 的
+  // `1/2/3` 是连续的，人读起来像在核对一个色卡）。
+  for (const g of list) {
+    g.colors.sort((a, b) => {
+      if (a.named !== b.named) return a.named ? 1 : -1;
+      return a.colorRaw.localeCompare(b.colorRaw, 'zh-Hans-CN', { numeric: true });
+    });
+  }
+  // 组间：有待办的排前面；同为待办时按键数多的在前（一屏内先解决大头）
+  list.sort((a, b) => {
+    const ua = a.colors.filter((c) => !c.named).length;
+    const ub = b.colors.filter((c) => !c.named).length;
+    if (ua !== ub) return ub - ua;
+    return a.itemId.localeCompare(b.itemId);
+  });
+  return { groups: list, unnamedKeys, totalKeys: rows.length };
+}
+
+/**
+ * 商品ID → 采集库里的标题（**第三顺位**兜底，只用于展示）。
+ *
+ * 真库实测它只覆盖 37 个商品里的 3 个（`pl_shop_items` 是采集来的，与订单不是同一批），
+ * 所以它排在「订单原文的产品信息首行」之后 —— 订单自己的原文才是这批单的共同事实。
+ */
+function shopItemTitleMap(itemIds: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const ids = [...new Set(itemIds.map((s) => String(s ?? '').trim()).filter(Boolean))];
+  if (!ids.length || !tableExists('pl_shop_items')) return out;
+  const holes = ids.map(() => '?').join(',');
+  for (const r of dbQuery<{ item_id: string; title: string }>(
+    `SELECT item_id, title FROM pl_shop_items
+      WHERE item_id IN (${holes}) AND COALESCE(title, '') <> ''`,
+    ids,
+  )) {
+    const id = String(r.item_id ?? '');
+    const t = String(r.title ?? '').trim();
+    // 同一 itemId 多处采集时取最长的标题（与 `queueGroups` 同一取舍：更长的信息更多）
+    if (id && t && t.length > (out.get(id)?.length ?? 0)) out.set(id, t);
+  }
+  return out;
+}
+
+/** 款编码 → { 款名, 厂家 }（命名板显示与「未指定厂家」计数用；产品库没建时返回空表，不报错） */
+function productMetaMap(): Map<string, { name: string; supplierId: number }> {
+  const out = new Map<string, { name: string; supplierId: number }>();
+  if (!productSchemaReady()) return out;
+  for (const r of dbQuery<{ code: string; name: string; supplier_id: number }>(
+    `SELECT code, name, supplier_id FROM pl_products WHERE code <> ''`,
+  )) {
+    const code = String(r.code ?? '');
+    if (!code) continue;
+    out.set(code, {
+      name: String(r.name ?? '').trim(),
+      supplierId: Number(r.supplier_id) || 0,
+    });
+  }
+  return out;
+}
+
+export interface RenameColorOutcome {
+  ok: boolean;
+  error?: string;
+  styleColorId: number;
+  name: string;
+  /** 这次改名覆盖到的键数（N:1 合并过的色会一次改到多行） */
+  keys: number;
+}
+
+/**
+ * 给一个款色起名（命名板唯一的写入口）。
+ *
+ * 四条纪律：
+ *   ① **只改 `oi_style_colors.color`，不改 `code`**：`code` 是拿货单/对账引用的稳定标识
+ *      （形如 `SUST-001-5`），跟着改会让历史单据指向一个不存在的编码。现有库里就有先例
+ *      （`color=深蓝` 而 `code=SUST-001-5`）。
+ *   ② **同款下不允许重名**：`oi_style_colors` 本来就有 `UNIQUE(style_id, color)`，重名会被
+ *      SQLite 自己拦下 —— 但拦下来的是 `UNIQUE constraint failed: oi_style_colors.style_id,
+ *      oi_style_colors.color` 这种原话（变异测试真跑出来过第 2761 行那条断言就是这么红的），
+ *      界面只能原样吐给用户。这里提前判一次，是为了给一句能照着做的话：
+ *      **要合并去「映射与关联」，这里只负责起名**。
+ *   ③ **空名/超长一律拒绝**：空名会让下游 `if (!color)` 的分支把这一行重新当"没色"
+ *      （拿货、算钱都读它），等于把刚做完的事撤销掉。
+ *   ④ 顺带把该款色下所有键的 `state` 置 `named` —— 它是"人碰过这条"的记账，
+ *      不参与匹配（匹配只用 `variant_key`）。
+ */
+export function renameStyleColor(styleColorId: number, name: unknown): RenameColorOutcome {
+  const id = Number(styleColorId) || 0;
+  const next = String(name ?? '').trim();
+  const fail = (error: string): RenameColorOutcome => ({ ok: false, error, styleColorId: id, name: next, keys: 0 });
+  if (id <= 0) return fail('invalid styleColorId');
+  if (!next) return fail('色名不能为空');
+  if (next.length > 40) return fail('色名太长（最多 40 字）');
+  const row = dbGet<{ id: number; style_id: number; color: string }>(
+    `SELECT id, style_id, COALESCE(color, '') AS color FROM oi_style_colors WHERE id = ?`,
+    [id],
+  );
+  if (!row) return fail('款色不存在（可能已被删除）');
+  const styleId = Number(row.style_id) || 0;
+  // 同款重名守卫：**排除自己**（改回同一个名字是幂等操作，不该报错）
+  const dup = dbGet<{ id: number; code: string }>(
+    `SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ? AND id <> ? LIMIT 1`,
+    [styleId, next, id],
+  );
+  if (dup) return fail(`这个款下已经有同名颜色了（${String(dup.code)}），要合并请用「映射与关联」`);
+  if (String(row.color ?? '') === next) {
+    // 幂等：目标值 == 现值 ⇒ 不写。派生非幂等就必然漂移（重名检查、state 记账都别重复做）
+    const keys = Number(
+      dbGet<{ n: number }>(`SELECT COUNT(*) AS n FROM oi_variant_keys WHERE style_color_id = ?`, [id])?.n ?? 0,
+    );
+    return { ok: true, styleColorId: id, name: next, keys };
+  }
+  const keys = dbTransaction(() => {
+    dbRun(`UPDATE oi_style_colors SET color = ? WHERE id = ?`, [next, id]);
+    dbRun(
+      `UPDATE oi_variant_keys SET state = 'named', updated_at = datetime('now','localtime')
+        WHERE style_color_id = ? AND state = 'auto'`,
+      [id],
+    );
+    return Number(
+      dbGet<{ n: number }>(`SELECT COUNT(*) AS n FROM oi_variant_keys WHERE style_color_id = ?`, [id])?.n ?? 0,
+    );
+  });
+  return { ok: true, styleColorId: id, name: next, keys };
+}
+
+export interface SaveStyleBasicsOutcome {
+  ok: boolean;
+  error?: string;
+  styleId: number;
+  /** 款编码（`oi_styles.code` ≡ `pl_products.code`，写产品主数据靠它定位） */
+  styleCode: string;
+  name: string;
+  supplierId: number;
+}
+
+/**
+ * 给一个**款**起名 / 指定厂家（命名板组头的写入口）。
+ *
+ * 为什么这两件事同一个入口：它们在同一条判断链上 —— 人看的是一个 listing 的图，
+ * 心里同时决定了"这是个什么款"和"从哪家拿"。分成两个入口就得在同一处点两次、
+ * 而两次之间界面还可能被别的刷新打断。
+ *
+ * 落点纪律：
+ *   ① **只写产品主数据**（`pl_products.name` / `supplier_id`），`oi_styles` 只读不写 ——
+ *      款名/厂家的唯一权威在产品域（见文件头 ADR-002 C1），订单库再存一份就是两套口径。
+ *   ② 走**窄接口** `renameProduct` / `moveProductSupplier`，不整行 upsert：
+ *      全量 upsert 会把没展示的列按默认值重置（静默清空比报错更难查）。
+ *   ③ **幂等**：目标值 == 现值就不写（重导/重复回车不该产生 updated_at 抖动）。
+ *   ④ `supplierId` 只在**显式传入**时改（`undefined` = 不动），而 `0` 是合法的"清空厂家"。
+ *   ⑤ 厂家不存在时 `moveProductSupplier` 会抛 —— 这里接住转成人话，别让 IPC 层吐英文栈。
+ */
+export function saveStyleBasics(
+  styleId: number,
+  patch: { name?: unknown; supplierId?: unknown } = {},
+): SaveStyleBasicsOutcome {
+  const id = Number(styleId) || 0;
+  const name = patch?.name === undefined ? undefined : String(patch.name ?? '').trim();
+  const supplierId = patch?.supplierId === undefined ? undefined : Number(patch.supplierId);
+  const fail = (error: string, code = ''): SaveStyleBasicsOutcome => ({
+    ok: false,
+    error,
+    styleId: id,
+    styleCode: code,
+    name: name ?? '',
+    supplierId: 0,
+  });
+  if (id <= 0) return fail('invalid styleId');
+  if (name !== undefined && name.length > 60) return fail('款名太长（最多 60 字）');
+  if (supplierId !== undefined && (!Number.isFinite(supplierId) || supplierId < 0)) {
+    return fail('厂家参数不合法');
+  }
+  if (name === undefined && supplierId === undefined) return fail('没有要改的内容');
+  const row = dbGet<{ code: string }>(`SELECT COALESCE(code, '') AS code FROM oi_styles WHERE id = ?`, [id]);
+  if (!row) return fail('款不存在（可能已被删除）');
+  const code = String(row.code ?? '').trim();
+  if (!code) return fail('这个款没有编码，挂不上产品主数据');
+  ensureProductSchema();
+  // ⚠️ 两步必须**同一个事务**：改款名在 `pl_products.name`，改厂家要顺带校验"厂家存在吗"。
+  //    先写名再校验厂家的写法，在厂家不存在时会把名字留在库里、却回一个 `ok:false`
+  //    —— 界面说"没保存"，库里已经变了（冒烟 [15] 的变异测试真跑出来过）。
+  try {
+    dbTransaction(() => {
+      if (name !== undefined) renameProduct(code, name);
+      if (supplierId !== undefined) moveProductSupplier(code, supplierId);
+    });
+  } catch (e: unknown) {
+    return fail(e instanceof Error ? e.message : '保存失败', code);
+  }
+  const after = dbGet<{ name: string; supplier_id: number }>(
+    `SELECT COALESCE(name, '') AS name, COALESCE(supplier_id, 0) AS supplier_id
+       FROM pl_products WHERE code = ?`,
+    [code],
+  );
+  return {
+    ok: true,
+    styleId: id,
+    styleCode: code,
+    name: String(after?.name ?? ''),
+    supplierId: Number(after?.supplier_id) || 0,
+  };
+}
+
+// ── 款合并（P4）：同厂家下 N 个"其实是同一件货"的款 → 1 个，且可拆 ──────────────
+//
+// 为什么必须存在：默认 **1 个 listing = 1 个款**，这是"导入即可统计"的前提，代价是
+// 同款开了 3 个链接就变成 3 个款（真库 47 个 listing 收敛后本该是 12 个款）。
+// 合并只影响"按款汇总"的口径，不影响任何原始数据 —— 所以它**不是门**，不做也能拿货。
+
+/** 候选合并里的一个款（够人眼判断"是不是同一件货"的信息，不多也不少） */
+export interface MergeStyleBrief {
+  styleId: number;
+  styleCode: string;
+  /** 款名（空串 = 占位款，还没起名） */
+  styleName: string;
+  /** 挂在这个款下的变体键数（= 几个 listing×色） */
+  keyCount: number;
+  /** 款下色数（含不挂键的历史色） */
+  colorCount: number;
+  /** 涉及的订单行数 */
+  rowCount: number;
+  /** 色名/平台原文（最多 10 个，界面按顺序摊开，用来比"这两批色像不像"） */
+  colors: string[];
+  /** 示例图（本地绝对路径，可能空：采集通道的行没有图） */
+  imagePath: string;
+}
+
+/** 同厂家下的一组候选（`styles.length >= 2` 才出组） */
+export interface MergeCandidateGroup {
+  supplierId: number;
+  supplierName: string;
+  styles: MergeStyleBrief[];
+}
+
+/** 一次已发生的合并（撤销入口的数据面）；一次操作 = 一条记录，可能含多个源款 */
+export interface StyleMergeRecord {
+  /** 批次 id（撤销按它，**不是**按行 id：一次 N→1 会写 N 行，按行拆只能拆掉最后一个） */
+  batchId: string;
+  targetStyleId: number;
+  targetStyleCode: string;
+  /** 并进来的源款（顺序 = 合并顺序） */
+  sources: Array<{ styleId: number; styleCode: string }>;
+  /** 搬过去的色数 */
+  movedColors: number;
+  /** 改指的键数 */
+  movedKeys: number;
+  createdAt: string;
+}
+
+export interface StyleMergeBoard {
+  groups: MergeCandidateGroup[];
+  merges: StyleMergeRecord[];
+}
+
+export interface MergeStylesOutcome {
+  ok: boolean;
+  error?: string;
+  /** 本批次的 id（空串 = 没发生合并） */
+  batchId: string;
+  targetStyleId: number;
+  /** 搬过去的色数 + 改指的键数（回执文案用） */
+  movedColors: number;
+  movedKeys: number;
+}
+
+export interface UnmergeOutcome {
+  ok: boolean;
+  error?: string;
+  /** 还原成功的明细数（色 + 键） */
+  restored: number;
+  /** 跳过的明细数（键已被后续合并改指 / 色已被删） */
+  skipped: number;
+}
+
+/** 色名比较键：合并判定"同名色"用；不转小写会把 `Khaki` 与 `khaki` 当成两个色 */
+function colorKey(raw: unknown): string {
+  const k = toNameKey(String(raw ?? '')).toLowerCase();
+  // 空色名也必须有键：否则同名判定退化成"每次都不匹配"，搬色时撞
+  // `UNIQUE(style_id, color)`（真库里色名都有值，这是给脏数据留的兜底）
+  return k || '\u0000';
+}
+
+function styleBriefOf(styleId: number, code: string, meta: Map<string, { name: string; supplierId: number }>): MergeStyleBrief {
+  const id = Number(styleId) || 0;
+  const keyCount =
+    dbGet<{ n: number }>(`SELECT COUNT(*) AS n FROM oi_variant_keys WHERE style_color_id IN
+      (SELECT id FROM oi_style_colors WHERE style_id = ?)`, [id])?.n ?? 0;
+  const colors = dbQuery<{ color: string; id: number }>(
+    `SELECT id, COALESCE(color, '') AS color FROM oi_style_colors WHERE style_id = ? ORDER BY id`,
+    [id],
+  );
+  const rowCount =
+    dbGet<{ n: number }>(`SELECT COUNT(*) AS n FROM oi_order_items WHERE variant_key IN
+      (SELECT variant_key FROM oi_variant_keys WHERE style_color_id IN
+        (SELECT id FROM oi_style_colors WHERE style_id = ?))`, [id])?.n ?? 0;
+  const imagePath =
+    dbGet<{ p: string }>(
+      `SELECT COALESCE(i.local_path, '') AS p
+         FROM oi_order_items x
+         JOIN oi_variant_keys v ON v.variant_key = x.variant_key
+         JOIN oi_images i ON i.id = x.image_id
+        WHERE v.style_color_id IN (SELECT id FROM oi_style_colors WHERE style_id = ?)
+          AND COALESCE(i.local_path, '') <> ''
+        ORDER BY x.id LIMIT 1`,
+      [id],
+    )?.p ?? '';
+  return {
+    styleId: id,
+    styleCode: code,
+    styleName: meta.get(code)?.name ?? '',
+    keyCount: Number(keyCount) || 0,
+    colorCount: colors.length,
+    rowCount: Number(rowCount) || 0,
+    colors: colors.map((c) => String(c.color ?? '').trim()).filter(Boolean).slice(0, 10),
+    imagePath: String(imagePath ?? ''),
+  };
+}
+
+/**
+ * 同厂家下 ≥2 个款的组（还没合并的）。
+ *
+ * ⚠️ 只按厂家分组，**不做任何"看起来像同款"的猜测**：真库实测 CLIP 判色 AUC 0.522，
+ * 用视觉相似度提议合并等于掷硬币，而错并比拆更难发现（拆的入口在，但人不会去拆一个
+ * "看着挺对"的合并）。所以这里给的是**候选**，判断留给人。
+ *
+ * 只统计"有键的款"：合并后源款键数归零，自然从候选里消失（不会反复提示已合过的组）。
+ */
+export function styleMergeCandidates(supplierLimit = 200): MergeCandidateGroup[] {
+  if (!tableExists('oi_variant_keys')) return [];
+  const styles = dbQuery<{ style_id: number; code: string }>(
+    `SELECT sc.style_id AS style_id, COALESCE(st.code, '') AS code
+       FROM oi_variant_keys v
+       JOIN oi_style_colors sc ON sc.id = v.style_color_id
+       JOIN oi_styles st ON st.id = sc.style_id
+      GROUP BY sc.style_id
+      ORDER BY sc.style_id`,
+  );
+  if (!styles.length) return [];
+  const meta = productMetaMap();
+  const bySupplier = new Map<number, MergeStyleBrief[]>();
+  for (const s of styles) {
+    const code = String(s.code ?? '').trim();
+    const supplierId = meta.get(code)?.supplierId ?? 0;
+    if (supplierId <= 0) continue; // 没指定厂家的款不参与（"同厂家"是这组候选的唯一依据）
+    const list = bySupplier.get(supplierId) ?? [];
+    list.push(styleBriefOf(Number(s.style_id), code, meta));
+    bySupplier.set(supplierId, list);
+  }
+  const supNames = new Map<number, string>();
+  if (bySupplier.size && tableExists('suppliers')) {
+    const ids = [...bySupplier.keys()];
+    for (const r of dbQuery<{ id: number; name: string }>(
+      `SELECT id, COALESCE(name, '') AS name FROM suppliers WHERE id IN (${ids.map(() => '?').join(',')})`,
+      ids,
+    )) {
+      supNames.set(Number(r.id), String(r.name ?? ''));
+    }
+  }
+  const out: MergeCandidateGroup[] = [];
+  for (const [supplierId, list] of bySupplier) {
+    if (list.length < 2) continue; // 一个款没有"合并"可言
+    out.push({
+      supplierId,
+      supplierName: supNames.get(supplierId) ?? `#${supplierId}`,
+      // 款多（同厂家十几款）时按"挂的键多"排，人最可能先认出量大的那批
+      styles: list.slice().sort((a, b) => b.keyCount - a.keyCount || a.styleCode.localeCompare(b.styleCode)),
+    });
+  }
+  return out
+    .sort((a, b) => b.styles.length - a.styles.length || a.supplierName.localeCompare(b.supplierName))
+    .slice(0, Math.max(1, Number(supplierLimit) || 200));
+}
+
+/** 候选 + 已有的合并记录（拿货页那一块的全部数据面） */
+export function styleMergeBoard(): StyleMergeBoard {
+  const merges: StyleMergeRecord[] = tableExists('oi_style_merges')
+    ? (() => {
+        const heads = dbQuery<Record<string, unknown>>(
+          `SELECT m.batch_id AS batch_id,
+                  m.target_style_id AS tgt,
+                  COALESCE(t.code, '') AS tgt_code,
+                  MIN(m.created_at) AS created_at,
+                  (SELECT COUNT(*) FROM oi_style_merge_items i
+                     JOIN oi_style_merges x ON x.id = i.merge_id
+                    WHERE x.batch_id = m.batch_id AND i.kind = 'color') AS moved_colors,
+                  (SELECT COUNT(*) FROM oi_style_merge_items i
+                     JOIN oi_style_merges x ON x.id = i.merge_id
+                    WHERE x.batch_id = m.batch_id AND i.kind = 'key') AS moved_keys
+             FROM oi_style_merges m
+             LEFT JOIN oi_styles t ON t.id = m.target_style_id
+            GROUP BY m.batch_id, m.target_style_id
+            ORDER BY MAX(m.id) DESC
+            LIMIT 200`,
+        );
+        return heads.map((r) => {
+          const batchId = String(r.batch_id ?? '');
+          const sources = dbQuery<{ id: number; code: string }>(
+            `SELECT m.source_style_id AS id, COALESCE(s.code, '') AS code
+               FROM oi_style_merges m LEFT JOIN oi_styles s ON s.id = m.source_style_id
+              WHERE m.batch_id = ? ORDER BY m.id`,
+            [batchId],
+          ).map((s) => ({ styleId: Number(s.id) || 0, styleCode: String(s.code ?? '') }));
+          return {
+            batchId,
+            targetStyleId: Number(r.tgt) || 0,
+            targetStyleCode: String(r.tgt_code ?? ''),
+            sources,
+            movedColors: Number(r.moved_colors) || 0,
+            movedKeys: Number(r.moved_keys) || 0,
+            createdAt: String(r.created_at ?? ''),
+          };
+        });
+      })()
+    : [];
+  return { groups: styleMergeCandidates(), merges };
+}
+
+/**
+ * 把 `sourceStyleIds` 全部并进 `targetStyleId`（一次 N→1）。
+ *
+ * 色配对只按**同名**（归一化后相等），不按位置也不按相似度：
+ *   · 同名 ⇒ 改键（源色留下不删，否则拆不回去）；
+ *   · 不同名 ⇒ 搬色（`style_id` 改到目标款，色 id 不变 ⇒ 键与订单行零改动）。
+ *
+ * 两条都不猜"这两个色其实是同一个"：猜错会让两个不同色的库存并成一色，
+ * 而拿货单照样能打印、照样能下单 —— 错得悄无声息，正是这轮改造要消灭的那类问题。
+ * 剩下的色由人在命名板里改个同名，再合一次即可。
+ */
+export function mergeStylesInto(targetStyleIdRaw: unknown, sourceStyleIdsRaw: unknown): MergeStylesOutcome {
+  const target = Number(targetStyleIdRaw) || 0;
+  const srcIds = [
+    ...new Set(
+      (Array.isArray(sourceStyleIdsRaw) ? sourceStyleIdsRaw : [])
+        .map((n) => Number(n) || 0)
+        .filter((n) => n > 0 && n !== target),
+    ),
+  ];
+  const fail = (error: string): MergeStylesOutcome => ({
+    ok: false,
+    error,
+    batchId: '',
+    targetStyleId: target,
+    movedColors: 0,
+    movedKeys: 0,
+  });
+  if (target <= 0) return fail('没有选目标款');
+  if (!srcIds.length) return fail('没有选要合并进来的款');
+  if (!tableExists('oi_variant_keys')) return fail('订单库还没准备好（变体键表不存在）');
+  const tgt = dbGet<{ code: string }>(`SELECT COALESCE(code, '') AS code FROM oi_styles WHERE id = ?`, [target]);
+  if (!tgt) return fail('目标款不存在（可能已被删除）');
+  const srcRows = dbQuery<{ id: number; code: string }>(
+    `SELECT id, COALESCE(code, '') AS code FROM oi_styles WHERE id IN (${srcIds.map(() => '?').join(',')})`,
+    srcIds,
+  );
+  if (srcRows.length !== srcIds.length) return fail('要合并的款里有些不在了（可能已被删除），刷新后再试');
+
+  let movedColors = 0;
+  let movedKeys = 0;
+  // 一次 N→1 会写 N 行 `oi_style_merges`（一源一行），但人眼里是**一次操作** ——
+  // 所以撤销键必须是批次号。按行 id 拆的实现只能拆掉最后一个源款（真库副本实测 restored=1）。
+  const batchId = `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  dbTransaction(() => {
+    // 目标款现有色，按**归一化名**索引；同名多行取 id 最小那条（否则"合并到哪一条"变成随机）
+    const colorIndex = new Map<string, number>();
+    for (const c of dbQuery<{ id: number; color: string }>(
+      `SELECT id, COALESCE(color, '') AS color FROM oi_style_colors WHERE style_id = ? ORDER BY id`,
+      [target],
+    )) {
+      const k = colorKey(c.color);
+      if (k && !colorIndex.has(k)) colorIndex.set(k, Number(c.id));
+    }
+    for (const src of srcRows) {
+      const mid = dbRun(
+        `INSERT INTO oi_style_merges (batch_id, source_style_id, target_style_id) VALUES (?, ?, ?)`,
+        [batchId, Number(src.id), target],
+      ).lastInsertRowid;
+      const srcColors = dbQuery<{ id: number; color: string }>(
+        `SELECT id, COALESCE(color, '') AS color FROM oi_style_colors WHERE style_id = ? ORDER BY id`,
+        [Number(src.id)],
+      );
+      for (const sc of srcColors) {
+        const fromId = Number(sc.id) || 0;
+        if (fromId <= 0) continue;
+        const k = colorKey(sc.color);
+        const toId = colorIndex.get(k) ?? 0;
+        if (toId && toId !== fromId) {
+          // 同名色已在目标款下 ⇒ 只改键（源色行留着，拆的时候要能指回来）
+          for (const key of dbQuery<{ variant_key: string; state: string }>(
+            `SELECT variant_key, COALESCE(state, 'auto') AS state FROM oi_variant_keys WHERE style_color_id = ?`,
+            [fromId],
+          )) {
+            dbRun(
+              `UPDATE oi_variant_keys SET style_color_id = ?, state = 'merged',
+                      updated_at = datetime('now','localtime')
+                WHERE variant_key = ?`,
+              [toId, key.variant_key],
+            );
+            dbRun(
+              `INSERT INTO oi_style_merge_items
+                 (merge_id, kind, variant_key, from_style_color_id, to_style_color_id, from_state)
+               VALUES (?, 'key', ?, ?, ?, ?)`,
+              [mid, key.variant_key, fromId, toId, String(key.state ?? 'auto')],
+            );
+            dbRun(
+              `UPDATE oi_order_items SET style_color_id = ?
+                WHERE variant_key = ? AND COALESCE(style_color_id, 0) = ?`,
+              [toId, key.variant_key, fromId],
+            );
+            movedKeys += 1;
+          }
+          continue;
+        }
+        // 不同名（或目标款下的同名色就是它自己）⇒ 搬色：只改 style_id，色 id 不变
+        dbRun(`UPDATE oi_style_colors SET style_id = ? WHERE id = ?`, [target, fromId]);
+        // ⚠️ 索引必须跟着更新：同一批里两个源款都有 `4` 时，不更新就会把第二条也搬过来，
+        //    撞 `UNIQUE(style_id, color)`（真库副本上实测撞到过，整批回滚）。
+        colorIndex.set(k, fromId);
+        dbRun(
+          `INSERT INTO oi_style_merge_items (merge_id, kind, color_id, from_style_id, to_style_id)
+           VALUES (?, 'color', ?, ?, ?)`,
+          [mid, fromId, Number(src.id), target],
+        );
+        movedColors += 1;
+      }
+    }
+  });
+  return { ok: true, batchId, targetStyleId: target, movedColors, movedKeys };
+}
+
+/**
+ * 拆开一次合并（按批次把明细逐条还原，然后删掉整批）。
+ *
+ * 跳过而不是硬还原的情况有两种，都要计数报出来（静默少还原几条，人会以为合并没拆干净）：
+ *   · 键已经被后来的合并改指到别处（当前指向 ≠ 本次的 `to`）；
+ *   · 键/色已被删（`ON DELETE CASCADE`）。
+ */
+export function unmergeStyles(batchIdRaw: unknown): UnmergeOutcome {
+  const batchId = String(batchIdRaw ?? '').trim();
+  if (!batchId) return { ok: false, error: '没有指定要拆开的合并', restored: 0, skipped: 0 };
+  const head = dbGet<{ id: number }>(`SELECT id FROM oi_style_merges WHERE batch_id = ? LIMIT 1`, [batchId]);
+  if (!head) return { ok: false, error: '这条合并记录不在了（可能已经拆过）', restored: 0, skipped: 0 };
+  const items = dbQuery<{
+    kind: string;
+    color_id: number;
+    variant_key: string;
+    from_style_id: number;
+    to_style_id: number;
+    from_style_color_id: number;
+    to_style_color_id: number;
+    from_state: string;
+  }>(
+    `SELECT i.* FROM oi_style_merge_items i
+       JOIN oi_style_merges m ON m.id = i.merge_id
+      WHERE m.batch_id = ?
+      ORDER BY i.id DESC`,
+    [batchId],
+  );
+  let restored = 0;
+  let skipped = 0;
+  dbTransaction(() => {
+    for (const it of items) {
+      if (String(it.kind) === 'color') {
+        const cid = Number(it.color_id) || 0;
+        // 色已被删（或被别的合并搬走了）⇒ 跳过
+        const cur = cid
+          ? dbGet<{ style_id: number }>(`SELECT style_id FROM oi_style_colors WHERE id = ?`, [cid])
+          : undefined;
+        if (!cur || Number(cur.style_id) !== Number(it.to_style_id)) {
+          skipped += 1;
+          continue;
+        }
+        dbRun(`UPDATE oi_style_colors SET style_id = ? WHERE id = ?`, [Number(it.from_style_id), cid]);
+        restored += 1;
+        continue;
+      }
+      // kind = 'key'
+      const key = String(it.variant_key ?? '');
+      const fromId = Number(it.from_style_color_id) || 0;
+      const toId = Number(it.to_style_color_id) || 0;
+      const cur = key
+        ? dbGet<{ style_color_id: number }>(`SELECT style_color_id FROM oi_variant_keys WHERE variant_key = ?`, [key])
+        : undefined;
+      if (!cur || Number(cur.style_color_id) !== toId) {
+        skipped += 1;
+        continue;
+      }
+      dbRun(
+        `UPDATE oi_variant_keys SET style_color_id = ?, state = ?,
+                updated_at = datetime('now','localtime')
+          WHERE variant_key = ?`,
+        [fromId, String(it.from_state ?? 'auto'), key],
+      );
+      dbRun(
+        `UPDATE oi_order_items SET style_color_id = ?
+          WHERE variant_key = ? AND COALESCE(style_color_id, 0) = ?`,
+        [fromId, key, toId],
+      );
+      restored += 1;
+    }
+    dbRun(`DELETE FROM oi_style_merges WHERE batch_id = ?`, [batchId]);
+  });
+  return { ok: true, restored, skipped };
+}
+
 function autoAssignByMap(
   rec: Pick<OrderRecord, 'imageId' | 'shop' | 'color' | 'rawFields'>,
+  rowId = 0,
 ): void {
-  if (!productSchemaReady()) return;
-  // 无图订单不参与归款（归款的落点是把**图片**挂到款色上）
-  if (!rec.imageId) return;
   const { itemId } = extractSkuFields(rec.rawFields);
   if (!itemId) return; // 订单没有商品ID → 这条链路无从查起（不是错误）
-  const hit = resolveOrderSku({ shop: rec.shop, itemId });
-  if (!hit) return;
+  // ⚠️ 产品库守卫**只管映射那条路**：变体键来自订单自身，不需要产品库、也不需要图。
+  //    原来这里一上来就 `if (!productSchemaReady()) return`，那会让没建产品库的机器永远归不了类。
+  const hit = productSchemaReady() ? resolveOrderSku({ shop: rec.shop, itemId }) : null;
+  if (!hit) {
+    // 没有人工映射 ⇒ 按变体键自动建/复用款色。这就是"不用再人工设一次款和色"的那一步。
+    assignByVariantKey(rowId, rec, itemId);
+    return;
+  }
   // 产品库里手工新建的款在识别池里没有行 ⇒ 补一行占位款（与「点名归款」共用同一个实现）
   const style = ensureStyleByCode(hit.productCode);
+  // 无图订单：归款的落点（图）写不了，但**行**能写 —— 不写就等于让"采集通道来的单"永远未归类。
+  if (!rec.imageId) {
+    const mappedNoImg = String(hit.spec ?? '').trim();
+    if (mappedNoImg && mappedNoImg !== '*' && Number(rowId) > 0) {
+      // 判据与图那条**同一个**：行上没结论、或结论是"猜的"（按变体键自动建的临时款）⇒ 落映射；
+      // 人认过的（命名过 / 改过色名）不动。旧实现只认 `style_color_id = 0`，
+      // P2 让导入即归类之后这个条件永远不成立 ⇒ 映射对无图行彻底失效。
+      const cur = dbGet<{ style_color_id: number }>(
+        `SELECT COALESCE(style_color_id, 0) AS style_color_id FROM oi_order_items WHERE id = ?`,
+        [Number(rowId)],
+      );
+      if (isGuessedStyleColor(Number(cur?.style_color_id ?? 0))) {
+        const sc = ensureStyleColor(style.id, hit.productCode, mappedNoImg);
+        dbRun(`UPDATE oi_order_items SET style_color_id = ? WHERE id = ?`, [sc.id, Number(rowId)]);
+      }
+    }
+    return;
+  }
   // 颜色权威来源（D4 + 2026-10-19 按图定色 / 平台色名对照 + 2026-10-20 报表规格串）：
   //   ① **映射里配的颜色**（人明确说过"这个商品ID 是什么色"）—— 已经是我方色名，不再翻译
   //   ② 图片**已有**的真实款色（人工纠正 / AI 结论 / 色图采纳继承）—— 一律不动
@@ -2226,27 +3507,40 @@ function autoAssignByMap(
   // 同一款的下一批订单照样落成 `Khaki`，用户每次都白改一遍。
   // ②必须在③之前：色图采纳时写的是**我的色名**（如「红色」），采集侧记的是平台色名
   //（如 `Khaki`）；让③盖掉②等于把人工命名冲成平台内部编号。
-  // ②的"不动"有一个例外，见下方 `currentIsAlias`：已经确认是平台色名的那些要重定。
-  const mapped = String(hit.spec ?? '').trim();
-  if (mapped && mapped !== '*') {
-    setImageStyleColor(rec.imageId, ensureStyleColor(style.id, hit.productCode, mapped).id);
-    return;
-  }
-  // ②/③ 都要看图，一次查回 URL 与当前归属（两次往返没必要）
-  const img = dbGet<{ source_url: string; color: string }>(
-    `SELECT COALESCE(i.source_url, '') AS source_url, COALESCE(sc.color, '') AS color
+  // ②的"不动"有两个例外：见下方 `currentIsAlias`（已确认是平台色名的要重定）与
+  // `currentIsGuess`（"猜的"结论不算人的结论，映射可以改掉）。
+  // 图上的当前结论（mapped 分支要判"能不能改"，②③④ 还要 URL 与色名）——
+  // 一次查回，两个分支共用，不查两遍。
+  const img = dbGet<{ source_url: string; color: string; style_color_id: number | null }>(
+    `SELECT COALESCE(i.source_url, '') AS source_url, COALESCE(sc.color, '') AS color,
+            i.style_color_id AS style_color_id
        FROM oi_images i LEFT JOIN oi_style_colors sc ON sc.id = i.style_color_id
       WHERE i.id = ?`,
     [rec.imageId],
   );
+  // "猜的"结论（按变体键自动建的临时款）映射才可以改；人认过的（命名 / 合并 / 改过色名）不动。
+  // 没有结论时 `img.style_color_id` 为 0 ⇒ 判为"猜的" ⇒ 可写。
+  const currentIsGuess = isGuessedStyleColor(Number(img?.style_color_id ?? 0));
+  const mapped = String(hit.spec ?? '').trim();
+  if (mapped && mapped !== '*') {
+    // 映射是"这个商品ID 是什么色"的人为判定，但它**不许冲掉人更直接的操作**：
+    // 重导同一份 Excel / 后配映射时，图上已经被命名过的那条必须留住
+    //（否则"每次重导都把人工色名改回平台名叫法"，用户只能重导一次改一次）。
+    if (!currentIsGuess) return;
+    setImageStyleColor(rec.imageId, ensureStyleColor(style.id, hit.productCode, mapped).id);
+    return;
+  }
   const current = String(img?.color ?? '').trim();
   const aliases = colorAliases(hit.productId);
   // ②已有的真实色不动 —— 但**平台色名不算"真实色名"**：它只是采集侧的字符串（`Khaki` / `1`），
   //   一旦这个产品配过对照（`Khaki → 卡其`），挂在 `Khaki` 上的图就是"还没翻译的"，要重定。
   //   判据用"字典里有没有这一对"而不是猜"像不像色名"：`未分类` 之外的每一串都可能是自家色名，
   //   只有用户认过的那几串能确定是平台侧写法。
+  // 第三个例外（2026-10-28）：**"猜的"结论也不算人的结论**。P2 让导入即按变体键建临时款色，
+  //   图上的 `黑` 常常就是这么来的 —— 它不是人说的，映射（人明确配的判定）应该能改掉它；
+  //   命名过 / 改过色名的（`isGuessedStyleColor` 判否）照旧不动。
   const currentIsAlias = current ? pickColorAlias(aliases, hit.productId, current) !== '' : false;
-  if (current && current !== MAPPED_FALLBACK_COLOR && !currentIsAlias) return; // ②不覆盖人的结论
+  if (current && current !== MAPPED_FALLBACK_COLOR && !currentIsAlias && !currentIsGuess) return;
   const raw =
     orderColorByItemImage(itemId, img?.source_url)
     || String(rec.color ?? '').trim()
@@ -2336,6 +3630,14 @@ function reassignCore(
     ? ` OR LOWER(TRIM(sc.color)) IN (${extraColors.map(() => '?').join(',')})`
     : '';
 
+  // 候选 = "这条结论还能被映射改写"的行：
+  //   · 图上没结论（`style_color_id IS NULL`）；
+  //   · 占位色（`未分类`）；
+  //   · 平台色名（调用方显式点名的 `opts.colors`，见 `reassignOrdersByItemIds` 的说明）；
+  //   · **"猜的"结论**（按变体键自动建的临时款）—— 2026-10-28 补：P2 让导入即归类之后，
+  //     前两条再也不可能成立，只剩这个判据能让"先导订单、后配映射"的回填生效。
+  //     判据与 `autoAssignByMap` 的 ② 守卫**同一个函数**（`guessedScSql`），不另写一套。
+  //   人认过的（命名过 / 改过色名 / 合并过）一律不在候选里 —— 那是"改一次映射把历史全改判"，禁用。
   const rows = dbQuery<{
     image_id: number;
     shop: string;
@@ -2349,7 +3651,7 @@ function reassignCore(
        JOIN oi_images i ON oi.image_id = i.id
        LEFT JOIN oi_style_colors sc ON sc.id = i.style_color_id
       WHERE oi.image_id IS NOT NULL
-        AND (i.style_color_id IS NULL OR sc.color = ?${colorCond})`,
+        AND (i.style_color_id IS NULL OR sc.color = ?${colorCond} OR ${guessedScSql('i.style_color_id')})`,
     [MAPPED_FALLBACK_COLOR, ...extraColors.map((c) => c.toLowerCase().trim())],
   );
   const d = getDb();
@@ -2510,6 +3812,15 @@ export function skuBackfillFromOrder(input: {
     const shop = resolveShopRef(order.shop, itemId);
     if (!shop.shopId) return { ...none, status: 'shopUnresolved' };
 
+    // 套装商品在这里**没有任何特殊分支**（这是新模型相对上一版的最大简化）：
+    // `pl_shop_sku` 一条映射 = 「这个商品卖哪个产品」，套装商品的答案是**套装产品本身**
+    // （它也是 `pl_products` 的一行）。部件是产品之间的关系（`pl_bundle_links`），
+    // 由产品库定义一次，与"这个商品归哪个款"是两件事 —— 混在一层就会分裂成
+    // 「同商品同一个 spec 挂多行、还要按角色判重」，那是把目录事实塞进映射表。
+    //
+    // 于是 `resolveOrderSku` 对套装商品照常命中套装产品，核对页再据
+    // `isBundleProduct(产品)` 决定要不要展开 —— 展开读的是行级快照 `oi_item_parts`。
+
     const productId = productIdByCode(input.styleCode);
     if (!productId) return { ...none, status: 'noProduct' };
 
@@ -2575,7 +3886,7 @@ export function insertOrder(rec: OrderRecord): number {
       const id = Number((existing as { id: number }).id);
       // 幂等重入**也要再试一次归款**：映射很可能是这条订单之后才人工确认的，
       // 不重试的话「先导订单、后确认映射」的人永远等不到自动命中（验收②的字面场景）。
-      autoAssignByMap(rec);
+      autoAssignByMap(rec, id);
       syncOrderClassificationFromImage(rec.imageId);
       return id;
     }
@@ -2588,6 +3899,8 @@ export function insertOrder(rec: OrderRecord): number {
   const color = String(rec.color ?? '').trim() || parseOrderPropsColor(rec.rawFields);
   // 件数：**落库那一刻**从报表块里定下来（`(商品数量:2 piece)`），不再让下游各算一遍。
   const qty = parseOrderQty(rec.rawFields);
+  // 变体键：**导入这一刻算一次并落库**，此后只读（除店铺改名）。口径只有一份，见 `variantKeyOfRow`。
+  const variantKey = variantKeyOfRow(rec.shop, JSON.stringify(rec.rawFields ?? {}), color);
 
   let itemId = 0;
   dbTransaction(() => {
@@ -2604,8 +3917,8 @@ export function insertOrder(rec: OrderRecord): number {
     }
     const ir = d
       .prepare(
-        `INSERT INTO oi_order_items (order_id, image_id, size, raw_fields, category, color, logo, status, qty)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO oi_order_items (order_id, image_id, size, raw_fields, category, color, logo, status, qty, variant_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         headerId,
@@ -2617,10 +3930,13 @@ export function insertOrder(rec: OrderRecord): number {
         rec.logo,
         status,
         qty,
+        variantKey,
       );
     itemId = Number(ir.lastInsertRowid);
   });
-  autoAssignByMap(rec);
+  // 归款**必须带行 id**：没有映射时 `autoAssignByMap` 会把这一行交给变体键
+  // （`assignByVariantKey` 要回读行上的 `variant_key`，拿不到 id 就整条链路空转）。
+  autoAssignByMap(rec, itemId);
   // 图**在导入前**就可能已有结论（识别过 / 人工归过色 / 上次归款写过）⇒ 补一次投影，
   // 不依赖 autoAssignByMap 这一趟是否命中（它未命中时什么都不做）。
   syncOrderClassificationFromImage(rec.imageId);
@@ -2866,7 +4182,7 @@ export function shippingRows(
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
      LEFT JOIN oi_images i ON oi.image_id = i.id
-     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${supplierJoin}
      ${conds.length ? `WHERE ${conds.join(' AND ')}` : ''}
@@ -2950,7 +4266,7 @@ export function listOrdersPage(
       `SELECT COUNT(*) AS n FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
        LEFT JOIN oi_images i ON oi.image_id = i.id
-       LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
        ${where}`,
@@ -2968,7 +4284,7 @@ export function listOrdersPage(
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
      LEFT JOIN oi_images i ON oi.image_id = i.id
-     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${n.join}
      ${where} ORDER BY oi.id DESC LIMIT ? OFFSET ?`,
@@ -3027,7 +4343,7 @@ export function updateOrder(input: UpdateOrderInput): { styleCode?: string; styl
           `SELECT s.code AS style_code, sc.code AS style_color_code
            FROM oi_order_items oi
            LEFT JOIN oi_images i ON oi.image_id = i.id
-           LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+           LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
            LEFT JOIN oi_styles s ON sc.style_id = s.id
            WHERE oi.id = ?`,
         )
@@ -3707,5 +5023,338 @@ export function parcelCountByOrders(orderNos: string[]): Record<string, number> 
   );
   for (const r of rows) out[String(r.order_no)] = Number(r.n) || 0;
   return out;
+}
+
+// ───────────────────────────────────────── 套装部件（`oi_item_parts`）
+//
+// 「一件实物 = 多个款色」（上衣 + 裤子各自不同款不同色）的行级事实。
+// 表的存在意义与字段口径见 `SCHEMA` 里那段注释；这里只强调**读取纪律**：
+//
+//   · 一个订单行的款色集合**只有一个读取入口** —— `itemStyleColorIds`；
+//   · 有部件 ⇒ 用部件集，**绝不**再掺行/图上那个单品款色（掺进去等于把套装当单品多算一件）；
+//   · 无部件 ⇒ 回落单品款色（图优先，理由见该函数注释）—— 老数据零迁移。
+//
+// ⚠️ 不要在各处 SQL 里各写一套「有部件就 JOIN 部件表、否则 JOIN 图」的 CASE：
+//    套装与非套装的分支必须只有一份实现，否则两页会算出不同的件数（同一件事两套口径）。
+
+/** 套装的一个部件：`oi_item_parts` 一行 + 联表带出的展示字段 */
+export interface OrderItemPart {
+  /** 部位（上衣/裤子/马甲/配件…，原文，已 trim）。同一行内唯一 */
+  role: string;
+  styleColorId: number;
+  /** 款色编码（`oi_style_colors.code`，如 `SUST-006-红`） */
+  styleColorCode: string;
+  /** 款编码（`oi_styles.code`）—— 与产品库 `pl_products.code` 同锚点 */
+  styleCode: string;
+  color: string;
+  /** 一套含几件该部位（≥1；「套装含两条裤子」用 2 表达，不写两条同 role 的记录） */
+  qtyPerSet: number;
+}
+
+/** 部件投影的唯一一份 SELECT（单笔与批量共用；改列只改这里） */
+const PART_SELECT = `SELECT p.order_item_id, p.role, p.style_color_id, p.qty_per_set,
+       COALESCE(sc.code, '') AS sc_code, COALESCE(sc.color, '') AS color,
+       COALESCE(s.code, '') AS style_code
+  FROM oi_item_parts p
+  LEFT JOIN oi_style_colors sc ON sc.id = p.style_color_id
+  LEFT JOIN oi_styles s ON s.id = sc.style_id`;
+
+/**
+ * ⭐ 「一个订单行 → 它的款色」的**唯一一份展开口径**，以可嵌入 FROM 的派生表形式导出。
+ *
+ * 形状（别名 `v`）：`(order_item_id, style_color_id, qty_per_set)`
+ *   · 有部件 ⇒ 每个部件一行（`qty_per_set` = 一套几件）；
+ *   · 无部件 ⇒ 一行，取图上那个单品款色，`qty_per_set` 恒 1（老数据零影响）；
+ *   · `style_color_id = 0` = 还没归类 —— **必须保留**，未归类的真实需求不能被吞掉。
+ *
+ * 为什么是"导出片段"而不是数据库视图：本库的迁移会 `ALTER TABLE ... RENAME` / `DROP TABLE`
+ * 重建 `oi_order_items`（v3 主干归一），**视图在底层表被换掉后会变悬空**，之后连无关的
+ * `ALTER TABLE` 都会报 `error in view ...: no such table` —— 老库迁移当场全红。
+ * 派生表只在语句执行时解析，随表走，不给迁移留地雷。
+ *
+ * 为什么必须唯一一份：各页 SQL 各抄一遍「有部件就 JOIN 部件表、否则 JOIN 图」，
+ * 必然出现"采购页算两件、拣货页算一件"，而两边各自看都正常（正是本项目踩过的坑）。
+ * TS 侧的 `itemStyleColorIds` 与 `purchase-db.outstanding()` 都读这一份。
+ */
+/**
+ * ⭐ 「这一行订单属于哪个款色」的**唯一身份表达式**（SQL 片段，要求 FROM 里有
+ * `oi_order_items oi` 与 `LEFT JOIN oi_images i ON i.id = oi.image_id`）。
+ *
+ * 口径：**订单行优先、图回落**。2026-10-28 订单驱动归类之后，`oi_order_items.style_color_id`
+ * 才是权威（由 `(店铺, 商品ID, Color 原值)` 的变体键自动写入）；`oi_images.style_color_id`
+ * 是旧识别链的历史结论，只在该行还没归类时兜底。
+ *
+ * 为什么必须导出而不是各页自己写一遍 `COALESCE(...)`：
+ * 改造前"改装色"只走图，于是所有投影层（待核对列表 / 订单利润 / 拣货 / 拿货缺口）都
+ * 按 `oi_images.style_color_id` 直接 JOIN 款色。改造后订单行先有了款色，
+ * 若投影层仍只认图，就会出现**同一行"统计说已归类、列表显示没归类"**——
+ * 真库实测这类行有 9/75（`image.style_color_id = 0` 但订单行已归）。
+ * 一个数字两处实现，用户只会认为坏了。
+ */
+export const ITEM_STYLE_COLOR_ID = `COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0)`;
+
+export const ITEM_STYLE_COLOR_SRC = `(SELECT p.order_item_id AS order_item_id,
+            p.style_color_id AS style_color_id, p.qty_per_set AS qty_per_set
+       FROM oi_item_parts p
+     UNION ALL
+     SELECT oi.id AS order_item_id,
+            -- 款色权威 = **订单行**（2026-10-28 订单驱动归类后的唯一落点），图只是历史回落：
+            -- 采集通道来的行 image_id 恒空，只认图的话这些行永远进不了拿货单。
+            ${ITEM_STYLE_COLOR_ID} AS style_color_id,
+            1 AS qty_per_set
+       FROM oi_order_items oi
+       LEFT JOIN oi_images i ON i.id = oi.image_id
+      WHERE NOT EXISTS (SELECT 1 FROM oi_item_parts p2 WHERE p2.order_item_id = oi.id))`;
+
+function mapPart(r: Record<string, unknown>): OrderItemPart {
+  return {
+    role: String(r.role ?? ''),
+    styleColorId: Number(r.style_color_id ?? 0) || 0,
+    styleColorCode: String(r.sc_code ?? ''),
+    styleCode: String(r.style_code ?? ''),
+    color: String(r.color ?? ''),
+    qtyPerSet: Number(r.qty_per_set ?? 1) || 1,
+  };
+}
+
+/** 一个订单行的全部部件（按录入顺序；空数组 = 这行不是套装） */
+export function listItemParts(orderItemId: number): OrderItemPart[] {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return [];
+  return dbQuery<Record<string, unknown>>(`${PART_SELECT} WHERE p.order_item_id = ? ORDER BY p.id ASC`, [
+    id,
+  ]).map(mapPart);
+}
+
+/**
+ * **一批**订单行的部件（核对页/列表一次问一批，避免每行一次 IPC）。
+ * 不在返回里的 id = 该行没有部件（非套装）。返回 Map 形态的普通对象便于 `structuredClone` 过 IPC。
+ */
+export function partsByItemIds(ids: number[]): Record<number, OrderItemPart[]> {
+  const clean = [...new Set((Array.isArray(ids) ? ids : []).map((n) => Number(n) || 0))].filter(
+    (n) => n > 0,
+  );
+  const out: Record<number, OrderItemPart[]> = {};
+  if (!clean.length) return out;
+  const marks = clean.map(() => '?').join(',');
+  const rows = dbQuery<Record<string, unknown>>(
+    `${PART_SELECT} WHERE p.order_item_id IN (${marks}) ORDER BY p.order_item_id ASC, p.id ASC`,
+    clean,
+  );
+  for (const r of rows) {
+    const key = Number(r.order_item_id ?? 0) || 0;
+    if (!key) continue;
+    (out[key] ??= []).push(mapPart(r));
+  }
+  return out;
+}
+
+/**
+ * 写入/替换一个订单行的部件（**全量替换**，事务）。
+ *
+ * 传空数组 = 把这行改回单品（清空部件）—— 合法且必须支持：套装判定错了要有回头路，
+ * 而"部分删除"没有业务含义（套装要么整体成立，要么不存在）。
+ *
+ * 校验放在写库**之前**并给出可读中文错误，不靠 `UNIQUE` 抛约束名：
+ *   · `role` 去空白后不得为空 —— 空 role 在核对页上是一行没有名字的款色，用户无法理解；
+ *   · 同一行内 `role` 不得重复（**大小写不敏感**：`Top` 与 `top` 是同一个部位，
+ *     DB 的 UNIQUE 只按字节比，挡不住这种写法，必须在这里先归一判重）；
+ *   · `styleColorId` 必须指向真实款色行 —— 0/负数会让下游把"没选"当成一个真实款色去求和。
+ */
+export function replaceItemParts(
+  orderItemId: number,
+  parts: Array<{ role: string; styleColorId: number; qtyPerSet?: number }>,
+): { ok: boolean; error?: string; parts: OrderItemPart[] } {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return { ok: false, error: '订单行不存在', parts: [] };
+  const exists = dbGet<{ id: number }>(`SELECT id FROM oi_order_items WHERE id = ?`, [id]);
+  if (!exists) return { ok: false, error: `订单行不存在: id=${id}`, parts: [] };
+
+  const want = (Array.isArray(parts) ? parts : []).map((p) => ({
+    role: String(p?.role ?? '').trim(),
+    styleColorId: Number(p?.styleColorId ?? 0) || 0,
+    qtyPerSet: Number(p?.qtyPerSet ?? 1) || 1,
+  }));
+  const seen = new Set<string>();
+  for (const p of want) {
+    if (!p.role) return { ok: false, error: '每个部件都要有一个部位名（如 上衣 / 裤子）', parts: [] };
+    const key = p.role.toLowerCase();
+    if (seen.has(key)) return { ok: false, error: `部位「${p.role}」重复了：一件实物里同一部位只有一个款色`, parts: [] };
+    seen.add(key);
+    if (p.styleColorId <= 0) return { ok: false, error: `部位「${p.role}」还没选款色`, parts: [] };
+    if (!Number.isInteger(p.qtyPerSet) || p.qtyPerSet < 1) {
+      return { ok: false, error: `部位「${p.role}」的每套件数必须是 ≥1 的整数`, parts: [] };
+    }
+    const sc = dbGet<{ id: number }>(`SELECT id FROM oi_style_colors WHERE id = ?`, [p.styleColorId]);
+    if (!sc) return { ok: false, error: `部位「${p.role}」指向的款色不存在: id=${p.styleColorId}`, parts: [] };
+  }
+
+  dbTransaction(() => {
+    dbRun(`DELETE FROM oi_item_parts WHERE order_item_id = ?`, [id]);
+    for (const p of want) {
+      dbRun(
+        `INSERT INTO oi_item_parts (order_item_id, role, style_color_id, qty_per_set) VALUES (?, ?, ?, ?)`,
+        [id, p.role, p.styleColorId, p.qtyPerSet],
+      );
+    }
+  });
+  return { ok: true, parts: listItemParts(id) };
+}
+
+/** 清空一个订单行的部件（= 改回单品）。返回删掉的行数 */
+export function clearItemParts(orderItemId: number): number {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return 0;
+  const r = dbRun(`DELETE FROM oi_item_parts WHERE order_item_id = ?`, [id]);
+  return Number(r.changes) || 0;
+}
+
+/** `materializeItemParts` 的结局。`missingColor` 是**正常结局**（不是错误）：配色没配过，等人补。 */
+export interface MaterializeOutcome {
+  /**
+   * · `written` 展开并写入了部件
+   * · `already` 这行已有部件（幂等，不覆盖人工改过的）
+   * · `notBundle` 该商品不是套装（正常单品行，什么都不做）
+   * · `missingColor` 商品已在产品库定义成套装，但**这个色号还没配过**配色
+   * · `noProduct` 商品还没映射到产品 / 产品域不可用
+   * · `noItemId` 订单行没有商品ID（采集/导入缺列）
+   */
+  status: 'written' | 'already' | 'notBundle' | 'missingColor' | 'noProduct' | 'noItemId';
+  parts: OrderItemPart[];
+  /** 这套套装有哪些部位（`missingColor` 时用来告诉用户"还差哪个"） */
+  roles: string[];
+  /** 本次写进去的部位口径（便于界面直接显示"已自动展开为 上衣红 / 裤子黑"） */
+  expanded: Array<{ role: string; styleCode: string; color: string; qty: number }>;
+}
+
+const NO_MATERIALIZE = (status: MaterializeOutcome['status']): MaterializeOutcome => ({
+  status,
+  parts: [],
+  roles: [],
+  expanded: [],
+});
+
+/**
+ * ⭐ 把「这个商品是套装」这件事**落成这一行的部件快照**（幂等）。
+ *
+ * 为什么要有这一步：产品库只定义了**目录事实**（这套由哪些款组成、各几件）与**配色字典**
+ * （平台色号 → 各部件色名）。订单行需要的是**这一单实际拆成什么** —— 那是快照，
+ * 必须在归类那一刻落下来，否则：
+ *   · 明天改一次套餐配方，历史单的拿货口径会被一起改掉（与"历史单钉住成本"同一条纪律反着来）；
+ *   · 每次汇总都要现算一遍展开，汇总页与核对页各算一次就是两套口径。
+ *
+ * **不猜的三条**（写错一条就是"发货后才发现少一条裤子"）：
+ *   · 该色号没配过 ⇒ 返回 `missingColor` 且**不写任何部件**（宁可留着当单品等人补，也不编配色）；
+ *   · 商品没映射到产品 ⇒ `noProduct`（不按标题/图上猜款）；
+ *   · 已有部件 ⇒ `already`，**不覆盖** —— 人工改过的部件优先于任何自动展开。
+ *
+ * 款色落库走 `ensureStyleByCode` + `ensureStyleColor`（与 `assignOrderStyle` 同一对函数）：
+ * 子商品的款编码与产品库同锚点，色名是**自家色名**（来自配色字典，不是平台色号原文）。
+ */
+export function materializeItemParts(orderItemId: number): MaterializeOutcome {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return NO_MATERIALIZE('noProduct');
+  if (!productSchemaReady()) return NO_MATERIALIZE('noProduct');
+  // 幂等：已有部件就不动（人工改过的那份永远优先）
+  const existing = listItemParts(id);
+  if (existing.length) return { status: 'already', parts: existing, roles: [], expanded: [] };
+
+  const row = dbGet<{ color: string; raw_fields: string; shop: string }>(
+    `SELECT oi.color, oi.raw_fields, o.shop
+       FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE oi.id = ?`,
+    [id],
+  );
+  if (!row) return NO_MATERIALIZE('noProduct');
+
+  let rawFields: Record<string, string> = {};
+  try {
+    const v = JSON.parse(String(row.raw_fields ?? '{}'));
+    if (v && typeof v === 'object') rawFields = v as Record<string, string>;
+  } catch {
+    rawFields = {}; // 一条脏 raw_fields 只让这一行展不开，不该往外抛
+  }
+  const { itemId } = extractSkuFields(rawFields);
+  if (!itemId) return NO_MATERIALIZE('noItemId');
+
+  const sku = resolveOrderSku({ shop: row.shop, itemId });
+  if (!sku) return NO_MATERIALIZE('noProduct');
+  if (!isBundleProduct(sku.productId)) return NO_MATERIALIZE('notBundle');
+
+  const roles = bundleRolesOf(sku.productId);
+  // 色号取**订单行的原文**（平台色号 `5`/`Khaki`）—— 它就是配色字典的键，不许先翻译成色名
+  const resolved = resolveBundleParts({
+    productId: sku.productId,
+    itemId,
+    color: String(row.color ?? ''),
+  });
+  if (!resolved.isBundle) return NO_MATERIALIZE('notBundle');
+  if (!resolved.matched || !resolved.parts.length) return { ...NO_MATERIALIZE('missingColor'), roles };
+
+  const want: Array<{ role: string; styleColorId: number; qtyPerSet: number }> = [];
+  const expanded: MaterializeOutcome['expanded'] = [];
+  for (const p of resolved.parts) {
+    const code = String(p.childCode ?? '').trim();
+    const color = String(p.color ?? '').trim();
+    if (!code || !color) return { ...NO_MATERIALIZE('missingColor'), roles }; // 字典残缺：不写半套
+    const style = ensureStyleByCode(code);
+    const sc = ensureStyleColor(style.id, style.code, color);
+    want.push({ role: p.role, styleColorId: sc.id, qtyPerSet: p.qty });
+    expanded.push({ role: p.role, styleCode: style.code, color, qty: p.qty });
+  }
+  const r = replaceItemParts(id, want);
+  if (!r.ok) return { ...NO_MATERIALIZE('missingColor'), roles }; // 校验失败 = 什么都不写（replaceItemParts 已事务保护）
+  return { status: 'written', parts: r.parts, roles, expanded };
+}
+
+/**
+ * ⭐ 一个订单行的**款色集合 —— 唯一读取口径**（采购需求、拣货、核对页都从这里取）。
+ *
+ * 有部件 ⇒ 只返回部件集。**绝不**再把该行的单品款色并进来：套装行上那个 `style_color_id`
+ *   是"这张套装图整体像哪个款"的残留，并进来就是同一件实物算两遍。
+ * 无部件 ⇒ 回落单品款色，**图优先**：
+ *
+ *   `oi_images.style_color_id` 才是款色归属的权威 —— `assignOrderStyle` 只写它
+ *   （`setImageStyleColor`），从不写 `oi_order_items.style_color_id`；后者是 v8 拆表前的
+ *   行级投影，写入方早已不再维护它的新值（只剩老数据里的历史值）。
+ *   所以回落顺序必须是「图 → 行」，反过来会让历史行值压过后来人工改的归属。
+ *
+ *   ⚠️ `picking-db.ts` 里的 `COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0)`
+ *      是**行优先**，与本函数相反。目前那张表的行级值基本为历史残留，两个口径在真库上多半
+ *      同值；接入套装时那处要改成走本函数（P3），不要照着它抄顺序。
+ *
+ * 返回值已去重、按部件录入顺序（单件时长度为 0 或 1）。
+ */
+export function itemStyleColorIds(orderItemId: number): number[] {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return [];
+  // 口径只有一份：`ITEM_STYLE_COLOR_SRC`（有部件出部件集、无部件回落图款色），
+  // 采购/拣货等汇总口径读的是同一条 —— 不在这里另写一遍 JOIN，否则就是第二套口径。
+  const rows = dbQuery<{ style_color_id: number }>(
+    `SELECT v.style_color_id FROM ${ITEM_STYLE_COLOR_SRC} v
+      WHERE v.order_item_id = ? AND v.style_color_id > 0
+      ORDER BY v.style_color_id`,
+    [id],
+  ).map((r) => Number(r.style_color_id) || 0);
+  return [...new Set(rows.filter((n) => n > 0))];
+}
+
+/**
+ * 组合键（派生，不落库）：把一个订单行的部件集压成一个可比较的字符串，形如 `12x1+57x1`。
+ *
+ * 用来回答「这个组合以前见过吗」——同名款色顺序不同的两条（上衣A+裤子B 与 裤子B+上衣A）
+ * 必须得到**同一个键**，所以先按款色 id 排序再拼；`qty_per_set` 参与拼接
+ * （「含两条裤子」与「含一条」是两个不同商品，不是一个组合的倍率）。
+ * 空串 = 这行不是套装。
+ */
+export function bundleKeyOf(orderItemId: number): string {
+  const id = Number(orderItemId) || 0;
+  if (id <= 0) return '';
+  const row = dbGet<{ k: string | null }>(
+    `SELECT group_concat(style_color_id || 'x' || qty_per_set, '+') AS k
+       FROM (SELECT style_color_id, qty_per_set FROM oi_item_parts
+              WHERE order_item_id = ? ORDER BY style_color_id, qty_per_set)`,
+    [id],
+  );
+  return String(row?.k ?? '');
 }
 

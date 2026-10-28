@@ -13,6 +13,16 @@
 
 ## [Unreleased]
 
+### Docs · 本地视觉方案 B（CLIP 小模型）实测结论入库（2026-10-28）
+
+- 在真库 82 张已归类图上做了留一法实测（不联网、不改产品代码），结论写进
+  [`docs/notes/2026-10-28-classify-local-vision-direction.md`](docs/notes/2026-10-28-classify-local-vision-direction.md) §八：
+  款 Top1 **93.6%** / Top3 98.7%（剔除近重复图后 91.1%），`margin≥0.02` 弃权后建议精度 **98.6%**；
+  **CLIP 判色 AUC 0.522 ≈ 随机**（色应交给像素主色集合 ΔE，AUC 0.729）；
+  另取证两条与本方案无关、但会直接卡住任何像素方案的事实：**`nativeImage` 解不了 webp**
+  （真库 83% 是 webp），以及**颜色标签本身有约 20% 自相矛盾**（同一"红色"款色下实测有黄图与黑图）。
+  分发建议：用 `onnxruntime-web`（WASM，46-165ms/张、零原生依赖）而非 `onnxruntime-node`（每平台 +65~87MB 二进制）。
+
 ### Removed · 云端视觉识别链路 + 待识别队列整体删除（2026-10-28）
 
 - 用户决定「**不接云端 API**」（本地视觉方案另议，判断与路线见

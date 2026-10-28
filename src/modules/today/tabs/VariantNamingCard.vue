@@ -75,6 +75,15 @@
           <span v-if="g.colors.length" class="wb-muted vn-group__meta">
             · {{ g.colors.length }} 色
           </span>
+          <!-- 组内进度：一屏只铺 6 个 listing，人需要一个"这一组填完了没"的读数，
+               否则最后一个色存完也不知道能不能往下走。 -->
+          <span
+            v-if="leftOf(g) > 0"
+            class="wb-muted vn-group__meta"
+            :data-act="`vn-group-left-${g.itemId}`"
+          >
+            · 还剩 {{ leftOf(g) }} 个没起名
+          </span>
         </header>
 
         <!-- 款这一行：款名 + 厂家（拿货按厂家统计靠它）。
@@ -162,14 +171,14 @@
                   :placeholder="c.colorRaw || '起个名字'"
                   maxlength="40"
                   @input="onInput(c, ($event.target as HTMLInputElement).value)"
-                  @keyup.enter="saveOne(c)"
+                  @keyup.enter="saveOne(c, g)"
                 />
                 <button
                   type="button"
                   class="wb-btn wb-btn--sm"
                   :data-act="`vn-save-${c.styleColorId}`"
                   :disabled="!dirtyOf(c)"
-                  @click="saveOne(c)"
+                  @click="saveOne(c, g)"
                 >
                   保存
                 </button>
@@ -214,7 +223,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { ipc } from '@/core/services/ipc';
 import { loadNamingBoard, renameVariantColor, saveVariantStyle } from '../classify';
 import { listSuppliers } from '../purchase';
@@ -290,6 +299,52 @@ const hiddenKeys = computed(() =>
 function draftOf(c: VariantColorItem): string {
   const d = draft.value[c.styleColorId];
   return d === undefined ? c.colorName : d;
+}
+
+/** 这一组还剩几个色是平台原文（组的进度，不是总进度；总数只有 `board.unnamedKeys` 一处口径） */
+function leftOf(g: VariantNamingGroup): number {
+  return g.colors.filter((c) => !c.named).length;
+}
+
+/**
+ * 存完之后该把光标交给谁：**同组的下一个未命名框**，本组没了就交下一组的第一个。
+ *
+ * 为什么这件事不能省（真库实测的依据）：待命名是 54 个键、分布在 37 个 listing 上。
+ * 每次保存后组件会重读命名板（`finally` 里 reload），重排会把已命名的色挪到组尾、
+ * 输入框重建 —— 不主动落焦的话，人每填一个都要再用鼠标点下一个框，54 次。
+ * 这是这一页唯一还属于人的劳动，能省的只有"找框"这一半。
+ *
+ * 为什么**不**按"同一个平台原文"批量命名（`1` 在 7 个 listing 上都出现）：平台原文是
+ * 商品级的编号，不同 listing 的 `1` 根本不是同一个颜色（键是 `(店铺, 商品, 原文色)` 也正是
+ * 因为这个）。批量按原文命名 = 把"位置"当"语义"，错得悄无声息，还会被自己的键记住。
+ */
+function nextFocusOf(c: VariantColorItem, g: VariantNamingGroup): number {
+  const idx = g.colors.findIndex((x) => x.styleColorId === c.styleColorId);
+  const rest = idx >= 0 ? g.colors.slice(idx + 1) : [];
+  const next = rest.find((x) => !x.named);
+  if (next) return next.styleColorId;
+  const gi = workGroups.value.findIndex((x) => x.itemId === g.itemId && x.shop === g.shop);
+  for (const g2 of workGroups.value.slice(gi + 1)) {
+    const first = g2.colors.find((x) => !x.named);
+    if (first) return first.styleColorId;
+  }
+  return 0;
+}
+
+/** 待落焦的框（`styleColorId`）；重读完成后再落，因为 reload 会重建 DOM */
+const pendingFocus = ref(0);
+
+async function applyPendingFocus(): Promise<void> {
+  const id = pendingFocus.value;
+  if (!id) return;
+  pendingFocus.value = 0;
+  await nextTick();
+  // 用 `data-act` 找而不是 `ref` 数组：一个 listing 里的框是 v-for 出来的、重排后会重建，
+  // 而 `data-act` 是这页与冒烟脚本共用的稳定标识（两边找的是同一个东西）。
+  const el = document.querySelector<HTMLInputElement>(`[data-act="vn-input-${id}"]`);
+  if (!el) return; // 目标被折叠/滑出这一批（cap 切片）—— 不抢焦点，别把人跳到别处
+  el.focus();
+  el.select();
 }
 
 /** 是否有改动（空串也算改动 —— 让人能看见"我清空了"，由保存时的校验来拒绝）。 */
@@ -374,7 +429,7 @@ async function saveStyle(g: VariantNamingGroup): Promise<void> {
   }
 }
 
-async function saveOne(c: VariantColorItem): Promise<void> {
+async function saveOne(c: VariantColorItem, g: VariantNamingGroup): Promise<void> {
   // ⚠️ 这里**不许**写 `if (busy > 0) return`：那是"上一次还没存完就把这次回车丢掉"，
   //    界面毫无反馈（用户以为名字存上了）。一次填 6 个色的正常用法必然连按回车，
   //    所以并发是常态，按行各存各的；整批只用一个计数决定"什么时候该刷新"。
@@ -384,8 +439,10 @@ async function saveOne(c: VariantColorItem): Promise<void> {
     const r = await renameVariantColor(c.styleColorId, name);
     if (!r.ok) {
       rowError.value = { ...rowError.value, [c.styleColorId]: r.error || '没保存成功' };
-      return;
+      return; // 被拒时**不动光标**：人还得在同一个框里改（跳走等于把错误甩在身后）
     }
+    // 光标交给下一个未命名的框（顺序在点击那一刻确定，重排后依然成立）
+    pendingFocus.value = nextFocusOf(c, g);
     // 成功后把草稿清掉（新值以服务端回读为准，下次 reload 会带回来）
     const next = { ...draft.value };
     delete next[c.styleColorId];
@@ -407,6 +464,7 @@ async function reload(): Promise<void> {
   error.value = '';
   try {
     board.value = await loadNamingBoard();
+    await applyPendingFocus(); // 必须在重读之后：DOM 刚被这批新数据重建
     await loadThumbs();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取待命名颜色失败';

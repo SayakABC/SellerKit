@@ -58,11 +58,15 @@ function check(name, fn) {
  * 下面的 `迁移步数与源码一致` 会拿源码里 `version: N` 的条数比对这几个常数，防止它们悄悄分叉
  * （本文件曾因 product.sku 偷偷加了一步而连红 3 条，正是缺这道比对）。
  */
-const PRODUCT_SKU_STEPS = 3; // pl_shop_sku：1 补列 → 2 唯一键归一 → 3 删 pl_item_weights（克重只属 SKU）
+// pl_shop_sku：1 补列 → 2 唯一键归一 → 3 删 pl_item_weights（克重只属 SKU）
+const PRODUCT_SKU_STEPS = 3;
 // oi_*：1/2 提列 → 3 主干归一 → 4 历史采集单回填 → 5 色名回填 → 6 style_color_id → 7 行级快照
 // → 8 拆表 → 9 成本两字段（C2：actual_cost_cents + 预估回填）→ 10 删旧价目表 ae_cost_map
+// → 11 删退役的 oi_queue（云端识别链整条删除，队列无写入方也无读取方）
+// → 12 订单行 += variant_key（店铺+商品ID+平台色）· 从 raw_fields 回填 · oi_variant_keys 建表
 // （2026-10-21 订正：v5–v6 加进来时这两个常数没跟着改，冒烟从那时起一直红着 —— 本轮一并补齐）
-const ORDER_MAIN_STEPS = 10;
+// （2026-10-28 订正：v11 加进来时同样漏改常数，7 条断言一起红 —— 加迁移必须同一提交改这里）
+const ORDER_MAIN_STEPS = 12;
 const AE_MAIN_STEPS = 2; // ae 域：1 成本生效区间重建 → 3 删弃表（v2 补列已随表删除）
 // purchase_orders：1 删 note → 2 purchase_items += style_color_id
 // → 3 purchase_sources += order_item_id（2026-10-22 补：常数漏改，[0] 自证拦下）
@@ -921,6 +925,13 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
        (1003, 100, 'S',  '{}', 0,  NULL),
        (1004, 101, 'L',  '{}', 11, NULL)`,
   );
+  // v12 的靶子：一行**带商品ID + 平台色**的老订单（真实报表形状）与一行没有任何商品信息的。
+  // 老库里这两个字段只存在于 `raw_fields` 里 ⇒ 只有"从原文重算"才回填得出来。
+  dbRun(
+    `INSERT INTO oi_order_items (id, order_id, size, raw_fields, style_color_id, cost_cents) VALUES
+       (1005, 100, 'M', '{"产品ID":"1005018888888001","产品信息":"【1】Old Row\\n(产品属性:Color:5,Size:M)"}', 0, NULL),
+       (1006, 100, 'L', '{"订单号":"NO-ITEM-ID"}', 0, NULL)`,
+  );
   dbRun(
     `INSERT INTO pl_products (code, name, cost_cents) VALUES ('S-COST-1', '成本款', 0), ('S-COST-2', '已有价', 5000)`,
   );
@@ -938,14 +949,25 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
       PRIMARY KEY (style_code, effective_from, source)
     )`,
   ]);
+  // v11 的靶子 `oi_queue`：它由迁移**删除**、SCHEMA 不再建，所以新库造不出来 ——
+  // 必须像 ae_cost_map 一样手工造，否则 v11 删的是空气、断言恒绿。
+  // ⚠️ 位置很重要：必须建在**版本已退回 v8 之后**（下面 v9–v11 会整段重跑），
+  //    而不是建完再单独把版本调回 v10 —— 那样会跳过 v9（补 actual_cost_cents 列）。
+  dbMigrate([
+    `CREATE TABLE oi_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_id INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )`,
+  ]);
   dbRun(
     `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date, updated_at)
      VALUES ('S-COST-1', '2026-10-10', 'manual',   '成本款', 2800, 0, '2026-10-10', datetime('now','localtime')),
             ('S-COST-1', '2026-10-17', 'purchase', '成本款', 3200, 1, '2026-10-17', datetime('now','localtime')),
             ('S-COST-2', '2026-10-01', 'manual',   '已有价', 4000, 0, '2026-10-01', datetime('now','localtime'))`,
   );
-  dbRun(`INSERT INTO suppliers (name) VALUES ('成本厂')`);
-  const supId = Number(dbGet(`SELECT id FROM suppliers WHERE name = '成本厂'`).id);
+  dbRun(`INSERT INTO suppliers (name) VALUES ('成本厂')`);  const supId = Number(dbGet(`SELECT id FROM suppliers WHERE name = '成本厂'`).id);
   dbRun(
     `INSERT INTO purchase_orders (id, supplier_id, biz_date, status) VALUES (1, ?, '2026-10-17', 'submitted')`,
     [supId],
@@ -993,6 +1015,33 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
     Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n),
     0,
     'v10 应删掉 ae_cost_map',
+  );
+  // ⑨ v11 删掉退役的 `oi_queue`（云端识别链已整条移除：它既没有写入方也没有读取方）
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_queue'`).n),
+    0,
+    'v11 应删掉 oi_queue',
+  );
+  // ⑩ v12：变体键列 + 键表 + **存量从原文回填**（键只在导入时算一次，存量得靠迁移补）
+  const v12Cols = dbQuery(`PRAGMA table_info(oi_order_items)`).map((c) => String(c.name));
+  assert.ok(v12Cols.includes('variant_key'), 'v12 应给 oi_order_items 加 variant_key');
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_variant_keys'`).n),
+    1,
+    'v12 应建出 oi_variant_keys',
+  );
+  const vk1005 = String(dbGet(`SELECT variant_key FROM oi_order_items WHERE id = 1005`).variant_key);
+  assert.strictEqual(vk1005.split('\u0000').length, 3, `存量行未回填出三段键：${JSON.stringify(vk1005)}`);
+  assert.ok(vk1005.includes('1005018888888001'), '键里应含商品ID（从 raw_fields 重算，不是读 color 列）');
+  assert.strictEqual(
+    String(dbGet(`SELECT variant_key FROM oi_order_items WHERE id = 1006`).variant_key),
+    '',
+    '无商品ID 的老行不许被编出一个键（那会把无关订单并成一件）',
+  );
+  // 收口：`ensureOrderSchema` 末尾会按键把存量归上款色（迁移只写键，不建款色）
+  assert.ok(
+    Number(dbGet(`SELECT COALESCE(style_color_id,0) AS s FROM oi_order_items WHERE id = 1005`).s) > 0,
+    '存量收口应把带键的老行归到款色上',
   );
 });
 closeDb();

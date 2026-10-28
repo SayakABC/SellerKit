@@ -83,7 +83,10 @@ function toSteadyState() {
 
 /** 外键开着（db.ts pragma foreign_keys=ON）→ 必须子表先删 */
 const reset = () => {
+  // ⚠️ `oi_item_parts` 必须**最先**删：它对 `oi_style_colors` 有外键（无 ON DELETE），
+  //    留在后面删会让"清款色"这一步直接撞约束、整组用例连带失败。
   for (const t of [
+    'oi_item_parts',
     'oi_orders',
     'oi_images',
     'oi_style_colors',
@@ -93,6 +96,7 @@ const reset = () => {
     'purchase_orders',
     'purchase_ignore',
     'pl_products',
+    'pl_bundle_links',
     'pl_shop_sku',
     'sk_shops',
     'sk_name_map',
@@ -528,6 +532,70 @@ check('D6 先导订单、后确认映射：重导同一条订单即自动命中'
   confirmMap({ shopId: shop.id, itemId: 'ITEM-6', productId: p.id });
   insertMappedOrder({ orderNo: 'NO-6', shop: '店A', itemId: 'ITEM-6', imageId }); // 重导（走幂等分支）
   assert.strictEqual(imageStyleCode(imageId), 'STYLE-900', '幂等重入没有重试归款 → 先导后关联的人永远等不到命中');
+});
+
+check('D7 套装的采购需求按**子商品**展开（一个订单行 → N 个款色，件数 × 每套件数）', () => {
+  reset();
+  const shop = sdb.upsertShop(shopRow());
+  const pTop = pdb.upsertProduct(productRow({ code: 'SET-TOP', name: '上衣款' }));
+  const pPant = pdb.upsertProduct(productRow({ code: 'SET-PANT', name: '裤子款' }));
+  const pSet = pdb.upsertProduct(productRow({ code: 'SET-ALL', name: '两件套' }));
+  // 色号 7 = 上衣红 + 裤子黑；裤子每套 2 件 —— 同时验「每套件数」参与需求件数
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet.id,
+      aliasKey: '7',
+      parts: [
+        { role: '上衣', childProductId: pTop.id, childColor: '红' },
+        { role: '裤子', childProductId: pPant.id, childColor: '黑', qty: 2 },
+      ],
+    }).ok,
+    true,
+  );
+  confirmMap({ shopId: shop.id, itemId: 'ITEM-SET', productId: pSet.id });
+  const { orderId } = insertMappedOrder({ orderNo: 'NO-SET', shop: '店A', itemId: 'ITEM-SET', color: '7' });
+  dbRun(`UPDATE oi_order_items SET qty = 3 WHERE id = ?`, [orderId]); // 3 套
+
+  const m = odb.materializeItemParts(orderId);
+  assert.strictEqual(m.status, 'written', `展开失败：${m.status}（缺配色时这个用例不该继续）`);
+
+  const rows = purdb.outstanding();
+  const byCode = new Map(rows.map((r) => [r.styleCode, r]));
+  // ① 套装款自己**不能**作为需求行（否则等于把套装当单品又要一遍货）
+  assert.strictEqual(byCode.has('SET-ALL'), false, '套装款本身不该出现在需求里');
+  // ② 两个子商品各一行，颜色是**子商品的颜色**（不是父级的），尺码继承订单行
+  assert.ok(byCode.has('SET-TOP'), `上衣款没进需求：${JSON.stringify(rows.map((r) => r.styleCode))}`);
+  assert.ok(byCode.has('SET-PANT'), '裤子款没进需求');
+  assert.strictEqual(byCode.get('SET-TOP').color, '红');
+  assert.strictEqual(byCode.get('SET-PANT').color, '黑');
+  assert.strictEqual(byCode.get('SET-TOP').size, 'M');
+  // ③ 件数 = 订单件数 × 每套件数：3 套 → 上衣 3、裤子 6
+  assert.strictEqual(byCode.get('SET-TOP').demand, 3);
+  assert.strictEqual(byCode.get('SET-PANT').demand, 6);
+  // ④ 两行来自**同一个订单行**：`orders` 不许被展开成 1+1
+  assert.strictEqual(byCode.get('SET-TOP').orders, 1);
+  assert.strictEqual(byCode.get('SET-PANT').orders, 1);
+});
+
+check('D8 该色号没配过配色 ⇒ 一件也不写（不许回落别的色号/父级色）', () => {
+  reset();
+  const shop = sdb.upsertShop(shopRow());
+  const pTop = pdb.upsertProduct(productRow({ code: 'SET-TOP', name: '上衣款' }));
+  const pSet = pdb.upsertProduct(productRow({ code: 'SET-ALL', name: '两件套' }));
+  pdb.replaceBundleLinks({
+    productId: pSet.id,
+    aliasKey: '7',
+    parts: [{ role: '上衣', childProductId: pTop.id, childColor: '红' }],
+  });
+  confirmMap({ shopId: shop.id, itemId: 'ITEM-SET2', productId: pSet.id });
+  const { orderId } = insertMappedOrder({ orderNo: 'NO-SET2', shop: '店A', itemId: 'ITEM-SET2', color: '9' });
+  const m = odb.materializeItemParts(orderId);
+  assert.strictEqual(m.status, 'missingColor', `色号 9 没配过，应报缺而不是猜：${m.status}`);
+  assert.deepStrictEqual(m.parts, [], '缺配色时一件都不许写（写了就是给错拿货单）');
+  assert.deepStrictEqual(m.roles, ['上衣'], '要告诉用户"这套差哪个部位"：靠 roles');
+  // 没写部件 ⇒ 这行暂时仍是单品，需求里出现的是**套装款**（可见、可修），不是凭空编的子款
+  const rows = purdb.outstanding();
+  assert.deepStrictEqual(rows.map((r) => r.styleCode), ['SET-ALL']);
 });
 
 console.log('\u2500'.repeat(64));

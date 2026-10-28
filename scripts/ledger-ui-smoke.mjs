@@ -2767,7 +2767,7 @@ async function main() {
       allocText = flat(act('imp-alloc-rows'));
     }
     report('公共行按「全部」摊给当期两家店、每店 ¥150.00（点得开逐笔，不是只写"2 家"）',
-      !!allocToggle && (allocText.match(/¥150\.00/g) || []).length === 2,
+      !!allocToggle && (allocText.match(/¥150[.]00/g) || []).length === 2,
       allocToggle ? allocText : '没有「看逐笔」按钮');
 
     clickEnabled('[data-act="imp-submit"]');

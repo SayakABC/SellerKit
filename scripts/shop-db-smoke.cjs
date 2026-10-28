@@ -503,6 +503,75 @@ check('源表不存在时不炸（各域表按域懒建，不能假定都初始�
   }
 });
 
+// ---- 门 1（店铺归一）：只数订单里出现过的店名 ----
+
+check('门 1：只数订单 —— 只出现在拿货单里的旧店名不算（否则这个门永远关不上）', () => {
+  reset();
+  seedOrders(['甲店']);
+  seedPurchase(['甲店', '乙店']); // 乙店只出现在历史拿货单里
+  const g = sdb.shopNormalizeGate();
+  assert.deepStrictEqual(g.pending.map((r) => r.key), ['甲店'], `不该带上乙店：${JSON.stringify(g.pending)}`);
+  assert.strictEqual(g.orders, 1);
+});
+
+check('门 1：同一店名的多种写法合成一条，行数是**累加**的（3 行是 3 行，不是 1 条）', () => {
+  reset();
+  seedOrders(['店A', ' 店A ', '店A\u200b', '店B']);
+  const g = sdb.shopNormalizeGate();
+  assert.strictEqual(g.pending.length, 2, `期望 2 家，实际 ${JSON.stringify(g.pending)}`);
+  const a = g.pending.find((r) => r.key === '店A');
+  assert.strictEqual(a.orders, 3, `写法合并后行数应为 3，实际 ${a.orders}`);
+  assert.strictEqual(g.orders, 4, `合计应为 4，实际 ${g.orders}`);
+});
+
+check('门 1：归一过的店铺不进清单（门是**派生**的 —— 归一完再算一次就少一家）', () => {
+  reset();
+  seedOrders(['店A', '店B']);
+  const shop = sdb.upsertShop(shopInput({ name: '店A' }));
+  assert.strictEqual(sdb.shopNormalizeGate().pending.length, 2, '归一前应有两家');
+  sdb.mapName({ raw: '店A', refId: shop.id });
+  const g = sdb.shopNormalizeGate();
+  assert.deepStrictEqual(g.pending.map((r) => r.key), ['店B'], `归一后应只剩店B：${JSON.stringify(g.pending)}`);
+  assert.strictEqual(g.orders, 1);
+});
+
+check('门 1：标了忽略的店不进清单（用户已经说过"这家别管"）', () => {
+  reset();
+  seedOrders(['甲店', '乙店']);
+  sdb.mapName({ raw: '甲店', ignored: true });
+  assert.deepStrictEqual(sdb.shopNormalizeGate().pending.map((r) => r.key), ['乙店']);
+});
+
+check('门 1：空 / 纯空白店名不算一项；按订单行数倒序（大店先做）', () => {
+  reset();
+  seedOrders(['', '  ', '小店', '大店', '大店', '大店']);
+  const g = sdb.shopNormalizeGate();
+  assert.deepStrictEqual(g.pending.map((r) => r.key), ['大店', '小店'], `排序不对：${JSON.stringify(g.pending)}`);
+  assert.strictEqual(g.orders, 4);
+});
+
+check('门 1：同名店铺已在库里时带出候选名（界面才敢说"能认成谁"）', () => {
+  reset();
+  seedOrders(['店A']);
+  sdb.upsertShop(shopInput({ name: '店A' }));
+  const row = sdb.shopNormalizeGate().pending.find((r) => r.key === '店A');
+  assert.strictEqual(row.autoShopName, '店A', '精确同名的店铺应作为候选');
+  // 反向：库里没有这家店时不许编一个候选出来（空串 = "先登记再认"）
+  reset();
+  seedOrders(['查无此店']);
+  assert.strictEqual(sdb.shopNormalizeGate().pending[0].autoShopName, '');
+});
+
+check('门 1：订单表还没建时返回空门，不炸（各域表按域懒建）', () => {
+  reset();
+  dbRun('DROP TABLE oi_orders');
+  try {
+    assert.deepStrictEqual(sdb.shopNormalizeGate(), { pending: [], orders: 0 });
+  } finally {
+    dbRun(`CREATE TABLE IF NOT EXISTS oi_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shop TEXT NOT NULL DEFAULT '')`);
+  }
+});
+
 // ---- 店铺主表 ----
 
 check('新增店铺后可查；同名不同平台算两家（UNIQUE 是 platform × 名称）', () => {

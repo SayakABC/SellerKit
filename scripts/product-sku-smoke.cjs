@@ -1638,6 +1638,197 @@ check('映射悬空：产品被删后要回到待办（队列与认款同一口�
   );
 });
 
+// ---- [套装] 产品关联子商品（一张关联表，键里必须带色号）----
+//
+// 业务原文：「套装不是整体色，可能自由搭配（上衣红 + 裤黑）；子商品也是独立商品，能单独卖」。
+// 所以断言必须让这三种错误实现各自变红 —— 三条都期望"黑"就全都恒绿：
+//   · 色号不区分（所有色号共用一组关联）· 商品级被产品级压过 · 未配的色号回落到别的色号
+const mkProduct = (code, name) =>
+  pdb.upsertProduct({
+    id: 0,
+    code,
+    name,
+    supplierId: 0,
+    category: '',
+    status: 'active',
+    note: '',
+  }).id;
+
+const pTop = mkProduct('BND-TOP', '上衣款');
+const pPant = mkProduct('BND-PANT', '裤子款');
+const pSet = mkProduct('BND-SET', '两件套');
+const pOther = mkProduct('BND-SET2', '另一套');
+
+check('关联：子商品是独立产品 —— 套装只存关系，不复制子商品的名称/成本', () => {
+  const r = pdb.replaceBundleLinks({
+    productId: pSet,
+    aliasKey: '5',
+    parts: [
+      { role: '上衣', childProductId: pTop, childColor: '红' },
+      { role: '裤子', childProductId: pPant, childColor: '黑', qty: 1 },
+    ],
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(pdb.isBundleProduct(pSet), true);
+  assert.strictEqual(pdb.isBundleProduct(pTop), false, '子商品本身不是套装（它照常单独卖）');
+  assert.strictEqual(pdb.getProduct(pTop).name, '上衣款', '子商品仍是产品库里那张自己的行');
+
+  const rows = pdb.bundleLinksOf(pSet);
+  assert.deepStrictEqual(
+    rows.map((x) => [x.aliasKey, x.role, x.childCode, x.childColor, x.qty]),
+    [
+      ['5', '上衣', 'BND-TOP', '红', 1],
+      ['5', '裤子', 'BND-PANT', '黑', 1],
+    ],
+    '按 色号 → 部件名 稳定排序',
+  );
+});
+
+check('关联：非法输入被拒，且**不动**已存关系（失败不能删一半）', () => {
+  const bad = (parts, alias, why) => {
+    const r = pdb.replaceBundleLinks({ productId: pSet, aliasKey: alias || '5', parts });
+    assert.strictEqual(r.ok, false, why);
+    assert.strictEqual(pdb.bundleLinksOf(pSet).length, 2, `${why} —— 失败后原关系必须还在`);
+  };
+  bad([{ role: '上衣', childProductId: pSet, childColor: '红' }], '5', '不许自引用');
+  bad(
+    [
+      { role: '上衣', childProductId: pTop, childColor: '红' },
+      { role: '上衣', childProductId: pPant, childColor: '黑' },
+    ],
+    '5',
+    '部件名不许重复（两件裤子用 qty=2）',
+  );
+  bad([{ role: '上衣', childProductId: pTop, childColor: '' }], '5', '子颜色必填');
+  bad([{ role: '上衣', childProductId: pTop, childColor: '红', qty: 0 }], '5', '件数必须 ≥1');
+  bad([{ role: '上衣', childProductId: 999999, childColor: '红' }], '5', '子商品必须存在');
+  // 色号是键的一半：空色号等于"不区分搭配"，必须拒
+  const noAlias = pdb.replaceBundleLinks({
+    productId: pSet,
+    aliasKey: '   ',
+    parts: [{ role: '上衣', childProductId: pTop, childColor: '红' }],
+  });
+  assert.strictEqual(noAlias.ok, false, '空色号必须拒绝');
+  assert.strictEqual(pdb.bundleLinksOf(pSet).length, 2, '空色号被拒后原关系不动');
+});
+
+check('关联：子商品本身是套装 ⇒ 拒绝（不嵌套，环的入口在写入处堵掉）', () => {
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pOther,
+      aliasKey: '1',
+      parts: [{ role: '整件', childProductId: pTop, childColor: '红' }],
+    }).ok,
+    true,
+  );
+  const r = pdb.replaceBundleLinks({
+    productId: pSet,
+    aliasKey: '5',
+    parts: [{ role: '内层', childProductId: pOther, childColor: '红' }],
+  });
+  assert.strictEqual(r.ok, false, '套装套套装暂不支持');
+  assert.ok(/套装套套装/.test(r.error || ''), `错误要说清原因，实际：${r.error}`);
+  assert.strictEqual(pdb.bundleLinksOf(pSet).length, 2, '拒绝后原关系必须完好');
+  pdb.clearBundle(pOther);
+});
+
+check('关联：换一个色号 = 另一套装搭配，两者互不影响（色号必须在键里）', () => {
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet,
+      aliasKey: '6',
+      parts: [
+        { role: '上衣', childProductId: pTop, childColor: '黑' },
+        { role: '裤子', childProductId: pPant, childColor: '黑' },
+      ],
+    }).ok,
+    true,
+  );
+  const a = pdb.resolveBundleParts({ productId: pSet, color: '5' });
+  assert.deepStrictEqual(a.parts.map((p) => p.color), ['红', '黑'], '色号 5 仍是 红+黑');
+  const b = pdb.resolveBundleParts({ productId: pSet, color: '6' });
+  assert.deepStrictEqual(b.parts.map((p) => p.color), ['黑', '黑'], '色号 6 是 黑+黑');
+});
+
+check('关联：商品级覆盖压过产品级，且只影响这个商品', () => {
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet,
+      itemId: 'ITEM-A',
+      aliasKey: '7',
+      parts: [
+        { role: '上衣', childProductId: pTop, childColor: '藏青' },
+        { role: '裤子', childProductId: pPant, childColor: '灰' },
+      ],
+    }).ok,
+    true,
+  );
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet,
+      aliasKey: '7',
+      parts: [
+        { role: '上衣', childProductId: pTop, childColor: '深蓝' },
+        { role: '裤子', childProductId: pPant, childColor: '深蓝' },
+      ],
+    }).ok,
+    true,
+  );
+  const a = pdb.resolveBundleParts({ productId: pSet, itemId: 'ITEM-A', color: '7' });
+  assert.deepStrictEqual(a.parts.map((p) => p.color), ['藏青', '灰'], '点名（商品级）必须赢');
+  assert.strictEqual(a.matchedScope, 'item');
+  const b = pdb.resolveBundleParts({ productId: pSet, itemId: 'ITEM-B', color: '7' });
+  assert.deepStrictEqual(b.parts.map((p) => p.color), ['深蓝', '深蓝'], '别的商品只吃产品级');
+  assert.strictEqual(b.matchedScope, 'product');
+});
+
+check('关联：该色号没配过 ⇒ matched=false，**不许**回落别的色号或拿父级色凑', () => {
+  const r = pdb.resolveBundleParts({ productId: pSet, color: '9' });
+  assert.strictEqual(r.isBundle, true);
+  assert.strictEqual(r.matched, false, '未配就是未配 —— 回落任一组都是给错拿货单');
+  assert.deepStrictEqual(r.parts, [], '不许拿色号 5/6 的搭配顶上');
+});
+
+check('关联键：色号归一（空白/全角/大小写）后同一个键', () => {
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet,
+      aliasKey: ' Khaki ',
+      parts: [
+        { role: '上衣', childProductId: pTop, childColor: '卡其' },
+        { role: '裤子', childProductId: pPant, childColor: '卡其' },
+      ],
+    }).ok,
+    true,
+  );
+  const r = pdb.resolveBundleParts({ productId: pSet, color: 'ｋｈａｋｉ' });
+  assert.strictEqual(r.matched, true, '全角与小写必须同键');
+  assert.deepStrictEqual(r.parts.map((p) => p.color), ['卡其', '卡其']);
+});
+
+check('替换只作用于本色号：重配色号 5 不许碰色号 6', () => {
+  assert.strictEqual(
+    pdb.replaceBundleLinks({
+      productId: pSet,
+      aliasKey: '5',
+      parts: [{ role: '上衣', childProductId: pTop, childColor: '白' }],
+    }).ok,
+    true,
+  );
+  const five = pdb.resolveBundleParts({ productId: pSet, color: '5' });
+  assert.deepStrictEqual(five.parts.map((p) => p.role), ['上衣'], '色号 5 现在是单件（重配过）');
+  const six = pdb.resolveBundleParts({ productId: pSet, color: '6' });
+  assert.deepStrictEqual(six.parts.map((p) => p.role), ['上衣', '裤子'], '色号 6 必须原样还在');
+});
+
+check('解除套装 ⇒ 关联全清，产品本身不删，子商品也不受影响', () => {
+  const r = pdb.clearBundle(pSet);
+  assert.ok(r.removed >= 1, `应删掉关联，实际 ${JSON.stringify(r)}`);
+  assert.deepStrictEqual(pdb.bundleLinksOf(pSet), []);
+  assert.ok(pdb.getProduct(pSet), '产品本身必须还在（套装只是它的一种关系）');
+  assert.ok(pdb.getProduct(pTop) && pdb.getProduct(pPant), '子商品一律不动');
+});
+
 // ---- 收尾 ----
 closeDb();
 fs.rmSync(dir, { recursive: true, force: true });

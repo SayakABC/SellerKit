@@ -274,31 +274,34 @@ const FAKE_BRIDGE = `<script>
   // ⭐ C2（2026-10-21）：价从**订单行投影**来（pickingRows 已带三档成本字段），不再读款级价目表。
   //    行上给的是真形状：actualCostCents（实付真值）/ costCents（进价预估）/ productCostCents（产品当前价）。
   //    S2 只填 costCents ⇒ 走的正是"预估那一档"；S1/S3 三档全空 ⇒ 无进价两支仍各有可观测面。
+  // ⚠️ 每行都带 styleColorId（2026-10-28 门 2 起是**判据的一部分**）：没归类的行开进单里
+  //    只会得到 style_color_id = 0，之后改个色名"已拿"就永久失联。没有它，"未指定厂家"那一格
+  //    与"已归类但款没厂家"两件事在夹具里就分不开（都是 supplierId=0），门 2 的两条分支只能验一条。
   var PICK_ROWS = [
     { id: 1, orderNo: 'I-1', shop: '店A', orderTime: daysAgo(1) + ' 10:00:00', styleCode: 'S1', styleName: '款一',
-      styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
+      styleColorId: 101, styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
       imagePath: '/tmp/a.jpg', shipped: false, bizStatus: '等待发货',
       actualCostCents: null, costCents: null, productCostCents: null,
       rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
     { id: 2, orderNo: 'I-2', shop: '店A', orderTime: daysAgo(1) + ' 11:00:00', styleCode: 'S1', styleName: '款一',
-      styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
+      styleColorId: 101, styleColor: '红', color: '黑', size: 'L', itemId: 'ITEM1', supplierId: 7, supplierName: '厂A',
       imagePath: '/tmp/a.jpg', shipped: false, bizStatus: '等待发货',
       actualCostCents: null, costCents: null, productCostCents: null,
       rawFields: { '商品信息': '【1】 某款 (商品数量:2 piece)' } },
     { id: 3, orderNo: 'I-3', shop: '店A', orderTime: daysAgo(1) + ' 12:00:00', styleCode: 'S2', styleName: '款二',
-      styleColor: '白', color: '白', size: 'M', itemId: 'ITEM2', supplierId: 0, supplierName: '',
+      styleColorId: 102, styleColor: '白', color: '白', size: 'M', itemId: 'ITEM2', supplierId: 0, supplierName: '',
       imagePath: '/tmp/b.jpg', shipped: false, bizStatus: '等待发货',
       actualCostCents: null, costCents: 1000, productCostCents: null,
       rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
     { id: 4, orderNo: 'I-4', shop: '店A', orderTime: daysAgo(1) + ' 13:00:00', styleCode: 'S9', styleName: '款九',
-      styleColor: '蓝', color: '蓝', size: 'M', itemId: 'ITEM9', supplierId: 9, supplierName: '厂C',
+      styleColorId: 103, styleColor: '蓝', color: '蓝', size: 'M', itemId: 'ITEM9', supplierId: 9, supplierName: '厂C',
       imagePath: '/tmp/c.jpg', shipped: false, bizStatus: '等待发货',
       actualCostCents: null, costCents: null, productCostCents: null,
       rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
     // S3·绿：**无图**（占位框分支的载体）+ 无成本（"无进价"按件说的另一行）。
     // 与 S1 同在厂A ⇒ 厂A 卡上有两款色行，多行形态（行间分隔线）也一并覆盖。
     { id: 5, orderNo: 'I-5', shop: '店A', orderTime: daysAgo(1) + ' 14:00:00', styleCode: 'S3', styleName: '款三',
-      styleColor: '绿', color: '绿', size: 'M', itemId: 'ITEM3', supplierId: 7, supplierName: '厂A',
+      styleColorId: 104, styleColor: '绿', color: '绿', size: 'M', itemId: 'ITEM3', supplierId: 7, supplierName: '厂A',
       imagePath: '', shipped: false, bizStatus: '等待发货',
       actualCostCents: null, costCents: null, productCostCents: null,
       rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' } },
@@ -390,6 +393,72 @@ const FAKE_BRIDGE = `<script>
   //     · P-43（无款 + 空品类 + 空特征）⇒ **填了颜色也没处挂**："拦住并说明"那条守卫的载体；
   //     · P-45（有款 S1 + 空品类 + 空特征）⇒ 点名款时必须**照样挂款**（不要求指纹），
   //       否则颜色永远到不了款色（拿货单 / 算钱 / 取图全读款色）。
+  // 命名板夹具（P3，2026-10-28）：**一个 listing × 3 个色键**（2 个待命名 + 1 个已命名）。
+  //   · 三个 styleColorId 各不相同 ⇒ 「保存」按下的必须是**那一行**的 id（用一个 id 的实现在这里就红）；
+  //   · 第三个 named:true ⇒ 计数必须是 2 而不是 3（把已命名的也当待办 = 用户白输一遍）；
+  //   · 组内 3 个色**同屏**给出 ⇒ 逐键翻页的实现拿不到 3 个输入框。
+  var NAMING_BOARD = {
+    groups: [
+      {
+        shop: '店A',
+        itemId: 'IT-N1',
+        title: 'Naming Fixture Listing',
+        // 款身份（组头那条控件）：styleId 必须 > 0 才给编辑；supplierId=0 表示未指定，
+        //   下拉要显示"未指定厂家"而不是选中第一个厂家（默认值不能靠位置）。
+        styleId: 77,
+        styleCode: 'N1',
+        styleName: '',
+        supplierId: 0,
+        styleCount: 1,
+        colors: [
+          { styleColorId: 901, styleCode: 'N1', styleName: '', colorName: '5', colorRaw: '5',
+            named: false, orderRows: 2, qty: 3, localPath: '/tmp/p41.jpg' },
+          { styleColorId: 902, styleCode: 'N1', styleName: '', colorName: '7', colorRaw: '7',
+            named: false, orderRows: 1, qty: 1, localPath: '/tmp/p42.jpg' },
+          { styleColorId: 903, styleCode: 'N1', styleName: '', colorName: '藏青', colorRaw: '9',
+            named: true, orderRows: 1, qty: 1, localPath: '/tmp/p44.jpg' },
+        ],
+      },
+    ],
+    unnamedKeys: 2,
+    totalKeys: 3,
+  };
+
+  // 款合并夹具（P4，2026-10-28）：一个厂家下 2 个款 + 一条已有的合并记录。
+  //   · 两个款**色集不同**（MG-1 有 5、7；MG-2 有 5、9）⇒ 界面上要能看出"合并会搬 1 个色"；
+  //   · 合并记录**必须存在**：不然"拆开"那条断言根本没东西可点（空跑）。
+  var MERGE_BOARD = {
+    groups: [
+      {
+        supplierId: 5,
+        supplierName: '集雨',
+        styles: [
+          { styleId: 201, styleCode: 'MG-1', styleName: '立领夹克', keyCount: 6, colorCount: 2,
+            rowCount: 6, colors: ['5', '7'], imagePath: '' },
+          { styleId: 202, styleCode: 'MG-2', styleName: '飘带卫衣', keyCount: 4, colorCount: 2,
+            rowCount: 4, colors: ['5', '9'], imagePath: '' },
+        ],
+      },
+    ],
+    merges: [
+      { batchId: 'b-mg-old', targetStyleId: 203, targetStyleCode: 'MG-3',
+        sources: [{ styleId: 204, styleCode: 'MG-4' }], movedColors: 2, movedKeys: 3,
+        createdAt: '2026-10-28 20:00:00' },
+    ],
+  };
+
+  // 门 1（店铺归一）夹具（P5，2026-10-28）：两家店没归一，共 7 行订单。
+  //   · 一家**有同名候选**（库里已登记、只是还没认）—— 界面必须敢说"能认成谁"；
+  //   · 一家**没有候选** —— 界面必须说"先登记"，而不是编一个名字出来（那会让人点错）。
+  //   两个数故意不等（2 家 / 7 行）：只显示家数的实现在"行数"那条断言上会红。
+  var SHOP_GATE_FIX = {
+    pending: [
+      { key: '店甲', raw: '店甲', orders: 5, autoShopName: '店甲', autoShopPlatform: 'ae' },
+      { key: '店乙', raw: '店乙', orders: 2, autoShopName: '', autoShopPlatform: '' },
+    ],
+    orders: 7,
+  };
+
   var PENDING_ORDERS = [
     { id: 41, imageId: 401, orderNo: 'P-41', shop: '店A', size: 'L', orderTime: '2026-10-04 10:00:00',
       category: 'T恤', color: '黑', logo: '', styleCode: '', styleName: '', styleColor: '',
@@ -709,6 +778,78 @@ const FAKE_BRIDGE = `<script>
     },
     'purchaseShopAllocationDetail': function (p) { rec('purchaseShopAllocationDetail', p); return { success: true, data: SHOP_DETAIL }; },
 
+    // ---- 命名板（P3，2026-10-28）----
+    /* 夹具刻意做成 **1 个 listing × 3 个色键（2 个待命名 + 1 个已命名）**：
+       最容易写错的两种实现都能被抓到 ——
+         · 逐键翻页（"点开一个填一个"）：组内 3 个输入框应当**同时**在 DOM 里；
+         · 把已命名的也当待办：计数应当只数 2。
+       ⚠️ 这个桩必须存在：不桩的话调用会落进 __unhandled，页面拿到 data:null ⇒
+          // 命名板整块静默失效，只有这条桩能看见。 */
+    'orderVariantNaming': function (p) {
+      rec('orderVariantNaming', p);
+      // ⚠️ 必须回**深拷贝**：真 IPC 是结构化克隆，页面拿到的从来不是主进程的活引用。
+      //    直接回 NAMING_BOARD 会让"页面顺手改了夹具"这件事在冒烟里看不出（改了也照样绿），
+      //    而线上它改的是自己的副本、库里的值根本没变 —— 假桥把两种结果抹平了。
+      return { success: true, data: JSON.parse(JSON.stringify(NAMING_BOARD)) };
+    },
+    /* 改名：**只接受 id + 名字**（界面不许送款名/编码/平台原文 —— 那些由主进程回读）。
+       名字叫「撞名」时回 ok:false，用来验"拒绝原话被显示出来而不是被改写成'保存失败'"。 */
+    /* 款信息（命名板组头）：款名 + 厂家一次存。**只接受改过的那一项** ——
+       supplierId 缺省表示不动，0 表示清空；两者混成一个是"改个名字顺手把厂家清了"。
+       这个桩必须存在：不桩则落进 __unhandled，页面拿到 data:null，保存后静默不刷新。 */
+    'orderStyleBasics': function (p) {
+      rec('orderStyleBasics', p);
+      var name = typeof (p && p.name) === 'string' ? p.name : '';
+      return {
+        success: true,
+        data: {
+          ok: true,
+          styleId: (p && p.styleId) || 0,
+          styleCode: 'N1',
+          name: name,
+          supplierId: typeof (p && p.supplierId) === 'number' ? p.supplierId : 0,
+        },
+      };
+    },
+    /* 款合并（P4）：候选 + 已合并记录。深拷贝同命名板 —— 真 IPC 是结构化克隆。 */
+    'orderStyleMergeBoard': function (p) {
+      rec('orderStyleMergeBoard', p);
+      return { success: true, data: JSON.parse(JSON.stringify(MERGE_BOARD)) };
+    },
+    /* 合并：只接受目标 + 源款 id；回执带批次号（拆开按它，不按行 id）。 */
+    'orderStyleMerge': function (p) {
+      rec('orderStyleMerge', p);
+      return {
+        success: true,
+        data: { ok: true, batchId: 'b-mg-new',
+          targetStyleId: (p && p.targetStyleId) || 0,
+          movedColors: 1, movedKeys: 3 },
+      };
+    },
+    'orderStyleUnmerge': function (p) {
+      rec('orderStyleUnmerge', p);
+      return { success: true, data: { ok: true, restored: 4, skipped: 0 } };
+    },
+    /* 门 1（店铺归一）：只读派生。深拷贝 —— 真 IPC 是结构化克隆，
+       交活引用会让"页面顺手改了夹具"在冒烟里既看不出、也不变红。 */
+    'shopGate': function () {
+      rec('shopGate', {});
+      return { success: true, data: JSON.parse(JSON.stringify(SHOP_GATE_FIX)) };
+    },
+    'orderVariantRename': function (p) {
+      rec('orderVariantRename', p);
+      var name = String((p && p.name) || '');
+      if (name === '撞名') {
+        return {
+          success: true,
+          data: { ok: false, error: '这个款下已经有同名颜色了（SUST-001-RED），要合并请用「映射与关联」', styleColorId: (p && p.styleColorId) || 0, name: name, keys: 0 },
+        };
+      }
+      return {
+        success: true,
+        data: { ok: true, styleColorId: (p && p.styleColorId) || 0, name: name, keys: 1 },
+      };
+    },
     // ---- 归类核对域（2026-10-05「归类核对」页签内建）----
     /* 进页时的**映射自愈**：页面会在取数前调一次（把「映射在、订单没吃到」的行补上）。
        桩默认回 0 行 —— 夹具里没有这类行，这里只验**接线**（真的调了、且没补到就不显示回执）。
@@ -2729,6 +2870,54 @@ async function main() {
     report('数据回来后界面跟着回来（保活 + token 联动，不是一次性的；三款色行都回来）',
       okBack, card('pk-bar') ? 'bar-ok, rows=' + [pickRow('S1 · 黑'), pickRow('S2 · 白'), pickRow('S3 · 绿')].length : 'no-bar');
 
+    // ---- 门 2（拿货前检查）：会开出一张错单的两种，拒绝并说清去哪补 ----
+    // 为什么断言"拒绝"而不是"按钮禁用"：一张卡上常常只有一两行有问题，禁用整张卡会连带挡掉
+    // 同一张卡上能拿的货 —— 门的作用域是"这批里的那几行"，不是"这家厂"。
+    // 两条都必须断言：只验"拒绝"的话，一个"谁来都拒绝"的实现也能全绿。
+    // ⚠️ 先把夹具恢复成"未指定厂家那一格还在"的形态：本段前面那条拖拽断言真的改了
+    //    那个"款 → 新厂家"的库（S2 被拖到厂A），不还原就只剩三家的卡、没有可断言的对象。
+    window.__movedSuppliers = {};
+    await clickRefresh();
+    var gateBtn = null;
+    try {
+      await waitFor(function () {
+        gateBtn = document.querySelector('[data-act="pk-create-order"][data-supplier="0"]');
+        return !!gateBtn;
+      }, 8000);
+    } catch (e) { gateBtn = document.querySelector('[data-act="pk-create-order"][data-supplier="0"]'); }
+    var createBefore = calls('purchaseOrderCreate').length;
+    if (gateBtn) gateBtn.click();
+    var gateSaid = true;
+    try {
+      await waitFor(function () { return !!card('pu-error'); }, 6000);
+    } catch (e) { gateSaid = false; }
+    var gateMsg = card('pu-error') ? flat(card('pu-error')) : '';
+    report('门 2：有"款色没指定厂家"的那一批**不开单**，并把原因与去处写在页面上（不是闪一下就没）',
+      !!gateBtn && gateSaid && calls('purchaseOrderCreate').length === createBefore &&
+        gateMsg.indexOf('还没指定厂家') >= 0 && gateMsg.indexOf('归类核对') >= 0,
+      'btn=' + !!gateBtn + ' called=' + (calls('purchaseOrderCreate').length - createBefore) +
+        ' msg=' + JSON.stringify(gateMsg.slice(0, 60)));
+
+    // 正向对照：**同一页上**合格的那一家必须照常开单（否则"拒绝"可能只是"整页不能开单"）
+    var okBtn = document.querySelector('[data-act="pk-create-order"][data-supplier="7"]');
+    if (okBtn) okBtn.click();
+    var okCreated = true;
+    try {
+      await waitFor(function () { return calls('purchaseOrderCreate').length > createBefore; }, 8000);
+    } catch (e) { okCreated = false; }
+    var cReq = calls('purchaseOrderCreate')[calls('purchaseOrderCreate').length - 1] || {};
+    report('门 2：合格的那一家照常开单（拦的是"这批里的问题行"，不是整页）',
+      !!okBtn && okCreated && Number(cReq.supplierId) === 7 &&
+        (cReq.items || []).length === 2 &&
+        (cReq.items || []).every(function (it) { return Number(it.styleColorId) > 0; }),
+      'btn=' + !!okBtn + ' created=' + okCreated + ' supplier=' + cReq.supplierId +
+        ' items=' + JSON.stringify((cReq.items || []).map(function (it) {
+          return it.styleCode + '/' + it.styleColorId;
+        })));
+    // 关掉开单后自动弹出的编辑器（它会盖住后面页签的点击热区）
+    if (card('pue-close')) card('pue-close').click();
+    await waitFor(function () { return !card('pu-editor'); }, 4000);
+
     // 提示（toast）的读取工具。**必须"全部提示里有没有"**，不能用 querySelector 取第一条：
     // 同一时刻界面上可以并排好几条（本页跑完累计几十条），第一条往往是**旧**提示 ——
     // 症状是"新提示没出来"，排查方向会整个反掉（这条已在真实事故里踩过）。
@@ -2754,6 +2943,178 @@ async function main() {
     await waitFor(function () {
       return !!card('classify-panel') && !!card('cl-table');
     }, 10000);
+
+    // ---- 门 1（店铺归一）：一句带数字的话 + 可展开清单 + 一个出口 ----
+    // 为什么在这一页断言：本页是"款/色的身份"成型的地方，而键里带店名 ——
+    // 一个店名没归一，它名下每个 listing 都自成一款（同一件货在统计/拿货里两行）。
+    var shopGateOk = true;
+    try {
+      await waitFor(function () { return !!card('cl-gate-shop'); }, 8000);
+    } catch (e) { shopGateOk = false; }
+    var shopGateTxt = card('cl-gate-shop-count') ? flat(card('cl-gate-shop-count')) : '';
+    report('门 1：订单里有未归一店铺时，页顶给出「N 家店 · M 行订单」（家数与行数都要说）',
+      shopGateOk && shopGateTxt.indexOf('2') >= 0 && shopGateTxt.indexOf('7') >= 0 &&
+        shopGateTxt.indexOf('家店') >= 0 && shopGateTxt.indexOf('行') >= 0,
+      shopGateOk ? JSON.stringify(shopGateTxt) : '没有提示条');
+    report('门 1：默认收起 —— 清单不在 DOM（常驻的只有一句话，不占半屏）',
+      !card('cl-gate-shop-list'), 'list=' + !!card('cl-gate-shop-list'));
+    card('cl-gate-shop-open').click();
+    await waitFor(function () { return !!card('cl-gate-shop-list'); }, 4000);
+    var rowA = card('cl-gate-shop-店甲');
+    var rowB = card('cl-gate-shop-店乙');
+    report('门 1：展开后逐条给店名 / 行数 / 能认成谁；没有候选的那家说"先登记"（不编名字）',
+      !!rowA && !!rowB && flat(rowA).indexOf('5 行') >= 0 && flat(rowA).indexOf('能认成') >= 0 &&
+        flat(rowB).indexOf('2 行') >= 0 && flat(rowB).indexOf('先登记') >= 0,
+      'A=' + (rowA ? flat(rowA) : '无') + ' | B=' + (rowB ? flat(rowB) : '无'));
+    report('门 1 **不阻断**动作：「这批全部确认无误」仍然可点（它保护数字口径，不是某个动作）',
+      !!card('cl-all-ok') && !card('cl-all-ok').disabled &&
+        !!card('cl-gate-shop-go'),
+      'all-ok=' + (card('cl-all-ok') ? 'disabled=' + card('cl-all-ok').disabled : '无') +
+        ' go=' + !!card('cl-gate-shop-go'));
+
+    // ---- 命名板（P3，2026-10-28）：这一页现在唯一还属于人的判断 ----
+    // 三条断言各自守一个容易写错的实现（每条都能被一个具体错法弄红）：
+    //   ① 逐键翻页（"点开一个填一个"）=> 组内 3 个输入框不会同时在 DOM 里；
+    //   ② 把已命名的也算待办 => 计数变 3（用户会白输一遍已经起过的名）；
+    //   ③ 改名时把款名/编码/平台原文一起送过去 => 主进程按界面草稿覆盖事实。
+    await waitFor(function () { return !!card('vn-panel'); }, 8000);
+    var vnInputs = queryAll('[data-act^="vn-input-"]');
+    var vnCount = flat(card('vn-count'));
+    report('命名板：一个 listing 的 3 个色键**同屏**给出（不是逐键翻页）',
+      !!card('vn-panel') && vnInputs.length === 3,
+      '输入框=' + vnInputs.length + ' 计数=' + vnCount);
+    // ⚠️ 正则里的空白写成 [ ] 而不是 \\s：这段代码整体在一个模板串里，单个反斜杠会被吃掉。
+    report('命名板计数只数**未命名**的（夹具 2 待命名 + 1 已命名 => 文案必须是 2 / 共 3）',
+      /还有[ ]*2[ ]*个/.test(vnCount) && /共[ ]*3[ ]*个/.test(vnCount),
+      '计数文案=' + JSON.stringify(vnCount));
+    // 填一个名字 + 回车 => 只送 id 与名字（不送 styleCode / colorRaw / 款名）
+    function fillAndEnter(act, val) {
+      var el = card(act);
+      if (!el) return false;
+      el.value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+      return true;
+    }
+    var okFill = fillAndEnter('vn-input-901', '藏青');
+    await waitFor(function () { return calls('orderVariantRename').length > 0; }, 6000);
+    var renCalls = calls('orderVariantRename');
+    var renPayload = renCalls[0] || {};
+    report('命名保存：回车即存，且**只送** styleColorId + name（款名/编码/平台原文不许由界面送）',
+      okFill && renCalls.length === 1 && Number(renPayload.styleColorId) === 901 &&
+        String(renPayload.name) === '藏青' && Object.keys(renPayload).length === 2,
+      'payload=' + JSON.stringify(renPayload) + ' 次数=' + renCalls.length);
+    // 拒绝原话必须显示出来（同款重名 => 主进程回 ok:false + 一句人话）
+    fillAndEnter('vn-input-902', '撞名');
+    await waitFor(function () { return !!card('vn-err-902'); }, 6000);
+    var vnErr = flat(card('vn-err-902'));
+    report('被拒绝时显示**主进程的原话**（不是统一的"保存失败"）',
+      vnErr.indexOf('同名') >= 0,
+      '错误文案=' + JSON.stringify(vnErr));
+
+    // ---- 款信息（组头）：这一层是"这个款叫什么 / 从哪家拿" ----
+    // 为什么单列断言：色名写 oi_style_colors，款名与厂家写产品主数据（pl_products）——
+    //   两张不同域的表。最容易被写错的实现是"一个入口送全量字段"，于是"只改个名字"
+    //   顺手把厂家清成 0，拿货页随即多出一批未指定厂家的货。
+    var styName = card('vn-style-name-IT-N1');
+    var stySup = card('vn-style-sup-IT-N1');
+    report('组头给的是「款」这一层：款编码只读 + 款名输入框 + 厂家下拉',
+      !!card('vn-style-code-IT-N1') && !!styName && !!stySup &&
+        flat(card('vn-style-code-IT-N1')) === 'N1',
+      '编码=' + (card('vn-style-code-IT-N1') ? flat(card('vn-style-code-IT-N1')) : '无') +
+        ' 名框=' + (styName ? '在' : '无') + ' 厂家=' + (stySup ? '在' : '无'));
+    report('厂家下拉默认落在「未指定」（默认值不靠位置：第一个选项是厂家 厂A）',
+      !!stySup && stySup.value === '0',
+      'value=' + (stySup ? stySup.value : '?') + ' 选项数=' + (stySup ? stySup.options.length : 0));
+    // ⚠️ 走**回车**而不是点「保存」：按钮的 disabled 绑在"有改动"上，而改动是上一行
+    //    dispatch 出来的 —— Vue 要到下一个 microtask 才重绘，同步 click 打到的还是 disabled 的按钮，
+    //    于是"点了没反应"。回车直接进 saveStyle（与面板文案"填完按回车即存"同一路径）。
+    var nbBefore = calls('orderVariantNaming').length;
+    setInput('vn-style-name-IT-N1', '测试卫衣');
+    card('vn-style-name-IT-N1').dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+    // ⚠️ 不能只等"调用发生了"就往下走：桩里的 rec 是**同步**记下的，promise 还没 resolve。
+    //    存成功之后组件会重读一次命名板（finally 里 reload）—— 等那一次才说明草稿已清空，
+    //    否则下一步"选厂家"会把还没清掉的草稿当成没保存的改动一起送出去（断言就会红得莫名其妙）。
+    await waitFor(function () { return calls('orderVariantNaming').length > nbBefore; }, 6000);
+    var sb1 = calls('orderStyleBasics')[0] || {};
+    report('只改款名时只送 styleId + name（**不送** supplierId ⇒ 厂家不会被清掉）',
+      Number(sb1.styleId) === 77 && String(sb1.name) === '测试卫衣' && !('supplierId' in sb1),
+      'payload=' + JSON.stringify(sb1));
+    setInput('vn-style-sup-IT-N1', '8');
+    await waitFor(function () { return calls('orderStyleBasics').length > 1; }, 6000);
+    var sb2 = calls('orderStyleBasics')[1] || {};
+    report('选厂家是**离散选择** ⇒ 立刻保存，且不把款名一起重发（避免草稿覆盖刚改的名字）',
+      Number(sb2.styleId) === 77 && Number(sb2.supplierId) === 8 && !('name' in sb2),
+      'payload=' + JSON.stringify(sb2));
+
+    // ---- 款合并（P4）：同厂家下「可能是同一件货」 ----
+    // 为什么在拿货页断言：这是唯一"同款分成两行"会让人肉疼的地方（同一件货要开两张单）。
+    // 三条要点：
+    //   ① 默认折叠、不拦任何动作 —— 合并不是门；
+    //   ② 目标 = **第一个勾的**，不是 DOM 里第一个（勾选顺序才是人的意图，DOM 顺序是渲染顺序）；
+    //   ③ 拆开按 batchId，不按行 id（一次 N→1 在库里写 N 行，按行只能拆掉最后一个源款）。
+    await activateTab('classify');
+    var okMergeHead = true;
+    try {
+      await waitFor(function () { return !!card('sm-merge-count'); }, 8000);
+    } catch (e) { okMergeHead = false; }
+    report('拿货页给出「可能是同一件货」：折叠头直接报数量（1 组 / 2 个款）',
+      okMergeHead && flat(card('sm-merge-count')).indexOf('1 组') >= 0 &&
+        flat(card('sm-merge-count')).indexOf('2 个款') >= 0,
+      okMergeHead ? flat(card('sm-merge-count')) : '没有折叠头');
+    report('默认折叠：说明与款列表都不在 DOM 里（低频整理，不占主屏）',
+      !card('sm-merge-note') && !card('sm-row-201'),
+      'note=' + !!card('sm-merge-note') + ' row=' + !!card('sm-row-201'));
+    card('sm-merge-toggle').click();
+    await waitFor(function () { return !!card('sm-merge-note'); }, 6000);
+    report('展开后说明里写明「随时可拆开」（合并可逆，人才敢点）',
+      !!card('sm-merge-note') && flat(card('sm-merge-note')).indexOf('随时可拆开') >= 0,
+      flat(card('sm-merge-note')).slice(0, 60));
+    report('两个款各自一行，带款名与色集（人靠它判断是不是同一件货）',
+      !!card('sm-row-201') && !!card('sm-row-202') &&
+        flat(card('sm-name-201')).indexOf('立领夹克') >= 0,
+      'row201=' + !!card('sm-row-201') + ' row202=' + !!card('sm-row-202'));
+    var mergeBtn = card('sm-merge-btn-5');
+    report('没勾够 2 个时按钮 disabled 且说清为什么（不是灰着不解释）',
+      !!mergeBtn && mergeBtn.disabled && flat(mergeBtn).indexOf('勾选 2 个') >= 0,
+      mergeBtn ? 'disabled=' + mergeBtn.disabled + ' 文案=' + flat(mergeBtn) : '没有按钮');
+    // ⭐ 故意**先勾第二个**：目标必须是"第一个勾的"，不是 DOM 里第一个。
+    //    按 DOM 顺序取目标的实现在这里就红（那种实现会说"合并到 立领夹克"，而人先点的是飘带卫衣）。
+    card('sm-pick-202').click();
+    await new Promise(function (r) { setTimeout(r, 60); });
+    card('sm-pick-201').click();
+    await waitFor(function () { return !card('sm-merge-btn-5').disabled; }, 4000);
+    report('勾满 2 个才能合并，按钮文案点名目标款（目标 = 先勾的「飘带卫衣」）',
+      !card('sm-merge-btn-5').disabled && flat(card('sm-merge-btn-5')).indexOf('飘带卫衣') >= 0,
+      flat(card('sm-merge-btn-5')));
+    report('目标行上有「合并到它」标记（不让人猜合并到哪个款了）',
+      !!card('sm-target-tag') && flat(card('sm-target-tag')).indexOf('合并到它') >= 0,
+      card('sm-target-tag') ? flat(card('sm-target-tag')) : '没有标记');
+    card('sm-merge-btn-5').click();
+    await waitFor(function () { return calls('orderStyleMerge').length > 0; }, 6000);
+    var mg1 = calls('orderStyleMerge')[0] || {};
+    report('合并只送目标 + 源款 id，目标 = **先勾的那个**（202，不是 DOM 第一个 201）',
+      Number(mg1.targetStyleId) === 202 && JSON.stringify(mg1.sourceStyleIds) === '[201]',
+      'payload=' + JSON.stringify(mg1));
+    report('已合并记录按批次列出（源款 → 目标款，搬了几个色/键也说出来）',
+      !!card('sm-merge-record-b-mg-old') &&
+        flat(card('sm-merge-record-b-mg-old')).indexOf('MG-4') >= 0 &&
+        flat(card('sm-merge-record-b-mg-old')).indexOf('MG-3') >= 0,
+      card('sm-merge-record-b-mg-old') ? flat(card('sm-merge-record-b-mg-old')) : '没有记录');
+    // ⚠️ 合并刚回来时按钮上是 busy（保存中）—— disabled 的按钮 click 不触发任何东西，
+    //    直接点会让这条断言超时得莫名其妙。先等它可点，再点。
+    var okUnReady = true;
+    try {
+      await waitFor(function () { var b = card('sm-unmerge-b-mg-old'); return !!b && !b.disabled; }, 8000);
+    } catch (e) { okUnReady = false; }
+    if (okUnReady) card('sm-unmerge-b-mg-old').click();
+    var okUn = true;
+    try { await waitFor(function () { return calls('orderStyleUnmerge').length > 0; }, 8000); }
+    catch (e) { okUn = false; }
+    var mg2 = calls('orderStyleUnmerge')[0] || {};
+    report('拆开送的是 batchId（一次 N→1 在库里是 N 行，按行 id 只能拆掉最后一个）',
+      okUn && okUnReady && String(mg2.batchId) === 'b-mg-old',
+      'ready=' + okUnReady + ' called=' + okUn + ' payload=' + JSON.stringify(mg2));
 
     // 本段两个小工具。⚠️ 全段都在 ASSERT_SCRIPT 模板串里 ⇒ 注释里**不能出现反引号**。
     function setInput(act, val) {

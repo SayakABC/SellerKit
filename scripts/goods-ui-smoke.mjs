@@ -3873,7 +3873,10 @@ async function main() {
     // 判据是"零款 + 队列已拉过且为空"——**两个条件都不容易造**，所以夹具两个开关一起用：
     // __smokeEmptyProducts 造零款、__smokeEmptyQueue 造空队列。
     // 少造任何一个，这张卡要么恒不出现（等于没测），要么在有货的库里冒出来（真机上没人会看见）。
-    // ⚠️ 断言必须超出"卡出现了"：三步的顺序、两步有真按钮、第三步**刻意没有**按钮，各是一条。
+    // ⚠️ 断言必须超出"卡出现了"：三步的顺序、三步各带真按钮、第三步不再说"就在这一页"，各是一条。
+    // ⚠️ 2026-10-28：第三步从「点一款认款」改成「看要拿什么」（归款已是导入时自动完成的），
+    //    所以它**从"刻意没有按钮"翻成了"必须有按钮"** —— 这一步的落点在另一个模块，
+    //    没有按钮就只是一句感想。改这段时别再按旧文案写回去。
     step('first-run');
     window.__smokeEmptyProducts = true;
     window.__smokeEmptyQueue = true;
@@ -3881,19 +3884,20 @@ async function main() {
     await settle(function () { return !!document.querySelector('[data-act="first-run-card"]'); }, 8000);
     var fr = document.querySelector('[data-act="first-run-card"]');
     report('零款 + 队列已拉过且为空 → 首启引导卡出现（全新安装的唯一时刻）', !!fr);
-    report('卡上恰好三步、顺序是 订单 → 店铺 → 认款（顺序错了这三步就不成立）',
+    report('卡上恰好三步、顺序是 订单 → 店铺 → 看要拿什么（顺序错了这三步就不成立）',
       !!fr && all('[data-act="first-run-card"] .gd-firstrun__step').length === 3 &&
         !!document.querySelector('[data-act="fr-step-orders"]') &&
         !!document.querySelector('[data-act="fr-step-shops"]') &&
-        !!document.querySelector('[data-act="fr-step-relate"]'),
+        !!document.querySelector('[data-act="fr-step-stats"]'),
       fr ? 'steps=' + all('[data-act="first-run-card"] .gd-firstrun__step').length : 'missing');
-    report('前两步都带**真按钮**（不是"请先去别处导入"那种纯文本提示）',
+    report('三步都带**真按钮**（不是"请先去别处导入"那种纯文本提示）',
       !!document.querySelector('[data-act="fr-import-orders"]') &&
-        !!document.querySelector('[data-act="fr-open-registry"]'));
-    report('第 3 步**刻意不给按钮**（它的动作就是"回到这一页"，给按钮只能是把当前页再切一次）',
-      !!document.querySelector('[data-act="fr-step-here"]') &&
-        !document.querySelector('[data-act="fr-step-relate"] button'),
-      flat(document.querySelector('[data-act="fr-step-here"]')));
+        !!document.querySelector('[data-act="fr-open-registry"]') &&
+        !!document.querySelector('[data-act="fr-goto-purchase"]'));
+    report('第 3 步不再写「就在这一页」（归款已自动完成，这一页没有第三步可做 —— 留着就是一句错话）',
+      !document.querySelector('[data-act="fr-step-here"]') &&
+        flat(document.querySelector('[data-act="fr-step-stats"]')).indexOf('就在这一页') < 0,
+      'here=' + !!document.querySelector('[data-act="fr-step-here"]'));
     // 有款之后必须自己消失 —— "做完即消失"不是靠用户去关它（那种「我知道了」按钮
     // 只会造出一个查不出原因的持久状态）。
     window.__smokeEmptyProducts = false;

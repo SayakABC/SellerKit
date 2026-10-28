@@ -15,6 +15,7 @@ import {
   ignoreKey,
   pendingOf,
   pendingRollup,
+  purchaseGateOf,
   takenKey,
   type PickingGroup,
   type PickingRow,
@@ -811,5 +812,60 @@ describe('pendingOf / pendingRollup：待拿口径（按钮件数与开单明细
     const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], { taken: { 'S1|黑|L': 3 } });
     expect(pendingRollup(groupByColor(s.groups))).toEqual({ colors: 0, pieces: 0, amount: 0, noPricePieces: 0 });
     expect(pendingRollup(null)).toEqual({ colors: 0, pieces: 0, amount: 0, noPricePieces: 0 });
+  });
+});
+
+describe('purchaseGateOf：门 2（拿货前检查，拦的是"会开出错单"的两件事）', () => {
+  /**
+   * 三行各代表一种状态（**默认 `row()` 的 styleColorId 是 0**，所以"已归类"必须显式给）：
+   *   · id 11 + 厂家 7  → 合格
+   *   · id 0（未识别款）→ 未归类
+   *   · id 12 + 厂家 0  → 有身份、但款没厂家
+   */
+  const gateFixture = (): PickingGroup[] =>
+    aggregatePicking([
+      row({ id: 1, orderNo: 'O1', styleColorId: 11 }),
+      row({ id: 2, orderNo: 'O2', styleCode: '', styleColor: '', color: '', styleColorId: 0 }),
+      row({ id: 3, orderNo: 'O3', styleCode: 'S9', styleColorId: 12, supplierId: 0, supplierName: '' }),
+    ]).groups;
+
+  it('全部有款色身份 + 都有厂家 → 门是开的', () => {
+    const ok = aggregatePicking([row({ styleColorId: 11 })]).groups;
+    expect(purchaseGateOf(ok)).toEqual({ unclassifiedRows: 0, noSupplierRows: 0, ok: true });
+  });
+
+  it('未归类的行 ⇒ 拦：它进单后 `style_color_id = 0`，改个色名"已拿"就永久失联', () => {
+    const g = gateFixture().filter((x) => x.styleColorId <= 0);
+    expect(g).toHaveLength(1);
+    expect(purchaseGateOf(g)).toEqual({ unclassifiedRows: 1, noSupplierRows: 0, ok: false });
+  });
+
+  it('有身份但款没厂家 ⇒ 拦：主进程会抛"厂商不存在"，那不是用户看得懂的原因', () => {
+    const g = gateFixture().filter((x) => x.styleColorId > 0 && x.supplierId === 0);
+    expect(g).toHaveLength(1);
+    expect(purchaseGateOf(g)).toEqual({ unclassifiedRows: 0, noSupplierRows: 1, ok: false });
+  });
+
+  it('两种问题各自计数（不许合成一个数：修法完全不同，一个去归类、一个去选厂家）', () => {
+    expect(purchaseGateOf(gateFixture())).toEqual({
+      unclassifiedRows: 1,
+      noSupplierRows: 1,
+      ok: false,
+    });
+  });
+
+  it('⚠️ 色名不是门：归好了的款色即使颜色是平台原文（`5`）也照开', () => {
+    // 这条是**反向控制**：把色名做成前置的实现会在这里变红 ——
+    // 而那正是"导入完就能拿货"被推回成 58 次人工输入的那条路。
+    const g = aggregatePicking([
+      row({ styleColorId: 11, styleColor: '5', color: '5' }),
+      row({ id: 2, orderNo: 'O2', styleColorId: 11, styleColor: '5', color: '5', size: 'M' }),
+    ]).groups;
+    expect(purchaseGateOf(g).ok).toBe(true);
+  });
+
+  it('没有要开的行（空 / null）→ 门不拦（空单不是"数据不全"）', () => {
+    expect(purchaseGateOf([])).toEqual({ unclassifiedRows: 0, noSupplierRows: 0, ok: true });
+    expect(purchaseGateOf(null)).toEqual({ unclassifiedRows: 0, noSupplierRows: 0, ok: true });
   });
 });

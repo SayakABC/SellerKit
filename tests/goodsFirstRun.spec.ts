@@ -39,8 +39,19 @@ describe('shouldShowFirstRunCard', () => {
 });
 
 describe('FIRST_RUN_STEPS', () => {
-  it('恰好三步、顺序是 订单 → 店铺 → 认款（顺序错了这三步就不成立）', () => {
-    expect(FIRST_RUN_STEPS.map((s) => s.id)).toEqual(['orders', 'shops', 'relate']);
+  it('恰好三步、顺序是 订单 → 店铺 → 看要拿什么（顺序错了这三步就不成立）', () => {
+    // 第三步 2026-10-28 由 `relate`（点一款认款）改成 `stats`：归款已经是导入时自动完成的，
+    // 把"逐个认款"当第三步会让用户每次导入都去做一遍系统已经做完的事。
+    // ⚠️ 这条断言是**故意的**：改回 `relate` 必须先改这里，逼人重新想一遍那件事还需不需要人做。
+    expect(FIRST_RUN_STEPS.map((s) => s.id)).toEqual(['orders', 'shops', 'stats']);
+  });
+
+  it('第三步不再教人"逐个认款"（这句文案已不成立，改回来会误导）', () => {
+    const last = FIRST_RUN_STEPS[FIRST_RUN_STEPS.length - 1];
+    expect(last.title).not.toMatch(/认款/);
+    expect(last.desc).not.toMatch(/点开左边任意一款/);
+    // 反过来：它必须真的说清"去哪看"（不说落点，这一步就只是一句感想）
+    expect(`${last.title}${last.desc}`).toMatch(/拿货/);
   });
 
   it('每一步都真的有说明文案（空 desc 会在界面上渲染成一行空白）', () => {

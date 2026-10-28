@@ -27,7 +27,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sellerkit-picking-smoke-'));
 
-const { initDb, closeDb, dbRun } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
+const { initDb, closeDb, dbGet, dbRun } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
 const odb = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
 const pdb = require(path.join(ROOT, 'dist', 'electron', 'product-db.js'));
 const pick = require(path.join(ROOT, 'dist', 'electron', 'picking-db.js'));
@@ -83,6 +83,13 @@ dbRun(
 dbRun(
   `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (3, 'sha3', 'fp3', 'u3', '')`,
+);
+// 另一张占位图：给「三层都没有」那条用。**故意不复用图 3** —— 让两个不同商品共用一张图
+// 在真实数据里不会发生（图按内容指纹去重），共用会让"后进的那行改判先归好的行"这类
+// 断言混淆来源。同商品多色共用主图是真的，那种场景在 [7] 用独立的图专门验。
+dbRun(
+  `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+   VALUES (4, 'sha4', 'fp4', 'u4', '')`,
 );
 
 let seq = 0;
@@ -198,7 +205,7 @@ check('③ 无订单图 → 回落款主图（`pl_shop_sku` 映射 → `pl_produ
 });
 
 check('三层都没有 → imagePath 为空串（界面标「缺图」，不静默）', () => {
-  order({ orderNo: 'H-NOIMG', itemId: 'IT-999', imageId: 3 });
+  order({ orderNo: 'H-NOIMG', itemId: 'IT-999', imageId: 4 });
   const hit = pick.pickingRows({}).rows.find((x) => x.orderNo === 'H-NOIMG');
   assert.strictEqual(hit.imagePath, '');
 });
@@ -211,7 +218,13 @@ check('识别链给出款编码与款色（映射命中 → autoAssignByMap → 
   assert.strictEqual(mapped.styleCode, 'STYLE-P1', '映射命中的行应带出产品编码');
   assert.ok(mapped.styleColor, '款色也应带出来（autoAssignByMap 建的款色）');
   const unmapped = rows.find((x) => x.orderNo === 'A-NEW');
-  assert.strictEqual(unmapped.styleCode, '', '没映射的行款编码为空串（不猜）');
+  // 2026-10-28（P2）起"没映射"**不再等于"没归款"**：导入那一刻已按变体键建了临时款
+  //（`AE-<商品ID>`，确定性/幂等由 `order:smoke` [13] 管，这里不重复）。
+  // 本条只钉两件事：**不许串到映射款上**（那才是"猜错了"），以及色/码仍取订单自身字段。
+  assert.ok(
+    unmapped.styleCode && unmapped.styleCode !== 'STYLE-P1',
+    `没映射的行应落自己的临时款、不能借映射款，实为 ${JSON.stringify(unmapped.styleCode)}`,
+  );
   assert.strictEqual(unmapped.color, '黑', '颜色/尺码取订单自身字段');
   assert.strictEqual(unmapped.size, 'L');
 });
@@ -306,13 +319,17 @@ check('先导订单、后配映射 → 回填存量订单（不必把 Excel 重�
     `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
      VALUES (12, 'sha12', 'fp12', 'u12', '/tmp/order-12.jpg')`,
   );
-  order({ orderNo: 'N-BACKFILL', itemId: 'IT-BF', imageId: 12 }); // 此刻还没有映射 → 未归款
+  order({ orderNo: 'N-BACKFILL', itemId: 'IT-BF', imageId: 12 }); // 此刻还没有映射
   const before = pick.pickingRows({}).rows.find((x) => x.orderNo === 'N-BACKFILL');
-  assert.strictEqual(before.styleCode, '', '配映射前应未归款');
+  // 配映射前：已按变体键归到**临时款**。断言"不为空"是有意的 ——
+  // P2 起「导入即归类」，"未归款"不再是常态；把这里当成"应该为空"是旧世界的口径。
+  assert.ok(before.styleCode && before.styleCode !== 'STYLE-BF', `配映射前应是临时款，实为 ${before.styleCode}`);
   const pid = pdb.upsertProduct({ code: 'STYLE-BF', name: '款BF', category: '衣服', supplierId: 0, status: 'active', note: '' });
   pdb.upsertSkuMappings([
     { platform: 'aliexpress', shopId: shop.id, itemId: 'IT-BF', productId: pid.id, spec: '白色', status: 'confirmed' },
   ]);
+  // ⚠️ 这一条是「映射能不能压过临时款」的**唯一**守卫：P2 之后行上永远有值，
+  //    候选判据若还是「未归款 / 占位色」，这里会静默返回 0（用户配完映射看不到任何变化）。
   const n = odb.reassignOrdersByItemIds(['IT-BF']);
   assert.strictEqual(n, 1, '应回填 1 行');
   const after = pick.pickingRows({}).rows.find((x) => x.orderNo === 'N-BACKFILL');
@@ -320,9 +337,40 @@ check('先导订单、后配映射 → 回填存量订单（不必把 Excel 重�
   assert.strictEqual(after.color, '白色');
 });
 
+check('人命名过的色不被映射改判（回填的另一半：只认"猜的"结论，不推翻人的判定）', () => {
+  dbRun(
+    `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+     VALUES (15, 'sha15', 'fp15', 'u15', '/tmp/order-15.jpg')`,
+  );
+  const rowId = order({ orderNo: 'Q-HUMAN', itemId: 'IT-HUMAN', imageId: 15, color: '黑' }); // → 临时款（色名 '黑'）
+  const sc = dbGet(`SELECT COALESCE(style_color_id, 0) AS id FROM oi_order_items WHERE id = ?`, [rowId]);
+  assert.ok(sc && Number(sc.id) > 0, '临时款色应已建出来');
+  // 命名：色名从订单原文 `黑` 改成 `玄黑`（命名板/核对页都走这个函数，同时把键标成 named）
+  const renamed = odb.renameStyleColor(Number(sc.id), '玄黑');
+  assert.ok(renamed.ok, `命名应成功：${JSON.stringify(renamed)}`);
+  const pid = pdb.upsertProduct({ code: 'STYLE-HUMAN', name: '款H', category: '衣服', supplierId: 0, status: 'active', note: '' });
+  pdb.upsertSkuMappings([
+    { platform: 'aliexpress', shopId: shop.id, itemId: 'IT-HUMAN', productId: pid.id, spec: '白色', status: 'confirmed' },
+  ]);
+  const n = odb.reassignOrdersByItemIds(['IT-HUMAN']);
+  assert.strictEqual(n, 0, '人命名过的结论不该被映射改判');
+  const hit = pick.pickingRows({}).rows.find((x) => x.orderNo === 'Q-HUMAN');
+  assert.strictEqual(hit.styleColor, '玄黑', '人工色名必须还在');
+  assert.notStrictEqual(hit.styleCode, 'STYLE-HUMAN');
+});
+
 check('回填不碰已定色的图（人工/识别结论/补过的色都算数 —— 改一次映射不会把历史订单全改判）', () => {
   const n = odb.reassignOrdersByItemIds(['IT-BF']);
   assert.strictEqual(n, 0, '图 12 已定色，不该被重判');
+});
+
+check('重导同一份报表不把人工色名改回映射色（映射分支也过"人认过的不动"这道闸门）', () => {
+  // Q-HUMAN 已被命名成「玄黑」。同一份订单再进一次（幂等重入会**再跑一遍归款**）——
+  // 这条路径不经过 `reassignCore` 的候选判据，只靠 `autoAssignByMap` 自己的闸门拦。
+  order({ orderNo: 'Q-HUMAN', itemId: 'IT-HUMAN', imageId: 15, color: '黑' });
+  const hit = pick.pickingRows({}).rows.find((x) => x.orderNo === 'Q-HUMAN');
+  assert.strictEqual(hit.styleColor, '玄黑', '重导把人工色名冲成了映射里的「白色」');
+  assert.strictEqual(pick.pickingRows({}).rows.filter((x) => x.orderNo === 'Q-HUMAN').length, 1, '重导不该插重复行');
 });
 
 check('未配颜色的映射（spec 缺省）行为不变 —— 颜色回落订单原文，不会凭空多出色', () => {
@@ -338,6 +386,32 @@ check('未配颜色的映射（spec 缺省）行为不变 —— 颜色回落订
   const hit = pick.pickingRows({}).rows.find((x) => x.orderNo === 'P-OLDWAY');
   assert.strictEqual(hit.styleCode, 'STYLE-C3');
   assert.strictEqual(hit.color, '藏青', '映射没配色 → 用订单原文色（一期行为不变）');
+});
+
+console.log('\n[7] 同商品多色共用一张主图：键的结论比图细，后进的那行不许改判先归好的行');
+
+check('两色共用一张图 → 各归各的色（全量投影会把先导的那色顶掉）', () => {
+  dbRun(
+    `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+     VALUES (16, 'sha16', 'fp16', 'u16', '/tmp/order-16.jpg')`,
+  );
+  // 同一个商品ID、两个色、**同一张主图**：AE 的图是商品的、色是 SKU 属性，这是常态而不是异常。
+  // ⚠️ 色必须写进**规格串**：键的色段以 `产品属性:Color:X` 为准（`variantKeyOfRow`），
+  //    行 `color` 只是兜底 —— 两行都写死同一个规格串，键就会是同一个，这条检查也就废了。
+  const rf = (c) => ({ 商品信息: `【1】 某款 (产品属性:Color:${c}、Size:L)\n(商品数量:1 piece)` });
+  order({ orderNo: 'R-SHARE-A', itemId: 'IT-SHARE', imageId: 16, color: '黑', rawFields: rf('黑') });
+  order({ orderNo: 'R-SHARE-B', itemId: 'IT-SHARE', imageId: 16, color: '白', rawFields: rf('白') });
+  const a = pick.pickingRows({}).rows.find((x) => x.orderNo === 'R-SHARE-A');
+  const b = pick.pickingRows({}).rows.find((x) => x.orderNo === 'R-SHARE-B');
+  assert.strictEqual(a.styleColor, '黑', '先导的那行被后导的行改判了（同图全量投影的典型症状）');
+  assert.strictEqual(b.styleColor, '白');
+  assert.notStrictEqual(a.styleColorId, b.styleColorId, '两个色必须是两个款色（同图不等于同色）');
+  // 键表的记忆也要和行一致：两个键各自绑在自己的色上（按图取键会把它们绑成同一个）
+  const mem = dbGet(
+    `SELECT COUNT(*) AS n FROM oi_variant_keys WHERE style_color_id IN (?, ?)`,
+    [a.styleColorId, b.styleColorId],
+  );
+  assert.strictEqual(Number(mem?.n ?? 0), 2, '两个键应各绑一个色');
 });
 
 console.log('');

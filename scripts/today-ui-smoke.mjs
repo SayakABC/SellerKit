@@ -393,10 +393,12 @@ const FAKE_BRIDGE = `<script>
   //     · P-43（无款 + 空品类 + 空特征）⇒ **填了颜色也没处挂**："拦住并说明"那条守卫的载体；
   //     · P-45（有款 S1 + 空品类 + 空特征）⇒ 点名款时必须**照样挂款**（不要求指纹），
   //       否则颜色永远到不了款色（拿货单 / 算钱 / 取图全读款色）。
-  // 命名板夹具（P3，2026-10-28）：**一个 listing × 3 个色键**（2 个待命名 + 1 个已命名）。
+  // 命名板夹具（P3，2026-10-28）：**两个 listing**（3 + 2 个色键，合计 3 个待命名 / 2 个已命名）。
   //   · 三个 styleColorId 各不相同 ⇒ 「保存」按下的必须是**那一行**的 id（用一个 id 的实现在这里就红）；
-  //   · 第三个 named:true ⇒ 计数必须是 2 而不是 3（把已命名的也当待办 = 用户白输一遍）；
-  //   · 组内 3 个色**同屏**给出 ⇒ 逐键翻页的实现拿不到 3 个输入框。
+  //   · 已命名的不进待办 ⇒ 计数必须是 3 / 共 5（把已命名的也算 = 用户白输一遍）；
+  //   · 组内 3 个色**同屏**给出 ⇒ 逐键翻页的实现拿不到 3 个输入框；
+  //   · **两组各有各的剩余数（2 / 1）而总数是 3** ⇒ "组头显示的是总进度"这种实现
+  //     在这里才分得出来（只有一个组时，组内数与总数恰好相等，那种断言恒绿）。
   var NAMING_BOARD = {
     groups: [
       {
@@ -419,9 +421,27 @@ const FAKE_BRIDGE = `<script>
             named: true, orderRows: 1, qty: 1, localPath: '/tmp/p44.jpg' },
         ],
       },
+      // 第二个 listing：1 个待命名 + 1 个已命名。它存在的唯一理由就是让"组内剩余"
+      // 与"总剩余"不相等（上方那条第 4 点）。
+      {
+        shop: '店A',
+        itemId: 'IT-N2',
+        title: 'Naming Fixture Listing 2',
+        styleId: 78,
+        styleCode: 'N2',
+        styleName: '',
+        supplierId: 0,
+        styleCount: 1,
+        colors: [
+          { styleColorId: 904, styleCode: 'N2', styleName: '', colorName: '1', colorRaw: '1',
+            named: false, orderRows: 1, qty: 1, localPath: '/tmp/p45.jpg' },
+          { styleColorId: 905, styleCode: 'N2', styleName: '', colorName: '黑', colorRaw: '2',
+            named: true, orderRows: 1, qty: 1, localPath: '/tmp/p46.jpg' },
+        ],
+      },
     ],
-    unnamedKeys: 2,
-    totalKeys: 3,
+    unnamedKeys: 3,
+    totalKeys: 5,
   };
 
   // 款合并夹具（P4，2026-10-28）：一个厂家下 2 个款 + 一条已有的合并记录。
@@ -2979,14 +2999,25 @@ async function main() {
     //   ③ 改名时把款名/编码/平台原文一起送过去 => 主进程按界面草稿覆盖事实。
     await waitFor(function () { return !!card('vn-panel'); }, 8000);
     var vnInputs = queryAll('[data-act^="vn-input-"]');
+    // 按组取框：这条断言说的是"**一个 listing 的**色同屏"，所以必须限定在组内 ——
+    // 全页框数会随夹具里加组而变，拿它当判据等于让断言跟着夹具漂。
+    var vnGroup1 = queryAll('[data-act="vn-group-IT-N1"] [data-act^="vn-input-"]');
     var vnCount = flat(card('vn-count'));
     report('命名板：一个 listing 的 3 个色键**同屏**给出（不是逐键翻页）',
-      !!card('vn-panel') && vnInputs.length === 3,
-      '输入框=' + vnInputs.length + ' 计数=' + vnCount);
+      !!card('vn-panel') && vnGroup1.length === 3,
+      '本组=' + vnGroup1.length + ' 全页=' + vnInputs.length + ' 计数=' + vnCount);
     // ⚠️ 正则里的空白写成 [ ] 而不是 \\s：这段代码整体在一个模板串里，单个反斜杠会被吃掉。
-    report('命名板计数只数**未命名**的（夹具 2 待命名 + 1 已命名 => 文案必须是 2 / 共 3）',
-      /还有[ ]*2[ ]*个/.test(vnCount) && /共[ ]*3[ ]*个/.test(vnCount),
+    report('命名板计数只数**未命名**的（夹具 3 待命名 + 2 已命名 => 文案必须是 3 / 共 5）',
+      /还有[ ]*3[ ]*个/.test(vnCount) && /共[ ]*5[ ]*个/.test(vnCount),
       '计数文案=' + JSON.stringify(vnCount));
+    // 组内进度（P3 补）：一屏只铺 6 个 listing，人需要知道"这一组填完了没"。
+    // 判据是**这一组的**剩余数：两组分别是 2 / 1，而总数是 3 —— 拿总数冒充组内数的实现
+    // 在这两条上都会红（3 ≠ 2、3 ≠ 1），这也是夹具必须放第二个组的原因。
+    var vnLeft1 = flat(card('vn-group-left-IT-N1'));
+    var vnLeft2 = flat(card('vn-group-left-IT-N2'));
+    report('命名板：组头给的是**这一组**还剩几个（不是总进度）',
+      /还剩[ ]*2[ ]*个/.test(vnLeft1) && /还剩[ ]*1[ ]*个/.test(vnLeft2),
+      'N1=' + JSON.stringify(vnLeft1) + ' N2=' + JSON.stringify(vnLeft2));
     // 填一个名字 + 回车 => 只送 id 与名字（不送 styleCode / colorRaw / 款名）
     function fillAndEnter(act, val) {
       var el = card(act);
@@ -3004,10 +3035,42 @@ async function main() {
       okFill && renCalls.length === 1 && Number(renPayload.styleColorId) === 901 &&
         String(renPayload.name) === '藏青' && Object.keys(renPayload).length === 2,
       'payload=' + JSON.stringify(renPayload) + ' 次数=' + renCalls.length);
+    // 光标接力：存完自动落到**同组下一个未命名**的框。真库 54 个待命名键，靠鼠标点 = 54 次。
+    // 为什么必须等：保存成功会在 finally 里重读命名板（DOM 重建）后才落焦，
+    // 只等"调用发生"拿到的是重读之前的焦点（那时还停在被保存的那个框上）。
+    var focusAct = '';
+    try {
+      await waitFor(function () {
+        var a = document.activeElement;
+        return !!a && a.getAttribute('data-act') === 'vn-input-902';
+      }, 6000);
+      focusAct = 'vn-input-902';
+    } catch (e) {
+      var a2 = document.activeElement;
+      focusAct = a2 ? String(a2.getAttribute('data-act')) : '';
+    }
+    report('存完自动把光标交给**同组下一个未命名**的框（省掉"每个色点一次鼠标"）',
+      focusAct === 'vn-input-902', '当前焦点=' + JSON.stringify(focusAct));
+    // 本组填完 ⇒ 交给**下一组**的第一个未命名框（一组 7 个色的真库 listing 很常见：
+    // 填到最后一个还得回头找下一块在哪，等于每组浪费一次滚屏 + 一次点击）。
+    var focusCross = '';
+    try {
+      fillAndEnter('vn-input-902', '灰');
+      await waitFor(function () {
+        var a = document.activeElement;
+        return !!a && a.getAttribute('data-act') === 'vn-input-904';
+      }, 6000);
+      focusCross = 'vn-input-904';
+    } catch (e) {
+      var a3 = document.activeElement;
+      focusCross = a3 ? String(a3.getAttribute('data-act')) : '';
+    }
+    report('本组填完 ⇒ 光标交给**下一组**的第一个未命名框（不回头找）',
+      focusCross === 'vn-input-904', '当前焦点=' + JSON.stringify(focusCross));
     // 拒绝原话必须显示出来（同款重名 => 主进程回 ok:false + 一句人话）
-    fillAndEnter('vn-input-902', '撞名');
-    await waitFor(function () { return !!card('vn-err-902'); }, 6000);
-    var vnErr = flat(card('vn-err-902'));
+    fillAndEnter('vn-input-904', '撞名');
+    await waitFor(function () { return !!card('vn-err-904'); }, 6000);
+    var vnErr = flat(card('vn-err-904'));
     report('被拒绝时显示**主进程的原话**（不是统一的"保存失败"）',
       vnErr.indexOf('同名') >= 0,
       '错误文案=' + JSON.stringify(vnErr));

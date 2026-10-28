@@ -96,6 +96,9 @@ const NON_REPO_HEADS = new Set([
   'dist',
   'release',
   'out',
+  // 兄弟仓库：采集扩展 SellerKitExtensions（独立 git repo）的源码路径 ——
+  // 跨仓引用是真实存在的文件，只是不在本仓；与 node_modules 同理跳过
+  'SellerKitExtensions',
   // AI 工具本机数据（见 AGENTS.md §0）：`git clone` 后本就不存在，
   // 引用它们的文档不算悬空 —— 与 node_modules 同理。
   '.workbuddy',
@@ -119,6 +122,26 @@ const NOTE_INDEX_FILES = [
  */
 const DELIBERATELY_MISSING = new Map([
   [
+    'src/core/ai/openaiCompatible.ts',
+    '2026-10-28 删除云端视觉链路（用户决定不接云端模型）：CHANGELOG / 2026-10-05 归类链路笔记记录的是"当时它在那里"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/core/ai/visionPrompt.ts',
+    '2026-10-28 随 src/core/ai 整目录删除：CHANGELOG 2026-10-05 条目记录的是"当时把提示词搬到这里"，改指现存文件则句子不成立',
+  ],
+  [
+    'tests/visionPrompt.spec.ts',
+    '2026-10-28 与 visionPrompt.ts 一并删除（枚举注入的守卫随提示词消失，提示词本身已无消费者）：CHANGELOG / PROJECT_BASELINE 的测试计数记录的是当时新增了它',
+  ],
+  [
+    'src/core/settings/RecognitionSettings.vue',
+    '2026-10-28 删除「设置 › 识别」页：2026-10-01 样式审查笔记记录的是"当时它仍在"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/goods/simple.ts',
+    '2026-10-25 用户口径"去掉简洁模式"：该共享 ref 与开关整个撤除（完整形态成为唯一形态）；CHANGELOG 2026-10-08 条目与 2026-10-08 收尾笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
+  ],
+  [
     'src/modules/goods/flow.ts',
     '2026-10-08 撤掉「货与成本」的步骤条引导后，该纯函数**与其单测一并删除**；CHANGELOG / GOODS_WORKBENCH_PLAN / 那条引导笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
   ],
@@ -129,6 +152,14 @@ const DELIBERATELY_MISSING = new Map([
   [
     'electron/product-cost-sync.ts',
     'P4（2026-10-09）把手工进价的写入口径提到 electron/manual-costs.ts 后删除；CHANGELOG 续十七 的句子正是在陈述「删了它」（移走后它只剩没实质的薄壳），改指现存文件则句子不成立',
+  ],
+  [
+    'electron/manual-costs.ts',
+    'C2（2026-10-21）随 `ae_cost_map` 删表一并删除（改价写口收敛到 `product-cost-set`）；CHANGELOG 与本轮笔记的句子正是**删除记录**，2026-10-09 维护面板笔记与 PRODUCT_LIBRARY P4 行记的是"当时它在哪"——改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/shop-accounts/components/CostPane.vue',
+    'B\'（2026-10-22）「基础数据 › 进价」整页退役（CostPane/RatesPane/CostRatesPane 三文件删除），成本维护收归产品编辑抽屉 + 产品列表「只看缺进价」筛选 + 内联 p-cost 列；PRODUCT_LIBRARY P4 行与 SHOP_ACCOUNT_REDESIGN_PLAN 记的是"它当时住在哪"，改指现存文件则句子不成立（成本现在散落在 ProductEditorDrawer.vue 的 ed-cost 与 ProductPane/ProductListView 的 p-cost 列，没有一个可对等的单文件）',
   ],
   [
     'src/stores/app.ts',
@@ -195,6 +226,38 @@ const DELIBERATELY_MISSING = new Map([
     'UX 审查（取数时点 2026-09-30）记录的是**当时**该面板的文案问题；同日 C9 收编把「成本与汇率」并入宿主',
   ],
   [
+    'ui-plugins/shipping-rate/README.md',
+    '该岛已整体下架（2026-10-15，回收为内建「基础数据 › 物流运费」，见 `docs/notes/2026-10-15-shipping-rate-intake.md`）；CHANGELOG 与旧计划记录的是当时的换版流程与发布动作，属历史记录。⚠️ `docs/README.md` 的**活导航**不豁免、已改指该笔记',
+  ],
+  [
+    'ui-plugins/shipping-rate/manifest.json',
+    '同上（岛清单表记录的是"当时新增了哪些文件"，改指现存文件则句子不成立）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/styles.css',
+    'CHANGELOG 记的是某版本"给岛补了 `.notice` 样式"，描述的是岛源码改动；实现现由 `src/modules/shop-accounts/components/*.vue` 的 scoped 样式承担',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/quote.js',
+    '同上（CHANGELOG 指出"该文件用了未定义的类名"，指的是岛视图文件）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/rates.js',
+    'UX 审查（取数时点 2026-09-30）取证的是**当时**岛视图里的性能上限写法；功能已回收为内建页签',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/products.js',
+    '同上（该文件头注释记的是两条重量数据源刻意不混用的历史决定）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/store.js',
+    '同日笔记（2026-09-30 M6 回迁）记录的是岛内 `syncTableFromHost()` 的改法；该文件随岛下架',
+  ],
+  [
+    'electron/ae-engine.ts',
+    '该利润引擎文件**已删除**（2026-10-15 数据依赖审查 C1，见 `docs/notes/2026-10-15-data-dependency-optimizations.md`）。引用它的四处都是**历史记录**：PROFIT_TRACKER 的「现状（extension 0.2.0）…已落地」、PRODUCT_LIBRARY 的 P4a 落地清单与「`ae-engine.ts:176` 取数」行号取证、ADR-002 记的回归面评估、CHANGELOG 旧条目 —— 改指现存文件（`ae-db.ts`）则句子不成立',
+  ],
+  [
     'ui-plugins/order-insight/dist/views/picking.js',
     'C2 的**删除记录**：岛内「拣货」页签随"入口唯一"撤回（发布前，1.5.0 未发布）；句子正在说"删了它"',
   ],
@@ -213,6 +276,14 @@ const DELIBERATELY_MISSING = new Map([
   [
     'scripts/order-insight-picking-ui-smoke.mjs',
     '同上（C2）：该假桥冒烟随页签一起删；现役样板见 `scripts/shipping-rate-ui-smoke.mjs`',
+  ],
+  [
+    'scripts/picking-ui-smoke.mjs',
+    '**退役记录**（2026-10-17）：「拣货」摘出左导航后失去宿主页（同一份清单在「今天 › 拿货」里，入口唯一），该假桥冒烟随之退役；它的导出 / 天数窗两条断言已搬进 `scripts/today-ui-smoke.mjs`。CHANGELOG 与 `docs/notes/2026-10-10-*` 记录的是"当时它在验什么"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/picking/meta.ts',
+    '**退役记录**（2026-10-17）：该模块壳（`meta.ts` / `index.ts`）随「拣货」摘出左导航删除，只留 `PickingView.vue`。CHANGELOG 那条记的是"悬空入口名守卫曾靠它的 `name` 兜底"——当时成立、现已不存在该文件，改指现存文件则句子不成立',
   ],
   // —— 下面这组是 C3（删 `extensions/` 留档包，2026-09-30）的**历史记录**：
   // 句子都出自"当时"的评审/计划（或 CHANGELOG 的删除记录），说的是"曾经有、现已删"，不是悬空引用。
@@ -261,6 +332,24 @@ const DELIBERATELY_MISSING = new Map([
   [
     'scripts/order-insight-settings-ui-smoke.mjs',
     'CHANGELOG 的删除记录 + 下架笔记 §6.2 说的正是"它**从未被 git 跟踪**、也已随岛删除"；改指现存文件则句子不成立',
+  ],
+  // —— 下面这组是「店铺账号管家」岛回收为内建模块（2026-10-14）的历史记录：引用出自 CHANGELOG
+  // 的**当时条目**（记录 2026-10-04 meta CSP 修复、2026-10-06 能力域校验盲区取证），句子正在说
+  // "当时改的是它 / 当时它长这样"，不是悬空引用。见 docs/notes/2026-10-14-shop-accounts-intake.md。
+  [
+    'ui-plugins/shop-accounts/index.html',
+    'CHANGELOG 的历史条目（meta CSP 修复当时改的就是岛根这个文件）；该岛已于 2026-10-14 回收为内建模块 `src/modules/shop-accounts/`，嵌正文 CSP 的宿主侧对应层现为仓库根 `index.html`',
+  ],
+  [
+    'ui-plugins/shop-accounts/src/api.js',
+    'CHANGELOG 的历史条目（能力域校验盲区取证当时点的就是岛内这份桥桩）；桥桩已随岛回收删除，现由 `src/core/services/ipc.ts` 直连',
+  ],
+  // —— 下面这条是「货与成本」并入「基础数据 › 货品档案」（2026-10-17）的历史记录：
+  // 引用出自一份**写于 2026-10-08 的审查快照**（`docs/reviews/UX_GOODS_NOVICE_2026-10-08.md`），
+  // 句子正在说"当时从侧栏这一项进来"，见 docs/notes/2026-10-17-mail-out-goods-into-master-data.md。
+  [
+    'src/modules/goods/meta.ts',
+    '2026-10-08 审查快照记录的**当时入口**（侧边栏「货与成本」，icon box / order 2）；该模块外壳已于 2026-10-17 删除并并入「基础数据」左导航第二项「货品档案」，改指现存文件（`src/modules/shop-accounts/MasterDataView.vue`）会让这句话描述一个当时不存在的入口',
   ],
 ]);
 

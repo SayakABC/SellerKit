@@ -5,7 +5,10 @@
 //   # 受限/沙箱环境（起不了 Chromium sandbox）加：--no-sandbox --disable-gpu
 //
 // 覆盖**图片族通道**（orderImageThumb / ThumbBatch / ReadImage / ReadLocalImage）+ **剪贴板图片通道**
-// （write-clipboard-image，「复制给厂家」）+ **拿货单行图通道**（purchase-style-images，按款色查本地图）；
+// （write-clipboard-image，「复制给厂家」）+ **拿货单行图通道**（purchase-style-images，按款色查本地图）
+// + **店铺商品列表通道**（shop-items-list / shop-items-import：shopId 三态透传 + productId 按款筛透传
+//   + 全新库守卫）
+// + **店铺商品人工维护通道**（shop-items-delete：行 id 定位、删快照不联动删映射）；
 // 判据同形：**渲染层按声明调用 → 载荷真的过到主进程 → 回来的是真值**。
 // （曾经还覆盖 `orderSkuRollup`（核对页「本页汇总」），那条通道随页头指标条一起删了，见 ⑥ 段的说明。）
 //
@@ -136,6 +139,8 @@ app.whenReady().then(async () => {
     require(path.join(ROOT, 'dist', 'electron', 'product-handlers.js'));
     // purchase 域：⑨ 段验「拿货单行图」按款色查图这条真链路
     require(path.join(ROOT, 'dist', 'electron', 'purchase-handlers.js'));
+    // shop-item 域：⑩ 段验「店铺商品列表」shopId 三态透传 + 全新库 sk_shops 守卫（真 handler + 真库）
+    require(path.join(ROOT, 'dist', 'electron', 'shop-item-handlers.js'));
     assert.ok(exposed, 'preload 没有 exposeInMainWorld');
 
     section('准备素材（真实 PNG，落进图片缓存目录）');
@@ -217,7 +222,7 @@ app.whenReady().then(async () => {
     pdb.ensureSkuSchema();
     sdb.ensureShopSchema();
     const shopId = sdb.upsertShop({
-      id: 0, platform: 'amazon', name: '店铺1', site: '', shopSetId: 0,
+      id: 0, platform: 'amazon', name: '店铺1', site: '',
       status: 'active', openedAt: '', note: '',
     }).id;
     sdb.mapName({ raw: '店1', refId: shopId, ignored: false });
@@ -241,8 +246,12 @@ app.whenReady().then(async () => {
       `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
       ['fp-adopt-shape', 'ufp-adopt-shape', '', orderImgPath],
     ).lastInsertRowid;
-    dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
-      oiImgId, 'SHAPE-ORD-1', '店1', JSON.stringify({ 商品ID: 'SHAPE-ADOPT' }),
+    // 2026-10-21（B1 拆表）：订单图挂在**明细行**（`oi_order_items.image_id`），主表只留一单一份的字段
+    const adoptOrderId = dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES (?,?)`, [
+      'SHAPE-ORD-1', '店1',
+    ]).lastInsertRowid;
+    dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?,?,?)`, [
+      adoptOrderId, oiImgId, JSON.stringify({ 商品ID: 'SHAPE-ADOPT' }),
     ]);
     const adoptPid = pdb.upsertProduct({
       id: 0, code: 'SHAPE-ADOPT', name: '待采纳款', supplierId: 0,
@@ -421,7 +430,7 @@ app.whenReady().then(async () => {
       (rsCap?.data?.paths ?? []).length === 500, `len=${(rsCap?.data?.paths ?? []).length}`);
 
     // ---- 「款色 + 尺码」取图（2026-10-11，用户报"拿货单明细的图片都是一样的"）----
-    // 真形状：订单 Excel 解析出来的图挂在**订单行**上（oi_orders.image_id → oi_images.local_path），
+    // 真形状：订单 Excel 解析出来的图挂在**订单行**上（oi_order_items.image_id → oi_images.local_path），
     // 而拿货单明细行的粒度是「款色 × 尺码」（= outstanding 的聚合键 = purchase_items 唯一键）
     // ⇒ 取图必须带上尺码，否则同一款的多行全落到"该款色最新那张"。
     // 这里造的就是最小区分场景：同款同色，L 行挂一张、M 行挂另一张。
@@ -435,8 +444,12 @@ app.whenReady().then(async () => {
       ['fp-shape-si-sl', 'ufp-si-sl', '', szL, scC]).lastInsertRowid;
     const idM = dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
       ['fp-shape-si-sm', 'ufp-si-sm', '', szM, scC]).lastInsertRowid;
-    dbRun(`INSERT INTO oi_orders (image_id, order_no, size, raw_fields) VALUES (?,?,?,?)`, [idL, 'SI-SIZE-L', 'L', '{}']);
-    dbRun(`INSERT INTO oi_orders (image_id, order_no, size, raw_fields) VALUES (?,?,?,?)`, [idM, 'SI-SIZE-M', 'M', '{}']);
+    for (const [imgId, no, size] of [[idL, 'SI-SIZE-L', 'L'], [idM, 'SI-SIZE-M', 'M']]) {
+      const ordId = dbRun(`INSERT INTO oi_orders (order_no) VALUES (?)`, [no]).lastInsertRowid;
+      dbRun(`INSERT INTO oi_order_items (order_id, image_id, size, raw_fields) VALUES (?,?,?,?)`, [
+        ordId, imgId, size, '{}',
+      ]);
+    }
 
     invokes.length = 0;
     const rsSize = await exposed.purchaseStyleImages({
@@ -458,6 +471,143 @@ app.whenReady().then(async () => {
     });
     check('该尺码没有订单行（手工加的行）→ 回落款色级最新图，不是"缺图"',
       rsFallback?.data?.paths?.[0] === szM, JSON.stringify(rsFallback?.data?.paths));
+
+    section('⑩ 店铺商品列表：shopId 三态透传（缺省 = 不过滤）+ 全新库 sk_shops 守卫');
+    // 两个已实测的静默缺陷，这里各钉一组：
+    // ① preload 曾把缺省 shopId 压成 0 ⇒ 主进程按「未登记桶」过滤 ⇒ 匹配到店的采集行一条都不显示
+    //    （2026-10-15 用户现场：扩展报"采到 8 条"，列表全空、console 一条错都没有）。
+    //    判据必须含「发出去的载荷里 shopId 是 undefined」—— 只断言"能查到行"会被
+    //    "夹具恰好全落桶里"骗绿（旧 e2e 就是这么漏的）。
+    // ② 全新库第一站点「店铺商品」曾报 no such table: sk_shops（读链 LEFT JOIN 店铺域从未初始化）。
+    sdb.ensureShopSchema();
+    const siShopId = sdb.upsertShop({
+      id: 0, platform: 'ae', name: '形状采集店', site: '',
+      status: 'active', openedAt: '', note: '',
+    }).id;
+    const imp = await exposed.shopItemsImport({ shopId: siShopId, ids: ['SHAPE-SI-1', 'SHAPE-SI-2'] });
+    check('手贴导入两条（真链路：handler → importManualItems → 落该店）',
+      imp?.success === true && imp?.data?.inserted === 2,
+      `success=${imp?.success} data=${JSON.stringify(imp?.data)}`);
+
+    invokes.length = 0;
+    const listNoFilter = await exposed.shopItemsList({});
+    check('缺省 shopId 在载荷里是 undefined（不是 0）—— 压成 0 时主进程只翻未登记桶',
+      invokes.at(-1)?.[1]?.shopId === undefined, JSON.stringify(invokes.at(-1)?.[1]));
+    check('缺省 shopId → 不过滤：店下的行要出现在列表里（旧代码这里 total=0）',
+      listNoFilter?.success === true && (listNoFilter?.data?.total ?? 0) >= 2,
+      `success=${listNoFilter?.success} total=${listNoFilter?.data?.total}`);
+
+    const listShop = await exposed.shopItemsList({ shopId: siShopId });
+    check('指定店 → 只回该店的行',
+      listShop?.data?.total === 2 && (listShop?.data?.rows ?? []).every((r) => r.shopId === siShopId),
+      `total=${listShop?.data?.total}`);
+    const listBucket = await exposed.shopItemsList({ shopId: -1 });
+    check('shopId=-1（未登记桶）→ 0 条（这两条落在店下，不在桶里）',
+      listBucket?.data?.total === 0, `total=${listBucket?.data?.total}`);
+
+    // 全新库守卫（handler 层，与 shop-item:smoke 的同一条各守一层）：删掉店铺域两张表再读
+    dbRun(`DROP TABLE IF EXISTS sk_shops`);
+    dbRun(`DROP TABLE IF EXISTS sk_name_map`);
+    const listFresh = await exposed.shopItemsList({});
+    check('全新库（sk_shops 被删）点「店铺商品」不再报错，且行还在',
+      listFresh?.success === true && (listFresh?.data?.total ?? 0) >= 2,
+      `success=${listFresh?.success} error=${listFresh?.error || ''} total=${listFresh?.data?.total}`);
+
+    section('⑪ 店铺商品人工维护：删采集行（真 handler + 真库）');
+    // 2026-10-16 用户口径：表上加删除；2026-10-23 起 SKU 矩阵的唯一维护面是产品编辑抽屉，
+    // 采集段只剩认款，所以写路径这里只验删除：
+    //   · 唯一键是 (shop_id, store_key, item_id) 三元组 ⇒ 同一店重复采集幂等更新；
+    //     同一商品ID 在桶里/店下各是一行 ⇒ 删除必须按**行 id** 定位；
+    //   · 删快照行**不联动删** pl_shop_sku 映射（快照存"店里有什么"、映射存"人的决定"）。
+    // 夹具店（⑩ 末把 sk_shops 删了 ⇒ 这里的 ensureSchema 已把它重建为空，重新建一家）
+    const siShop2 = sdb.upsertShop({
+      id: 0, platform: 'ae', name: '形状维护店', site: '',
+      status: 'active', openedAt: '', note: '',
+    }).id;
+    const impSku = await exposed.shopItemsImport({ shopId: siShop2, ids: ['SHAPE-SKU-1', 'SHAPE-SKU-2'] });
+    check('夹具：再导两条进这家店（同店重复导入是更新不是新增）',
+      impSku?.success === true && impSku?.data?.inserted === 2,
+      `success=${impSku?.success} data=${JSON.stringify(impSku?.data)}`);
+    const listAll = await exposed.shopItemsList({});
+    const rowSku1 = (listAll?.data?.rows ?? []).find((r) => r.itemId === 'SHAPE-SKU-1');
+    const rowSku2 = (listAll?.data?.rows ?? []).find((r) => r.itemId === 'SHAPE-SKU-2');
+    check('两条都落在这家店下且各有一个行 id（后面的删除按它定位）',
+      !!rowSku1 && !!rowSku2 && rowSku1.shopId === siShop2 && rowSku2.shopId === siShop2,
+      `id1=${rowSku1?.id} id2=${rowSku2?.id}`);
+
+    // 先给 SHAPE-SKU-1 建一条认款映射（删快照后它必须还在）
+    pdb.upsertSkuMappings([{ platform: 'ae', shopId: siShop2, itemId: 'SHAPE-SKU-1', productId: pid }]);
+    const mapBefore = dbGet(`SELECT COUNT(*) AS c FROM pl_shop_sku WHERE item_id = ?`, ['SHAPE-SKU-1']);
+    check('前提：这一行已有一条认款映射（否则"删后映射还在"是空转断言）',
+      Number(mapBefore?.c) >= 1, `mapRows=${mapBefore?.c}`);
+
+    // 「产品编辑 › 从采集商品导入 SKU 矩阵」的取数口（2026-10-23）：按款筛。
+    // 两条都钉在载荷上：① >0 时 productId 必须过到主进程（缺了只能拿全库快照，客户端再筛会漏分页）；
+    // ② 0 / 缺省压成 undefined —— 主进程的 0 语义是"不过滤"，压成 0 就与"认到 0 号款"分不开。
+    invokes.length = 0;
+    const listByProduct = await exposed.shopItemsList({ productId: pid });
+    check('按款筛：productId 原样透传（不是只在渲染层筛）',
+      invokes.at(-1)?.[1]?.productId === pid, JSON.stringify(invokes.at(-1)?.[1]));
+    check('按款筛：只回当前认到这一款的采集行（同店另一条未认款，不得出现）',
+      listByProduct?.success === true &&
+        listByProduct?.data?.total === 1 &&
+        listByProduct?.data?.rows?.[0]?.itemId === 'SHAPE-SKU-1' &&
+        listByProduct?.data?.rows?.[0]?.mappedProductId === pid,
+      `success=${listByProduct?.success} data=${JSON.stringify(listByProduct?.data)}`);
+
+    invokes.length = 0;
+    await exposed.shopItemsList({ productId: 0 });
+    check('productId=0 在载荷里是 undefined（0 不是"没认款的款"，是"不筛"）',
+      invokes.at(-1)?.[1]?.productId === undefined, JSON.stringify(invokes.at(-1)?.[1]));
+    // 删 SHAPE-SKU-1：快照行没了、映射行还在
+    const del = await exposed.shopItemsDelete({ id: rowSku1.id });
+    check('删采集行成功（按行 id）', del?.success === true && del?.data?.removed === true,
+      `success=${del?.success} data=${JSON.stringify(del?.data)}`);
+    const afterDel = await exposed.shopItemsList({});
+    check('删完这一行消失、另一行还在（按 item_id 删会误删别家那份）',
+      !(afterDel?.data?.rows ?? []).some((r) => r.id === rowSku1.id) &&
+        (afterDel?.data?.rows ?? []).some((r) => r.itemId === 'SHAPE-SKU-2'),
+      `rows=${JSON.stringify((afterDel?.data?.rows ?? []).map((r) => r.itemId))}`);
+    const mapLeft = dbGet(`SELECT COUNT(*) AS c FROM pl_shop_sku WHERE item_id = ?`, ['SHAPE-SKU-1']);
+    check('⭐ 删快照行不联动删认款映射（快照存"店里有什么"、映射存"人的决定"，两套不互写）',
+      Number(mapLeft?.c) >= 1, `mapRows=${mapLeft?.c}`);
+    const delMissing = await exposed.shopItemsDelete({ id: rowSku1.id }).catch((e) => ({ success: false, error: String(e) }));
+    check('删不存在的行 → 报错上行（行可能刚被重采/删掉，不能假装删了）',
+      delMissing?.success === false, `success=${delMissing?.success} err=${delMissing?.error || ''}`);
+
+    // ── ⑫ 记账批量导入：名字必须活着穿过 preload 白名单 ──────────────────
+    // 为什么要有这一段：`sanitizeLedgerImportEntries` 是**字段白名单**，漏一个字段就是静默丢弃 ——
+    // 主进程收到 `partyId: 0` 且没有名字，报的是「第 1 行：没有资金相关人」，而
+    // 直接测 `batchCreateEntries`（`ledger:smoke` 就是这么做的）永远看不见这一层。
+    section('⑫ 记账批量导入：partyName / categoryName 穿过 preload 白名单（漏一个就是静默丢失）');
+    const ldb = require(path.join(ROOT, 'dist', 'electron', 'ledger-db.js'));
+    require(path.join(ROOT, 'dist', 'electron', 'ledger-handlers.js'));
+    ldb.ensureLedgerSchema();
+    dbRun(
+      `INSERT INTO sk_shops (platform, name, name_key, status, opened_at) VALUES ('ae', ?, ?, 'active', '2026-01-01')`,
+      ['白名单店', '白名单店'],
+    );
+    const wlShop = dbGet(`SELECT id FROM sk_shops WHERE name_key = ?`, ['白名单店']);
+    const wlImp = await exposed.ledgerEntryBatchCreate({
+      entries: [{
+        bizDate: '2026-10-03', kind: 'expense', scope: 'shop', shopId: Number(wlShop.id),
+        partyId: 0, partyName: '白名单房东', categoryId: 0, categoryName: '白名单科目', amountCents: 12345,
+      }],
+    }).catch((e) => ({ success: false, error: String(e) }));
+    check('批导入成功（名字被白名单丢掉时这里必报「第 1 行：没有资金相关人」）',
+      wlImp?.success === true, JSON.stringify(wlImp?.error || wlImp?.data));
+    const wlParties = ldb.listParties({}).filter((p) => p.name === '白名单房东');
+    check('相关人按文件里的名字建出来了（且只有一条）', wlParties.length === 1, `count=${wlParties.length}`);
+    const wlCats = ldb.listCategories('expense', true).filter((c) => c.name === '白名单科目');
+    check('科目按文件里的名字建出来了（收/支方向取这一行的方向）',
+      wlCats.length === 1 && wlCats[0].kind === 'expense', JSON.stringify(wlCats));
+    check('主进程如实返回新建清单（界面据此念出"多出了哪些名字"）',
+      JSON.stringify(wlImp?.data?.createdParties) === '["白名单房东"]' &&
+        JSON.stringify(wlImp?.data?.createdCategories) === '["白名单科目"]',
+      JSON.stringify({ p: wlImp?.data?.createdParties, c: wlImp?.data?.createdCategories }));
+    check('条目真的挂在新建的相关人上（不是落成 party_id=0）',
+      (wlImp?.data?.ids ?? []).length === 1 && wlParties.length === 1,
+      JSON.stringify(wlImp?.data?.ids));
   } catch (e) {
     check(`冒烟自身异常：${e && e.message}`, false, e && e.stack ? String(e.stack).split('\n')[1] : '');
   }

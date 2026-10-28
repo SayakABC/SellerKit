@@ -36,24 +36,28 @@ const DB = join(userDataDir(), 'sellerkit.db');
 
 /** 要清空的表（业务数据 + 主数据；范围＝用户 2026-09-30 选的 D） */
 const CLEAR = [
-  // A 订单与派生
-  'ae_orders', 'ae_order_lines', 'ae_fees', 'ae_settle_lines', 'ae_cost_map',
-  'oi_orders', 'oi_images', 'oi_styles', 'oi_style_colors', 'oi_style_fingerprints', 'oi_queue',
+  // A 订单与派生（含 B1 拆表 / B2 包裹）
+  'ae_settle_lines',
+  'oi_orders', 'oi_order_items', 'oi_images', 'parcels', 'parcel_lines',
+  'oi_styles', 'oi_style_colors', 'oi_style_fingerprints',
   'sr_rate_snapshots',
   // B 拿货与付款
   'purchase_items', 'purchase_orders', 'purchase_ignore', 'purchase_sources', 'payments', 'suppliers',
-  // C 邮件本地缓存（账号配置保留）
-  'sk_mail_messages', 'sk_mail_bodies', 'sk_mail_attachments', 'sk_mail_attachment_cache',
-  'sk_mail_folders', 'sk_mail_meta',
-  // D 主数据（全流程从零演练）
-  'pl_products', 'pl_variants', 'pl_images', 'pl_item_images', 'pl_shop_sku',
-  'sk_shops', 'sk_name_map', 'sk_shop_sets',
+  // C 邮件（账号行跟着店铺走：外键指向 sk_shops，清店铺时一并清，否则留下孤儿账号）
+  'sk_mail_accounts', 'sk_mail_messages', 'sk_mail_bodies', 'sk_mail_attachments',
+  'sk_mail_attachment_cache', 'sk_mail_folders', 'sk_mail_meta',
+  // D 主数据（全流程从零演练；含色名别名、店铺商品快照与工具账号）
+  'pl_products', 'pl_variants', 'pl_images', 'pl_item_images', 'pl_shop_sku', 'oi_color_aliases',
+  'sk_shops', 'sk_tool_accounts', 'sk_name_map', 'pl_shop_items', 'pl_shop_store_keys',
+  // E 记账（2026-10-25 新增域；子表在前：结算行 → 结算单 → 分摊行/方案 → 条目 → 承接 → 相关人/科目）
+  'bk_settlement_lines', 'bk_settlements', 'bk_allocations', 'bk_allocation_rules',
+  'bk_entries', 'bk_transfers', 'bk_periods', 'bk_op_log', 'bk_parties', 'bk_categories',
 ];
 
 /** 保留（**动了会坏事**或属账号/配置） */
 const KEEP = [
   'sk_schema_migrations', // 迁移记账：清了会让版本化迁移重跑
-  'sk_mail_accounts', 'sk_companies', 'sk_company_profiles', // 账号与资质：重录成本高
+  'sk_companies', 'sk_company_profiles', // 账号与资质：重录成本高
   'ae_rates', // 汇率：默认值会重种，用户改过的也留着
 ];
 

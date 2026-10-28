@@ -73,7 +73,7 @@
               <option v-for="c in COLOR_OPTIONS" :key="c" :value="c">{{ c }}</option>
             </select>
           </label>
-          <!-- 灰因**常显**（与「店铺登记」表单、右栏「需先登记店铺」同一条口径）：
+          <!-- 灰因**常显**（与「店名归一」表单、右栏「需先登记店铺」同一条口径）：
                确定按钮在没选产品时是灰的，原先只能靠"为什么点不动"去猜 ——
                而弹层里恰恰是产品很多、最需要知道"还差一步什么"的地方。 -->
           <span v-if="!picked" class="wb-muted pk-blocked" data-act="pick-blocked">

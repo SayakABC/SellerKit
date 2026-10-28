@@ -7,12 +7,24 @@
 // require 时直接抛 ABI 不匹配。故 DB 层统一走冒烟；纯函数的归一逻辑另在
 // `tests/shopName.spec.ts`（15 例）里覆盖。
 //
-// 覆盖 S1 的核心不变量：
+// 覆盖 S1 + 2026-10-22 物理合并的核心不变量：
 //   · 归一只做「去空白 + 剥不可见字符」—— 肉眼一样的写法必须归成一个键，不同名必须不合并
 //   · `sk_shops` 的 UNIQUE 建在**归一键**上（否则 "店A" 与 "店A " 能同时入库 → 精确命中立刻有歧义）
-//   · 未归一名单是**实时聚合**三处历史文本，不是会被放陈的缓存表
+//   · 未归一名单是**实时聚合**两处历史文本，不是会被放陈的缓存表
 //   · 不猜歧义：同名命中多家店时不给"精确命中"提示
 //   · 指到不存在的店必须抛错，不静默写成"未归一"
+//   · 合并后的「一行两态」：纯账号行 `name_key=''`、纯店铺行 `email=''` 都不参与各自维度的唯一性，
+//     两者都空由 CHECK 拒绝（否则一行既不是店也不是账号，界面里无处安放）
+//   · `upsertShop` 是**局部更新**：账号列（email / 工具引用 / 凭证）不在它的写入面里，
+//     漏传的列必须保持原值 —— 「货与成本」编辑一次地址就把账号清空的事故不能再有
+//   · 状态四态（启用 / 停用 / 封店 / 退店）：局部更新不许把封店 / 退店悄悄改回启用；
+//     账号侧历史态（banned / closed / paused）在迁移时并入四态
+//   · 记分分值（2026-10-23）：老库靠 `shop.columns` v1 补列；`0` = 未记录，
+//     非法值抛错不静默归零
+//   · 保证金到账时间（2026-10-25）：老库靠 `shop.columns` v2 补列；只在退店行展示，
+//     缺少 = 空串（未填写），非法日期归一为空串而不是写脏值
+//   · 删除保护（2026-10-26）：有记账引用（专属条目 / 公共分摊行 / 已作废条目）时**拒绝删除**
+//     并引导改用停用；判据在编排层 `shop-delete-guard.ts`，本脚本调线上同一份函数
 // 每个用例自带 reset()：避免上一条的种子数据让下一条"新增"报重复键，产生假失败。
 
 const assert = require('assert');
@@ -25,16 +37,19 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sellerkit-shop-smoke-'));
 
 const { initDb, closeDb, dbRun, dbQuery, dbGet } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
 const sdb = require(path.join(ROOT, 'dist', 'electron', 'shop-db.js'));
+const adb = require(path.join(ROOT, 'dist', 'electron', 'shop-accounts-db.js'));
+const ldb = require(path.join(ROOT, 'dist', 'electron', 'ledger-db.js'));
+const { deleteShopAccountGuarded } = require(path.join(ROOT, 'dist', 'electron', 'shop-delete-guard.js'));
 const { toNameKey } = require(path.join(ROOT, 'dist', 'electron', 'shopName.js'));
 
 initDb(path.join(dir, 'smoke.db'));
 sdb.ensureShopSchema();
+// 记账表：删除保护要验的正是"有记账引用时不许删店"，没有这两张表就无从验证。
+ldb.ensureLedgerSchema();
 
-// 三个历史文本来源 + 账号套装（shop_set_id 是软关联，这里只为"不越界"建最小同构表）
+// 两个历史文本来源（本冒烟只关心"店铺名文本"这一列，故是最小同构桩）
 dbRun(`CREATE TABLE IF NOT EXISTS oi_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shop TEXT NOT NULL DEFAULT '')`);
 dbRun(`CREATE TABLE IF NOT EXISTS purchase_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, shop TEXT NOT NULL DEFAULT '')`);
-dbRun(`CREATE TABLE IF NOT EXISTS ae_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_name TEXT NOT NULL DEFAULT '')`);
-dbRun(`CREATE TABLE IF NOT EXISTS sk_shop_sets (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL DEFAULT '')`);
 
 let failed = 0;
 function check(name, fn) {
@@ -49,39 +64,46 @@ function check(name, fn) {
 }
 
 const reset = () => {
-  for (const t of ['sk_shops', 'sk_name_map', 'oi_orders', 'purchase_sources', 'ae_orders', 'sk_shop_sets']) {
+  // 分摊行先清（它挂在条目上）；记账条目也要清，否则上一条用例的引用会让下一条的"删除成功"假失败。
+  for (const t of [
+    'bk_allocations',
+    'bk_entries',
+    'sk_shops',
+    'sk_name_map',
+    'oi_orders',
+    'purchase_sources',
+    'sk_tool_accounts',
+  ]) {
     dbRun(`DELETE FROM ${t}`);
   }
 };
 
-/** 全量入参（upsert 是全量提交语义） */
+/** `upsertShop` 的入参（**局部更新**：不带的列保持原值，显式空串才清空） */
 const shopInput = (over = {}) => ({
   id: 0,
   platform: 'ae',
   name: '深圳优选店',
   platformShopId: '',
   site: 'RU',
-  shopSetId: 0,
   status: 'active',
   openedAt: '',
   note: '',
   ...over,
 });
 
-/** 往三处文本各塞若干行 */
+/** 往两处文本各塞若干行 */
 const seedOrders = (rows) => {
+  // 本冒烟只关心"店铺名文本"这一列，故 `oi_orders` 是**最小同构桩**（见上方建表，只有 id/shop）——
+  // 不要按真实订单表形状给它补列：那会把用例绑死在订单域 schema 上（B1 拆表时就误改过一次）。
   for (const s of rows) dbRun(`INSERT INTO oi_orders (shop) VALUES (?)`, [s]);
 };
 const seedPurchase = (rows) => {
   for (const s of rows) dbRun(`INSERT INTO purchase_sources (shop) VALUES (?)`, [s]);
 };
-const seedAe = (rows) => {
-  for (const s of rows) dbRun(`INSERT INTO ae_orders (shop_name) VALUES (?)`, [s]);
-};
 
 const keys = (rows) => rows.map((r) => r.key);
 const list = (p = {}) =>
-  sdb.listShops({ offset: 0, limit: 50, search: '', platform: '', status: '', shopSetId: 0, ...p });
+  sdb.listShops({ offset: 0, limit: 50, search: '', platform: '', status: '', ...p });
 
 console.log('\n店铺实体数据层冒烟（sk_shops / sk_name_map）\n' + '\u2500'.repeat(64));
 
@@ -106,7 +128,12 @@ check('空库：未归一名单为空、汇总全零（源表为空）', () => {
 // 本脚本的 `sk_shops` 是 `ensureShopSchema()` 现建的，建表语句里已含新列 ——
 // 于是 `ALTER` 那条分支**一次都不会执行**，写成什么样都恒绿。
 // 这是"用干净环境测"的典型盲区（记忆里那条：新建的库没有历史状态，必然全绿）。
-check('老库迁移：没有 platform_shop_id 列的表能被 ALTER 补上（新建库测不出这条）', () => {
+//
+// 2026-10-22 物理合并后，老形状（`shop_set_id`、无 `email`）走的不再是 ALTER 补列，
+// 而是 `shop.main` v1 整表重建（店铺行 + 账号行合成一行）。所以这里同时把**账本倒回 0**：
+// 真机上老库的账本里没有 shop.main，而本脚本开头那次 ensure 已经把版本记成 1 ——
+// 不倒回去，迁移一步都不会跑，这条用例就变成安慰剂。
+check('老库迁移：shop.main v1 把「店铺 + 账号套装 + 邮箱账号」合成同一行，行不丢、外键改指新店', () => {
   dbRun(`DROP TABLE IF EXISTS sk_shops`);
   dbRun(`CREATE TABLE sk_shops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,50 +149,298 @@ check('老库迁移：没有 platform_shop_id 列的表能被 ALTER 补上（新
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE(platform, name_key)
   )`);
-  dbRun(`INSERT INTO sk_shops (platform, name, name_key, note) VALUES ('ae', '老店', '老店', '迁移前的行')`);
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, site, note, shop_set_id) VALUES ('ae', '老店', '老店', 'RU', '迁移前的行', 1)`);
+  // 账号侧一行（老形状 = sk_shop_sets）：邮箱 / 手机 / 紫鸟 / ERP 都在它身上
+  dbRun(`CREATE TABLE sk_shop_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL DEFAULT '',
+    company_id INTEGER NOT NULL DEFAULT 0,
+    alipay TEXT NOT NULL DEFAULT '',
+    ziniao_account TEXT NOT NULL DEFAULT '',
+    erp_account TEXT NOT NULL DEFAULT '',
+    platforms TEXT NOT NULL DEFAULT '[]',
+    opened_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    tags TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    secret_enc BLOB,
+    secret_keys TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+  )`);
+  dbRun(
+    `INSERT INTO sk_shop_sets (id, email, phone, ziniao_account, erp_account, opened_at, status)
+     VALUES (1, 'old@example.com', '13800000000', 'zn-1', 'erp-1', '2024-01-01', 'banned')`,
+  );
+  // 邮箱账号（老形状：外键指向 sk_shop_sets.id）—— 迁移必须把它改指到合并后的店铺行
+  dbRun(`CREATE TABLE sk_mail_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_set_id INTEGER NOT NULL DEFAULT 0,
+    email TEXT NOT NULL DEFAULT '',
+    provider_id TEXT NOT NULL DEFAULT '',
+    imap_host TEXT NOT NULL DEFAULT '',
+    imap_port INTEGER NOT NULL DEFAULT 993,
+    imap_secure INTEGER NOT NULL DEFAULT 1,
+    proxy TEXT NOT NULL DEFAULT '',
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    folders TEXT NOT NULL DEFAULT '',
+    sync_enabled INTEGER NOT NULL DEFAULT 1,
+    sync_days INTEGER NOT NULL DEFAULT 30,
+    max_body_bytes INTEGER NOT NULL DEFAULT 204800,
+    status TEXT NOT NULL DEFAULT 'idle',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_synced_at TEXT NOT NULL DEFAULT '',
+    uid_validity INTEGER NOT NULL DEFAULT 0,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+  )`);
+  dbRun(
+    `INSERT INTO sk_mail_accounts (id, shop_set_id, email, imap_host, sync_days)
+     VALUES (77, 1, 'old@example.com', 'imap.example.com', 15)`,
+  );
+  dbRun(`DELETE FROM sk_schema_migrations WHERE key = 'shop.main'`);
 
   const before = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => r.name);
-  assert.ok(!before.includes('platform_shop_id'), '前置条件：老表本来就不该有这一列');
+  assert.ok(!before.includes('email'), '前置条件：老表本来就不该有 email 列（账号在另一张表）');
 
   sdb.ensureShopSchema();
 
   const after = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => r.name);
-  assert.ok(after.includes('platform_shop_id'), 'ensure 应把新列补上');
-  // 老数据不丢，且新列回落空串（不是 NULL）—— NULL 会让 `<> ''` 的部分索引漏掉它
-  const row = dbGet(`SELECT name, note, platform_shop_id FROM sk_shops WHERE name_key = '老店'`);
-  assert.strictEqual(row.note, '迁移前的行', '补列不得丢数据');
-  assert.strictEqual(row.platform_shop_id, '', '补列后旧行应为空串，不是 NULL');
-  // 幂等：连跑两次不再 ALTER、不报错
-  sdb.ensureShopSchema();
-  sdb.ensureShopSchema();
+  for (const c of ['platform_shop_id', 'shop_url', 'shop_url_raw', 'email', 'ziniao_account_id', 'erp_account_id']) {
+    assert.ok(after.includes(c), `合并迁移应补上 ${c}`);
+  }
+  assert.ok(!after.includes('shop_set_id'), 'shop_set_id 这一列必须随合并消失（同一行不再需要外键）');
   assert.strictEqual(
-    dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c,
+    dbQuery(`SELECT name FROM sqlite_master WHERE type='table' AND name='sk_shop_sets'`).length,
+    0,
+    'sk_shop_sets 必须被删掉 —— 留着它就有第二个数据源',
+  );
+
+  const row = dbGet(`SELECT id, name, note, site, email, status, opened_at, ziniao_account_id, erp_account_id FROM sk_shops`);
+  assert.strictEqual(Number(row.id), 1, '主键不变 —— 订单/采购里的 shop_id 引用不能断链');
+  assert.strictEqual(row.name, '老店', '店名不丢');
+  assert.strictEqual(row.status, 'banned', '账号侧历史态 banned 必须并入「封店」，不能回落启用');
+  assert.ok(row.note.includes('迁移前的行'), `店铺侧备注必须还在：${row.note}`);
+  assert.ok(
+    row.note.includes('手机号 13800000000'),
+    `账号侧没有企业可归的手机号要落进备注留痕，不许静默丢：${row.note}`,
+  );
+  assert.strictEqual(row.site, 'RU', '站点不丢');
+  assert.strictEqual(row.email, 'old@example.com', '账号邮箱并进同一行');
+  assert.strictEqual(row.opened_at, '2024-01-01', '开店时间从账号侧带过来');
+  assert.ok(Number(row.ziniao_account_id) > 0, '紫鸟文本应落进 sk_tool_accounts 并被引用');
+  assert.ok(Number(row.erp_account_id) > 0, 'ERP 文本应落进 sk_tool_accounts 并被引用');
+  const tools = dbQuery(`SELECT kind, account FROM sk_tool_accounts ORDER BY id`).map((t) => `${t.kind}:${t.account}`);
+  assert.deepStrictEqual(tools.sort(), ['erp:erp-1', 'ziniao:zn-1'], '两套工具账号各一行，且账号名原样');
+
+  // 邮箱账号：外键从 sk_shop_sets 改指 sk_shops，**账号 id 不变**（同步游标/已缓存附件都挂在它上面）
+  const mailCols = dbQuery(`PRAGMA table_info(sk_mail_accounts)`).map((c) => String(c.name));
+  assert.ok(mailCols.includes('shop_id'), '迁移后应有 shop_id 列');
+  assert.ok(!mailCols.includes('shop_set_id'), 'shop_set_id 必须随合并消失');
+  const mail = dbGet(`SELECT id, shop_id, email, imap_host, sync_days FROM sk_mail_accounts WHERE id = 77`);
+  assert.ok(mail, '迁移不许丢邮箱账号');
+  assert.strictEqual(Number(mail.shop_id), 1, '账号必须并到合并出来的那一行（id 1）');
+  assert.strictEqual(mail.email, 'old@example.com', '邮箱原样');
+  assert.strictEqual(mail.imap_host, 'imap.example.com', 'IMAP 配置原样');
+  assert.strictEqual(Number(mail.sync_days), 15, '同步天数原样');
+  assert.strictEqual(
+    (dbQuery(`SELECT COUNT(*) AS c FROM sk_mail_accounts`))[0].c,
     1,
-    '幂等迁移不得产生额外行'
+    '账号表行数不变（一条不丢也不多造）',
+  );
+  assert.strictEqual(dbQuery(`PRAGMA foreign_key_check`).length, 0, '迁移后外键必须自洽');
+
+  // 幂等：版本已记 ⇒ 再 ensure 不重复搬、不产生额外行（第二次不会再把工具账号插一遍）
+  sdb.ensureShopSchema();
+  sdb.ensureShopSchema();
+  assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c, 1, '幂等迁移不得产生额外店铺行');
+  assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_tool_accounts`)[0].c, 2, '幂等迁移不得重复建工具账号');
+  reset();
+  dbRun(`DROP TABLE IF EXISTS sk_shop_sets`);
+});
+
+// 只有账号表、没有店铺表的早期库（早期版本账号先落地）。只看形状的话它会命中"已是新形状"的
+// 短路，账本被补记成 1、账号行**永久孤立**在 sk_shop_sets 里（症状：邮箱账号在界面上一律看不到，
+// 且没有任何报错）。判据因此必须是"形状对 **且** 没有 sk_shop_sets"。
+check('早期库（只有 sk_shop_sets）：账号行搬成纯账号行，不孤立', () => {
+  dbRun(`DROP TABLE IF EXISTS sk_shops`);
+  dbRun(`DROP TABLE IF EXISTS sk_mail_accounts`);
+  dbRun(`CREATE TABLE sk_shop_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL DEFAULT '',
+    company_id INTEGER NOT NULL DEFAULT 0,
+    alipay TEXT NOT NULL DEFAULT '',
+    ziniao_account TEXT NOT NULL DEFAULT '',
+    erp_account TEXT NOT NULL DEFAULT '',
+    platforms TEXT NOT NULL DEFAULT '[]',
+    opened_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    tags TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    secret_enc BLOB,
+    secret_keys TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+  )`);
+  dbRun(`INSERT INTO sk_shop_sets (id, email, phone, status) VALUES (5, 'only@ex.com', '13900000000', 'closed')`);
+  dbRun(`DELETE FROM sk_schema_migrations WHERE key = 'shop.main'`);
+
+  sdb.ensureShopSchema();
+
+  // 按邮箱取行，不按 id：纯账号行没有店铺 id 可继承（sk_shops 里旧店铺的显式 id 先占位，
+  // 账号行走 AUTOINCREMENT 续号）—— 断言钉的是"搬过来了"，不是"搬到第几行"。
+  const acct = dbGet(`SELECT id, platform, name, name_key, email, status FROM sk_shops WHERE email = 'only@ex.com'`);
+  assert.ok(acct, '账号行必须被搬进 sk_shops（不能留在 sk_shop_sets 里）');
+  assert.ok(Number(acct.id) > 0, '合并后的账号行有自己的行 id（邮件账号外键要指向它）');
+  assert.strictEqual(acct.name, '', '纯账号行没有店名');
+  assert.strictEqual(acct.name_key, '', '纯账号行的归一键也是空 —— 它不参与店名唯一性');
+  assert.strictEqual(acct.email, 'only@ex.com');
+  assert.strictEqual(acct.status, 'exited', '账号侧历史态 closed 必须并入「退店」');
+  assert.strictEqual(acct.platform, 'ae', '账号侧没有平台，合并后统一落 ae（当前只管速卖通）');
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS c FROM sqlite_master WHERE name='sk_shop_sets'`)[0].c,
+    0,
+    '搬完必须删掉旧表',
   );
   reset();
 });
 
-// ---- 三处文本的聚合 ----
+check('前置：当前库的表形状已含 score / deposit_received_at，shop.columns 账本记到 v2', () => {
+  const cols = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
+  assert.ok(cols.includes('score'), '新库的建表语句必须自带 score —— 否则只有老库能补，新库反而缺列');
+  assert.ok(
+    cols.includes('deposit_received_at'),
+    '新库的建表语句必须自带 deposit_received_at（保证金到账时间）',
+  );
+  // 账本一 key 一行、只存**最新版本**（migrate 的 upsert 语义），不是每步一行
+  assert.strictEqual(
+    dbQuery(`SELECT version FROM sk_schema_migrations WHERE key = 'shop.columns'`)[0].version,
+    2,
+    'shop.columns 应记到 v2（v1 score + v2 deposit_received_at；它独立于 shop.main，后者版本一旦 ≥1 就整段跳过）',
+  );
+});
 
-check('三处历史文本都被汇总进未归一名单', () => {
+// ⚠️ 同「老库迁移」那条的理由：本脚本的库是现建的，建表语句已含这两列 ⇒ ALTER 分支一次都不会执行。
+// 必须造一张「当前形状但既没有 score 也没有 deposit_received_at」的老表，并把 shop.columns 的账本倒回 0。
+// 注意**不能只 DROP 表就调 ensure**：`dbMigrate(SCHEMA)` 会按新形状把表建出来（带这两列），
+// 补列分支照样恒绿。所以老表要自己按 DDL 建好，让 `CREATE TABLE IF NOT EXISTS` 变成空操作。
+check('老库补列：shop.columns v1/v2 给 sk_shops 补 score 与 deposit_received_at，老行默认值正确、数据不丢、幂等', () => {
+  reset();
+  dbRun(`DROP TABLE IF EXISTS sk_shops`);
+  dbRun(`CREATE TABLE sk_shops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL DEFAULT 'ae',
+    name TEXT NOT NULL DEFAULT '',
+    name_key TEXT NOT NULL DEFAULT '',
+    platform_shop_id TEXT NOT NULL DEFAULT '',
+    shop_url TEXT NOT NULL DEFAULT '',
+    shop_url_raw TEXT NOT NULL DEFAULT '',
+    site TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    company_id INTEGER NOT NULL DEFAULT 0,
+    ziniao_account_id INTEGER NOT NULL DEFAULT 0,
+    erp_account_id INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    opened_at TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    secret_enc BLOB,
+    secret_keys TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    CHECK (trim(name) <> '' OR trim(email) <> ''),
+    CHECK (
+      (trim(name) = '' AND trim(name_key) = '') OR
+      (trim(name) <> '' AND trim(name_key) <> '')
+    )
+  )`);
+  const seeded = dbRun(
+    `INSERT INTO sk_shops (platform, name, name_key, site, status, note)
+     VALUES ('ae', '补列前的老店', '补列前的老店', 'RU', 'banned', '这条备注不许丢')`,
+  );
+  dbRun(`DELETE FROM sk_schema_migrations WHERE key = 'shop.columns'`);
+
+  const before = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
+  assert.ok(!before.includes('score'), '前置条件：老表本来就没有 score 列');
+  assert.ok(!before.includes('deposit_received_at'), '前置条件：老表本来也没有 deposit_received_at 列');
+
+  sdb.ensureShopSchema();
+
+  const after = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
+  assert.ok(after.includes('score'), 'shop.columns v1 必须把 score 补上');
+  assert.ok(after.includes('deposit_received_at'), 'shop.columns v2 必须把 deposit_received_at 补上');
+  const row = dbGet(
+    `SELECT name, site, status, note, score, deposit_received_at FROM sk_shops WHERE id = ?`,
+    [seeded.lastInsertRowid],
+  );
+  assert.ok(row, '补列不许丢行');
+  assert.strictEqual(row.site, 'RU', '既有列原样');
+  assert.strictEqual(row.status, 'banned', '补列不许改状态（封店仍是封店）');
+  assert.strictEqual(row.note, '这条备注不许丢');
+  assert.strictEqual(Number(row.score), 0, '老行没有记分记录 ⇒ 0（未记录），不是 NULL、也不是脏值');
+  assert.strictEqual(row.deposit_received_at, '', '老行没有保证金记录 ⇒ 空串（未填写），不是 NULL');
+
+  // 幂等：再 ensure 两次不重复 ALTER、不产生额外行
+  sdb.ensureShopSchema();
+  sdb.ensureShopSchema();
+  assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c, 1);
+  assert.strictEqual(Number(sdb.getShop(Number(seeded.lastInsertRowid)).score), 0);
+  assert.strictEqual(
+    dbQuery(`SELECT deposit_received_at FROM sk_shops WHERE id = ?`, [seeded.lastInsertRowid])[0]
+      .deposit_received_at,
+    '',
+  );
+});
+
+// 保证金到账（2026-10-25）：字段走和 openedAt 一样的局部更新语义 ——
+// 漏传 = 保持、空串 = 清空、非日期（没选全 / 手打乱码）归一为空串而不是把脏值写进库。
+// 列表投影必须带出来（列表渲染只读 list，不读详情）。
+check('保证金到账：写入 / 列表带出 / 漏传保持 / 带时间只留日期 / 非法日期归一空串 / 空串清空', () => {
+  reset();
+  const { id } = adb.upsertShopAccount({ name: '保证金店', depositReceivedAt: '2026-02-03' });
+  assert.strictEqual(adb.getShopAccount(id).depositReceivedAt, '2026-02-03');
+  assert.strictEqual(
+    adb.listShopAccounts({ search: '保证金店' })[0].depositReceivedAt,
+    '2026-02-03',
+    '共享列表投影必须带出 depositReceivedAt（退店行要显示到账日期）',
+  );
+  adb.upsertShopAccount({ id, note: '改备注' });
+  assert.strictEqual(adb.getShopAccount(id).depositReceivedAt, '2026-02-03', '漏传 = 保持原值');
+  adb.upsertShopAccount({ id, depositReceivedAt: '2026-05-06T10:00:00' });
+  assert.strictEqual(adb.getShopAccount(id).depositReceivedAt, '2026-05-06', '带时间的日期只留日期部分');
+  adb.upsertShopAccount({ id, depositReceivedAt: '2026-02-30' });
+  assert.strictEqual(
+    adb.getShopAccount(id).depositReceivedAt,
+    '',
+    '不存在的日历日归一为空串（宁可显示未填，也不写一个假日期）',
+  );
+  adb.upsertShopAccount({ id, depositReceivedAt: '2026-07-08' });
+  adb.upsertShopAccount({ id, depositReceivedAt: '' });
+  assert.strictEqual(adb.getShopAccount(id).depositReceivedAt, '', '空串 = 显式清空');
+});
+
+// ---- 两处文本的聚合 ----
+
+check('两处历史文本都被汇总进未归一名单', () => {
   reset();
   seedOrders(['甲店']);
   seedPurchase(['乙店']);
-  seedAe(['丙店']);
   const rows = sdb.listUnmapped();
-  assert.deepStrictEqual(keys(rows).sort(), ['丙店', '乙店', '甲店'].sort());
+  assert.deepStrictEqual(keys(rows).sort(), ['乙店', '甲店'].sort());
   assert.deepStrictEqual(rows.find((r) => r.key === '甲店').sources, ['order']);
   assert.deepStrictEqual(rows.find((r) => r.key === '乙店').sources, ['purchase']);
-  assert.deepStrictEqual(rows.find((r) => r.key === '丙店').sources, ['ae']);
 });
 
 check('验收原文：未归一名单覆盖 oi_orders 的每一个店铺名（逐条，且计数一致）', () => {
   reset();
   seedOrders(['A店', 'A店', 'B店', '  B店  ', 'C店\u3000']);
-  // 另两处是子集：此时"未归一名单条数"应与 DISTINCT shop 数完全一致
+  // 另一处是子集：此时"未归一名单条数"应与 DISTINCT shop 数完全一致
   seedPurchase(['A店']);
-  seedAe(['B店']);
   const distinct = dbQuery(`SELECT DISTINCT shop FROM oi_orders WHERE shop <> ''`).map((r) => r.shop);
   const rows = sdb.listUnmapped();
   for (const raw of distinct) {
@@ -181,15 +456,14 @@ check('验收原文：未归一名单覆盖 oi_orders 的每一个店铺名（�
 
 check('归一同键：肉眼一样的写法合成一条，条数累加、来源去重', () => {
   reset();
-  // 这五个都是同一个名字（首尾空白 / 零宽 / BOM / 全角空格在**名字外部**）
+  // 这四个都是同一个名字（首尾空白 / 零宽字符在**名字外部**）
   seedOrders(['店A', ' 店A ', '店A\u200b']);
   seedPurchase(['店A']);
-  seedAe(['\ufeff店A', '店A']);
   const rows = sdb.listUnmapped();
   assert.strictEqual(rows.length, 1, `期望合成 1 条，实际 ${rows.length}`);
   assert.strictEqual(rows[0].key, '店A');
-  assert.strictEqual(rows[0].occurrences, 6, `条数应为 6，实际 ${rows[0].occurrences}`);
-  assert.deepStrictEqual(rows[0].sources.sort(), ['ae', 'order', 'purchase'].sort());
+  assert.strictEqual(rows[0].occurrences, 4, `条数应为 4，实际 ${rows[0].occurrences}`);
+  assert.deepStrictEqual(rows[0].sources.sort(), ['order', 'purchase'].sort());
 });
 
 check('内部空白归一：全角空格 / 连续空格同为 "店 A"，但与 "店A" 不同键', () => {
@@ -220,12 +494,12 @@ check('空 / 纯空白店铺名不进名单（否则噪音淹没真问题）', (
 check('源表不存在时不炸（各域表按域懒建，不能假定都初始化过）', () => {
   reset();
   seedOrders(['甲店']);
-  dbRun('DROP TABLE ae_orders');
+  dbRun('DROP TABLE purchase_sources');
   try {
     assert.strictEqual(sdb.listUnmapped().length, 1);
     assert.strictEqual(sdb.shopSummary().names.total, 1);
   } finally {
-    dbRun(`CREATE TABLE IF NOT EXISTS ae_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_name TEXT NOT NULL DEFAULT '')`);
+    dbRun(`CREATE TABLE IF NOT EXISTS purchase_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, shop TEXT NOT NULL DEFAULT '')`);
   }
 });
 
@@ -286,8 +560,64 @@ check('列表：平台 / 状态过滤与关键字检索', () => {
   assert.strictEqual(list({ search: '不存在的关键字' }).total, 0);
 });
 
+check('状态四态可写入、可筛选；局部更新不把封店 / 退店改回启用', () => {
+  reset();
+  assert.deepStrictEqual(
+    sdb.SHOP_STATUSES.slice().sort(),
+    ['active', 'archived', 'banned', 'exited'],
+    '状态白名单必须是四态（封店 / 退店不能靠自由文本存）',
+  );
+  const a = sdb.upsertShop(shopInput({ platform: 'ae', name: '甲店', status: 'active' }));
+  const b = sdb.upsertShop(shopInput({ platform: 'amazon', name: '乙店', status: 'banned' }));
+  const c = sdb.upsertShop(shopInput({ platform: 'shopee', name: '丙店', status: 'exited' }));
+  const d = sdb.upsertShop(shopInput({ platform: 'ebay', name: '丁店', status: 'archived' }));
+  assert.strictEqual(list({ status: 'active' }).rows[0].name, '甲店');
+  assert.strictEqual(list({ status: 'archived' }).rows[0].name, '丁店');
+  assert.strictEqual(list({ status: 'banned' }).rows[0].name, '乙店');
+  assert.strictEqual(list({ status: 'exited' }).rows[0].name, '丙店');
+  // 局部更新（只改备注）：状态必须按**原值**归一后写回。旧实现只判 `archived`，
+  // 会把封店 / 退店悄悄改回启用 —— 用户改一次地址，店就"复活"了，而且没有任何提示。
+  sdb.upsertShop({ id: b.id, note: '封店中' });
+  sdb.upsertShop({ id: c.id, note: '已退店' });
+  sdb.upsertShop({ id: d.id, note: '停用中' });
+  assert.strictEqual(sdb.getShop(b.id).status, 'banned', '封店不许被局部更新改回启用');
+  assert.strictEqual(sdb.getShop(c.id).status, 'exited', '退店不许被局部更新改回启用');
+  assert.strictEqual(sdb.getShop(d.id).status, 'archived', '停用不许被局部更新改回启用');
+  // 汇总按四态各自计数（概览 chip 的数字来源）
+  const byStatus = {};
+  for (const r of sdb.shopSummary().byStatus) byStatus[r.status] = r.count;
+  assert.deepStrictEqual(byStatus, { active: 1, archived: 1, banned: 1, exited: 1 });
+  // 非法状态不写进白名单之外的值（按启用兜底，列表筛选仍四态可达）
+  const bad = sdb.upsertShop(shopInput({ platform: 'wish', name: '戊店', status: '下架' }));
+  assert.strictEqual(sdb.getShop(bad.id).status, 'active');
+  assert.strictEqual([a.created, b.created, c.created, d.created].every(Boolean), true);
+});
+
+check('记分分值：写入 / 两位小数 / 局部更新保持 / 显式 0 清为未记录 / 非法值抛错', () => {
+  reset();
+  const { id } = sdb.upsertShop(shopInput({ name: '记分店' }));
+  assert.strictEqual(sdb.getShop(id).score, 0, '新增不传 = 0（未记录）');
+  sdb.upsertShop({ id, score: 12.5 });
+  assert.strictEqual(sdb.getShop(id).score, 12.5);
+  assert.strictEqual(
+    list({ search: '记分店' }).rows[0].score,
+    12.5,
+    '共享列表投影必须带出 score（列表要显示记分）',
+  );
+  sdb.upsertShop({ id, note: '只改备注' });
+  assert.strictEqual(sdb.getShop(id).score, 12.5, '漏传 score = 保持原值（局部更新语义）');
+  sdb.upsertShop({ id, score: 3.456 });
+  assert.strictEqual(sdb.getShop(id).score, 3.46, '保留两位小数');
+  assert.throws(() => sdb.upsertShop({ id, score: -1 }), /记分分值/);
+  assert.throws(() => sdb.upsertShop({ id, score: Number.NaN }), /记分分值/);
+  assert.throws(() => sdb.upsertShop({ id, score: Infinity }), /记分分值/);
+  assert.strictEqual(sdb.getShop(id).score, 3.46, '非法值抛错后原值不变（不许静默改写）');
+  sdb.upsertShop({ id, score: 0 });
+  assert.strictEqual(sdb.getShop(id).score, 0, '0 是「清为未记录」的唯一表达');
+});
+
 // ---- 平台店铺标识（platform_shop_id；2026-09-27 新增）----
-// 这个字段的价值**不在"关联订单"** —— 三处历史文本（订单/采购/利润）与账号套装都没有标识列
+// 这个字段的价值**不在"关联订单"** —— 两处历史文本（订单/采购）与账号套装都没有标识列
 // （2026-09-27 逐处实测），全库唯一能拿来比对订单的仍是店名字符串。它解决的是：
 //   ① 改名不断链（名称变了历史文本就断了，标识不变）
 //   ② 把同一家店的多种写法收拢到一个键上（实测订单侧 42 行出现 7 种店名）
@@ -358,30 +688,84 @@ check('搜索能命中平台店铺标识（用户从后台抄来的就是一串 
   assert.strictEqual(list({ search: '9990001' }).total, 1, '应只命中乙店');
 });
 
-check(`按 shopSetId 过滤：只看某个账号套装名下的店；0 是"不过滤"而不是"只看未关联"`, () => {
+// 合并后没有 shopSetId 这一列了（店铺与账号同一行）—— 换成钉住"一行两态"的三条约束：
+// 纯账号行 / 纯店铺行 / 两者都空。这是物理合并最容易做错的地方：唯一性若照旧建在 name 上，
+// 纯账号行（name=''）第二家就进不来。
+check('一行两态：纯账号行（只有邮箱）与纯店铺行（只有店名）可以共存', () => {
   reset();
-  sdb.upsertShop(shopInput({ name: '甲店', shopSetId: 7 }));
-  sdb.upsertShop(shopInput({ name: '乙店', shopSetId: 7 }));
-  sdb.upsertShop(shopInput({ name: '丙店', shopSetId: 0 }));
-  assert.strictEqual(list({ shopSetId: 7 }).total, 2);
-  assert.strictEqual(list({ shopSetId: 8 }).total, 0, '没挂店铺的套装应为 0（而不是回落成不过滤）');
-  assert.strictEqual(list({ shopSetId: 0 }).total, 3, 'shopSetId=0 是"不过滤"');
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','','','a@ex.com')`);
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','','','b@ex.com')`);
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','甲店','甲店','')`);
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','乙店','乙店','')`);
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c,
+    4,
+    '四条（两家纯账号 + 两家纯店铺）都该进得来 —— 唯一性不许把纯账号行互相判重',
+  );
+  // 列表面**故意**只列有店名的行：纯账号行不该出现在订单/拣货/利润的店铺选择器里
+  assert.strictEqual(list().total, 2, '店铺列表只列有店名的两行（纯账号行不进选择器）');
+  assert.deepStrictEqual(
+    list().rows.map((r) => r.name),
+    ['乙店', '甲店'],
+    '排序是 platform → name 的 BINARY 序（乙 U+4E59 在 甲 U+7532 之前）',
+  );
 });
 
-check('标识可清空（全量提交语义下传空串即清空）', () => {
+check('邮箱唯一性是硬约束且大小写同键（lower(email) 部分索引）', () => {
+  reset();
+  dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','','','A@Ex.com')`);
+  assert.throws(
+    () =>
+      dbRun(
+        `INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('amazon','','','a@ex.com')`
+      ),
+    /UNIQUE constraint failed/,
+    '同一邮箱跨平台也只能是一个账号 —— 邮箱是账号身份，不参与"同名不同平台算两家"',
+  );
+});
+
+check('店名与邮箱都为空的行被 CHECK 拒绝（既不是店也不是账号的行不该存在）', () => {
+  reset();
+  assert.throws(
+    () => dbRun(`INSERT INTO sk_shops (platform, name, name_key, email) VALUES ('ae','','','')`),
+    /CHECK constraint failed/,
+    'CHECK (trim(name) <> "" OR trim(email) <> "") 必须拦住"空行" —— 它在任何列表里都无处安放',
+  );
+});
+
+check('标识可清空（显式传空串即清空 —— 这是"清空"的唯一表达方式）', () => {
   reset();
   const { id } = sdb.upsertShop(shopInput({ name: '甲店', platformShopId: 'SID-1' }));
   sdb.upsertShop(shopInput({ id, name: '甲店', platformShopId: '' }));
   assert.strictEqual(sdb.getShop(id).platformShopId, '');
 });
 
-check('全量提交陷阱：更新时忘记带标识 = 标识被清空（所以界面上必须回填原值）', () => {
+check('局部更新：不带标识 = 标识保持原值（2026-10-22 由全量提交改成局部提交）', () => {
   reset();
   const { id } = sdb.upsertShop(shopInput({ name: '甲店', platformShopId: 'SID-1' }));
-  sdb.upsertShop(shopInput({ id, name: '甲店改名' })); // 故意不带 platformShopId
+  sdb.upsertShop({ id, name: '甲店改名' }); // 只给要改的两项，其余一律不传
   const row = sdb.getShop(id);
   assert.strictEqual(row.name, '甲店改名');
-  assert.strictEqual(row.platformShopId, '', '缺省即空是全量提交的定义行为 —— 钉住它，提醒界面回填');
+  assert.strictEqual(
+    row.platformShopId,
+    'SID-1',
+    '漏传的列必须保持原值 —— 「货与成本」只改地址，不该把标识（更不该把账号列）抹掉',
+  );
+});
+
+check('upsertShop 不碰账号列（同表不同写入面）', () => {
+  reset();
+  const { id } = sdb.upsertShop(shopInput({ name: '甲店' }));
+  dbRun(
+    `UPDATE sk_shops SET email = ?, company_id = ?, ziniao_account_id = ?, secret_keys = ? WHERE id = ?`,
+    ['a@ex.com', 5, 2, '["shopPwd"]', id],
+  );
+  sdb.upsertShop({ id, name: '甲店改名', note: '只改名称与备注' });
+  const row = dbGet(`SELECT email, company_id, ziniao_account_id, secret_keys FROM sk_shops WHERE id = ?`, [id]);
+  assert.strictEqual(row.email, 'a@ex.com', '账号列不许被店铺侧写入抹掉');
+  assert.strictEqual(Number(row.company_id), 5);
+  assert.strictEqual(Number(row.ziniao_account_id), 2);
+  assert.strictEqual(row.secret_keys, '["shopPwd"]');
 });
 
 // ---- 归一指派 ----
@@ -498,6 +882,60 @@ check('归一入参消毒：kind 白名单兜底 + 空名称抛错', () => {
   assert.strictEqual(r.key, '店A');
   assert.strictEqual(dbGet(`SELECT kind FROM sk_name_map WHERE raw_key = '店A'`).kind, 'shop');
   assert.throws(() => sdb.mapName({ raw: '店B', refId: id, ignored: false, kind: 'supplier' }), /暂不支持/);
+});
+
+// ---- 删除保护：记账引用 ----
+//
+// 判据在 `electron/shop-delete-guard.ts`（编排层），不是 handler —— 冒烟调的是线上同一份函数，
+// 否则只能断言文案、测不到"有引用时到底会不会删"。两类引用都要拦：
+//   · 专属条目（`bk_entries.shop_id`）—— 这一笔收支只属于这家店，删店就让历史数字无处可看；
+//   · 公共分摊行（`bk_allocations.shop_id`）—— 公共支出的其中一份摊给了这家店。
+// 作废条目同样算引用：作废只是把状态改掉，列表里仍按店名展示历史，删店会让那一行失去归属。
+check('删除保护：有记账引用（专属条目 / 公共分摊 / 已作废）时拒绝删除，无引用时可删', () => {
+  reset();
+  const a = adb.upsertShopAccount({ name: '账目店A' });
+  const b = adb.upsertShopAccount({ name: '账目店B' });
+
+  dbRun(
+    `INSERT INTO bk_entries (biz_date, kind, scope, shop_id, party_id, amount_cents)
+     VALUES ('2026-10-05','expense','shop', ?, 1, 1000)`,
+    [a.id],
+  );
+  assert.throws(
+    () => deleteShopAccountGuarded(a.id),
+    /1 条收支[\s\S]*请改为「停用」/,
+    '有专属条目的店必须拒绝删除，并引导改用停用',
+  );
+  assert.strictEqual(list({ search: '账目店A' }).total, 1, '拒绝时不许真的把店删掉');
+
+  // 公共分摊：条目本身 shop_id = 0，只有分摊行指向 B —— 两类引用分别可达。
+  const shared = dbRun(
+    `INSERT INTO bk_entries (biz_date, kind, scope, party_id, amount_cents, basis)
+     VALUES ('2026-10-06','expense','shared', 1, 500, 'equal')`,
+  );
+  dbRun(
+    `INSERT INTO bk_allocations (entry_id, shop_id, amount_cents, ratio_bp) VALUES (?, ?, 500, 10000)`,
+    [shared.lastInsertRowid, b.id],
+  );
+  assert.throws(
+    () => deleteShopAccountGuarded(b.id),
+    /1 条公共分摊/,
+    '被公共支出摊到的店同样必须拒绝删除（它的账目在分摊表里）',
+  );
+
+  // 作废条目仍是引用（历史列表按店名展示），不是"可以删了"。
+  const c = adb.upsertShopAccount({ name: '作废店C' });
+  dbRun(
+    `INSERT INTO bk_entries (biz_date, kind, scope, shop_id, party_id, amount_cents, status)
+     VALUES ('2026-10-07','expense','shop', ?, 1, 800, 'void')`,
+    [c.id],
+  );
+  assert.throws(() => deleteShopAccountGuarded(c.id), /1 条收支/, '已作废条目也算历史引用');
+
+  // 正控制：没有任何引用的店必须能删 —— 否则上面两条的"拒绝"可能只是"全都删不了"。
+  const clean = adb.upsertShopAccount({ name: '无账目店' });
+  assert.deepStrictEqual(deleteShopAccountGuarded(clean.id), { deleted: true });
+  assert.strictEqual(list({ search: '无账目店' }).total, 0, '无引用的店应被真正删除');
 });
 
 // ---- 收尾 ----

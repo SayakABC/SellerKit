@@ -24,9 +24,6 @@ import type {
 } from '@/lib/productImport';
 import * as ipc from '@/core/services/ipc';
 import type { ExcelFilePayload } from '@/core/services/ipc';
-import { pickUnitCost } from '@/lib/orderCost';
-import type { CostInterval } from '@/lib/orderCost';
-import { localDayKey } from '@/lib/localDay';
 import { unwrapApi, isCanceled } from './unwrapApi';
 
 /* ============================================================================
@@ -94,9 +91,9 @@ export interface ProductImportCommitResult {
   skusWritten: number;
   /** 本次设为款主图的张数 */
   imagesAttached: number;
-  /** 本次写入 `ae_cost_map` 的手工进价条数 */
+  /** 本次随产品一并写入当前进价的行数 */
   costsWritten: number;
-  /** 因与现价相同（幂等）或未填而跳过的进价条数 */
+  /** 带进价但没入库（编码冲突等）的行数 */
   costsSkipped: number;
   /** 本次**新建**的供应商条数（2026-10-10） */
   suppliersCreated: number;
@@ -111,12 +108,6 @@ export interface ProductImportCommitResult {
 
 /** 「同名款（款式名在库内已存在）」的处理方式；默认覆盖 = 沿用库内编码更新那一款 */
 export type SameNameMode = 'overwrite' | 'skip';
-
-/** 本地日期 `yyyy-mm-dd` —— 手工进价的生效日（口径：**导入当日**，见 `product-cost-sync.ts`）。
- *  实现收敛在 `@/lib/localDay`（三处"今天"共用一份，见该文件注释）。 */
-export function todayKey(): string {
-  return localDayKey();
-}
 
 /** 导出翻页护栏：每页与主进程 `product-db` 的 `MAX_LIST_LIMIT` 一致，最多 40 页 = 2 万行 */
 const EXPORT_PAGE = 500;
@@ -342,11 +333,10 @@ export async function commitProductImport(
             skus: x.skus.map((s) => ({ color: s.color, size: s.size, weightG: s.weightG })),
             imageId: x.imageId,
             // 手工进价（**分**）：`null` = 这行没填 ⇒ 主进程**不修改**库内已有价（不是清 0）。
-            // 生效日 = 导入当日 —— 改价只影响此后的订单，历史订单按区间回查仍取旧价。
+            // C2 起落点就是 `pl_products.cost_cents`（当前价），不再写第二张成本表。
             costCents: x.costCents,
           })),
           mode,
-          effectiveFrom: todayKey(),
         })
       )
     : {
@@ -420,8 +410,8 @@ export async function exportProducts(opts: {
           imagePath: r.imagePath ?? '',
           status: r.status,
           note: r.note,
-          // 进价在 `fillExportCosts` 里补（要跨域读 `ae_cost_map`）；这里先占位
-          costCents: null,
+          // 当前进价直接取产品行（C2 起唯一真源）；0 = 没维护 → 导出留空，不写 0
+          costCents: Number(r.costCents) > 0 ? Number(r.costCents) : null,
           skus: [],
         });
         idByCode.set(r.code, r.id);
@@ -429,7 +419,6 @@ export async function exportProducts(opts: {
       if (rows.length >= (res?.total ?? 0) || !(res?.rows ?? []).length) break;
     }
     await fillExportSkus(rows, idByCode);
-    await fillExportCosts(rows);
   }
 
   const layout = buildProductSheetLayout(rows, template);
@@ -485,36 +474,6 @@ async function fillExportSkus(
       if (!code) continue;
       byCode.get(code)?.skus.push({ color: v.color, size: v.size, weightG: v.weightG });
     }
-  }
-}
-
-/**
- * 给导出行补上**当前生效进价**（分）。
- *
- * 口径与**算钱 / 拣货两页完全一致**：一次读全 `ae_cost_map`，用 `pickUnitCost` 按业务日期取
- * 该款当时生效的那条（同一天 manual 优先）。这里业务日期取**今天** —— 「当前价」就是这个意思；
- * 改价后历史订单仍按各自的下单日期回查到旧价（区间口径，不是快照）。
- *
- * 取不到**不报错**：那一列空着比"导出整个失败"更接近事实（款确实在，只是还没维护进价）。
- */
-async function fillExportCosts(rows: ProductExportRow[]): Promise<void> {
-  if (!rows.length) return;
-  let costs: CostInterval[] = [];
-  try {
-    const c = unwrapApi(await ipc.aeCostMapList());
-    costs = (c ?? []).map((x) => ({
-      styleCode: String(x.styleCode ?? ''),
-      effectiveFrom: String(x.effectiveFrom ?? ''),
-      unitPrice: (Number(x.unitPriceCents) || 0) / 100,
-      source: String(x.source ?? ''),
-    }));
-  } catch {
-    return; // 读不到成本 → 进价列全空，导出照常
-  }
-  const today = todayKey();
-  for (const r of rows) {
-    const unit = pickUnitCost(costs, r.code, today);
-    r.costCents = unit === null ? null : Math.round(unit * 100);
   }
 }
 

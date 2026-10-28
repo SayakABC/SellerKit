@@ -1,4 +1,24 @@
 import type { MarketCatalog, MarketPluginInfo } from './core/plugin/types';
+// 分摊基准只有一处定义（`src/lib/ledger.ts`）：两个地方各写一份 `'equal'|'revenue'|'manual'`，
+// 早晚会出现一边加了新基准、另一边不知道的情况。
+import type { LedgerBasis } from './lib/ledger';
+
+export type { LedgerBasis };
+
+/**
+ * 「色未定」修复的候选色行（`purchase-style-colors` 返回的一项）。
+ *
+ * 只来自款色表（该款真实存在的色）—— 修历史单据时**不许现编色名**：
+ * 编出来的名字对不上任何色行，等于再造一批"已拿匹配不上、图也取不到"的脏数据。
+ */
+export interface StyleColorOptionRow {
+  /** 色行 id（身份） */
+  id: number;
+  /** 色名（款色表里的真值，不是订单上的平台色名） */
+  color: string;
+  /** 该色行是否挂着图；`false` 多为归色改写留下的空壳（界面要与真实色区分） */
+  hasImage: boolean;
+}
 
 export interface ElectronAPI {
   selectExcel: () => Promise<APIResult<ExcelFileResult>>;
@@ -10,6 +30,8 @@ export interface ElectronAPI {
   writeClipboard: (text: string) => Promise<APIResult<void>>;
   /** 写图片剪贴板（PNG dataURL）：「复制给厂家」的发厂清单图，粘进微信发给供应商 */
   writeClipboardImage: (dataUrl: string) => Promise<APIResult<void>>;
+  /** 打开外链（「打开店铺」；主进程只放行 http/https，其余协议报错；优先 Chrome，用不了回落系统默认浏览器） */
+  openExternal: (url: string) => Promise<APIResult<void>>;
   /** 模块命名空间持久化（§1.4）：读取 `modules.<moduleId>` 下的数据，无数据返回 null */
   getModuleState: (moduleId: string) => Promise<APIResult<unknown>>;
   /** 模块命名空间持久化（§1.4）：写入 `modules.<moduleId>`，模块之间互不污染 */
@@ -68,7 +90,47 @@ export interface ElectronAPI {
     source?: 'all' | 'import' | 'collect';
     /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`）；缺省 = 全库（见 `orderList` 同名参数） */
     importDate?: string;
+    /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库。记账的营收占比用 */
+    period?: string;
   }) => Promise<APIResult<UnifiedOrderRow[]>>;
+  // ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----
+  // 写通道都回**整单**最新状态（`ParcelDetail`）：拆包面板在开着的时候别人也可能在改同一单，
+  // 用返回值重绘比"本地推测结果"稳（推测的结果和库不一致时，用户看到的是"点了没反应"）。
+  orderParcelDetail: (payload: { orderNo: string }) => Promise<APIResult<ParcelDetail>>;
+  /** 一批订单各拆了几个包（`{ 单号: 包数 }`；不在返回里的 = 0 个包） */
+  orderParcelCounts: (payload: { orderNos: string[] }) => Promise<APIResult<ParcelCountMap>>;
+  /** 一批订单的包裹汇总（运费/重量；不在返回里的 = 还没拆包）。利润页用它替代运价表估算 */
+  orderParcelTotals: (payload: { orderNos: string[] }) => Promise<APIResult<ParcelTotalsMap>>;
+  orderParcelCreate: (payload: {
+    orderNo: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 分；`null`/缺省 = 还不知道（不是 0） */
+    shipCents?: number | null;
+    /** 克；`null`/缺省 = 还不知道 */
+    weightG?: number | null;
+  }) => Promise<APIResult<ParcelDetail & { id: number }>>;
+  orderParcelUpdate: (payload: {
+    id: number;
+    orderNo?: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 只传要改的字段：`undefined` = 不改，`null` = 清成"还不知道" */
+    shipCents?: number | null;
+    weightG?: number | null;
+  }) => Promise<APIResult<ParcelDetail | null>>;
+  orderParcelDelete: (payload: { id: number; orderNo?: string }) => Promise<APIResult<ParcelDetail | null>>;
+  /** `qty <= 0` = 从该包移除这一行；超拆由主进程拒绝并回 `error` 文案 */
+  orderParcelSetLine: (payload: {
+    parcelId: number;
+    orderItemId: number;
+    qty: number;
+    orderNo?: string;
+  }) => Promise<APIResult<ParcelDetail | null>>;
   orderDownloadImage: (url: string) => Promise<APIResult<OrderImageRecord>>;
   /** 拣货投影（只读）：未发货订单行 + 三层回落图 + 款色码/供应商（聚合在渲染层纯函数） */
   pickingRows: (payload?: {
@@ -91,9 +153,6 @@ export interface ElectronAPI {
   orderImageThumbBatch: (
     items: { localPath: string; maxEdge?: number }[]
   ) => Promise<APIResult<{ dataUrls: (string | null)[] }>>;
-  /** 识别引擎 API Key：safeStorage 加密落盘（渲染层不落明文） */
-  orderApiKeySet: (apiKey: string) => Promise<APIResult<{ stored: boolean }>>;
-  orderApiKeyGet: () => Promise<APIResult<{ apiKey: string }>>;
   /** 清理不被数据库引用的孤儿图片文件（返回释放数量与字节） */
   orderCleanupOrphanImages: () => Promise<APIResult<{ deleted: number; freedBytes: number }>>;
   // 产品库导入「图片」列：读取用户指定的本地图片（任意路径，仅图片扩展名，≤10MB）
@@ -102,43 +161,6 @@ export interface ElectronAPI {
     buffer: ArrayBuffer,
     defaultName?: string
   ) => Promise<APIResult<{ filePath: string }>>;
-  // ---- 待识别队列（订单归类：导入行整批落库 oi_queue，失败/缺图重启不丢、可增量重试）----
-  orderQueueEnqueue: (payload: {
-    batchNo: string;
-    rows: OrderQueueEnqueueRow[];
-  }) => Promise<APIResult<{ count: number }>>;
-  orderQueueStats: (payload: { batchNo: string }) => Promise<APIResult<OrderQueueStats>>;
-  /** 队列行分页：失败清单用 { status:'error' }，缺图清单用 { missingOnly:true }；列表不含 raw_fields，返回 { rows, total } */
-  orderQueueList: (payload: {
-    batchNo: string;
-    offset?: number;
-    limit?: number;
-    status?: OrderQueueStatus | 'all';
-    /** 缺图待补（status 为 pending/missing 且 url 为空） */
-    missingOnly?: boolean;
-  }) => Promise<APIResult<{ rows: OrderQueueRow[]; total: number }>>;
-  /** 单行队列行（含 raw_fields）：补图等按需取，避免列表全量携带大字段 */
-  orderQueueGet: (id: number) => Promise<APIResult<OrderQueueRow>>;
-  orderQueueNextPending: (payload: {
-    batchNo: string;
-    afterId: number;
-    limit: number;
-  }) => Promise<APIResult<OrderQueueRow[]>>;
-  orderQueueSetResult: (payload: {
-    id: number;
-    status: 'done' | 'error' | 'missing';
-    error?: string;
-  }) => Promise<APIResult<void>>;
-  orderQueuePatch: (payload: {
-    id: number;
-    url: string;
-    rawFields: Record<string, string>;
-  }) => Promise<APIResult<void>>;
-  orderQueueRetryErrors: (payload: { batchNo: string }) => Promise<APIResult<{ count: number }>>;
-  orderQueuePurgeDone: (payload: { batchNo: string }) => Promise<APIResult<{ count: number }>>;
-  orderQueueLastActive: () => Promise<
-    APIResult<{ batchNo: string; stats: OrderQueueStats } | null>
-  >;
   // 款编码/款色（产品库主数据）
   orderStyleResolve: (payload: {
     imageId: number;
@@ -163,7 +185,19 @@ export interface ElectronAPI {
     styleId?: number;
     color: string;
     fingerprint?: string;
-  }) => Promise<APIResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
+  }) => Promise<
+    APIResult<{
+      styleCode: string;
+      styleColorCode: string;
+      skuBackfill?: SkuBackfillOutcome;
+      /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
+      colorAlias?: ColorAliasRemembered | null;
+    }>
+  >;
+  // 全库重放已确认映射：修「映射在、订单没吃到」的历史漏网（`dryRun` 只报数不改库）
+  orderReplayMappings: (payload?: { dryRun?: boolean }) => Promise<
+    APIResult<SkuMappingReplayStats>
+  >;
   // 修改款式展示名（款编码级）
   orderStyleRename: (payload: {
     code: string;
@@ -186,36 +220,18 @@ export interface ElectronAPI {
   // 退回待核对（归类核对页「已核对」范围里的行内动作）：把点名的已核对行置回 corrected=0。
   // 入参只有裸数组 —— **没有** { all: true } 形态（退回一律点名，理由见 order-db.ts 的实现注释）。
   orderReopenCorrected: (ids: number[]) => Promise<APIResult<{ updated: number }>>;
-  // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
+  // 速卖通订单采集（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC。
+  // ⚠️ 2026-10-15：原 `aeOrderList` / `aeSummary` / `aeProfitStats` 随「订单明细 / 利润统计」页
+  //   并入宿主「算钱」后已无消费者，连同死表 ae_orders/ae_order_lines/ae_fees 一并删除。
   aeDbEnsure: () => Promise<APIResult<void>>;
-  aeOrderList: (payload?: {
-    offset?: number;
-    limit?: number;
-    search?: string;
-  }) => Promise<APIResult<{ rows: AeOrderListItem[]; total: number }>>;
-  aeSummary: () => Promise<APIResult<AeSummary>>;
   aeReceiverStatus: () => Promise<APIResult<AeReceiverStatus>>;
-  // M1 利润追踪扩展：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
-  aeProfitStats: (payload?: {
-    granularity?: 'day' | 'month';
-    rangeDays?: number;
-  }) => Promise<APIResult<AeProfitOverview>>;
-  aeCostMapImport: (payload: {
-    items: AeCostMapImportItem[];
-  }) => Promise<APIResult<{ replaced: number }>>;
-  aeCostMapList: () => Promise<APIResult<AeCostMapItem[]>>;
   /**
-   * P4 成本维护：手工录入 / 修改进价（`source='manual'`）。
-   * 缺省生效日 = 当天（**不会**回落 `0000-01-01`）；逐条带 `effectiveFrom` 可补录历史价。
+   * 订阅「采集已入库」事件（接收端写库后广播；主进程→渲染层单向）。
+   * 外部进程（Chrome 扩展）写库宿主页面无法感知，靠它触发重拉。返回退订函数。
    */
-  aeCostMapUpsertManual: (payload: {
-    items: ManualCostItemInput[];
-    effectiveFrom?: string;
-  }) => Promise<APIResult<{ written: number; skipped: number }>>;
-  /** P4 成本维护：删除手工进价区间（只删 `manual`；`purchase` 行归拿货对账同步管） */
-  aeCostMapDeleteManual: (payload: {
-    keys: { styleCode: string; effectiveFrom: string }[];
-  }) => Promise<APIResult<{ deleted: number }>>;
+  onAeItemsIngested: (cb: (event: AeItemsIngestedEvent) => void) => () => void;
+  // ⚠️ 2026-10-21（C2）：`aeCostMapImport / List / UpsertManual / DeleteManual` 随 ae_cost_map
+  //    退役删除（成本真源 = 产品行当前价 + 订单明细行「进价 / 实际进价」）。
   /** ---- 结算明细（AE 后台导出的订单明细；解析在渲染层，主进程只落库）---- */
   settleImport: (payload: { rows: unknown[] }) => Promise<
     APIResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
@@ -276,8 +292,6 @@ export interface ElectronAPI {
   purchaseOrderCreate: (payload: {
     supplierId: number;
     bizDate: string;
-    mode: 'detail' | 'package';
-    totalCents?: number;
     items?: PurchaseItem[];
     /** 来源订单快照（从数据统计跳转生成时锁定店铺归属；缺省时主进程按缺口自动推导） */
     sources?: PurchaseSourceRow[];
@@ -285,7 +299,6 @@ export interface ElectronAPI {
   purchaseOrderUpdate: (payload: {
     id: number;
     bizDate?: string;
-    totalCents?: number;
     items?: PurchaseItem[];
   }) => Promise<APIResult<void>>;
   purchaseOrderSubmit: (payload: { id: number }) => Promise<APIResult<void>>;
@@ -309,6 +322,9 @@ export interface ElectronAPI {
     to?: string;
   }) => Promise<APIResult<ReconciliationRow[]>>;
   purchaseOutstanding: () => Promise<APIResult<OutstandingRow[]>>;
+  purchaseTaken: () => Promise<APIResult<TakenRow[]>>;
+  /** 逐行覆盖度：未发货订单每行「要几件 / 已覆盖几件」+ 无归属台账（只读） */
+  purchaseOrderCoverage: () => Promise<APIResult<OrderCoveragePayload>>;
   purchaseIgnoreAdd: (payload: {
     styleCode: string;
     color?: string;
@@ -342,27 +358,197 @@ export interface ElectronAPI {
   }) => Promise<APIResult<{ filePath: string }>>;
   /** 拿货单编辑器行图：按「款编码 + 款色」批量取本地图路径（**顺序与入参一致**，未命中为 null） */
   purchaseStyleImages: (payload: {
-    items: { styleCode: string; color: string; size?: string }[];
+    items: { styleCode: string; color: string; size?: string; styleColorId?: number }[];
   }) => Promise<APIResult<{ paths: (string | null)[] }>>;
-  // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
+  /** 「色未定」修复的候选色：`{ [款编码大写]: 该款色行[] }`（只列事实，选哪个由用户定）
+   *  ⚠️ 返回类型不要写 `Record<string, X[]>` —— `npm run verify` 的成员抽取把泛型里
+   *  深度 1 的逗号当成成员分隔符，会把 `X` 误读成"仅 types 声明的通道"（实测踩过）。 */
+  purchaseStyleColors: (payload: {
+    styleCodes: string[];
+  }) => Promise<APIResult<{ [styleCode: string]: StyleColorOptionRow[] }>>;
+  /** 款色改名（产品侧改色名 → 订单侧色行跟着改标签；id / 编码 / 绑定的图不动）。
+   *  `renamed=false` 时 `reason` 说明原因（`target-exists` = 该名已是一个色行，合并要人来定）。 */
+  styleColorRename: (payload: {
+    productId: number;
+    styleCode: string;
+    from: string;
+    to: string;
+  }) => Promise<
+    APIResult<{ renamed: boolean; styleColorId?: number; reason?: string; colorAlias?: unknown }>
+  >;
+  // ---- 记账（店铺收支 + 公共费用分摊 + 资金相关人往来结算）----
+  // 口径：记账记的是「已发生、金额确定、算谁的」业务收支，与「统计」页的订单预测毛利
+  // **只并排不求和**（见 docs/plans/LEDGER_PLAN.md §1）。结算只改往来状态，不产生收支。
+  /** 幂等建表（视图首次激活时调用） */
+  ledgerDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
+  /** 期间内可参与分摊的店铺（含被排除的及原因 —— 界面必须显式写出来） */
+  ledgerEligibleShops: (payload: { period: string }) => Promise<APIResult<LedgerEligibleShops>>;
+  /** 科目列表（收/支各一套；默认不含已停用） */
+  ledgerCategoryList: (payload?: {
+    kind?: LedgerKind;
+    includeArchived?: boolean;
+  }) => Promise<APIResult<LedgerCategoryRow[]>>;
+  /** 新建 / 改名 / 停用科目（builtin 可改名不可删；不允许改收/支类型） */
+  ledgerCategoryUpsert: (payload: {
+    id?: number;
+    kind?: LedgerKind;
+    name?: string;
+    sort?: number;
+    archived?: boolean;
+  }) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 分摊方案（房租 / 工资这类每月照抄） */
+  ledgerRuleList: () => Promise<APIResult<LedgerRuleRow[]>>;
+  ledgerRuleUpsert: (payload: {
+    id?: number;
+    name?: string;
+    basis?: LedgerBasis;
+    shopIds?: number[];
+    ratios?: number[];
+    note?: string;
+  }) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 明细列表（按店铺筛选走**分摊行**：公共支出摊到该店的部分也算该店成本） */
+  ledgerEntryList: (payload?: LedgerEntryFilter) => Promise<APIResult<LedgerEntryRow[]>>;
+  /** 单条详情（含分摊明细） */
+  ledgerEntryGet: (payload: { id: number }) => Promise<APIResult<LedgerEntryDetail | null>>;
+  /**
+   * 新建 / 更新条目（局部语义：未传的字段 = 保持原值）。
+   * 公共条目（scope='shared'）必须带 `allocations`，且其合计必须**恰好等于**金额，否则拒写。
+   */
+  ledgerEntryUpsert: (
+    payload: LedgerEntryInput,
+  ) => Promise<APIResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>>;
+  /** 作废条目（不删行；已被结算单占用的须先撤销结算） */
+  ledgerEntryVoid: (payload: { id: number; reason: string }) => Promise<APIResult<{ id: number; voided: boolean }>>;
+  /** 恢复作废条目（`void → active`）；被有效结算单占用时拒 */
+  ledgerEntryRestore: (payload: { id: number }) => Promise<APIResult<{ id: number; restored: boolean }>>;
+  /** 批量作废（「撤销本次导入」用）：整批一个事务，任一条不可作废则整批回滚 */
+  ledgerEntriesVoid: (payload: {
+    ids: number[];
+    reason: string;
+  }) => Promise<APIResult<{ voided: number; ids: number[] }>>;
+  /** 汇总（店铺轴 / 科目轴 + 三项体检；体检非 0 时界面必须红字提示，不许静默） */
+  ledgerSummary: (payload?: {
+    period?: string;
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<LedgerSummary>>;
+  /** 相关人列表 */
+  ledgerPartyList: (payload?: {
+    includeArchived?: boolean;
+    keyword?: string;
+  }) => Promise<APIResult<LedgerPartyRow[]>>;
+  /** 新建 / 改相关人（`name_key` 唯一：拦住"张三"/"张三 "被建成两个人） */
+  ledgerPartyUpsert: (payload: {
+    id?: number;
+    name?: string;
+    kind?: LedgerPartyKind;
+    phone?: string;
+    note?: string;
+    archived?: boolean;
+  }) => Promise<APIResult<{ id: number; created: boolean }>>;
+  /** 合并相关人：未结算条目改挂 + 已结算条目留在原处 + 残额兜底结转（合并后原人未结清必须为 0） */
+  ledgerPartyMerge: (payload: {
+    fromId: number;
+    toId: number;
+    note?: string;
+  }) => Promise<APIResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>>;
+  /** 往来台账：应收 / 应付 / 净往来 / 已结算 / 未结清（五个数缺一个用户就得自己减） */
+  ledgerPartyLedger: (payload?: {
+    includeArchived?: boolean;
+    partyId?: number;
+  }) => Promise<APIResult<LedgerPartyLedgerRow[]>>;
+  /**
+   * 创建结算单。**金额不由前端传** —— 主进程按勾选的条目求和（结构上没有第二个数）。
+   * 方向必须与未结清符号一致、金额不得超出未结清；一条条目只能被一张有效结算单占用。
+   * `offset` = 互抵结清：一张单同时挂收入与支出条目，只记净资金流（须两类都有）。
+   */
+  ledgerSettleCreate: (payload: {
+    partyId: number;
+    settleDate: string;
+    direction: 'pay' | 'receive' | 'offset';
+    entryIds: number[];
+    method?: string;
+    note?: string;
+  }) => Promise<
+    APIResult<{ id: number; amountCents: number; entryCount: number; cashCents: number }>
+  >;
+  ledgerSettleList: (payload?: { partyId?: number }) => Promise<APIResult<LedgerSettlementRow[]>>;
+  /** 撤销结算（作废 + 结算行失活，这批条目恢复可结；必须填原因） */
+  ledgerSettleVoid: (payload: {
+    id: number;
+    reason: string;
+  }) => Promise<APIResult<{ id: number; voided: boolean }>>;
+  /** 批量变更相关人的预演：选中条目的结算状态、涉及的结算单、原人余额会怎么变 */
+  ledgerEntryRepatchPreview: (payload: {
+    entryIds: number[];
+  }) => Promise<APIResult<LedgerRepatchPreview>>;
+  /**
+   * 批量变更相关人（三路，见 LEDGER_PLAN §6.4）：
+   * - `move-all`        改挂（要求全部未结算）
+   * - `move-unsettled`  只改挂未结算、已结算留原人（默认推荐；**不写结转**）
+   * - `void-then-move`  撤销涉及的结算单（必填原因）后改挂全部
+   */
+  ledgerEntryRepatch: (payload: {
+    entryIds: number[];
+    toPartyId: number;
+    mode: LedgerRepatchMode;
+    reason?: string;
+  }) => Promise<APIResult<LedgerRepatchResult>>;
+  /** 单店取数（三卡 + 科目分布含公摊 + 该店承担的公摊条目） */
+  ledgerShopBreakdown: (payload: {
+    shopId: number;
+    period?: string;
+    from?: string;
+    to?: string;
+  }) => Promise<APIResult<LedgerShopBreakdown>>;
+  /** 明细导出 xlsx（业务口径全由渲染层算好传入，主进程只画表存盘） */
+  ledgerExportExcel: (payload: LedgerExportInput) => Promise<APIResult<{ filePath: string; rows: number }>>;
+  /**
+   * 文件里的相关人 / 科目 / 店铺名 → 库里 id（批量导入用）。
+   * 归一与同名判定只在主进程做（`toNameKey` 与这些表都在这侧），渲染层只消费四态。
+   */
+  ledgerNameResolve: (payload: {
+    party?: string[];
+    category?: string[];
+    shop?: string[];
+  }) => Promise<APIResult<LedgerNameResolveResult>>;
+  /**
+   * Excel 批量导入：**整批一个事务、只新增**（永不改已有条目、不产生结算单）。
+   * 任一行不合法 → 整批回滚，错误带「第 N 行：」。
+   */
+  ledgerEntryBatchCreate: (payload: {
+    entries: LedgerImportEntryInput[];
+  }) => Promise<
+    APIResult<{
+      created: number;
+      ids: number[];
+      allocations: number;
+      /** 本批自动新建的相关人 / 科目名字（界面要如实说出"多出了哪些名字"） */
+      createdParties: string[];
+      createdCategories: string[];
+    }>
+  >;
+  /** 下载导入模板（三张表内容由渲染层给）；用户点取消 → 错误为 `__canceled__` */
+  ledgerImportTemplate: (payload: {
+    sheets: LedgerTemplateSheetInput[];
+    defaultName: string;
+  }) => Promise<APIResult<{ filePath: string; sheets: number }>>;
+  // ---- 店铺账号（一行 = 店铺 + 账号，物理合并；紫鸟 / ERP 是共享登录，多店引用同一条）----
   /** 幂等建表（视图首次激活时调用） */
   shopAccountDbEnsure: () => Promise<APIResult<void>>;
-  /** 店铺套列表（关键字/状态/平台过滤；永不返回明文密码，仅 secretKeys 标记哪些敏感字段已配置） */
-  shopAccountList: (payload?: {
-    search?: string;
-    status?: ShopAccountStatus | '';
-    platform?: string;
-  }) => Promise<APIResult<ShopAccountItem[]>>;
-  /** 单套详情（含解密后的敏感字段，仅编辑时使用） */
+  /** 合并列表（关键字 / 状态 / 企业 / 紫鸟 / ERP 联动筛选；永不返回明文密码，仅 secretKeys 标记已配置项） */
+  shopAccountList: (payload?: ShopAccountListFilter) => Promise<APIResult<ShopAccountItem[]>>;
+  /** 单行详情（含解密后的敏感字段，仅编辑时使用） */
   shopAccountGet: (payload: { id: number }) => Promise<APIResult<ShopAccountDetail | null>>;
-  /** 汇总（总数 / 按状态计数 / 平台选项去重计数） */
+  /** 汇总（总数 / 按状态 / 三种完整度计数） */
   shopAccountSummary: () => Promise<APIResult<ShopAccountSummary>>;
   /** 当前系统安全存储是否可用（不可用时前端提示密码降级存储风险） */
   shopAccountSecurity: () => Promise<APIResult<{ secureStorage: boolean }>>;
-  /** 新增/更新店铺套（secrets 缺省=保持、空串=清空、非空=覆盖；密码在主进程加密后落库） */
+  /** 新增/更新（局部语义：缺省 = 保持原值，空串 = 清空；店名与邮箱至少填一个） */
   shopAccountUpsert: (
     payload: ShopAccountUpsertInput
-  ) => Promise<APIResult<{ id: number; secureStorage: boolean }>>;
+  ) => Promise<APIResult<{ id: number; created: boolean; secureStorage: boolean }>>;
+  /** 删除（有订单 / 商品 / 归一记录或邮件账号时拒绝，提示改「停用」） */
   shopAccountDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
   /** 按需解密单个敏感字段（复制/查看，避免整条详情往返） */
   shopAccountReveal: (payload: {
@@ -370,16 +556,26 @@ export interface ElectronAPI {
     field: ShopAccountSecretKey;
   }) => Promise<APIResult<{ value: string }>>;
   /**
-   * 批量修改店铺套（仅作用于非敏感字段；敏感密码字段在批量操作中不被允许）
+   * 批量修改（仅作用于非敏感字段；敏感密码字段在批量操作中不被允许）
    * - ids：待改店铺 id 列表（自动去重，仅保留正整数）
    * - patch：单字段修改指令；未声明的字段 = 不改
-   *   - status：覆盖
-   *   - company / tags / note：{ mode: 'set' | 'append', value }
-   *   - platforms：{ mode: 'set' | 'append' | 'remove', values: string[] }
+   *   - status / companyId / ziniaoAccountId / erpAccountId：覆盖（0 = 取消关联）
+   *   - tags / note：{ mode: 'set' | 'append', value }
    */
   shopAccountBatchUpdate: (
     payload: ShopAccountBatchUpdateInput
   ) => Promise<APIResult<ShopAccountBatchUpdateResult>>;
+  // ---- 工具账号（紫鸟 / ERP 的登录凭据：一条登录一份密码，被多家店铺共享）----
+  /** 工具账号列表（kind 缺省 = 两族一起返回；含 usageCount 引用计数） */
+  toolAccountList: (payload?: {
+    kind?: ToolAccountKind | '';
+  }) => Promise<APIResult<ToolAccountItem[]>>;
+  /** 新增/更新（password 缺省 = 保持、空串 = 清除；更新时不可改 kind） */
+  toolAccountUpsert: (payload: ToolAccountUpsertInput) => Promise<APIResult<{ id: number }>>;
+  /** 删除（仍被店铺引用时拒绝并回传原因） */
+  toolAccountDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /** 按需解密工具账号密码 */
+  toolAccountReveal: (payload: { id: number }) => Promise<APIResult<{ value: string }>>;
   // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法；无密码类凭据）----
   /** 幂等建表（企业管理 Tab 首次激活时调用） */
   companyDbEnsure: () => Promise<APIResult<void>>;
@@ -419,14 +615,24 @@ export interface ElectronAPI {
   ) => Promise<APIResult<{ id: number; created: boolean }>>;
   /** 删除（物理删除；已进入业务链路的产品应改为 status='archived'） */
   productDelete: (payload: { id: number }) => Promise<APIResult<{ deleted: boolean }>>;
+  /**
+   * 只改「当前进价」（分；0 = 清空）。成本面板的保存按钮走这一条 ——
+   * 不经过 `productUpsert` 的全量提交（那会把厂家/类目/状态/备注一起重置）。
+   */
+  productCostSet: (payload: {
+    code: string;
+    costCents: number;
+  }) => Promise<APIResult<{ found: boolean; updated: boolean }>>;
+  /** 有当前进价的款编码集合（`pl_products.cost_cents > 0`；「今天」缺口卡用） */
+  productPricedCodes: () => Promise<APIResult<{ codes: string[] }>>;
   /** 汇总（总数 / 按状态 / 厂家分布 / 未关联厂家数；supplierOptions 为**全量**厂家，供下拉） */
   productSummary: () => Promise<APIResult<ProductSummary>>;
+  /** 下一个款编码（建款向导「系统发号」只读展示；主进程发号器，渲染层勿自行 max+1） */
+  productNextCode: () => Promise<APIResult<{ code: string }>>;
   /** Excel 批量导入（单事务）；mode='insertOnly' 时编码已存在的行记为失败而不覆盖 */
   productImport: (payload: {
     items: ProductImportRowInput[];
     mode?: 'upsert' | 'insertOnly';
-    /** 手工进价的生效日 `yyyy-mm-dd`（缺省 = 导入当日）；主进程对非法值回落当天 */
-    effectiveFrom?: string;
   }) => Promise<APIResult<ProductImportOutcome>>;
   /**
    * 导出 / 下载模板：渲染层给「每格写什么 + 每行的图路径」，**主进程**用 exceljs 生成并嵌图。
@@ -499,6 +705,9 @@ export interface ElectronAPI {
   productBatchUpdate: (
     payload: ProductBatchUpdateInput,
   ) => Promise<APIResult<{ updated: number }>>;
+  productMoveSupplier: (
+    payload: ProductMoveSupplierInput,
+  ) => Promise<APIResult<{ changed: boolean }>>;
   // ---- 产品图片（pl_images / pl_item_images；srcPath 须来自用户对话框所选文件）----
   productImageAttach: (payload: {
     productId: number;
@@ -536,7 +745,7 @@ export interface ElectronAPI {
   /** 删除关联关系 */
   shopProductRelationDelete: (payload: { id: number }) => Promise<APIResult<{ removed: number }>>;
   // ---- 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）----
-  // 补上缺失的"店铺"实体层：历史文本（订单 / 采购 / 利润三处）**不改写**，靠名称归一映射旁挂关联。
+  // 补上缺失的"店铺"实体层：历史文本（订单 / 采购两处）**不改写**，靠名称归一映射旁挂关联。
   /** 幂等建表（视图首次激活时调用） */
   shopDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
   /** 店铺列表（关键字 / 平台 / 状态过滤 + 分页；按平台 → 名称升序） */
@@ -546,16 +755,14 @@ export interface ElectronAPI {
     status?: ShopStatus | '';
     offset?: number;
     limit?: number;
-    /** 只看某个账号套装名下的店铺（0/缺省 = 不过滤）—— 店铺套编辑抽屉用 */
-    shopSetId?: number;
   }) => Promise<APIResult<{ rows: ShopListItem[]; total: number }>>;
   /** 单条详情（不存在返回 null） */
   shopGet: (payload: { id: number }) => Promise<APIResult<ShopListItem | null>>;
-  /** 新增/更新（全量提交；同平台同名冲突时主进程抛错，不静默合并） */
+  /** 新增/更新（**局部更新**：缺省字段保持原值；同平台同名冲突时主进程抛错，不静默合并） */
   shopUpsert: (payload: ShopUpsertInput) => Promise<APIResult<{ id: number; created: boolean }>>;
-  /** 汇总（店铺数 / 按平台 / 按状态 + 三处历史文本的归一进度） */
+  /** 汇总（店铺数 / 按平台 / 按状态 + 两处历史文本的归一进度） */
   shopSummary: () => Promise<APIResult<ShopSummary>>;
-  /** 未归一的历史店铺名（实时聚合三处文本，非缓存表） */
+  /** 未归一的历史店铺名（实时聚合两处文本，非缓存表） */
   shopUnmapped: () => Promise<APIResult<UnmappedShopRow[]>>;
   /** 归一指派 / 标记忽略（ignored=true 时不要求 refId） */
   shopMap: (payload: {
@@ -570,6 +777,35 @@ export interface ElectronAPI {
     raw: string;
     kind?: NameMapKind;
   }) => Promise<APIResult<{ removed: number }>>;
+  /** 店铺商品快照列表（按店铺 / 搜索 / 分页；shopId<0 = 只看未登记；productId = 只看当前认到该款的） */
+  shopItemsList: (payload?: {
+    shopId?: number;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    onlyUnconfirmed?: boolean;
+    productId?: number;
+  }) => Promise<APIResult<{ rows: ShopItemRow[]; total: number }>>;
+  /** 采集汇总（每家店：采集数 / 已认款数 / 最近采集时间） */
+  shopItemsSummary: () => Promise<APIResult<ShopItemSummaryRow[]>>;
+  /** 手贴商品ID导入（保底通道：列表页选择器全落空时贴 ID 进来；shopId=0 = 未登记桶） */
+  shopItemsImport: (payload: {
+    shopId?: number;
+    ids?: string[];
+  }) => Promise<APIResult<{ received: number; inserted: number; updated: number; skipped: number }>>;
+  /**
+   * 下载采集图入库（主进程 net 下载 → landImageBuffer 去重 → 回填 pl_shop_items.image_id）。
+   * `adoptMain=true` 且带 productId 时顺手采纳为款主图（只补空）；
+   * `colors[]` = 每色图采纳为款色绑定图（只补空；下载/采纳失败逐张进 reason，不外抛）。
+   */
+  shopItemImageFetch: (payload: {
+    id: number;
+    productId?: number;
+    adoptMain?: boolean;
+    colors?: { color: string; imageUrl: string }[];
+  }) => Promise<APIResult<ShopItemImageFetchResult>>;
+  /** 删一条采集行（按行 id；同一商品ID 在多家店下各是一行，不能按 item_id 删） */
+  shopItemsDelete: (payload: { id: number }) => Promise<APIResult<{ removed: boolean }>>;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
   pluginsScan: () => Promise<APIResult<PluginScanResult>>;
@@ -834,44 +1070,6 @@ export interface OrderImageRecord {
   styleColorId?: number;
 }
 
-/** 识别队列行状态：pending=待识别 / done=成功 / error=失败（可重试）/ missing=缺图（补图后重跑） */
-export type OrderQueueStatus = 'pending' | 'done' | 'error' | 'missing';
-
-/** 待识别队列入队行（导入 Excel 解析拆行后的原始记录） */
-export interface OrderQueueEnqueueRow {
-  /** 完整原始行（含主图列等，识别时使用） */
-  rawFields: Record<string, string>;
-  /** 主图 URL（可能为空=缺图） */
-  url: string;
-  /** 订单号（列表展示/失败排查用） */
-  orderNo: string;
-  /** 产品信息摘要（多产品拆行，列表展示用） */
-  info: string;
-}
-
-/** 待识别队列行（SQLite oi_queue 表）：导入行落库，识别失败/缺图重启不丢，可增量重试 */
-export interface OrderQueueRow extends OrderQueueEnqueueRow {
-  id: number;
-  /** 批次号（同一次导入共享，runProcess/补图/重试按批次操作） */
-  batchNo: string;
-  status: OrderQueueStatus;
-  /** 最近一次失败原因 */
-  error: string;
-  /** 累计失败次数（重试不清零，用于持续失败告警） */
-  failCount: number;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-/** 队列统计（概览当前批次进度/遗留） */
-export interface OrderQueueStats {
-  total: number;
-  pending: number;
-  done: number;
-  error: number;
-  missing: number;
-}
-
 /** 订单明细（SQLite oi_orders 表） */
 export interface OrderRecord {
   id?: number;
@@ -1051,7 +1249,10 @@ export interface PurchaseItem {
   amountCents: number;
   /** 生成草稿时的建议数量（仅展示） */
   suggestionQty: number;
+  /** 款色 id（身份键，来自缺口行）。0 = 老数据/色未定 ⇒ 回落文本匹配 */
+  styleColorId?: number;
 }
+
 
 /** 拿货单的来源订单快照行（生成拿货单时锁定的订单明细，含店铺/尺码，用于按店铺拆分成本） */
 export interface PurchaseSourceRow {
@@ -1061,8 +1262,10 @@ export interface PurchaseSourceRow {
   styleName?: string;
   color: string;
   size: string;
-  /** 需求件数（订单行粒度通常为 1） */
+  /** 这条来源覆盖的件数（一条订单行 × 覆盖件数，可以是 2） */
   qty: number;
+  /** 指向 `oi_order_items.id`；0 = 无归属（加列之前的历史单 / 订单行不够） */
+  orderItemId?: number;
 }
 
 /** 店铺对账汇总行（拿货成本按来源订单拆分到店铺） */
@@ -1091,93 +1294,145 @@ export interface ShopAllocationDetailRow {
   amountCents: number;
 }
 
-// ---- 店铺账号管家（shop-accounts 视图插件）----
+// ---- 店铺账号（原「店铺账号管家」与「店铺登记」合并后的单一行）----
 //
-// 业务模型：一行 = 一套店铺（店群中的一个邮箱主体），邮箱为业务主标识。
-// 一套店铺 = 邮箱 + 店铺密码 / 邮箱密码 / 关联手机号 / 关联企业名称
-//          / 关联支付宝 + 支付密码 / 紫鸟账号 + 紫鸟密码 / ERP账号 + ERP密码
-//          / 关联平台（可多选，既支持单平台，也支持一个邮箱跨平台复用）/ 状态 / 标签 / 备注
-
-/** 店铺状态：在用 / 停用 / 封店 / 已注销 */
-export type ShopAccountStatus = 'active' | 'paused' | 'banned' | 'closed';
+// 业务模型：一行 = 一家店铺 + 它的账号（`sk_shops` 物理合并，不再有"店铺套"中间层）。
+// 店名与邮箱至少有一个：只有邮箱 = 还没建店铺（accountOnly），只有店名 = 账号待补（shopOnly）。
+// 手机号 / 支付宝 / 企业名在企业表（`sk_companies`）维护，本结构只读带出用于列表与筛选。
+// 紫鸟 / ERP 是共享登录（`sk_tool_accounts`）：一条登录一份密码，多家店铺引用同一条。
 
 /**
- * 敏感字段键（统一经主进程 safeStorage 加密落库；列表接口永不返回明文）
+ * 店铺状态：启用 / 停用 / 封店 / 退店。
+ * 后三者只做标记、不物理删除 —— 历史订单 / 采购仍指向它。
+ */
+export type ShopAccountStatus = 'active' | 'archived' | 'banned' | 'exited';
+
+/**
+ * 店铺行上的敏感字段键（统一经主进程 safeStorage 加密落库；列表接口永不返回明文）
+ * 紫鸟 / ERP 密码不在这里 —— 它们跟着工具账号走。
  * mailAuthPwd = IMAP 授权码（集中邮件收件箱专用，与 emailPwd 登录密码是两套凭据）
  */
-export type ShopAccountSecretKey =
-  'shopPwd' | 'emailPwd' | 'alipayPwd' | 'ziniaoPwd' | 'erpPwd' | 'mailAuthPwd';
+export type ShopAccountSecretKey = 'shopPwd' | 'emailPwd' | 'alipayPwd' | 'mailAuthPwd';
 
-/**
- * 账号编辑器里直接维护的敏感字段（不含 mailAuthPwd）。
- * IMAP 授权码由「收件箱接入」流程单独维护（mailAccountUpsert），不进入店铺套的密码组，
- * 避免在同一处混用两套语义不同的邮箱凭据。
- */
-export type ShopAccountSecretField = Exclude<ShopAccountSecretKey, 'mailAuthPwd'>;
+/** 工具账号类型：紫鸟 / ERP */
+export type ToolAccountKind = 'ziniao' | 'erp';
 
-/** 店铺套列表行（可检索元数据 + 已配置的敏感字段标记，不含任何明文密码） */
+/** 店铺账号列表行（可检索元数据 + 已配置的敏感字段标记，不含任何明文密码） */
 export interface ShopAccountItem {
   id: number;
-  /** 店铺邮箱（业务主标识，唯一） */
+  platform: string;
+  /** 店名；'' = 纯账号行（还没建店铺） */
+  name: string;
+  /** 归一键（店铺名唯一性判定用） */
+  nameKey: string;
+  /** 平台店铺ID（稳定业务键，改名不影响） */
+  platformShopId: string;
+  /** 店铺地址原文（展示 / 「打开店铺」的目标；'' = 未填） */
+  shopUrl: string;
+  site: string;
+  /** 店铺邮箱；'' = 纯店铺行（账号待补） */
   email: string;
-  /** 关联手机号 */
-  phone: string;
-  /** 关联企业名称 */
-  company: string;
-  /** 关联企业 id（企业管理 sk_companies 主键；0 = 未关联） */
+  /** 关联企业 id（`sk_companies` 主键；0 = 未关联） */
   companyId: number;
-  /** 关联支付宝（运费扣款） */
+  /** 企业名（企业表带出，只读） */
+  companyName: string;
+  /** 企业联系电话（只读带出，用于列表与筛选） */
+  phone: string;
+  /** 企业支付宝（运费扣款；只读带出） */
   alipay: string;
-  /** 关联紫鸟账号 */
+  /** 关联紫鸟工具账号 id（0 = 未关联） */
+  ziniaoAccountId: number;
+  /** 关联 ERP 工具账号 id（0 = 未关联） */
+  erpAccountId: number;
+  /** 紫鸟账号（工具表带出，只读） */
   ziniaoAccount: string;
-  /** ERP 账号 */
+  /** ERP 账号（工具表带出，只读） */
   erpAccount: string;
-  /** 关联平台（单平台 = 长度 1；跨平台复用 = 多项） */
-  platforms: string[];
+  status: ShopAccountStatus;
+  /** 记分分值（平台记分 / 扣分；0 = 未记录） */
+  score: number;
   /** 开店时间（YYYY-MM-DD；空串 = 未填写） */
   openedAt: string;
-  status: ShopAccountStatus;
+  /** 保证金到账时间（YYYY-MM-DD；退店时填写，空串 = 未填写） */
+  depositReceivedAt: string;
   tags: string;
   note: string;
   /** 已配置值的敏感字段（仅供 UI 展示「已保存」徽标，不含任何明文） */
   secretKeys: ShopAccountSecretKey[];
+  /** 是否挂着邮件账号（删除确认要写明级联删除范围） */
+  hasMailAccount: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
-/** 店铺套详情（含解密后的敏感字段，仅编辑时获取） */
+/** 店铺账号详情（含解密后的敏感字段，仅编辑时获取） */
 export interface ShopAccountDetail extends ShopAccountItem {
   secrets: Partial<Record<ShopAccountSecretKey, string>>;
 }
 
+/** 列表筛选：企业与工具账号用 `undefined = 不筛选 / 0 = 未关联 / > 0 = 指定项` 三态 */
+export interface ShopAccountListFilter {
+  search?: string;
+  status?: ShopAccountStatus | '';
+  companyId?: number;
+  ziniaoAccountId?: number;
+  erpAccountId?: number;
+}
+
 /**
- * 店铺套写入入参
+ * 店铺账号写入入参（**局部语义**：`undefined = 保持原值`，`'' = 清空`）
  * - secrets：字段缺省 = 保持原值；空串 = 清空；非空 = 覆盖
- * - platforms：undefined = 保持原值；数组（含空数组）= 覆盖
+ * - clearSecrets：明确清除的敏感字段（与 secrets 同时传时 clear 优先）
  */
 export interface ShopAccountUpsertInput {
   id?: number;
+  name?: string;
+  platform?: string;
+  platformShopId?: string;
+  shopUrl?: string;
+  site?: string;
   email?: string;
-  phone?: string;
-  company?: string;
-  alipay?: string;
-  ziniaoAccount?: string;
-  erpAccount?: string;
-  platforms?: string[];
+  /** 0 = 取消关联；> 0 = 关联该企业（企业名 / 手机号 / 支付宝由企业表带出） */
+  companyId?: number;
+  /** 0 = 取消关联；> 0 = 引用该工具账号 */
+  ziniaoAccountId?: number;
+  erpAccountId?: number;
+  status?: ShopAccountStatus;
+  /** 记分分值（≥ 0；缺省 = 保持原值，0 = 清为未记录） */
+  score?: number;
   /** 开店时间（YYYY-MM-DD）；字符串（含空串）= 覆盖，缺省 = 保持原值 */
   openedAt?: string;
-  status?: ShopAccountStatus;
+  /** 保证金到账时间（YYYY-MM-DD）；字符串（含空串）= 覆盖，缺省 = 保持原值 */
+  depositReceivedAt?: string;
   tags?: string;
   note?: string;
   secrets?: Partial<Record<ShopAccountSecretKey, string>>;
+  clearSecrets?: ShopAccountSecretKey[];
 }
 
-/** 平台选项（去重 + 该平台店铺套数） */
-export interface ShopAccountPlatformCount {
-  platform: string;
-  count: number;
+/** 工具账号（紫鸟 / ERP 共享登录；密码只进不出） */
+export interface ToolAccountItem {
+  id: number;
+  kind: ToolAccountKind;
+  account: string;
+  note: string;
+  /** 被多少家店铺引用（> 0 时不可删除） */
+  usageCount: number;
+  hasPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
+/** 工具账号写入入参（局部语义；更新时不可改 kind） */
+export interface ToolAccountUpsertInput {
+  id?: number;
+  /** 新增时必填 */
+  kind?: ToolAccountKind;
+  account?: string;
+  note?: string;
+  /** 缺省 = 保持；空串 = 清除；非空 = 覆盖 */
+  password?: string;
+}
 // ---------------------------------------------------------------------------
 // 企业管理（挂在「店铺账号管家」内：企业基本信息 + 欧代/土代/德国包装法）
 // ---------------------------------------------------------------------------
@@ -1231,7 +1486,10 @@ export interface CompanyItem {
   address: string;
   legalPerson: string;
   contactName: string;
+  /** 联系电话（与支付宝一一配对：一个企业的手机号与运费扣款支付宝固定搭配） */
   contactPhone: string;
+  /** 扣运费的支付宝账号（一企业一份；店铺行只读展示，密码仍在店铺行） */
+  alipayAccount: string;
   contactEmail: string;
   /** VAT 税号 */
   vatNo: string;
@@ -1269,6 +1527,8 @@ export interface CompanyUpsertInput {
   legalPerson?: string;
   contactName?: string;
   contactPhone?: string;
+  /** 扣运费的支付宝账号（字段缺省 = 保持；空串 = 清空） */
+  alipayAccount?: string;
   contactEmail?: string;
   vatNo?: string;
   eoriNo?: string;
@@ -1305,7 +1565,7 @@ export type ProductStatus = 'active' | 'archived';
 /** 产品列表行（厂家名由 supplier_id 派生，非本表字段 —— 避免同一语义两个写入者） */
 export interface ProductListItem {
   id: number;
-  /** 内部编码：与 oi_styles.code / purchase_items.style_code / ae_cost_map.style_code 同口径 */
+  /** 内部编码：与 oi_styles.code / purchase_items.style_code 同口径 */
   code: string;
   name: string;
   /** 关联厂家 suppliers(id)；0 = 未关联 */
@@ -1318,6 +1578,8 @@ export interface ProductListItem {
   imageId: number;
   /** 主图缓存路径（'' = 无图；经 order-image-thumb 取缩略图展示） */
   imagePath: string;
+  /** **当前进价**（分；0 = 未填）。产品级维护入口；订单行快照另存 `oi_order_items.cost_cents` */
+  costCents: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1362,10 +1624,18 @@ export interface ProductBatchUpdateInput {
   note?: string;
 }
 
+/** 按款编码改厂家（拣货宫格拖拽的写入口；写是**款级**的 —— 该款所有款色一起走） */
+export interface ProductMoveSupplierInput {
+  /** 款编码（`pl_products.code`；未识别款没有可写的款） */
+  code: string;
+  /** 目标厂家 suppliers(id)；0 = 清空关联（"未指定厂家"格是合法落点） */
+  supplierId: number;
+}
+
 /**
  * **统一订单行**（两条摄取通道共用的形状，C1 合并的落点）：
  *   · `order-shipping-rows`（Excel 报表导入 → `oi_orders` 投影）
- *   · `order-collected-rows`（浏览器采集 → `ae_orders` 投影）
+ *   · `order-collected-rows`（浏览器采集 → `oi_orders` 投影）
  *
  * **只放主线（算钱 + 拣货）真正读的字段**（用户 2026-09-30 定的原则：精简优先、非必要先删、必要再加）：
  * 已删掉货值/买家运费/店铺优惠/平台补贴/币种/业务模式/付款·收货时点/发货时点等 9 个**零读者**字段 ——
@@ -1378,10 +1648,14 @@ export interface UnifiedOrderRow {
   /** 摄取通道（主干 `source`）：`import` = 报表导入 · `collect` = 浏览器采集 */
   source: 'import' | 'collect';
   shop: string;
+  /** 店名归一键（主进程 `toNameKey` 算好）—— 按店铺身份聚合营收时用它，别在渲染层自己 trim */
+  shopKey: string;
   orderTime: string;
   /** 识别链 `oi_images.style_color_id → oi_style_colors → oi_styles` 的结果（采集侧取 `style_code`）；未识别为空串 */
   styleCode: string;
   styleColor: string;
+  /** 款色**身份**（`oi_style_colors.id`；0 = 未归类）—— 逐行覆盖度靠它拼台账键 */
+  styleColorId: number;
   /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
   color: string;
   size: string;
@@ -1402,9 +1676,85 @@ export interface UnifiedOrderRow {
   taxPlatform: string;
   /** 订单状态原文（交易完成 / 订单关闭 / 等待买家收货 …）—— 分桶与"未发货"判定都读它 */
   bizStatus: string;
+  /** 行级克重**快照**（`oi_order_items.weight_g`，归类核对确认时钉）；`null` = 还没钉 ⇒ 读方回落 SKU 查表 */
+  weightG?: number | null;
+  /** 行级**进价预估**快照（`oi_order_items.cost_cents`，归类确认时按产品当时价钉；单位：分）；`null` = 还没钉 */
+  costCents?: number | null;
+  /** 行级**实际进价**快照（`oi_order_items.actual_cost_cents`，拿货落账后回写；单位：分）；`null` = 还没落账 */
+  actualCostCents?: number | null;
   /** 原始整行（导入侧保真：件数解析、商品ID 提取都从这里；采集侧为空对象） */
   rawFields: Record<string, string>;
 }
+
+// ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----
+//
+// 单位与空值口径跟主进程一致：金额「分」、重量「克」，**null = 还不知道**（不是 0）。
+// 「还能拆几件」由主进程算好（`remaining`），界面不再自己减一遍 —— 两处减法必然有一天不一致。
+
+/** 包裹里的一个订单行（一个包可以只装某行的部分件数） */
+export interface ParcelLine {
+  id: number;
+  orderItemId: number;
+  qty: number;
+}
+
+/** 一个包裹 */
+export interface Parcel {
+  id: number;
+  orderNo: string;
+  /** 人工标注的包名（「箱 1」/「补发」）；空串 = 只按顺序展示 */
+  label: string;
+  trackingNo: string;
+  carrier: string;
+  shipCents: number | null;
+  weightG: number | null;
+  note: string;
+  lines: ParcelLine[];
+  createdAt: string;
+}
+
+/** 拆包面板的候选行：订单行 + 已分包件数 + 还能拆几件 */
+export interface ParcelItem {
+  id: number;
+  styleCode: string;
+  styleColor: string;
+  color: string;
+  size: string;
+  /** 件数真值（`oi_order_items.qty`）；null = 导入侧没解析出来（不是 0） */
+  qty: number | null;
+  packed: number;
+  /** 还能拆几件；`qty` 未知时 null */
+  remaining: number | null;
+  weightG: number | null;
+}
+
+/** 一单的包裹汇总（**派生**，不落库：总物流费/总重 = Σ 包裹；任一包缺值 ⇒ 整单 null） */
+export interface ParcelTotals {
+  count: number;
+  shipCents: number | null;
+  weightG: number | null;
+  shipMissing: number;
+  weightMissing: number;
+}
+
+/** `order-parcel-detail` 的返回（拆包面板一次取全） */
+export interface ParcelDetail {
+  parcels: Parcel[];
+  items: ParcelItem[];
+  totals: ParcelTotals;
+}
+
+/**
+ * 「单号 → 包数」。
+ * ⚠️ 单独起个名字而**不**在 `ElectronAPI` 里直接写 `Record<string, number>`：
+ * `scripts/check-ipc-contract.mjs` 是按**顶层逗号**切成员的（尖括号不算深度），
+ * `Record<string, number>` 里的逗号会被切成两条 ⇒ 冒出一个叫 `number` 的假成员、契约校验红。
+ * （脚本的局限，不是契约错；换个写法即可，不必去改校验器。）
+ */
+export type ParcelCountMap = Record<string, number>;
+
+/** 「单号 → 包裹汇总」（`order-parcel-totals` 的返回）。单独起名的理由同 `ParcelCountMap`。 */
+export type ParcelTotalsMap = Record<string, ParcelTotals>;
 
 /** 拣货投影行（宿主 `picking-rows` 返回；纯层 `src/lib/picking.ts` 直接消费它） */
 export interface PickingRowProjection {
@@ -1417,6 +1767,14 @@ export interface PickingRowProjection {
   /** 款名（`oi_styles.name`）；未识别款 / 该款没录名字为空串（供「拿货单」明细预填名称） */
   styleName: string;
   styleColor: string;
+  /**
+   * 款色 id —— **身份**（分组与"已拿"匹配的键）。0 = 未归类。
+   *
+   * 为什么必须有它（2026-10-20）：色名是**会变的标签**（映射确认/人工核对都会改写），
+   * 拿它当匹配键 ⇒ 改一次名，历史拿货单一条都匹配不上（真库 10 行全部变"待拿"，无任何报错）。
+   * 身份一律走 id；色名只用于展示与历史单据快照。
+   */
+  styleColorId: number;
   /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
   color: string;
   size: string;
@@ -1430,6 +1788,13 @@ export interface PickingRowProjection {
   shipped: boolean;
   /** 平台状态原文（**关闭/取消的判定在渲染层**，用 `orderCost.bucketOfStatus`） */
   bizStatus: string;
+  /** 行级**实际进价**（`oi_order_items.actual_cost_cents`，分）；null = 还没拿货落账 */
+  actualCostCents: number | null;
+  /** 行级**进价预估**（`oi_order_items.cost_cents`，分）；null = 还没钉过 */
+  costCents: number | null;
+  /** 产品**当前进价**（`pl_products.cost_cents`，分）；null = 未识别款 / 没维护。
+   *  拣货金额的最后一档（前两档没有值时才用）—— "这批大概要花多少钱"的经营估算。 */
+  productCostCents: number | null;
   /** 件数由渲染层从 raw_fields 解析（与订单利润页同一份实现） */
   rawFields: Record<string, string>;
 }
@@ -1509,6 +1874,8 @@ export interface ProductUpsertInput {
   category?: string;
   status?: ProductStatus;
   note?: string;
+  /** 当前进价（分）。**不传 = 不修改**（全量提交里的唯一例外，见主进程 `upsertProduct`） */
+  costCents?: number;
 }
 
 /** Excel 批量导入的一行（字段已在渲染层解析校验；主进程只做兜底与落库） */
@@ -1532,7 +1899,7 @@ export interface ProductImportRowInput {
   /** 该行 Excel 里那张图（`product-extract-images` 的产物）；0 = 没图，不覆盖款上已有主图 */
   imageId: number;
   /**
-   * 手工进价（**分**；落 `ae_cost_map`，`source='manual'`，生效日 = 导入当日）。
+   * 手工进价（**分**；写产品行的 `pl_products.cost_cents` = 当前进价）。
    * `null` / 缺省 = 这行没填进价 ⇒ **不修改**库内已有价（**不是清 0**）。
    */
   costCents?: number | null;
@@ -1546,7 +1913,7 @@ export interface ProductImportOutcome {
   skusWritten: number;
   /** 本次设为款主图的张数 */
   imagesAttached: number;
-  /** 本次写入 `ae_cost_map` 的手工进价条数 */
+  /** 本次写入产品行「当前进价」的条数 */
   costsWritten: number;
   /** 因与库内现价相同（幂等）或未填而被跳过的进价条数 */
   costsSkipped: number;
@@ -1627,6 +1994,13 @@ export interface ShopProductRelation {
 /** 一条待写入的映射（批量关联 / 改绑共用） */
 export interface SkuMapInputPayload {
   platform: string;
+  /**
+   * 店铺 id。**0 = 让主进程按商品ID 认店**（2026-10-20）。
+   *
+   * 为什么允许 0：从「拿货 › 未归类」配映射时，界面手里只有商品ID（订单行不带店铺 id），
+   * 硬要它先查店铺等于逼用户回「归类核对」重做一遍。认店走既有证据链末级
+   * `shopIdByItemId`（商品ID 反查），**认不出就报错、不猜**（多店歧义/无证据）。
+   */
   shopId: number;
   itemId: string;
   /** **颜色**（D4 起承载颜色语义；缺省 `'*'` = 未指定色）。
@@ -1671,6 +2045,19 @@ export interface SkuBackfillOutcome {
   conflictCode: string;
 }
 
+/**
+ * ⭐ 归类核对顺带记住的**色名对照**：把平台侧那个怪名字（`Khaki` / `1`）换成自家色名。
+ *
+ * 与 `SkuBackfillOutcome` 同一性质 —— **附加产物**：`null` 时"归属已改"照样是成功的。
+ * 记住之后，同一款后续订单（以及同商品的历史订单）自动落成 `to` 这个名字。
+ */
+export interface ColorAliasRemembered {
+  /** 平台侧原文（用户改之前看到的名字） */
+  from: string;
+  /** 用户填的自家色名 */
+  to: string;
+}
+
 /** 待关联队列的一行（`status='shopUnresolved'` 时**不允许**写映射：不拿空平台硬塞） */
 export interface SkuQueueRow {
   shopKey: string;
@@ -1710,14 +2097,18 @@ export interface SkuQueueStats {
 // ---------------------------------------------------------------------------
 // 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）
 //
-// 病根（该计划 D1/D2）：店铺实体不存在，店名以自由文本各存三处且互相拷贝 ——
-//   oi_orders.shop / purchase_sources.shop / ae_orders.shop_name
+// 病根（该计划 D1/D2）：店铺实体不存在，店名以自由文本各存两处且互相拷贝 ——
+//   oi_orders.shop / purchase_sources.shop
+// （2026-10-15：`ae_orders.shop_name` 曾是第三处，随 `ae_orders` 弃表一并删。）
 // 本层补实体层，历史文本一律不改写（G2）；关联靠 sk_name_map 的归一映射。
-// ⚠️ 三处文本**都没有平台字段** → `platform` 无法从历史数据推导，只能在登记店铺时由人指定。
+// ⚠️ 两处文本**都没有平台字段** → `platform` 无法从历史数据推导，只能在登记店铺时由人指定。
 // ---------------------------------------------------------------------------
 
-/** 店铺状态：在营 / 停用（停用仅标记，不物理删除 —— 历史订单仍指向它） */
-export type ShopStatus = 'active' | 'archived';
+/**
+ * 店铺状态：启用 / 停用 / 封店 / 退店。
+ * 后三者只是标记，不物理删除 —— 历史订单仍指向它。
+ */
+export type ShopStatus = 'active' | 'archived' | 'banned' | 'exited';
 
 /** 归一映射的实体类型（S1 只用 shop；其余为 supplier / style / product 预留） */
 export type NameMapKind = 'shop' | 'supplier' | 'style' | 'product';
@@ -1730,10 +2121,17 @@ export interface ShopListItem {
   nameKey: string;
   /** 平台店铺ID（**归一后**的值；'' = 未填）—— 店铺实体的稳定业务键，改名不影响 */
   platformShopId: string;
+  /**
+   * 店铺地址（**原文**，界面回显 + 「打开店铺」的目标；'' = 未填）。
+   * ⚠️ 与库里那个**匹配键**不是一回事：键存 `sk_shops.shop_url`（协议/www/尾斜杠/index.html/
+   * 查询串全剥掉），且**不出现在本结构里** —— 剥掉协议的串打不开（2026-10-16 修的现场）。
+   * 采集帧的 URL 匹配走主进程内部，与这里的展示值无关。
+   */
+  shopUrl: string;
   site: string;
-  /** 所属账号套装 sk_shop_sets(id)；0 = 未关联（软关联） */
-  shopSetId: number;
   status: string;
+  /** 记分分值（平台记分 / 扣分；0 = 未记录） */
+  score: number;
   openedAt: string;
   note: string;
   createdAt: string;
@@ -1742,19 +2140,29 @@ export interface ShopListItem {
   aliasCount: number;
 }
 
-/** 新增/更新店铺入参（**全量提交**语义：缺省即空） */
+/**
+ * 店铺侧新增/更新入参（**局部更新**语义：`undefined = 保持原值`，`'' = 清空`）。
+ * ⚠️ 物理合并后这是硬约束：店铺选择器编辑一次不能把同一行的邮箱 / 企业 / 工具 / 凭证清空。
+ */
 export interface ShopUpsertInput {
   /** 0 / 缺省 = 新增 */
   id: number;
-  platform: string;
-  name: string;
+  platform?: string;
+  name?: string;
   /** 平台店铺ID（可空；非空时参与唯一性 —— 同平台内不得重复） */
-  platformShopId: string;
-  site: string;
-  shopSetId: number;
-  status: string;
-  openedAt: string;
-  note: string;
+  platformShopId?: string;
+  /**
+   * 店铺地址（**用户填的原文**，可空；主进程据此派生采集帧的匹配键）。
+   * 落库时会规整成"可打开的地址"：已带 `http(s)://` 的原样保留，裸域名补 `https://`
+   * （见 `electron/shop-db.ts` 的 `toOpenableUrl`）。再次编辑时回显的就是这个规整后的原文。
+   */
+  shopUrl?: string;
+  site?: string;
+  status?: string;
+  /** 记分分值（≥ 0；缺省 = 保持原值，0 = 清为未记录） */
+  score?: number;
+  openedAt?: string;
+  note?: string;
 }
 
 /** 未归一的历史店铺名（一次实时聚合的结果） */
@@ -1788,6 +2196,67 @@ export interface ShopSummary {
   };
 }
 
+/** 店铺商品快照行（pl_shop_items；采集而来 = 平台事实，与「这是什么款」的人的决定解耦） */
+export interface ShopItemRow {
+  id: number;
+  /** 所属店铺 sk_shops(id)；0 = 未登记（store_key 为展示名） */
+  shopId: number;
+  /** 店铺平台（来自 sk_shops；'' = 未登记 —— 没有平台就不能写映射，与待关联队列同一纪律） */
+  platform: string;
+  /** 店铺名（来自 sk_shops；'' = 未登记，界面回落 storeKey） */
+  shopName: string;
+  /** 未登记时的展示归一名（店名 → 归一 URL → storeId）；登记后恒 '' */
+  storeKey: string;
+  /** 平台商品ID（toSkuKey 归一：剥不可见字符 + 折叠空白；与订单侧认款同口径） */
+  itemId: string;
+  title: string;
+  imageUrl: string;
+  /** 已下载到图片库的 image_id；0 = 未下载 */
+  imageId: number;
+  priceText: string;
+  category: string;
+  status: string;
+  url: string;
+  /** SKU 矩阵 JSON（详情页重采时才有；列表轻采为空） */
+  skuJson: string;
+  source: string;
+  /** 最近一次采集时间（ms epoch） */
+  scrapedAt: number;
+  /** 已认到哪个产品（pl_shop_sku 最新一条 confirmed；0 = 没认过） */
+  mappedProductId: number;
+  /** 已认产品的款编码（展示用；产品已删时为 ''） */
+  mappedProductCode: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 每家店（含未登记）的采集汇总行 */
+export interface ShopItemSummaryRow {
+  shopId: number;
+  storeKey: string;
+  /** 采集数 */
+  total: number;
+  /** 已认款数（存在 confirmed 映射行） */
+  confirmed: number;
+  /** 最近采集时间（ms epoch；0 = 从未采集） */
+  lastScrapedAt: number;
+}
+
+/** 采集图下载入库的结果（shop-item-image-fetch；主进程结构化回执，失败不进异常） */
+export interface ShopItemImageFetchResult {
+  /** 主图：入库后的 pl_images id（0 = 没下载成） */
+  imageId: number;
+  localPath: string;
+  /** true = 这一行此前已入库，本次复用（没重新下载） */
+  reused: boolean;
+  /** true = 顺手采纳成了款主图（只补空：款已有主图时为 false） */
+  adopted: boolean;
+  /** 主图失败的原文（'' = 成功/跳过）—— 渲染层照写回执，不当成异常 */
+  mainError: string;
+  /** 每色图的采纳结果（bound=false 时 reason 说清为什么：图已绑 / 色已有图 / 下载失败） */
+  colors: { color: string; imageId: number; bound: boolean; reason: string }[];
+}
+
 // ---------------------------------------------------------------------------
 // 集中邮件收件箱（IMAP 只读；挂在「店铺账号管家」内）
 // ---------------------------------------------------------------------------
@@ -1798,7 +2267,8 @@ export type MailAccountStatus = 'idle' | 'syncing' | 'error' | 'paused';
 /** 邮件账号（连接配置 + 同步状态；**不含任何凭据**——授权码只进不出） */
 export interface MailAccountItem {
   id: number;
-  shopSetId: number;
+  /** 挂载的店铺行（合并后邮箱账号就在店铺行上；ON DELETE CASCADE） */
+  shopId: number;
   email: string;
   providerId: string;
   imapHost: string;
@@ -1914,7 +2384,7 @@ export interface MailConnectionTestResult {
 
 /** 账号接入入参（secrets.mailAuthPwd 省略 = 保持原值，空串 = 清除） */
 export interface MailAccountUpsertInput {
-  shopSetId: number;
+  shopId: number;
   email?: string;
   providerId?: string;
   imapHost?: string;
@@ -1977,42 +2447,40 @@ export interface MailSyncEvent {
   message?: string;
 }
 
-/** 店铺套汇总（总量 / 按状态计数 / 平台选项），供统计条与筛选下拉使用 */
+/** 店铺账号汇总（总量 / 按状态 / 三种完整度），供统计条使用 */
 export interface ShopAccountSummary {
   total: number;
   byStatus: Partial<Record<ShopAccountStatus, number>>;
-  platforms: ShopAccountPlatformCount[];
+  /** 店名 + 邮箱都有 */
+  complete: number;
+  /** 只有店名（账号待补） */
+  shopOnly: number;
+  /** 只有邮箱（店铺待建） */
+  accountOnly: number;
 }
 
 /**
  * 单字段批量修改指令
- * - 字符串字段（company / tags / note）：mode=set 覆盖、append 追加（去重 / 拼接）
- * - 单值账号字段（phone / alipay / ziniaoAccount / erpAccount）：仅覆盖语义
- *   （均为唯一标识，同一字段内追加多个值无业务意义，故不提供 append）
  * - 状态（status）：仅覆盖语义；未传 = 不改
- * - 平台（platforms）：set=覆盖、append=并入、remove=从已有中移除（set 差集）
+ * - 引用关系（companyId / ziniaoAccountId / erpAccountId）：仅覆盖语义（0 = 取消关联）
+ * - 字符串字段（tags / note）：mode=set 覆盖、append 追加（去重 / 拼接）
  * - 未出现在 patch 中的字段一律不动
  *
  * 不在批量操作范围内的字段：
  * - email（业务主标识，批量改成同一值会直接撞唯一约束）
- * - secrets（shopPwd / emailPwd / alipayPwd / ziniaoPwd / erpPwd）——一次性覆写 N 套凭证
+ * - 店名 / 平台 / 平台店铺ID（身份字段，批量覆盖会把不同店改成同一个）
+ * - secrets（shopPwd / emailPwd / alipayPwd）——一次性覆写 N 套凭证
  *   无法逐条确认、不可回滚，风险不可控（见 AGENTS.md 红线 3）
  */
 export interface ShopAccountBatchFieldPatch {
   status?: ShopAccountStatus;
-  /**
-   * 关联企业 id（引用企业管理列表，仅「覆盖」语义——企业是引用关系，无追加概念）：
-   * 0 = 取消关联（同时清空企业名称列）；> 0 = 覆盖为该企业（企业名称列同步取企业库中的名称）。
-   * 2026-09-18：原 `company?: { mode, value }` 文本 patch 由下拉选择取代，已移除。
-   */
+  /** 0 = 取消关联；> 0 = 覆盖为该企业 */
   companyId?: number;
-  phone?: string;
-  alipay?: string;
-  ziniaoAccount?: string;
-  erpAccount?: string;
+  /** 0 = 取消关联；> 0 = 覆盖为该工具账号 */
+  ziniaoAccountId?: number;
+  erpAccountId?: number;
   tags?: { mode: 'set' | 'append'; value: string };
   note?: { mode: 'set' | 'append'; value: string };
-  platforms?: { mode: 'set' | 'append' | 'remove'; values: string[] };
 }
 
 /** 批量修改入参：ids 为目标店铺 id 数组；patch 全字段可选（未设置=不改） */
@@ -2033,7 +2501,8 @@ export interface PurchaseOrder {
   supplierName: string;
   /** YYYY-MM-DD */
   bizDate: string;
-  mode: 'detail' | 'package';
+  /** 恒 `'detail'`（包价单 2026-10-20 删除；老库若有 package 行也按明细读） */
+  mode: 'detail';
   status: 'draft' | 'submitted';
   totalCents: number;
   editedAt: string | null;
@@ -2067,15 +2536,71 @@ export interface ReconciliationRow {
   paymentCount: number;
 }
 
-/** 待拿货缺口（实时差量 = max(0, 需求 − 已拿)；粒度 = 款色码） */
+/** 待拿货缺口（实时差量 = max(0, 需求 − 已拿)；粒度 = 款色码，未归类单列一组） */
 export interface OutstandingRow {
   styleCode: string;
   styleName: string;
+  /** 身份键（0 = 未归类）：已拿按它匹配，色名改名不会再失联 */
+  styleColorId: number;
   color: string;
   size: string;
+  /** 需求件数（SUM(qty)，不是行数） */
   demand: number;
   taken: number;
   missing: number;
+  /** 没有款色归属（id=0）—— 界面必须标出来并给修复入口，不许静默排除 */
+  unclassified: boolean;
+  /** 未归类组的平台商品ID（聚合修复入口用） */
+  itemIds: string[];
+  /** 未归类组的订单原文色名（平台写法） */
+  colorRaw: string;
+  /** 需求行数 */
+  orders: number;
+}
+
+/**
+ * **已拿台账**（一行 = 一个款色码：所有已提交拿货单的 qty 合计）。
+ *
+ * ⚠️ 与 `OutstandingRow` 的分工：它是**台账**（拿过多少，拿齐了照样在），
+ *    而 `outstanding()` 是**缺口**（缺为 0 的行不返回）。清单算"还差多少"只能读这一份 ——
+ *    读缺口那份，拿齐的款色会被当成"已拿 0" ⇒ 卡永远停在待拿（2026-10-17 用户实报）。
+ */
+export interface TakenRow {
+  /** 款色 id（身份键）。0 = 老明细（按文本三元组兜底匹配） */
+  styleColorId: number;
+  styleCode: string;
+  color: string;
+  size: string;
+  taken: number;
+}
+
+/**
+ * 一行订单明细的覆盖情况（`purchase-order-coverage` 的 `rows` 元素，2026-10-22）。
+ *
+ * `qty` 是明细真值（`null` = 不知道，由渲染层从报表回落）；`covered` 只统计**已提交**拿货单。
+ */
+export interface OrderCoverageRow {
+  /** `oi_order_items.id`（与 `purchase_sources.order_item_id` 同一空间） */
+  orderItemId: number;
+  orderNo: string;
+  shop: string;
+  orderTime: string;
+  styleCode: string;
+  styleName: string;
+  styleColorId: number;
+  styleColor: string;
+  colorRaw: string;
+  size: string;
+  qty: number | null;
+  rawFields: Record<string, string>;
+  covered: number;
+  unclassified: boolean;
+}
+
+export interface OrderCoveragePayload {
+  rows: OrderCoverageRow[];
+  /** 无归属的已拿台账（按款色码当池子用，与 `covered` 互斥、相加不重复） */
+  unattributed: TakenRow[];
 }
 
 /** 无需补货标记 */
@@ -2086,92 +2611,42 @@ export interface IgnoreRow {
   createdAt: string;
 }
 
-// ---- 速卖通利润追踪（ae-profit / M0，字段与 electron/ae-db.ts 对应）----
-
-/** SKU 明细行（列表页仅行数，点开详情时按需拉取） */
-export interface AeOrderLineItem {
-  productId: string;
-  skuId: string;
-  title: string;
-  skuProps: string;
-  qty: number;
-  unitPrice: number;
-  goodsAmount: number;
-}
-
-/**
- * 费用科目 key（宽松白名单：未知科目同样入库，仅前端 label 字典缺失时回退原 key）。
- * 与 electron/ae-db.ts AeFeeCategory 语义一致；新增科目 = 采集端加 fees 条目，无需改表。
- */
-export type AeFeeCategory =
-  | 'platform_commission' // 平台佣金
-  | 'logistics_fee' // 物流费-卖家承担
-  | 'payment_channel' // 支付通道费
-  | 'refund' // 退款/纠纷调整（收入扣减类）
-  | (string & {});
-
-/** 订单级费用条目（列表行内联；currency 已回填订单币种） */
-export interface AeFeeItem {
-  category: AeFeeCategory;
-  amount: number;
-  currency: string;
-}
-
-/** 订单明细列表行（不含 raw_json） */
-export interface AeOrderListItem {
-  id: number;
-  orderId: string;
-  shopName: string;
-  site: string;
-  orderTime: string;
-  status: string;
-  currency: string;
-  /** 商品金额（收入侧） */
-  goodsAmount: number;
-  /** 买家付运费（收入侧） */
-  shippingIncome: number;
-  /** 费用科目明细（平台佣金/物流费/退款…；同币种 = 订单币种） */
-  fees: AeFeeItem[];
-  lineCount: number;
-  source: string;
-  updatedAt: string;
-}
-
-export interface AeFeeSummary {
-  category: AeFeeCategory;
-  total: number;
-  orders: number;
-}
-
-export interface AeCurrencyGroup {
-  currency: string;
-  orders: number;
-  goodsAmount: number;
-  shippingIncome: number;
-  fees: AeFeeSummary[];
-}
-
-/**
- * 汇总（分币种，收入/费用分列；M1 利润引擎基于此扩展）。
- * 金额保留原币种按组聚合；top 级 total* 为跨币种预览合计（真实口径以 byCurrency 为准）。
- */
-export interface AeSummary {
-  totalOrders: number;
-  totalGoodsAmount: number;
-  totalShippingIncome: number;
-  byCurrency: AeCurrencyGroup[];
-}
+// ---- 速卖通订单采集（ae-profit / M0）----
+//
+// ⚠️ 2026-10-15：`AeOrderLineItem` / `AeFeeCategory` / `AeFeeItem` / `AeOrderListItem` /
+//   `AeFeeSummary` / `AeCurrencyGroup` / `AeSummary` 随「订单明细」页并入宿主「算钱」后已无消费者，
+//   连同死表 `ae_orders`/`ae_order_lines`/`ae_fees` 一并删除。
 
 /** 接收端运行状态（ae-receiver.ts） */
 export interface AeReceiverStatus {
   running: boolean;
   port: number;
   startedAt: string;
+  /** 最近一次订单采集（/ae/ingest）时间 */
   lastIngestAt: string;
+  /** 最近一次商品采集（/ae/shop-items/ingest）时间；'' = 从未采集 */
+  lastItemsIngestAt: string;
   lastError: string;
+  /** 最近一批订单里**因缺汇率**算不出金额的单数（0 = 全部算出钱了）。缺汇率不算失败，但要能说出口 */
+  lastRateMissing: number;
 }
 
-// ---- 速卖通利润追踪 M1：利润引擎 / 成本衔接 / 汇率（与 electron/ae-engine.ts、ae-db.ts 同构）----
+/**
+ * 「采集已入库」事件（主进程 → 渲染层单向广播）。
+ * 扩展推的商品帧在接收端落库成功后发出 —— 已打开的页面据此重拉（不必用户手动刷新）。
+ */
+export interface AeItemsIngestedEvent {
+  /** 帧里收到的条数（= 消毒通过 + 被丢弃） */
+  received: number;
+  inserted: number;
+  updated: number;
+  /** 丢弃条数（含帧内消毒失败与 upsert 内跳过） */
+  skipped: number;
+  /** 广播时刻（ISO 8601） */
+  at: string;
+}
+
+// ---- 速卖通成本快照 / 汇率（与 electron/ae-db.ts 同构）----
 
 /** 拿货成本快照项（purchase-cost-snapshot 只读导出；P4a 起按 (款, 拿货日期) 分组，一款可多项） */
 export interface PurchaseCostSnapshotItem {
@@ -2182,41 +2657,13 @@ export interface PurchaseCostSnapshotItem {
   weightedPriceCents: number;
   /**
    * 本项的拿货日期（yyyy-mm-dd）。
-   * ⚠️ P4a 语义变更：原为「该款最近一次拿货日期」（一款一项），现为「**本项**的拿货日期」
-   * （一款可多项，一项 = 一个成本生效区间）；导库时作为 `ae_cost_map.effective_from`。
+   * P4a 起语义为「**本项**的拿货日期」（一款可多项，一项 = 一个成本区间）。
    */
   lastBizDate: string;
 }
 
-/** ae_cost_map 导入项（渲染层构造后交 ae-cost-map-import 全量替换） */
-export interface AeCostMapImportItem {
-  styleCode: string;
-  styleName: string;
-  unitPriceCents: number;
-  sampleCount: number;
-  lastBizDate: string;
-}
-
-/** ae_cost_map 行（成本管理面板）。P4a 起同一款可多行：一行 = 一个生效区间。 */
-export interface AeCostMapItem extends AeCostMapImportItem {
-  /** 生效日（yyyy-mm-dd）；无区间信息的存量行 = `0000-01-01` */
-  effectiveFrom: string;
-  /** 该行来源：purchase = 对账快照导入，manual = 界面手工录入 */
-  source: string;
-  updatedAt: string;
-}
-
-/**
- * 手工进价的一条（P4 成本维护界面 / 产品导入的「进价」列**共用形状**）。
- * `unitPriceCents` 是**分**；生效日缺省用 payload 上的 `effectiveFrom`（= 当天）。
- */
-export interface ManualCostItemInput {
-  styleCode: string;
-  styleName?: string;
-  unitPriceCents: number;
-  /** 生效日 yyyy-mm-dd；缺省用 payload 的 `effectiveFrom`，再缺省 = 当天 */
-  effectiveFrom?: string;
-}
+// ⚠️ 2026-10-21（C2）：`AeCostMapImportItem` / `AeCostMapItem` / `ManualCostItemInput`
+//    随 ae_cost_map 退役删除 —— 成本维护走 `product-cost-set`，不再有区间价目表。
 
 /** 汇率行（1 fromCurrency = rateToCny CNY） */
 export interface AeRateItem {
@@ -2225,71 +2672,490 @@ export interface AeRateItem {
   updatedAt: string;
 }
 
-/** 利润引擎分层合计（CNY 基准） */
-export interface AeProfitTotals {
-  orders: number;
-  /** 净收入 CNY（已扣退款） */
-  incomeCny: number;
-  /** 商品成本 CNY（命中成本表的行） */
-  costCny: number;
-  /** 订单级费用 CNY（不含退款科目） */
-  feeCny: number;
-  /** 毛利 CNY = 净收入 − 成本 */
-  grossProfitCny: number;
-  /** 运营利润 CNY = 毛利 − 费用 */
-  operatingProfitCny: number;
-  /** 缺汇率跳过的订单数 */
-  missingRateOrders: number;
+// ⚠️ 2026-10-15：`AeProfitTotals` / `AeTrendPoint` / `AeTopOrder` / `AeTopStyle` /
+//   `AeFeeBreakdownItem` / `AeProfitOverview` 随利润引擎 `electron/ae-engine.ts` 一并删除
+//   （宿主「算钱」页的利润口径改由渲染层 `src/lib/orderCost.ts` 组合计算）。
+
+/**
+ * 「全库重放已确认映射」的统计（主进程 `order-db.replaySkuMappings` 的返回）。
+ *
+ * 四个数各司其职，**都不参与相加**：
+ * - `mappedItems` 输入面（有确认映射的商品数）；
+ * - `candidateRows` 待补的存量行（没归款 / 挂在占位色上）；
+ * - `fixableRows` 其中映射能覆盖的行；
+ * - `fixedRows` 真正写进库的行（`dryRun` 恒 0 —— 报数不该改库）。
+ */
+export interface SkuMappingReplayStats {
+  mappedItems: number;
+  candidateRows: number;
+  fixableRows: number;
+  fixedRows: number;
 }
 
-export interface AeTrendPoint {
-  bucket: string;
-  orders: number;
-  incomeCny: number;
-  costCny: number;
-  grossProfitCny: number;
+// ---- 记账（店铺收支 + 公共费用分摊 + 资金相关人往来结算）----
+//
+// 这是一组**新域**的类型，与「统计」（orderCost 的预测毛利）没有任何字段级关系。
+// 两边的钱不许相加、不许互相推导 —— 只在汇总页并排对照（见 LEDGER_PLAN.md §1）。
+
+/** 收/支方向。金额恒为正整数分，方向只由这里表达（禁止"负数收入"这种第二种写法） */
+export type LedgerKind = 'income' | 'expense';
+/** 范围：专属某店 / 公共（需分摊到各店） */
+export type LedgerScope = 'shop' | 'shared';
+/** 相关人类型（身份用 id，`kind` 只用于分组展示） */
+export type LedgerPartyKind = 'supplier' | 'staff' | 'landlord' | 'platform' | 'other';
+
+/** 分摊行（落库形状；`ratioBp` 是权重快照，仅供展示，**不是判据**） */
+export interface LedgerAllocationRow {
+  shopId: number;
+  shopName: string;
+  amountCents: number;
+  ratioBp: number;
 }
 
-export interface AeTopOrder {
-  orderId: string;
-  orderTime: string;
-  status: string;
-  currency: string;
-  incomeCny: number;
-  costCny: number;
-  grossProfitCny: number;
+/** 写条目时传入的分摊行（渲染层 `computeAllocations` 的产物） */
+export interface LedgerAllocationInput {
+  shopId: number;
+  amountCents: number;
+  ratioBp?: number;
 }
 
-export interface AeTopStyle {
-  styleCode: string;
-  styleName: string;
-  qty: number;
-  incomeCny: number;
-  costCny: number;
-  grossProfitCny: number;
+/** 条目写入入参（局部语义：缺省 = 保持原值） */
+export interface LedgerEntryInput {
+  id?: number;
+  /** YYYY-MM-DD（发生日，不是录入日） */
+  bizDate?: string;
+  kind?: LedgerKind;
+  scope?: LedgerScope;
+  shopId?: number;
+  /** 资金相关人，**必填**（0 / 空一律拒；数据库还有 CHECK 兜底） */
+  partyId?: number;
+  categoryId?: number;
+  /** 整数分、> 0 */
+  amountCents?: number;
+  basis?: LedgerBasis;
+  ruleId?: number;
+  method?: string;
+  note?: string;
+  /** `scope='shared'` 必填且合计必须等于 `amountCents`；`scope='shop'` 忽略（自动单行全额） */
+  allocations?: LedgerAllocationInput[];
 }
 
-export interface AeFeeBreakdownItem {
-  category: string;
-  totalCny: number;
-  orders: number;
+/** 条目行（列表与详情共用） */
+export interface LedgerEntryRow {
+  id: number;
+  bizDate: string;
+  /** `YYYY-MM`，由数据库生成列从 bizDate 派生 */
+  period: string;
+  kind: LedgerKind;
+  scope: LedgerScope;
+  shopId: number;
+  shopName: string;
+  partyId: number;
+  partyName: string;
+  /** 相关人已停用（历史条目照常显示，但下拉里选不到） */
+  partyArchived: boolean;
+  categoryId: number;
+  categoryName: string;
+  amountCents: number;
+  basis: LedgerBasis | '';
+  /** 套用的分摊方案 id（0 = 未套用）；只作来源留痕，重算不读它 */
+  ruleId: number;
+  method: string;
+  note: string;
+  status: 'active' | 'void';
+  voidReason: string;
+  /** 是否已被**有效**结算单占用（由结算行 JOIN 得出，不在条目上再存一份） */
+  settled: boolean;
+  settlementId: number;
+  /** 分摊行数（公共条目"摊 5 家"用） */
+  allocCount: number;
+  /**
+   * 仅在列表请求带 `includeAllocations` 且 `scope='shared'` 时返回（无店名，供导入查重算指纹）。
+   * 与 `LedgerEntryDetail.allocations` 不同：那份一定带 `shopName`，且只有单条详情才给。
+   */
+  allocations?: Array<{ shopId: number; amountCents: number; ratioBp: number }>;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface AeProfitOverview {
-  baseCurrency: 'CNY';
-  totals: AeProfitTotals;
-  trend: AeTrendPoint[];
-  topOrders: AeTopOrder[];
-  topStyles: AeTopStyle[];
-  feeBreakdown: AeFeeBreakdownItem[];
-  coverage: {
-    orderCount: number;
-    lineCount: number;
-    /** 有 style_code 的行 */
-    codeLines: number;
-    /** 命中成本表的行 */
-    matchedLines: number;
+/** 条目详情（含分摊明细） */
+export interface LedgerEntryDetail extends LedgerEntryRow {
+  allocations: LedgerAllocationRow[];
+}
+
+/** 明细筛选 */
+export interface LedgerEntryFilter {
+  period?: string;
+  from?: string;
+  to?: string;
+  kind?: LedgerKind;
+  scope?: LedgerScope;
+  /** 按**分摊行**筛：公共支出摊到该店的部分也算该店支出 */
+  shopId?: number;
+  partyId?: number;
+  categoryId?: number;
+  settleStatus?: 'all' | 'settled' | 'unsettled';
+  includeVoid?: boolean;
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+  /** 给公共条目补分摊行（导入查重算指纹用；常规列表不要开，多一次查询） */
+  includeAllocations?: boolean;
+}
+
+export interface LedgerCategoryRow {
+  id: number;
+  kind: LedgerKind;
+  name: string;
+  builtin: boolean;
+  sort: number;
+  archived: boolean;
+}
+
+export interface LedgerRuleRow {
+  id: number;
+  name: string;
+  basis: LedgerBasis;
+  shopIds: number[];
+  ratios: number[];
+  note: string;
+  archived: boolean;
+}
+
+export interface LedgerPartyRow {
+  id: number;
+  name: string;
+  kind: LedgerPartyKind;
+  phone: string;
+  note: string;
+  archived: boolean;
+  /** 被合并到谁（0 = 没被合并）；`archived && mergedTo > 0` = 「已并入」，否则才是「手动停用」 */
+  mergedTo: number;
+  createdAt: string;
+  updatedAt: string;
+  entryCount: number;
+}
+
+/**
+ * 往来台账一行：五个数必须同时显示。
+ * 只给"未结清"一个数的话，用户想知道"这钱是怎么来的"就得自己去翻明细。
+ */
+export interface LedgerPartyLedgerRow {
+  partyId: number;
+  partyName: string;
+  kind: LedgerPartyKind;
+  archived: boolean;
+  /** 被合并到谁（0 = 没被合并）：台账据此写「已并入 → B」并给跳转 */
+  mergedTo: number;
+  /** 应收：我该从对方收 */
+  receivableCents: number;
+  /** 应付：我该付给对方 */
+  payableCents: number;
+  /** 净往来 = 应收 − 应付（正 = 对方欠我） */
+  netCents: number;
+  /** 已结算净额 = Σ我付出 − Σ我收到（对净往来的**调整量**，付出为正） */
+  settledNetCents: number;
+  /** 未结清 = 净往来 **+** 已结算净额 + 承接余额（加号，不是减号：见 partyLedger.ts 文件头） */
+  unsettledCents: number;
+  /**
+   * 分方向余额：应收方向还能结多少 / 应付方向还能结多少。
+   * 两个人（净额）不够用 —— 同一人既欠我钱又该我付时，"该付的那笔"上限是应付余额，不是净额。
+   */
+  unsettledReceivableCents: number;
+  unsettledPayableCents: number;
+  /** 承接自他人 / 转给他人的余额（`bk_transfers` 净额） */
+  transferCents: number;
+  lastSettleDate: string;
+}
+
+export interface LedgerSettlementRow {
+  id: number;
+  partyId: number;
+  partyName: string;
+  settleDate: string;
+  direction: 'pay' | 'receive' | 'offset';
+  /** 毛额 = 结算行之和 */
+  amountCents: number;
+  /** 支出侧毛额（互抵单里我付出的部分；普通 pay 单等于 amountCents） */
+  payCents: number;
+  /** 收入侧毛额（互抵单里我收到的部分；普通 receive 单等于 amountCents） */
+  receiveCents: number;
+  /** 实际资金流 = payCents − receiveCents：正 = 我净付出，负 = 我净收到，0 = 完全对冲 */
+  cashCents: number;
+  method: string;
+  note: string;
+  status: 'active' | 'void';
+  voidReason: string;
+  entryCount: number;
+}
+
+/** 期间内可参与分摊的店铺；**被排除的必须显式列出来**（否则用户以为漏了） */
+export interface LedgerEligibleShops {
+  eligible: Array<{ id: number; name: string }>;
+  excluded: Array<{
+    id: number;
+    name: string;
+    reason: 'not-open-yet' | 'inactive';
+    status: string;
+  }>;
+}
+
+/** 汇总（店铺轴 / 科目轴 + 体检） */
+export interface LedgerSummary {
+  period: string;
+  incomeCents: number;
+  expenseCents: number;
+  balanceCents: number;
+  entryCount: number;
+  /** 公共条目条数（汇总页「公共池」显示用） */
+  sharedEntryCount: number;
+  /**
+   * 公共条目金额，**按方向分开**。
+   * 以前只有一个 `sharedCents`（收入+支出混加），排在"收入/支出/结余"后面时会被读成
+   * "支出里的公共部分"，一笔公共收入还会让它反直觉地变大（审查 P2-11）。
+   */
+  sharedIncomeCents: number;
+  sharedExpenseCents: number;
+  byShop: Array<{
+    shopId: number;
+    shopName: string;
+    shopStatus: string;
+    /** 专属收入（条目本身就属于该店） */
+    directIncomeCents: number;
+    /** 公摊收入（公共条目摊到该店的部分） */
+    sharedIncomeCents: number;
+    directExpenseCents: number;
+    sharedExpenseCents: number;
+    /** = 专属 + 公摊（汇总表与单店页共用同四个分项相加，不另取一次求和） */
+    incomeCents: number;
+    expenseCents: number;
+    balanceCents: number;
+    sharedEntryCount: number;
+  }>;
+  byCategory: Array<{
+    categoryId: number;
+    categoryName: string;
+    kind: LedgerKind;
+    amountCents: number;
+  }>;
+  /**
+   * 四项体检，正常恒为 0 / 空。
+   * 非 0 时汇总页必须红字提示并给定位入口 —— 静默吞掉等于让用户拿错数去做决定。
+   */
+  integrity: {
+    /** Σ分摊 − Σ有效条目金额 */
+    allocationGapCents: number;
+    /** Σ净往来（只算挂到有效相关人的条目）−（总收入 − 总支出）；非 0 = 有条目 party_id 悬空 */
+    partyGapCents: number;
+    /** (总收入 − 总支出) − Σ各店结余；非 0 = 公共池漏摊（方案 §7.2） */
+    publicPoolCents: number;
+    brokenEntries: Array<{ entryId: number; amountCents: number; allocatedCents: number }>;
+    /** 条目挂在不存在的相关人上（体检③ 非 0 时的定位入口） */
+    missingPartyEntries: Array<{ entryId: number; amountCents: number }>;
   };
+}
+
+// ---- 记账 P4：批量变更相关人 / 单店 / 导出 ----
+
+/**
+ * 三路（方案 §6.4）：
+ * - `move-all`        改挂（全部未结算才允许）
+ * - `move-unsettled`  只改挂未结算，已结算留原人（默认推荐，**不写结转**）
+ * - `void-then-move`  先作废涉及的结算单（必填原因），再改挂全部
+ */
+export type LedgerRepatchMode = 'move-all' | 'move-unsettled' | 'void-then-move';
+
+export interface LedgerRepatchEntry {
+  id: number;
+  bizDate: string;
+  kind: LedgerKind;
+  amountCents: number;
+  partyId: number;
+  partyName: string;
+  status: 'active';
+  /** 0 = 未结算 */
+  settlementId: number;
+}
+
+export interface LedgerRepatchPartyImpact {
+  partyId: number;
+  partyName: string;
+  unsettledCents: number;
+  selectedCount: number;
+  selectedCents: number;
+  selectedSettledCount: number;
+  selectedSettledCents: number;
+  /** A/B 路（只移走所选未结算条目）后的未结清 */
+  afterMoveCents: number;
+  /** C 路（作废结算并移走所选全部条目）后的未结清 */
+  afterVoidMoveCents: number;
+}
+
+export interface LedgerRepatchSettlement {
+  id: number;
+  partyId: number;
+  partyName: string;
+  settleDate: string;
+  direction: 'pay' | 'receive';
+  amountCents: number;
+  /** 该结算单当前有效结算行总数 */
+  entryCount: number;
+  /** 本批次选中了几条（差额 = C 路作废时被连带恢复未结算的条目） */
+  selectedCount: number;
+}
+
+export interface LedgerRepatchPreview {
+  entries: LedgerRepatchEntry[];
+  missingIds: number[];
+  voidIds: number[];
+  fromParties: LedgerRepatchPartyImpact[];
+  settlements: LedgerRepatchSettlement[];
+  unsettledCount: number;
+  unsettledCents: number;
+  settledCount: number;
+  settledCents: number;
+  /** C 路会连带把未选中的条目恢复未结算的条数（必须让用户看见） */
+  collateralEntryCount: number;
+  recommended: LedgerRepatchMode;
+}
+
+export interface LedgerRepatchResult {
+  mode: LedgerRepatchMode;
+  toPartyId: number;
+  toPartyName: string;
+  movedCount: number;
+  movedCents: number;
+  keptSettledCount: number;
+  keptSettledCents: number;
+  voidedSettlements: Array<{
+    id: number;
+    settleDate: string;
+    direction: 'pay' | 'receive';
+    amountCents: number;
+    entryCount: number;
+  }>;
+  fromParties: Array<{
+    partyId: number;
+    partyName: string;
+    movedCount: number;
+    movedCents: number;
+    remainingUnsettledCents: number;
+  }>;
+}
+
+export interface LedgerShopBreakdownCategoryRow {
+  categoryId: number;
+  categoryName: string;
+  kind: LedgerKind;
+  directCents: number;
+  sharedCents: number;
+  amountCents: number;
+}
+
+export interface LedgerShopBreakdownSharedRow {
+  entryId: number;
+  bizDate: string;
+  kind: LedgerKind;
+  entryCents: number;
+  amountCents: number;
+  ratioBp: number;
+  categoryName: string;
+  partyName: string;
+  note: string;
+}
+
+/** 单店取数（方案 §7.1；结算进度不影响这里任何一个数） */
+export interface LedgerShopBreakdown {
+  shopId: number;
+  shopName: string;
+  shopStatus: string;
+  period: string;
+  incomeCents: number;
+  expenseCents: number;
+  balanceCents: number;
+  directIncomeCents: number;
+  sharedIncomeCents: number;
+  directExpenseCents: number;
+  sharedExpenseCents: number;
+  byCategory: LedgerShopBreakdownCategoryRow[];
+  sharedEntries: LedgerShopBreakdownSharedRow[];
+}
+
+/** 导出一行（展示文案由渲染层本地化，主进程不复算任何业务口径） */
+export interface LedgerExportRow {
+  bizDate: string;
+  kindLabel: string;
+  scopeLabel: string;
+  shopLabel: string;
+  partyName: string;
+  categoryName: string;
+  amountCents: number;
+  settleLabel: string;
+  note: string;
+}
+
+export interface LedgerExportInput {
+  title: string;
+  periodLabel: string;
+  filterLabel: string;
+  rows: LedgerExportRow[];
+  /** 与屏幕底部合计同源（主进程不复算） */
+  totalIncomeCents: number;
+  totalExpenseCents: number;
+  balanceCents: number;
+  defaultName: string;
+}
+
+/**
+ * 文件里的一个名字在库里的下落（`ledger-name-resolve` 的产物）。
+ *
+ * 归一（`toNameKey`）与"同名算不算同一家"的判定**只在主进程**：渲染层再算一遍就是两份口径。
+ * 措辞（"不存在 / 已停用 / 对应多家店"）由 `src/lib/ledgerImport.ts` 负责，本结构只给事实。
+ */
+export interface LedgerNameHit {
+  id: number;
+  /** 库里登记的名字（可能与文件里的写法差一个空格） */
+  name: string;
+  state: 'ok' | 'archived' | 'missing' | 'ambiguous';
+  /** 只有科目带：收入还是支出（科目名同时存在于两套科目时判 `ambiguous`，不猜方向） */
+  kind: LedgerKind | '';
+  /**
+   * 只有店铺带原始状态（`active` / `exited` / `archived` / `banned`）。
+   * `exited`（退店）**算 `ok`**：退店仍参与分摊，让人按状态写字，别按 state 猜。
+   */
+  status?: string;
+}
+
+export interface LedgerNameResolveResult {
+  /** 键 = 调用方给的**原文**（预览要按用户文件里的写法回显） */
+  party: Record<string, LedgerNameHit>;
+  category: Record<string, LedgerNameHit>;
+  shop: Record<string, LedgerNameHit>;
+}
+
+/**
+ * 批量导入一行落库入参：`partyId` / `categoryId` 为 0 时带上名字，
+ * 主进程按名字解析，库里没有就**在同一个事务里新建**（导入自动建人/科目）。
+ *
+ * 与 `LedgerEntryInput` 分开是为了让「记一笔」那条路**拿不到**这两个字段 ——
+ * 那条路径上名字找不到就是打错了字，必须报错让人改。
+ */
+export interface LedgerImportEntryInput extends LedgerEntryInput {
+  partyName?: string;
+  categoryName?: string;
+  /**
+   * 这一笔在**用户 Excel 表里的行号**（1-based，含表头）。
+   * 主进程报错文案说「第 N 行：…」时用的就是它 —— 勾选子集后"这批的第几条"和
+   * 用户看到的行号已经不是一回事，用下标报错等于把人指到别人的行上。
+   */
+  rowNo?: number;
+}
+
+/** 导入模板的一张表：内容全由 `src/lib/ledgerImport.ts` 生成（与解析器共用同一份列定义） */
+export interface LedgerTemplateSheetInput {
+  name: string;
+  rows: string[][];
+  widths: number[];
 }
 
 declare global {

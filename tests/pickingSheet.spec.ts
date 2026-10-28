@@ -8,8 +8,7 @@
 // ⚠️ 用例一律用**显式 `today`**（或 orderTime 留空），别让断言随系统日期漂移。
 import { describe, expect, it } from 'vitest';
 import { aggregatePicking, type PickingGroup, type PickingRow } from '../src/lib/picking';
-import type { CostInterval } from '../src/lib/orderCost';
-import { amountText, money, noPriceNote, sheetModelOf } from '../src/lib/pickingSheet';
+import { amountText, centsMoney, money, noPriceNote, sheetModelOf, sheetTextOf } from '../src/lib/pickingSheet';
 
 const infoBlock = (qty: number) => `【1】 某款 (产品属性:Color:黑、Size:L)\n(商品数量:${qty} piece)`;
 
@@ -22,6 +21,7 @@ function row(over: Partial<PickingRow> = {}): PickingRow {
     styleCode: 'S1',
     styleName: '款一',
     styleColor: '红',
+    styleColorId: 0,
     color: '黑',
     size: 'L',
     itemId: 'ITEM1',
@@ -30,17 +30,13 @@ function row(over: Partial<PickingRow> = {}): PickingRow {
     imagePath: '/tmp/a.jpg',
     shipped: false,
     bizStatus: '等待发货',
+    actualCostCents: null,
+    costCents: null,
+    productCostCents: null,
     rawFields: { 商品信息: infoBlock(1) },
     ...over,
   };
 }
-
-const cost = (styleCode: string, effectiveFrom: string, unitPrice: number): CostInterval => ({
-  styleCode,
-  effectiveFrom,
-  unitPrice,
-  source: 'purchase',
-});
 
 const META = { supplierId: 7, supplierName: '厂A', date: '2026-10-10' };
 
@@ -49,6 +45,15 @@ describe('pickingSheet：金额展示口径', () => {
     expect(money(9.5)).toBe('9.50');
     expect(money(20)).toBe('20.00');
     expect(money(Number.NaN)).toBe('0.00');
+  });
+
+  it('centsMoney：分 → 元（单据口径；NaN / 脏值按 0，不抛）', () => {
+    expect(centsMoney(50000)).toBe('500.00'); // 包价单 500.00 元
+    expect(centsMoney(12000)).toBe('120.00');
+    expect(centsMoney(5550)).toBe('55.50');
+    expect(centsMoney(0)).toBe('0.00');
+    expect(centsMoney(Number.NaN)).toBe('0.00');
+    expect(centsMoney(undefined)).toBe('0.00');
   });
 
   it('amountText：有价写 ¥、**全缺价写 —**（0 元 ≠ 不知道多少钱）；部分缺价照写金额', () => {
@@ -74,14 +79,13 @@ describe('sheetModelOf：发厂清单模型', () => {
   function fixture(): PickingGroup[] {
     return aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(3) } }),
-        row({ id: 2, orderNo: 'O2', size: 'M', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 3, orderNo: 'O3', styleCode: 'S2', color: '白', size: 'XL', imagePath: '', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 4, orderNo: 'O4', styleCode: 'S3', color: '蓝', size: 'L', supplierId: 8, supplierName: '厂B', rawFields: { 商品信息: infoBlock(3) } }),
-        row({ id: 5, orderNo: 'O5', styleCode: 'S3', color: '蓝', size: 'XL', supplierId: 8, supplierName: '厂B', rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 3, orderNo: 'O3', styleCode: 'S2', styleName: '', color: '白', size: 'XL', imagePath: '', rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 4, orderNo: 'O4', styleCode: 'S3', color: '蓝', size: 'L', supplierId: 8, supplierName: '厂B', costCents: 400, rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 5, orderNo: 'O5', styleCode: 'S3', color: '蓝', size: 'XL', supplierId: 8, supplierName: '厂B', costCents: 400, rawFields: { 商品信息: infoBlock(2) } }),
       ],
       {
-        costs: [cost('S1', '2026-01-01', 10), cost('S3', '2026-01-01', 4)],
         taken: { 'S1|黑|L': 1, 'S1|黑|M': 2 },
       },
     ).groups;
@@ -108,14 +112,16 @@ describe('sheetModelOf：发厂清单模型', () => {
     expect(sheetModelOf(g, { supplierId: 0, supplierName: '', date: '2026-10-10' })).toBeNull();
   });
 
-  it('行内容：款色键 / 款名 / 图片路径；件数 = 还差合计', () => {
+  it('行内容：款色键（内部身份）/ 对外展示名（**不含款编码**）/ 款名 / 图片路径；件数 = 还差合计', () => {
     const m = sheetModelOf(fixture(), META)!;
     const s1 = m.lines[0];
-    expect(s1.key).toBe('S1 · 黑');
+    expect(s1.key).toBe('S1 · 黑'); // 内部身份照旧（排序/去重用）
+    expect(s1.label).toBe('款一 · 黑'); // 对外文案：款编码不进 label（卡上/清单图/文字清单同口径）
     expect(s1.styleName).toBe('款一');
     expect(s1.localPath).toBe('/tmp/a.jpg');
     expect(s1.pieces).toBe(2); // L 还差 2；M 拿完了，不进
     const s2 = m.lines[1];
+    expect(s2.label).toBe('白'); // 缺款名只写颜色，不把款编码编出去
     expect(s2.localPath).toBe(''); // 无图门店照发（图是给厂家看的，不是必要条件）
     expect(s2.pieces).toBe(2);
   });
@@ -137,15 +143,15 @@ describe('sheetModelOf：发厂清单模型', () => {
     expect(m.lines[1].unitPriceText).toBe('—');
     expect(m.lines[1].amountText).toBe('—'); // 全无价 → 不写 ≈¥0.00
 
-    // 同款两码落在不同成本区间（L 走 1 月那条 10 元、M 走 6 月那条 12 元）——
+    // 同款两码的价可以不同（L 行钉 10 元、M 行钉 12 元）——
     // 行小计是「Σ 各码还差 × 该码的价」= 2×10 + 2×12 = 44，**不是**"还差合计 × 均价"（4×10.8=43.2）：
     // 这条断言专门分辨这两种实现（屏上/xlsx 同此口径）。
     const mixed = aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', size: 'L', orderTime: '2026-02-01', rawFields: { 商品信息: infoBlock(3) } }),
-        row({ id: 2, orderNo: 'O2', size: 'M', orderTime: '2026-07-01', rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1200, rawFields: { 商品信息: infoBlock(2) } }),
       ],
-      { days: 0, costs: [cost('S1', '2026-01-01', 10), cost('S1', '2026-06-01', 12)], taken: { 'S1|黑|L': 1 } },
+      { days: 0, taken: { 'S1|黑|L': 1 } },
     ).groups;
     const line = sheetModelOf(mixed, META)!.lines[0];
     expect(line.unitPriceText).toBe('¥10.80'); // 展示用均价 = 有价需求的加权均价
@@ -158,7 +164,7 @@ describe('sheetModelOf：发厂清单模型', () => {
     const b = sheetModelOf(fixture(), { supplierId: 8, supplierName: '厂B', date: '2026-10-10' })!;
     expect(b.footer).toBe('共 1 款色 · 5 件 · 预估 ¥20.00');
     // 全无价：金额写 `—`、说明写「全部」
-    const none = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], { costs: null }).groups;
+    const none = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })]).groups;
     expect(sheetModelOf(none, META)!.footer).toBe('共 1 款色 · 3 件 · 预估 —（3 件全部无进价）');
   });
 
@@ -173,12 +179,53 @@ describe('sheetModelOf：发厂清单模型', () => {
   it('行序确定：与输入顺序无关（件数降序 → 键升序，复用 groupByColor 的排序）', () => {
     const rev = aggregatePicking(
       [
-        row({ id: 3, orderNo: 'O3', styleCode: 'S2', color: '白', size: 'XL', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 2, orderNo: 'O2', size: 'M', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 3, orderNo: 'O3', styleCode: 'S2', color: '白', size: 'XL', costCents: 100, rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
       ],
-      { costs: [cost('S1', '2026-01-01', 10), cost('S2', '2026-01-01', 1)], taken: { 'S1|黑|M': 2 } },
+      { taken: { 'S1|黑|M': 2 } },
     ).groups;
     expect(sheetModelOf(rev, META)!.lines.map((l) => l.key)).toEqual(['S1 · 黑', 'S2 · 白']);
+  });
+});
+
+describe('sheetTextOf：一键复制的纯文字清单（微信粘贴）', () => {
+  it('四段式：标题（厂家 + 日期）→ 每行「款名 · 颜色：尺码×件数 · 件数」（**无款编码**）→ 合计行', () => {
+    const m = sheetModelOf(
+      aggregatePicking(
+        [
+          row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+          row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+          row({ id: 3, orderNo: 'O3', styleCode: 'S2', styleName: '款二', color: '白', size: 'XL', imagePath: '', rawFields: { 商品信息: infoBlock(2) } }),
+        ],
+        { taken: { 'S1|黑|L': 1 } },
+      ).groups,
+      META,
+    )!;
+    expect(sheetTextOf(m)).toBe(
+      '拿货单 · 厂A · 2026-10-10\n' +
+        '款一 · 黑：M×2  L×2 · 4 件\n' +
+        '款二 · 白：XL×2 · 2 件\n' +
+        '共 2 款色 · 6 件 · 预估 ¥40.00（不含 2 件无进价）',
+    );
+  });
+
+  it('数字与模型同源：改 taken / 行上价后文字跟着变（不在这里另算一遍）', () => {
+    const base = aggregatePicking([row({ costCents: 1000, rawFields: { 商品信息: infoBlock(3) } })]).groups;
+    expect(sheetTextOf(sheetModelOf(base, META)!)).toContain('款一 · 黑：L×3 · 3 件');
+    const taken = aggregatePicking([row({ costCents: 1000, rawFields: { 商品信息: infoBlock(3) } })], {
+      taken: { 'S1|黑|L': 1 },
+    }).groups;
+    expect(sheetTextOf(sheetModelOf(taken, META)!)).toContain('款一 · 黑：L×2 · 2 件');
+    // 全拿完 → 模型 null（调用方据此不复制，而不是复制一份空清单）
+    const done = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], {
+      taken: { 'S1|黑|L': 3 },
+    }).groups;
+    expect(sheetModelOf(done, META)).toBeNull();
+  });
+
+  it('缺款名的行只写颜色（款编码不外发 —— 不编一个名字出去）', () => {
+    const g = aggregatePicking([row({ styleName: '', rawFields: { 商品信息: infoBlock(2) } })]).groups;
+    expect(sheetTextOf(sheetModelOf(g, META)!)).toContain('黑：L×2 · 2 件');
   });
 });

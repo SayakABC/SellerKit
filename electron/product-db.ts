@@ -7,13 +7,13 @@
 //
 // 编码锚点（C2）
 //   pl_products.code 与既有链路同口径：oi_styles.code → purchase_items.style_code →
-//   ae_cost_map.style_code。后续「店铺商品 ID → 产品」映射与订单自动关联以此为唯一关联键，
+//   （曾用的款级价目表已退役）。后续「店铺商品 ID → 产品」映射与订单自动关联以此为唯一关联键，
 //   不引入第二套编码。关联一律用 id，名称仅作展示（厂家名即由 supplier_id 派生，不入本表）。
 //
 // 本层**不做**的事（避免过度设计 / 避免第二套口径）
-//   1. 成本不在此建表：ADR-002 Q2 已裁定成本权威形态为 ae_cost_map 改造（每 style_code 多行 +
-//      effective_from 生效区间），产品库落地时是**迁移/合并**而非另起一套。产品界面接成本维护
-//      须等该改造完成。
+//   1. 成本**不再**只做展示：2026-10-21（C2）起「当前进价」= `pl_products.cost_cents`，
+//      由本域维护（产品页 / 导入 / 抽屉）。旧款级区间价目表 `ae_cost_map` 已退役删除；
+//      历史成本落在订单明细行（预估 / 实际进价两字段），不回写本表。
 //   2. 厂家不在此建表：权威表是采购域 suppliers，本层只存 supplier_id。
 //
 // 安全边界
@@ -36,10 +36,11 @@ import {
   type MigrationStep,
 } from './db';
 import { toNameKey } from './shopName';
+import { shopIdByItemId, itemShopIndex, skuColorByItemImage } from './shop-item-db';
 import {
+  bindingKey,
   buildQueueView,
   extractSkuFields,
-  mappingKey,
   toSkuKey,
   type QueueRow,
   type QueueStats,
@@ -68,11 +69,16 @@ export interface ProductListItem {
   imageId: number;
   /** 主图缓存路径（由 image_id 派生；'' = 无图。渲染层经 order-image-thumb/读图通道展示） */
   imagePath: string;
+  /** **当前进价**（分；0 = 未填）。产品级维护入口，供产品页展示 + 新订单默认进价。
+   *  ⚠️ 只管"现在多少钱"；订单行快照（`oi_order_items.cost_cents`）管"那单当时多少钱"。 */
+  costCents: number;
   createdAt: string;
   updatedAt: string;
 }
 
-/** 新增/更新入参（**全量提交**语义，与 shop-account-upsert 一致：缺省即空，不做局部 patch） */
+/** 新增/更新入参（**全量提交**语义，与 shop-account-upsert 一致：缺省即空，不做局部 patch）
+ *  ⚠️ 唯一例外是 `costCents`：**未传即保留**（`undefined` 不覆盖）。理由见 `upsertProduct` 注释 ——
+ *  进价是钱，被一次"只改了个名字"的全量提交清成 0 是最贵的一类静默事故。 */
 export interface ProductUpsertInput {
   /** 0 / 缺省 = 新增 */
   id: number;
@@ -82,6 +88,8 @@ export interface ProductUpsertInput {
   category: string;
   status: string;
   note: string;
+  /** 当前进价（分）。`undefined` = 不修改（新增时落 0） */
+  costCents?: number;
 }
 
 export interface ProductSummary {
@@ -105,6 +113,7 @@ const SCHEMA = [
     status TEXT NOT NULL DEFAULT 'active',
     note TEXT NOT NULL DEFAULT '',
     image_id INTEGER NOT NULL DEFAULT 0,
+    cost_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
@@ -113,8 +122,12 @@ const SCHEMA = [
 ];
 
 /**
- * 幂等补列（**老库**）—— `image_id` 只写进了 CREATE TABLE 的话老库永远拿不到它
+ * 幂等补列（**老库**）—— `image_id` / `cost_cents` 只写进了 CREATE TABLE 的话老库永远拿不到它
  * （`CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改）。判定用 `PRAGMA table_info`。
+ *
+ * `cost_cents`（2026-10-21）：产品**当前进价**（分）。权威口径从 `ae_cost_map`（款级 + 生效区间，
+ * 已退役删除）迁到本列 —— 本列只答"现在多少钱"；"那单当时多少钱"由订单行两个字段回答
+ * （`oi_order_items.cost_cents` 归类确认时钉住 / `actual_cost_cents` 拿货落账回写）。
  */
 function ensureProductColumns(): void {
   const cols = new Set(
@@ -122,6 +135,9 @@ function ensureProductColumns(): void {
   );
   if (!cols.has('image_id')) {
     dbRun(`ALTER TABLE pl_products ADD COLUMN image_id INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!cols.has('cost_cents')) {
+    dbRun(`ALTER TABLE pl_products ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0`);
   }
 }
 
@@ -192,7 +208,7 @@ function num(v: unknown): number {
   return v !== undefined && v !== null ? Number(v) || 0 : 0;
 }
 
-const COLS = `id, code, name, supplier_id, category, status, note, image_id, created_at, updated_at`;
+const COLS = `id, code, name, supplier_id, category, status, note, image_id, cost_cents, created_at, updated_at`;
 
 /** image_id → 缓存路径（pl_images 未建表/无行时降级为空，不报错） */
 function imagePathMap(imageIds: number[]): Map<number, string> {
@@ -223,6 +239,7 @@ function mapRow(row: Record<string, unknown>, supplierNames: Map<number, string>
     note: String(row.note ?? ''),
     imageId,
     imagePath: imagePaths?.get(imageId) ?? '',
+    costCents: num(row.cost_cents),
     createdAt: String(row.created_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
   };
@@ -239,6 +256,8 @@ export function listProducts(payload: {
   withoutSupplier?: boolean;
   /** 只看"至少有一个 SKU 缺克重"的款。 */
   onlyMissingWeight?: boolean;
+  /** 只看"还没维护进价"的款（`cost_cents` 为 NULL 或 <= 0）。 */
+  onlyMissingCost?: boolean;
 }): { rows: ProductListItem[]; total: number } {
   const search = str(payload?.search, MAX.search);
   const status = str(payload?.status, MAX.status);
@@ -255,7 +274,7 @@ export function listProducts(payload: {
     where.push(`status = ?`);
     params.push(status);
   }
-  // 三个筛选互斥（界面上也做成互斥的开关），优先级：未关联厂家 > 指定厂家 > 缺克重
+  // 四个筛选互斥（界面上也做成互斥的开关），优先级：未关联厂家 > 指定厂家 > 缺克重 > 缺进价
   if (payload?.withoutSupplier === true) {
     where.push(`supplier_id = 0`);
   } else if (supplierId) {
@@ -268,6 +287,10 @@ export function listProducts(payload: {
       `EXISTS (SELECT 1 FROM pl_variants v WHERE v.product_id = pl_products.id ` +
         `AND (v.weight_g IS NULL OR v.weight_g <= 0))`
     );
+  } else if (payload?.onlyMissingCost === true) {
+    // 同源理：缺进价清单是「基础数据 › 进价」页退场后的承接能力，
+    // 必须在服务端筛（当前价 0 一律视为未维护，与库层 / 列表列口径一致）。
+    where.push(`(cost_cents IS NULL OR cost_cents <= 0)`);
   }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -308,6 +331,12 @@ export function getProduct(id: number): ProductListItem | null {
  * 新增 / 更新（全量提交）。
  * 编码唯一性是硬约束：与其它记录冲突时**明确抛错**，不静默改名或静默覆盖 ——
  * 编码是订单/采购/成本三域的关联键，静默变更会让历史数据指向另一个产品。
+ *
+ * ⚠️ `costCents` 是**唯一**不遵守"全量提交"的字段：**未传（`undefined`）= 不修改**。
+ *    为什么破例：进价是钱，而本函数被"改名 / 改厂家 / 导出→导回"等多条路径共用，
+ *    只要有一条没传进价就把它清成 0，利润会凭空变好看且**不报错**（本项目最贵的一类静默失效）。
+ *    显式传 `0` 仍然等于"清零"——"没说"与"说它是 0"必须能分开。
+ *
  * @returns { id, created } created=false 表示更新既有记录
  */
 export function upsertProduct(input: ProductUpsertInput): { id: number; created: boolean } {
@@ -324,6 +353,15 @@ export function upsertProduct(input: ProductUpsertInput): { id: number; created:
     str(input?.note, MAX.note),
   ] as const;
 
+  // 进价：undefined / null = 不修改；显式数值才写（含 0）。非法值**报错不猜**（进价直通利润链路）。
+  const costProvided = input?.costCents !== undefined && input?.costCents !== null;
+  let costCents = 0;
+  if (costProvided) {
+    const n = Number(input.costCents);
+    if (!Number.isFinite(n) || n < 0) throw new Error('进价必须是不小于 0 的整数（分）');
+    costCents = Math.round(n);
+  }
+
   // 更新（id > 0）时先确认目标存在，再查编码占用 ——
   // 顺序反了会让「改一个已被删除的产品」报成「编码已存在」，把真正原因盖住。
   if (id && !dbGet<{ id: number }>(`SELECT id FROM pl_products WHERE id = ?`, [id])) {
@@ -337,18 +375,68 @@ export function upsertProduct(input: ProductUpsertInput): { id: number; created:
   if (dup) throw new Error(`产品编码已存在：${code}`);
 
   if (id) {
-    dbRun(
-      `UPDATE pl_products SET code=?, name=?, supplier_id=?, category=?, status=?, note=?, updated_at=datetime('now','localtime') WHERE id=?`,
-      [...fields, id]
-    );
+    if (costProvided) {
+      dbRun(
+        `UPDATE pl_products SET code=?, name=?, supplier_id=?, category=?, status=?, note=?, cost_cents=?, updated_at=datetime('now','localtime') WHERE id=?`,
+        [...fields, costCents, id]
+      );
+    } else {
+      dbRun(
+        `UPDATE pl_products SET code=?, name=?, supplier_id=?, category=?, status=?, note=?, updated_at=datetime('now','localtime') WHERE id=?`,
+        [...fields, id]
+      );
+    }
     return { id, created: false };
   }
 
   const info = dbRun(
-    `INSERT INTO pl_products (code, name, supplier_id, category, status, note) VALUES (?,?,?,?,?,?)`,
-    [...fields]
+    `INSERT INTO pl_products (code, name, supplier_id, category, status, note, cost_cents) VALUES (?,?,?,?,?,?,?)`,
+    [...fields, costCents]
   );
   return { id: info.lastInsertRowid, created: true };
+}
+
+/**
+ * 只改一款的**当前进价**（按款编码定位、只写一列，`renameProduct` 同一手法）。
+ *
+ * 用途（C2 起）：成本面板逐款改价 / 产品导入随行写入。产品表的当前价只影响**此后归类确认的
+ * 新单**（预估快照从它拷贝），不回写任何历史订单行。
+ *
+ * @returns `found=false` 表示该编码在产品库里没有产品行（价没落下 —— 调用方必须如实报出来，
+ *          不要静默吞掉：那正是"改了价、产品列表没变"这类失效的温床）。
+ *          `updated=false` = 值本来就相同（幂等，不产生写入）。
+ */
+export function setProductCostByCode(
+  code: string,
+  costCents: number,
+): { found: boolean; updated: boolean } {
+  const c = str(code, MAX.code).trim();
+  const cents = Math.max(0, Math.round(Number(costCents) || 0));
+  if (!c) return { found: false, updated: false };
+  if (!tableExists('pl_products')) return { found: false, updated: false };
+  const info = dbRun(
+    `UPDATE pl_products SET cost_cents = ?, updated_at = datetime('now','localtime')
+      WHERE code = ? AND cost_cents <> ?`,
+    [cents, c, cents],
+  );
+  return {
+    found: !!dbGet<{ id: number }>(`SELECT id FROM pl_products WHERE code = ?`, [c]),
+    updated: info.changes > 0,
+  };
+}
+
+/**
+ * 有当前进价的款编码（`cost_cents > 0`）。
+ *
+ * 为什么单独一个只读投影：「今天」的缺口卡只想知道"这些款有没有价"，
+ * 而 `productList` 一次最多 500 条 —— 为这一个判断翻 40 页产品，代价远大于一条 SQL。
+ * 返回的是**编码集合**，不是金额（金额各页自己读产品行，别在这里再算一份）。
+ */
+export function listPricedProductCodes(): string[] {
+  if (!tableExists('pl_products')) return [];
+  return dbQuery<{ code: string }>(
+    `SELECT code FROM pl_products WHERE cost_cents > 0 ORDER BY code ASC`
+  ).map((r) => String(r.code ?? ''));
 }
 
 /**
@@ -367,6 +455,49 @@ export function renameProduct(code: string, name: string): { changed: boolean } 
     [str(name, MAX.name), c]
   );
   return { changed: info.changes > 0 };
+}
+
+/**
+ * 改一款的厂家（拣货宫格里"把 SKU 拖到别家"的写入口；`supplierId` 0 = 清空关联）。
+ *
+ * 为什么单独一个窄函数、按 **code** 收：拣货清单手上只有款编码（跨域关联锚点），
+ * 而 `batchUpdateProducts` 按产品 id 收 —— 渲染层为此先查一遍 id 只会多一轮往返
+ * 和一个"查到了但已被删"的中间态。与 `renameProduct` 同一手法（code 定位、只改一列）。
+ *
+ * 覆盖规则（照 `adoptProduct` 的语义，别退化成裸 upsert）：
+ *   · 该编码**没有产品行** → 新建（只落 code + supplier_id）—— 未建档的款也能拖：
+ *     它正因没有 `pl_products` 行才落在拣货清单的「未指定厂家」里，不给建就等于拖不动；
+ *   · 已有产品 → **只改 supplier_id**，name/category/status/note 一律不碰
+ *     （全量 upsert 会把没展示的列按默认值重置，静默清空比报错更难查）；
+ *   · `supplierId > 0` 时校验厂家存在（suppliers 表属采购域、未建表时降级放行，
+ *     与 `batchUpdateProducts` 同口径）。
+ *
+ * @returns changed=false = 目标厂家与原厂家相同（没有可改的；调用方据此说"没有变化"）
+ */
+export function moveProductSupplier(code: string, supplierId: number): { changed: boolean } {
+  ensureProductSchema();
+  const c = str(code, MAX.code);
+  if (!c) throw new Error('款编码不能为空');
+  const sid = toId(supplierId);
+  if (sid && suppliersTableReady()) {
+    if (!dbGet(`SELECT id FROM suppliers WHERE id = ?`, [sid])) {
+      throw new Error(`厂家不存在或已被删除：#${sid}`);
+    }
+  }
+  const existing = dbGet<{ id: number; supplier_id: number }>(
+    `SELECT id, supplier_id FROM pl_products WHERE code = ?`,
+    [c]
+  );
+  if (existing) {
+    if (num(existing.supplier_id) === sid) return { changed: false };
+    const info = dbRun(
+      `UPDATE pl_products SET supplier_id = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+      [sid, toId(existing.id)]
+    );
+    return { changed: info.changes > 0 };
+  }
+  dbRun(`INSERT INTO pl_products (code, supplier_id) VALUES (?, ?)`, [c, sid]);
+  return { changed: true };
 }
 
 /**
@@ -539,6 +670,9 @@ export interface ProductImportRow {
    * 0 = 这行没图（**不覆盖**款上已有的主图）。
    */
   imageId: number;
+  /** 该行填的进价（分）。`undefined` = 这行没填 ⇒ **不修改**库内已有价（**不是清 0**）。
+   *  2026-10-21 起：产品表 `pl_products.cost_cents`（"当前价"维护入口）也收同一个值。 */
+  costCents?: number;
 }
 
 export interface ProductImportOutcome {
@@ -636,6 +770,10 @@ export function importProducts(
             ? (str(r?.status, MAX.status) as ProductStatus)
             : 'active',
           note: str(r?.note, MAX.note),
+          // 进价：只有这行填了才写（undefined = 不修改；见 `upsertProduct` 的破例说明）
+          ...(r?.costCents !== undefined && r?.costCents !== null
+            ? { costCents: Number(r.costCents) }
+            : {}),
         });
 
         // ② SKU
@@ -711,8 +849,7 @@ export function importProducts(
 // 空平台会把不同平台的两家店并到同一个键上。
 //
 // 有意**不做** `pl_import_errors`（§3.1 原写"建表时机 = P3"）：P2 的导入失败行已经能回传界面重试，
-// 落一张跨重启的失败表需要一个消费它的界面（"历史失败行"），P3 的验收里没有这条。等真需要时按
-// `oi_queue` 的先例补，而不是先建一张没有生产者的表。
+// 落一张跨重启的失败表需要一个消费它的界面（"历史失败行"），P3 的验收里没有这条。等真需要时再补，而不是先建一张没有生产者的表。
 
 /** 映射状态：确认 / 待确认 / 已失效（商品ID 变了） */
 export type SkuMapStatus = 'confirmed' | 'pending' | 'invalid';
@@ -824,6 +961,9 @@ const SKU_TABLE_SQL = `CREATE TABLE IF NOT EXISTS pl_shop_sku (
 const SKU_SCHEMA = [
   SKU_TABLE_SQL,
   `CREATE INDEX IF NOT EXISTS idx_pl_shop_sku_lookup ON pl_shop_sku(platform, shop_id, item_id, status)`,
+  // 认款/队列/批量解析/写入判重全部按 `(shop_id, item_id)` 走（平台已退出匹配键，见 `bindingKey`）：
+  // 没有这条索引，那几条查询会放弃 `idx_pl_shop_sku_lookup` 的前缀 `platform` 而退化成扫表
+  `CREATE INDEX IF NOT EXISTS idx_pl_shop_sku_binding ON pl_shop_sku(shop_id, item_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_pl_shop_sku_product ON pl_shop_sku(product_id)`,
 ];
 
@@ -1026,7 +1166,9 @@ function mapSkuRow(
   const shopId = num(row.shop_id);
   return {
     id: num(row.id),
-    platform: String(row.platform ?? ''),
+    // 平台以**店铺当前值**为准（店铺行是权威，映射行那列只是写入时的副本）——
+    // 改过平台的店，列表里也不会再显示成旧平台；店铺被删才回落到副本（有值比空着好查）
+    platform: shops.get(shopId)?.platform || String(row.platform ?? ''),
     shopId,
     shopName: shops.get(shopId)?.name ?? '',
     itemId: String(row.item_id ?? ''),
@@ -1055,8 +1197,18 @@ export function listSkuMappings(payload: SkuMapQuery): { rows: ShopSkuRow[]; tot
   const where: string[] = [skuMappingSql()];
   const params: (string | number)[] = [];
   if (search) {
-    where.push(`(item_id LIKE ? OR platform LIKE ? OR note LIKE ?)`);
     const like = `%${search}%`;
+    // 平台按**店铺当前值**搜（与上图展示同一权威）：改过平台的店，搜新平台要能搜到。
+    // 店铺域未初始化时回落到映射行自己的副本（否则建表都做不了）。
+    if (tableExists('sk_shops')) {
+      where.push(
+        `(item_id LIKE ? OR note LIKE ? OR EXISTS (
+            SELECT 1 FROM sk_shops s WHERE s.id = pl_shop_sku.shop_id AND s.platform LIKE ?
+         ))`,
+      );
+    } else {
+      where.push(`(item_id LIKE ? OR platform LIKE ? OR note LIKE ?)`);
+    }
     params.push(like, like, like);
   }
   if ((SKU_MAP_STATUSES as readonly string[]).includes(status)) {
@@ -1105,29 +1257,40 @@ export function skuMapSummary(): SkuMapSummary {
   const byStatus = dbQuery<Record<string, unknown>>(
     `SELECT status, COUNT(*) AS c FROM pl_shop_sku WHERE ${skuMappingSql()} GROUP BY status ORDER BY c DESC`,
   ).map((r) => ({ status: String(r.status ?? ''), count: num(r.c) }));
-  const byPlatform = dbQuery<Record<string, unknown>>(
-    `SELECT platform, COUNT(*) AS c FROM pl_shop_sku WHERE ${skuMappingSql()} GROUP BY platform ORDER BY c DESC`,
-  ).map((r) => ({ platform: String(r.platform ?? ''), count: num(r.c) }));
 
   const shops = shopLabelMap();
   const grouped = dbQuery<Record<string, unknown>>(
-    `SELECT shop_id AS sid, COUNT(*) AS c FROM pl_shop_sku WHERE ${skuMappingSql()} GROUP BY shop_id ORDER BY c DESC`,
+    `SELECT shop_id AS sid, COUNT(*) AS c, MAX(platform) AS plat
+       FROM pl_shop_sku WHERE ${skuMappingSql()} GROUP BY shop_id ORDER BY c DESC`,
   );
+  const byShop = grouped.map((r) => {
+    const sid = num(r.sid);
+    const label = shops.get(sid);
+    return {
+      shopId: sid,
+      // 店铺被删 / 未登记时留空名，不隐藏这一行 —— 藏起来会让"映射总数对不上"变成查不出的悬案
+      shopName: label?.name ?? '',
+      // 平台取店铺当前值（权威）；店铺已删才回落到映射行的副本
+      platform: label?.platform || String(r.plat ?? ''),
+      count: num(r.c),
+    };
+  });
+  // 平台汇总按**店铺当前平台**聚合（与列表、认款同一权威）——按映射行自己的副本分组的话，
+  // 改过平台的店会在这里显示成旧平台，而列表已经是新平台，两处对不上
+  const buckets = new Map<string, number>();
+  for (const row of byShop) {
+    const key = row.platform || '未登记';
+    buckets.set(key, (buckets.get(key) ?? 0) + row.count);
+  }
+  const byPlatform = [...buckets]
+    .map(([platform, count]) => ({ platform, count }))
+    .sort((a, b) => b.count - a.count);
+
   return {
     total: totalRow ? num(totalRow.c) : 0,
     byStatus,
     byPlatform,
-    byShop: grouped.map((r) => {
-      const sid = num(r.sid);
-      const label = shops.get(sid);
-      return {
-        shopId: sid,
-        // 店铺被删 / 未登记时留空名，不隐藏这一行 —— 藏起来会让"映射总数对不上"变成查不出的悬案
-        shopName: label?.name ?? '',
-        platform: label?.platform ?? '',
-        count: num(r.c),
-      };
-    }),
+    byShop,
   };
 }
 
@@ -1140,9 +1303,9 @@ const MAX_QUEUE_ROWS = 1000;
 
 /** 取订单行最小投影（表不存在时返回空 —— 未启用订单域的用户仍应能看到一个空队列而不是报错） */
 function collectOrderRows(maxRows: number): { rows: SkuOrderRow[]; truncated: boolean } {
-  if (!tableExists('oi_orders')) return { rows: [], truncated: false };
+  if (!tableExists('oi_order_items')) return { rows: [], truncated: false };
   const rows = dbQuery<Record<string, unknown>>(
-    `SELECT shop, raw_fields FROM oi_orders LIMIT ?`,
+    `SELECT o.shop, oi.raw_fields FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id LIMIT ?`,
     [maxRows + 1],
   );
   const truncated = rows.length > maxRows;
@@ -1174,19 +1337,37 @@ export function shopSkuQueue(payload: { limit?: number; maxRows?: number } = {})
 
   const { rows: orders, truncated } = collectOrderRows(maxRows);
 
+  // 「已关联」的键集合 —— **只算产品还在的映射**（`JOIN pl_products`）。
+  // 为什么：映射行在产品被删之后不会消失（没有外键级联），而 `resolveOrderSku` 把"指向已删产品"
+  // 的映射当**未命中**（绝不替人猜一个产品）。两边口径不一致的症状（2026-10-20 真库实测：
+  // 2 条映射指向已删的 `9802`，卡住 10 单）：订单永远认不出款，队列却说这个商品**已关联** ⇒
+  // 它连"去补"的入口都不出现，用户只看到"有 10 单认不出，但没有一处能点"。
+  //
+  // ⭐ 键只含 `(店铺, 商品ID)`（`bindingKey`），**不取映射行自己的 `platform`**：那是写映射那刻
+  // 从店铺行抄来的副本，而队列侧拼键用的是店铺**当前**平台 —— 改一次平台两边就对不上，
+  // 该店全部商品被当成"未关联"重新塞回待办，用户只能全量重配。
   const mappedKeys = new Set<string>();
   for (const r of dbQuery<Record<string, unknown>>(
-    `SELECT platform, shop_id, item_id FROM pl_shop_sku WHERE status = 'confirmed' AND ${skuMappingSql()}`,
+    `SELECT m.shop_id, m.item_id FROM pl_shop_sku m
+       JOIN pl_products p ON p.id = m.product_id
+      WHERE m.status = 'confirmed' AND ${skuMappingSql('m.')}`,
   )) {
-    mappedKeys.add(mappingKey(r.platform, num(r.shop_id), r.item_id));
+    mappedKeys.add(bindingKey(num(r.shop_id), r.item_id));
   }
 
+  // 「商品ID 反查店铺」的索引**按需加载**（只有真的存在未认店的分组时才查一次全量）——
+  // 队列每次打开都建一遍全表索引是白花钱，而认店成功的用户永远用不到它。
+  let itemShops: Map<string, number> | null = null;
   const view = buildQueueView({
     orders,
     manualShopIdByKey: manualShopIdByKey(),
     autoShopByKey: uniqueShopByKey(),
     shopsById: shopLabelMap(),
     mappedKeys,
+    resolveShopByItemId: (itemId) => {
+      if (!itemShops) itemShops = itemShopIndex();
+      return itemShops.get(toSkuKey(itemId)) ?? 0;
+    },
     limit,
   });
 
@@ -1212,21 +1393,25 @@ export function shopSkuQueue(payload: { limit?: number; maxRows?: number } = {})
  * 把没确认的映射当命中，等于让系统替人下结论。
  */
 export function resolveSkuBatch(
-  keys: { platform: string; shopId: number; itemId: string }[],
+  /** `platform` 仍收但**不参与匹配**（保留是因为调用方手上本来就有它；见 `bindingKey`） */
+  keys: { platform?: string; shopId: number; itemId: string }[],
 ): { matched: boolean; productId: number; productCode: string; productName: string; itemId: string }[] {
   ensureSkuSchema();
   const list = Array.isArray(keys) ? keys.slice(0, 20000) : [];
   const products = productLabelMap();
   const index = new Map<string, number>();
   for (const r of dbQuery<Record<string, unknown>>(
-    `SELECT platform, shop_id, item_id, product_id FROM pl_shop_sku
-     WHERE status = 'confirmed' AND ${skuMappingSql()}`,
+    // 与队列同一口径：**指向已删产品的映射不算命中**（见 `shopSkuQueue` 里那段注释）——
+    // 否则这里会回 "matched:true + 产品编码为空"，调用方拿它当已关联，问题同样看不见。
+    `SELECT m.shop_id, m.item_id, m.product_id FROM pl_shop_sku m
+       JOIN pl_products p ON p.id = m.product_id
+       WHERE m.status = 'confirmed' AND ${skuMappingSql('m.')}`,
   )) {
-    index.set(mappingKey(r.platform, num(r.shop_id), r.item_id), num(r.product_id));
+    index.set(bindingKey(num(r.shop_id), r.item_id), num(r.product_id));
   }
   return list.map((k) => {
     const itemId = toSkuKey(k?.itemId);
-    const pid = index.get(mappingKey(k?.platform, toId(k?.shopId), itemId)) ?? 0;
+    const pid = index.get(bindingKey(toId(k?.shopId), itemId)) ?? 0;
     return {
       matched: pid > 0,
       productId: pid,
@@ -1253,6 +1438,13 @@ export function resolveSkuBatch(
  * 同一 (店, 商品ID) 若同时存在 `'*'` 与带色两条，取带色的那条；不然人配了色却不生效，
  * 症状是"配了没用"（最难查的一类）。同色并列时取 `id` 最小的一条，保证结果不随写入顺序漂移。
  *
+ * ⭐ 认店补第五级（2026-10-19）：店铺原文的归一键（人工归一 → 同名唯一）**都落空**时，
+ * 用**商品ID 反查采集快照**（`shopIdByItemIds`）—— 商品ID 是比店名更强的证据：
+ * `pl_shop_items` 的键就是 `(shop_id, store_key, item_id)`，它记录了这个商品当初归在哪家店。
+ * 没有这一级时，"用户把店铺ID 填成店名"这类登记错误会让订单**永远认不了店**，
+ * 而订单行上其实一直带着能反证的 itemId（症状是"配了映射却不生效"，且两边各自看都正常）。
+ * 该级**只兜底**：原文归一成功就不查；多店歧义返回 0（不猜）。
+ *
  * @returns null = 未命中（店铺未归一 / 无映射 / 映射非 confirmed / 产品已删），调用方保持原状
  */
 export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
@@ -1268,22 +1460,26 @@ export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
 } | null {
   const shopKey = toNameKey(input?.shop);
   const itemId = toSkuKey(input?.itemId);
-  if (!shopKey || !itemId) return null;
+  if (!itemId) return null;
   ensureSkuSchema();
 
-  const manual = manualShopIdByKey().get(shopKey) ?? 0;
-  const shopId = manual || uniqueShopByKey().get(shopKey)?.id || 0;
-  // 店铺没归一 → 平台未知。不拿空平台去凑：不同平台的同名店铺会被并到同一个键上
+  const manual = shopKey ? (manualShopIdByKey().get(shopKey) ?? 0) : 0;
+  // 店铺没归一 → 平台未知。不拿空平台去凑：不同平台的同名店铺会被并到同一个键上。
+  // 兜底顺序：人工归一 → 同名唯一 → **商品ID 反查采集快照**（末级，唯一命中才算）
+  const shopId = manual || (shopKey ? (uniqueShopByKey().get(shopKey)?.id ?? 0) : 0) || shopIdByItemId(itemId);
   if (!shopId) return null;
 
+  // 平台只用于返回值（下游写映射时记一笔）；匹配键**不含平台** —— 见 `bindingKey`：
+  // 映射行的 `platform` 是副本，用它当条件会让"改一次店铺平台"废掉该店全部映射。
+  // 同 (店,商品ID) 若遗留多平台重复行，下面的 ORDER BY 已定序（带色优先 → id 最小），结果确定。
   const platform = shopLabelMap().get(shopId)?.platform ?? '';
   const row = dbGet<{ product_id: number; variant_id: number; spec: string }>(
     `SELECT product_id, variant_id, spec FROM pl_shop_sku
-     WHERE platform = ? AND shop_id = ? AND item_id = ? AND status = 'confirmed'
+     WHERE shop_id = ? AND item_id = ? AND status = 'confirmed'
        AND ${skuMappingSql()}
      ORDER BY (spec = '*' OR spec = '') ASC, id ASC
      LIMIT 1`,
-    [normPlatform(platform), shopId, itemId],
+    [shopId, itemId],
   );
   const pid = num(row?.product_id);
   if (!pid) return null;
@@ -1303,6 +1499,19 @@ export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
 }
 
 /**
+ * 「这张订单图是哪个颜色」—— 归款侧的唯一入口（实现在采集域 `shop-item-db`）。
+ *
+ * 为什么在**产品域**再包一层而不是让订单域直接读采集表：订单域只认产品域这一个锚点
+ * （`order-db → product-db` 是已登记的唯一跨域边），采集快照是"平台事实"，
+ * 由产品域统一对外transit，符合"订单不直接读采集"的分层。
+ *
+ * @returns `''` = 定不了（没采到过 / 图不在 SKU 图里 / 多色共用一张图 ⇒ 歧义，不猜）
+ */
+export function orderColorByItemImage(itemId: unknown, imageUrl: unknown): string {
+  return skuColorByItemImage(itemId, imageUrl);
+}
+
+/**
  * 店铺**原文** → (店铺实体 id, 平台)：`resolveOrderSku` 的第一步单独抽出来。
  *
  * 为什么必须抽出来而不是让调用方自己拼：**人工核对回流**那条链路手上只有订单原文的店铺名，
@@ -1310,13 +1519,18 @@ export function resolveOrderSku(input: { shop?: unknown; itemId?: unknown }): {
  * `resolveOrderSku` / 待关联队列必须是**同一份** —— 各写一遍的症状是"队列里说这家店已归一、
  * 回流却写不进去"，而且两边分别看都正常，只能靠对着读才发现。
  *
+ * `itemId` = 可选的**反向证据**（与 `resolveOrderSku` 第五级同一条）：原文归一落空时，
+ * 用商品ID 反查采集快照里"这个商品归在哪家已登记店"。回流链路本来就拿着 itemId
+ * （`recognizeOrderStyle` 先用它查重才走到这里），不传这级就白丢。
+ *
  * @returns `shopId = 0` = 店铺尚未归一。此时**不得**写映射：订单里没有平台，
  *          拿空平台硬塞会把不同平台的同名店铺并到同一个键上（见 `shopSku.ts` 口径 3）。
  */
-export function resolveShopRef(shop: unknown): { shopId: number; platform: string } {
+export function resolveShopRef(shop: unknown, itemId?: unknown): { shopId: number; platform: string } {
   const key = toNameKey(shop);
-  if (!key) return { shopId: 0, platform: '' };
-  const shopId = manualShopIdByKey().get(key) ?? uniqueShopByKey().get(key)?.id ?? 0;
+  const named = key ? (manualShopIdByKey().get(key) ?? uniqueShopByKey().get(key)?.id ?? 0) : 0;
+  // 末级兜底：店铺原文认不出时用商品ID 反证（唯一命中才算；多店歧义返回 0）
+  const shopId = named || shopIdByItemId(itemId);
   if (!shopId) return { shopId: 0, platform: '' };
   return { shopId, platform: shopLabelMap().get(shopId)?.platform ?? '' };
 }
@@ -1418,10 +1632,12 @@ function normPlatform(v: unknown): string {
  *   · 店铺不存在 → 报错（不写成 `shop_id=0`，那会让两家店共用一个键）；
  *   · 产品不存在 → 报错（映射指向空产品等于没映射，但界面上会显示成"已关联"）。
  *
- * **改绑 = 替换**（2026-09-29 裁定）：同一 `(platform, shop_id, item_id, spec)` 的映射行**只有一条**，
+ * **改绑 = 替换**（2026-09-29 裁定）：同一 `(shop_id, item_id, spec)` 的映射行**只有一条**，
  * 提交另一个产品即替换它；一对多的「套装」不在此处维护，走「商品清单」的池行（`SKU_POOL_SOURCE`）。
+ * ⭐ 2026-10-20 起判重**不含 `platform`**（店铺的副本，见 `bindingKey`）：含它时"改过平台的店"
+ * 重配会新增一行、旧行留成幽灵关联。
  *
- * **改色 = 改同一条绑定**（2026-10-10，补色通道）：5 列键只在 `spec` 上对不上、而该商品名下**同产品**
+ * **改色 = 改同一条绑定**（2026-10-10，补色通道）：键只在 `spec` 上对不上、而该商品名下**同产品**
  * 恰好只有**一条**映射行时，**替换它的 spec** 而不是并排新增 —— 用户"给这个商品补个颜色"之后，
  * 旧的款级行（`*`）必须消失（否则映射列表里同商品两条、一条永远不会被命中，而人以为旧的那条已经变了）。
  *
@@ -1461,7 +1677,12 @@ export function upsertSkuMappings(rows: SkuMapInput[]): SkuMapOutcome {
       try {
         if (!itemId) throw new Error('商品ID不能为空');
         const platform = normPlatform(r?.platform);
-        const shopId = toId(r?.shopId);
+        let shopId = toId(r?.shopId);
+        // shopId 允许缺省（2026-10-20）：从**拿货/拣货**页面配映射时，界面手里只有商品ID
+        // （订单行不带店铺 id），硬要它先查店铺 id 就等于逼用户回「归类核对」重做一遍。
+        // 认店走既有证据链末级 `shopIdByItemId`（URL → storeId → 店名 → 桶键 → 商品ID 反查），
+        // **认不出就报错、不猜**：多店歧义/无证据时返回 0 ⇒ 下面照常抛"请选择店铺"。
+        if (!shopId) shopId = toId(shopIdByItemId(itemId));
         if (!shopId) throw new Error('请选择店铺');
         if (tableExists('sk_shops') && !dbGet(`SELECT id FROM sk_shops WHERE id = ?`, [shopId])) {
           throw new Error('店铺不存在或已被删除');
@@ -1477,24 +1698,28 @@ export function upsertSkuMappings(rows: SkuMapInput[]): SkuMapOutcome {
         // 变体关联由颜色反查（见 `variantIdByColor`）—— 调用方只管配颜色，不必知道变体 id
         const variantId = variantIdByColor(productId, spec);
 
-        // 只认映射行（池行的绑定不参与一对一改绑）；命中即整体替换该行的产品与状态
+        // 只认映射行（池行的绑定不参与一对一改绑）；命中即整体替换该行的产品与状态。
+        // ⚠️ 判重**不含平台**（2026-10-20）：平台是店铺的副本，用它判重会让"改过平台的店"
+        // 在重配时**新增**一行、旧行留成永远命中不了的幽灵关联（产品详情里还会被算进"已关联"）。
         const existing = dbGet<{ id: number }>(
           `SELECT id FROM pl_shop_sku
-           WHERE platform = ? AND shop_id = ? AND item_id = ? AND spec = ? AND ${skuMappingSql()}
+           WHERE shop_id = ? AND item_id = ? AND spec = ? AND ${skuMappingSql()}
            ORDER BY id LIMIT 1`,
-          [platform, shopId, itemId, spec],
+          [shopId, itemId, spec],
         );
         if (existing) {
+          // 顺手把 `platform` 副本刷新成店铺当前值：它不参与匹配，但留在表里的旧值会让看库的人
+          // 以为这家店还在别的平台（"改过平台的店"重配一次就自洽了，不用专门写迁移）
           dbRun(
             `UPDATE pl_shop_sku
-             SET product_id = ?, variant_id = ?, status = ?, source = 'manual', note = ?,
+             SET platform = ?, product_id = ?, variant_id = ?, status = ?, source = 'manual', note = ?,
                  updated_at = datetime('now','localtime')
              WHERE id = ?`,
-            [productId, variantId, status, note, existing.id],
+            [platform, productId, variantId, status, note, existing.id],
           );
           out.updated++;
         } else {
-          // 5 列键只在 spec 上对不上：先看是不是"**同一条绑定的改色**"——该商品名下**同产品**
+          // 键在 spec 上对不上：先看是不是"**同一条绑定的改色**"——该商品名下**同产品**
           // 恰好已有**一条**映射行时，改色 = **替换它的 spec**，而不是在它旁边新增一条。
           // 旁留的旧行永远命中不了（`resolveOrderSku` 只取一条、带色行优先），而人以为它已经变了
           //（症状：映射列表里同商品两条，一条 `*` 一条带色，看不出哪条算数）。
@@ -1503,9 +1728,9 @@ export function upsertSkuMappings(rows: SkuMapInput[]): SkuMapOutcome {
           // 已有 2+ 条同产品行（历史数据）也无从判断该动哪条，维持"新增"。
           const twin = dbQuery<{ id: number }>(
             `SELECT id FROM pl_shop_sku
-              WHERE platform = ? AND shop_id = ? AND item_id = ? AND product_id = ? AND ${skuMappingSql()}
+              WHERE shop_id = ? AND item_id = ? AND product_id = ? AND ${skuMappingSql()}
               ORDER BY id LIMIT 2`,
-            [platform, shopId, itemId, productId],
+            [shopId, itemId, productId],
           );
           if (twin.length === 1) {
             dbRun(
@@ -1561,7 +1786,7 @@ export function invalidateSkuMapping(id: number): { changed: boolean } {
 //                的图，产品主图会被误删）。文件统一落 `userData/product-images/`（handler 层复制，
 //                展示走 order-read-image / order-image-thumb 通道 —— 白名单已扩展为两目录）。
 // pl_item_images 商品ID 维度的**手动覆盖图**（映射与关联列表"商品ID对应的图片"的第一优先级）。
-//                取图三层回落（`itemImagePool`）：手动覆盖图 → 订单识别图（oi_orders.raw_fields
+//                取图三层回落（`itemImagePool`）：手动覆盖图 → 订单识别图（oi_order_items.raw_fields
 //                命中该商品ID 的行，image_id → oi_images，最新在前）→ 款主图（映射 → pl_products）。
 
 export interface VariantRow {
@@ -1833,6 +2058,38 @@ export function attachProductImage(productId: number, imageId: number): { change
   return { changed: true };
 }
 
+/**
+ * 把**已入库**的图片采纳为款主图（**只补空**：款已有主图时不动，返回 false）。
+ *
+ * 与 `adoptOrderImages` 的差别只在采纳源（那个从订单图来，这个从采集图来）——
+ * 落点与纪律是同一件：`attachProductImage` 是同一条写路径，"只补空"的判定也收在这里，
+ * 不靠调用方自觉（调用方传个 productId 就覆盖的话，"款已有主图不覆盖"这条验收就落空了）。
+ */
+export function adoptProductImageIfEmpty(productId: number, imageId: number): boolean {
+  ensureProductSchema();
+  const pid = toId(productId);
+  const iid = toId(imageId);
+  if (!pid || !iid) return false;
+  const row = dbGet<{ image_id: number }>(`SELECT image_id FROM pl_products WHERE id = ?`, [pid]);
+  if (!row) return false;
+  if (Number(row.image_id) || 0) return false;
+  attachProductImage(pid, iid);
+  return true;
+}
+
+/**
+ * 按产品 id 取款编码（`pl_products.code`；产品已删返回 ''）。
+ * 色图采纳要用它定位识别池里的款色（`ensureStyleByCode`）—— 编码从**产品行**取，
+ * 不接收渲染层传的字符串：传错就是在识别池里建一个张冠李戴的占位款。
+ */
+export function getProductCode(productId: number): string {
+  ensureProductSchema();
+  const pid = toId(productId);
+  if (!pid) return '';
+  const row = dbGet<{ code: string }>(`SELECT code FROM pl_products WHERE id = ?`, [pid]);
+  return row ? String(row.code ?? '') : '';
+}
+
 /** 移除款主图（pl_images 行保留 —— 可能仍被 pl_item_images 引用；孤图清理另议） */
 export function detachProductImage(productId: number): { changed: boolean } {
   ensureVariantSchema();
@@ -1884,7 +2141,7 @@ const ORDER_IMAGES_PER_ITEM = 3;
 /**
  * 批量取商品ID的候选图（**三层回落，逐 item 独立判定**）：
  *   ① pl_item_images 覆盖图 —— 人的显式决定，最高优先；
- *   ② 订单识别图 —— `oi_orders.image_id` 非空的行，raw_fields 商品ID 命中即收集（最新在前）；
+ *   ② 订单识别图 —— `oi_order_items.image_id` 非空的行，raw_fields 商品ID 命中即收集（最新在前）；
  *   ③ 款主图 —— 该商品ID 的 confirmed 映射 → pl_products.image_id（多行映射取任一，确定性按 id 升序）。
  * 不做模糊匹配：商品ID 是精确键（toSkuKey 归一后比对），命中不了就回落下一层。
  */
@@ -1911,12 +2168,12 @@ export function itemImagePool(itemIds: string[]): Map<string, ItemImagePoolEntry
     }
   }
 
-  // ② 订单识别图：oi_orders 没有商品ID列，商品ID 只在 raw_fields JSON 里（与队列同一条扫描路径）
-  if (tableExists('oi_orders')) {
+  // ② 订单识别图：商品ID 只在明细表 raw_fields JSON 里（与队列同一条扫描路径）
+  if (tableExists('oi_order_items')) {
     const keySet = new Set(keys);
     const collected = new Map<string, ProductImageRef[]>();
     const rows = dbQuery<Record<string, unknown>>(
-      `SELECT id, image_id, raw_fields FROM oi_orders
+      `SELECT id, image_id, raw_fields FROM oi_order_items
        WHERE image_id IS NOT NULL ORDER BY id DESC LIMIT ${IMAGE_POOL_SCAN_LIMIT}`,
     );
     for (const r of rows) {

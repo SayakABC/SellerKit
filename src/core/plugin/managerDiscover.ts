@@ -42,6 +42,9 @@ function createBuiltinManifest(meta: ModuleMeta, pkg?: BuiltinPkgInfo): PluginMa
           icon: meta.icon,
           order: meta.order,
           navHidden: meta.navHidden,
+          // ⚠️ 过路字段之一（另一半在 `pluginManager.ts` 的 `metasFromContributions`）：
+          // 这里不抄，模块写的 subNav 就到不了侧栏 —— 且没有任何报错。
+          subNav: meta.subNav,
           container: 'host',
         },
       ],

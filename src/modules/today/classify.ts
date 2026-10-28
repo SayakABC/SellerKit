@@ -1,83 +1,30 @@
-// 「归类核对」域在渲染层的**薄封装**：把宿主的 `order*` 通道收成带类型的函数，
-// 再加两件事 —— 读识别引擎（配置 + 密钥）、跑一次单图识别。
+// 「归类核对」域在渲染层的**薄封装**：把宿主的 `order*` 通道收成带类型的函数。
 //
 // ⚠️ **本文件不含任何业务算法**：指纹算 `@/lib/styleMatcher`、品类/颜色归一算
 //    `@/lib/orderClassifier`（与导入/产品库同一份实现）。指纹只有同源，"识别出来的款"与
 //    "人工核对的款"才会落到同一个款编码上（两处各写一套必然同款拆成两款，见该文件的注释）。
 //
-// ⚠️ **`readEngine` / `recognizeOrder` 当前没有任何调用方（2026-10-05 起）**：它们原先只服务
-//    「归类核对」页的「识别未归类」批量按钮，该按钮已按用户要求删除。**刻意保留**的两个理由：
-//      ① 「设置 › 识别」写的那份引擎配置（`ENGINE_NS`）必须有个读取方，否则那页就成了只写不读；
-//      ② 重新接入识别（形态未定）时，这两个就是现成件 —— 读配置 + 单图识别 → 归一化 → 落库。
-//    ⇒ 若最终决定不做自动识别，**本文件的下半段（引擎 + 识别）应与「设置 › 识别」页一并删除**。
-//      别让它们无声无息地烂在这里（本仓纪律：不可达代码要么有明确归期，要么删）。
+// ⚠️ **2026-10-28：云端视觉识别链路已整条删除**（`readEngine` / `recognizeOrder` /
+//    `src/core/ai` / 「设置 › 识别」页 / `order-api-key-*` 两个通道）。原因是它们自 2026-10-05
+//    起就**零调用方**（「识别未归类」按钮当时已删），而用户已决定不接云端模型 ——
+//    留着就是"用户配了 Key、没有任何地方会用它"的只写不读。判断与替代路线见
+//    `docs/notes/2026-10-28-classify-local-vision-direction.md`。**别再往这里加识别入口**：
+//    本地视觉方案（像素特征/颜色检索）落点在 `src/lib/imageFeatures.ts` + 主进程解码，
+//    与云端引擎无关。
 //
 // 为什么不用 `src/core/services/ipc.ts` 的导出：那里 `order*` 主要挂在 `ipc` 实例上，
 // 这里补齐后调用点读起来是 `listPending()` 而不是 `ipc.orderList({...})`，且失败一律抛错
 // （`success:false` 的 error 文案比"静默空列表"有用 —— 空列表会被读成"没有待核对的单"）。
 
-import {
-  createVisionEngine,
-  type RecognitionResult,
-  type VisionEngine,
-  type VisionEngineConfig,
-} from '@/core/ai';
 import { ipc, type ApiResult } from '@/core/services/ipc';
-import { useModuleStorage } from '@/core/services/storage';
-import { classifyResult } from '@/lib/orderClassifier';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
+import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered } from '@/types';
 
 /** 取单个值：失败抛错 */
 async function need<T>(p: Promise<ApiResult<T>>): Promise<T> {
   const r = await p;
   if (!r.success) throw new Error(r.error || '操作失败');
   return r.data as T;
-}
-
-// ─────────────────────────────────────────────────────────── 识别引擎
-
-/**
- * 与「设置 › 识别」(`src/core/settings/RecognitionSettings.vue`) **同一命名空间同一键** —— 两边可互通。
- *
- * ⚠️ 名字沿用 `order-insight`（原岛 id）是**有意保留**：这是 electron-store 里已落盘的
- * **用户数据键**（引擎配置 + `imageColumn` 等列名）。岛已于 2026-10-05 整体下架，但键不能跟着改名 ——
- * 改名的唯一效果是"用户配好的 Key 与列映射静默消失"。**命名空间名 ≠ 模块是否存在。**
- */
-const ENGINE_NS = 'order-insight';
-
-/** 兜底默认（设置页里删过字段时用；与设置页的 DEFAULT_ENGINE 同值） */
-const DEFAULT_ENGINE: Omit<VisionEngineConfig, 'apiKey'> = {
-  provider: 'qwen',
-  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  model: 'qwen-vl-max',
-  temperature: 0.1,
-};
-
-export interface EngineReadiness {
-  engine: VisionEngine | null;
-  /** `engine` 为 null 时**直接给用户看**的原因（别让它跑到一半才报错） */
-  reason: string;
-}
-
-/**
- * 读识别引擎（引擎配置 + 加密存储里的密钥）。
- *
- * 没有密钥时**不造引擎**、把原因说清楚：批量识别是几十秒起步的动作，
- * 让它先跑起来再逐行失败，不如在点按钮的那一刻就拦住并给出入口。
- */
-export async function readEngine(): Promise<EngineReadiness> {
-  const storage = useModuleStorage<{ engine?: Partial<VisionEngineConfig> }>(ENGINE_NS);
-  const cfg = await storage.load();
-  const saved = cfg?.engine && typeof cfg.engine === 'object' ? cfg.engine : {};
-  const merged = { ...DEFAULT_ENGINE, ...saved };
-  delete (merged as { apiKey?: string }).apiKey; // 老版本曾把空 key 一起落盘，读出口径统一清掉
-  const keyRes = await ipc.orderApiKeyGet();
-  const apiKey = keyRes.success && keyRes.data ? String(keyRes.data.apiKey || '') : '';
-  if (!apiKey) {
-    return { engine: null, reason: '还没配视觉识别引擎的 API Key —— 去「设置 → 识别」填好保存再回来' };
-  }
-  return { engine: createVisionEngine({ ...merged, apiKey }), reason: '' };
 }
 
 // ─────────────────────────────────────────────────────────── 取数
@@ -226,6 +173,12 @@ export interface CorrectionResult {
    * 只有"点名款"这条路有它 —— 只改品类/颜色走的是指纹重归类，不涉及商品级结论。
    */
   skuBackfill?: SkuBackfillOutcome;
+  /**
+   * ⭐ 顺带记住的**色名对照**（平台色名 → 我方色名）。
+   *
+   * 同 `skuBackfill`：`null`/缺省不影响"已保存"这个结论，界面只额外说一句"以后这个名字都叫 X"。
+   */
+  colorAlias?: ColorAliasRemembered | null;
 }
 
 /**
@@ -247,9 +200,9 @@ export interface CorrectionResult {
  * ⚠️⚠️ **第 2 步的前提只有「点名了款」，绝不能再加"指纹非空"**（2026-10-11 用户报
  * "归类核对时设置的商品颜色还是不生效"，真库复现）：
  * `buildStyleFingerprint(category, features)` 在**品类与特征都为空时返回空串**，而真库里这两个量
- * 恰好恒空 —— 导入没提品类（23 行 `oi_orders.category` 全空）、从没跑过 VLM（`oi_images.result_json`
+ * 恰好恒空 —— 导入没提品类（23 行 `oi_order_items.category` 全空）、从没跑过 VLM（`oi_images.result_json`
  * 全 null ⇒ `features` 恒空）。原先写成 `if (named && fingerprint)` ⇒ 挂款、颜色记忆、商品ID 回流
- * **整条链一次都不执行**，而 `orderUpdate` 那一步照样写 `oi_orders.color` 并返回 `corrected=1`，
+ * **整条链一次都不执行**，而 `orderUpdate` 那一步照样写 `oi_order_items.color` 并返回 `corrected=1`，
  * 界面提示「已保存，归属 SUST-006」—— 用户看到"保存成功"，但**款色还是「未分类」**，
  * 拿货单/算钱/取图（全读 `sc.color`）一个地方都不会变。
  * 指纹在这一步只是**附加记忆**（写进 `oi_style_fingerprints`，供以后自动识别命中），
@@ -275,6 +228,7 @@ export async function saveCorrection(input: CorrectionInput): Promise<Correction
   );
   let styleCode = String(r?.styleCode ?? '');
   let skuBackfill: SkuBackfillOutcome | undefined;
+  let colorAlias: ColorAliasRemembered | null = null;
 
   if (named) {
     const assigned = await ipc.orderStyleAssign({
@@ -288,8 +242,9 @@ export async function saveCorrection(input: CorrectionInput): Promise<Correction
     //    而 `r` 是上一步重归类的产物，两者在"点名了款"这条路上必然是同一个款、
     //    但来源不同 —— 写混了会让"回填的是哪个商品"跟着重归类结果漂。
     skuBackfill = assigned.success ? assigned.data?.skuBackfill : undefined;
+    colorAlias = assigned.success ? (assigned.data?.colorAlias ?? null) : null;
   }
-  return { styleCode, skuBackfill };
+  return { styleCode, skuBackfill, colorAlias };
 }
 
 /** 标记已核对（单行 / 全部）。返回实际更新行数 */
@@ -314,63 +269,4 @@ export async function markCorrected(input: number[] | { all: true }): Promise<nu
 export async function reopenCorrected(ids: number[]): Promise<number> {
   const r = await need(ipc.orderReopenCorrected(ids));
   return Number(r?.updated ?? 0);
-}
-
-// ─────────────────────────────────────────────────────────── 识别一张图
-
-export interface RecognizeOutcome {
-  category: string;
-  color: string;
-  styleCode: string;
-}
-
-/**
- * **识别一条订单的图并就地归类**（批量识别的单步）。
- *
- * 三步一条链，顺序不能反：
- *   ① 读图（`orderReadImage`，走图片缓存目录白名单）→ dataUrl；
- *   ② 引擎识别 → 归一化（与导入/产品库**同一份** `classifyResult`）+ 同源指纹；
- *   ③ 落库：`orderUpdate(reclassify)` 建/挂款，并把识别结果回写图片
- *      （`orderImageSave` —— 下次同 URL 的图直接复用该结论，不必再花一次模型调用）。
- *
- * 无图订单（`imageId` 为 0）直接跳过：识别链路只对有图的订单有意义，
- * 这类订单只能靠「商品ID 映射」或人工指定款。
- */
-export async function recognizeOrder(order: OrderRecord, engine: VisionEngine): Promise<RecognizeOutcome> {
-  const id = Number(order.id ?? 0);
-  const localPath = String(order.localPath ?? '');
-  if (!id || !localPath) throw new Error('这条订单没有主图，跳过');
-  const img = await need(ipc.orderReadImage(localPath));
-  const recv: RecognitionResult = await engine.analyze(img.dataUrl);
-  const norm = classifyResult({
-    category: String(recv.category ?? ''),
-    color: String(recv.color ?? ''),
-    logo: String(recv.logo ?? ''),
-    styleName: String(recv.styleName ?? ''),
-  });
-  const features = Array.isArray(recv.features)
-    ? recv.features.map((f) => String(f ?? '').trim()).filter(Boolean)
-    : [];
-  const fingerprint = buildStyleFingerprint(norm.category, features);
-  if (!fingerprint) throw new Error('识别结果为空（品类与特征都没出来），已跳过');
-
-  const r = await need(
-    ipc.orderUpdate({
-      id,
-      category: norm.category,
-      color: norm.color,
-      logo: norm.logo,
-      fingerprint,
-      features,
-      reclassify: true,
-      styleName: norm.styleName || undefined,
-    })
-  );
-  // 回写识别结论（失败不影响归类结果：只是下次要重新识别一次）
-  if (order.imageId) {
-    await ipc
-      .orderImageSave({ id: Number(order.imageId), status: 'done', resultJson: JSON.stringify(recv) })
-      .catch(() => undefined);
-  }
-  return { category: norm.category, color: norm.color, styleCode: String(r?.styleCode ?? '') };
 }

@@ -26,12 +26,14 @@ const { initDb, closeDb, dbRun, dbGet, dbQuery } = require(path.join(ROOT, 'dist
 const pdb = require(path.join(ROOT, 'dist', 'electron', 'product-db.js'));
 const sdb = require(path.join(ROOT, 'dist', 'electron', 'shop-db.js'));
 const odb = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
+const sidb = require(path.join(ROOT, 'dist', 'electron', 'shop-item-db.js'));
 
 initDb(path.join(dir, 'smoke.db'));
 pdb.ensureProductSchema();
 pdb.ensureSkuSchema();
 sdb.ensureShopSchema();
 odb.ensureOrderSchema();
+sidb.ensureShopItemSchema(); // 「商品ID 反查采集快照」那一组要用真表
 
 let failed = 0;
 function check(name, fn) {
@@ -50,7 +52,7 @@ function check(name, fn) {
 const PLATFORMS = ['amazon', 'shopee', 'temu', 'aliexpress', 'lazada'];
 
 function reset() {
-  for (const t of ['pl_shop_sku', 'pl_products', 'sk_shops', 'sk_name_map', 'oi_orders', 'oi_images']) {
+  for (const t of ['pl_shop_sku', 'pl_products', 'sk_shops', 'sk_name_map', 'oi_orders', 'oi_images', 'pl_shop_items', 'oi_color_aliases']) {
     dbRun(`DELETE FROM ${t}`);
   }
   imageId = 0; // 图片行被清了，缓存 id 会变成外键悬空值
@@ -65,7 +67,6 @@ function seedShops(n = 5) {
       platform: PLATFORMS[i - 1] || 'amazon',
       name: `店铺${i}`,
       site: '',
-      shopSetId: 0,
       status: 'active',
       openedAt: '',
       note: '',
@@ -122,7 +123,7 @@ function seedProducts(n, prefix = 'P') {
   return ids;
 }
 
-/** 订单行（raw_fields 是 JSON 文本，与线上同形态） */
+/** 订单行（raw_fields 是 JSON 文本，与线上同形态）。拆表后：主表（order_no+shop）+ 明细（image_id+raw_fields） */
 let imageId = 0;
 function seedOrders(rows) {
   if (!imageId) {
@@ -133,10 +134,12 @@ function seedOrders(rows) {
   }
   let n = 0;
   for (const r of rows) {
-    dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
+    const no = `SO-${++n}`;
+    dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES (?,?)`, [no, r.shop]);
+    const h = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]).id);
+    dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?,?,?)`, [
+      h,
       imageId,
-      `SO-${++n}`,
-      r.shop,
       JSON.stringify(r.fields),
     ]);
   }
@@ -198,20 +201,21 @@ check('同一 (平台,店铺,商品,规格) 重复关联 → 更新而非新增�
   assert.strictEqual(r.rows[0].productCode, 'P-0002');
 });
 
-check('商品ID 与平台先归一：只差空白/不可见字符不得写成两行', () => {
+check('商品ID 先归一：只差空白/不可见字符不得写成两行（**平台不参与身份**）', () => {
   reset();
   const shops = seedShops();
   const products = seedProducts(1);
   const base = { platform: 'amazon', shopId: shops[0], productId: products[0] };
+  // 2026-10-20 起身份 = (店铺, 商品ID)：同一个店下的同一个商品只可能有一条绑定 ——
+  // 以前"同店写 amazon 与 shopee 各一行"是允许的，那正是"平台副本参与判重"的残留
   const out = pdb.upsertSkuMappings([
     { ...base, itemId: 'B0X1' },
     { ...base, itemId: ' B0X1 ' },
     { ...base, itemId: 'B0\u200bX1' },
-    { ...base, platform: ' shopee ', itemId: 'B0X1' },
   ]);
   assert.strictEqual(out.failed.length, 0);
-  assert.strictEqual(out.created, 2, '归一后应只有两行：amazon 一行 + shopee 一行');
-  assert.strictEqual(queryMap().total, 2);
+  assert.strictEqual(out.created, 1, '归一后应只有一行');
+  assert.strictEqual(queryMap().total, 1);
 });
 
 check('店铺不存在 → 该行失败，其余行照常入库（不做整批回滚）', () => {
@@ -267,13 +271,13 @@ check('resolveSkuBatch 命中返回产品编码与名称', () => {
   assert.strictEqual(hit.productName, '产品1');
 });
 
-check('resolveSkuBatch 未命中 / 平台或店铺不同 → matched=false（不跨店复用）', () => {
+check('resolveSkuBatch 未命中 / **店铺不同** → matched=false（不跨店复用）', () => {
   const s1 = shopByName('店铺1'); // amazon，有 B0X1 的映射
   const s2 = shopByName('店铺2'); // shopee，没有
   const r = pdb.resolveSkuBatch([
     { platform: 'amazon', shopId: s1.id, itemId: 'B0NOTHERE' },
     { platform: 'shopee', shopId: s2.id, itemId: 'B0X1' },
-    // 同平台同商品、但换了店铺 —— 这条才是"不跨店复用"的真守卫
+    // 同商品、但换了店铺 —— 这条才是"不跨店复用"的真守卫
     { platform: 'amazon', shopId: s2.id, itemId: 'B0X1' },
   ]);
   assert.deepStrictEqual(
@@ -281,6 +285,19 @@ check('resolveSkuBatch 未命中 / 平台或店铺不同 → matched=false（不
     [false, false, false]
   );
   assert.strictEqual(r[0].productId, 0);
+});
+
+check('resolveSkuBatch：平台参数不参与匹配（同店同商品，传什么平台都命中）', () => {
+  const s1 = shopByName('店铺1');
+  const rows = pdb.resolveSkuBatch([
+    { platform: 'amazon', shopId: s1.id, itemId: 'B0X1' },
+    { platform: 'temu', shopId: s1.id, itemId: 'B0X1' },
+    { shopId: s1.id, itemId: 'B0X1' }, // 调用方手上没有平台时也得能解析
+  ]);
+  assert.deepStrictEqual(
+    rows.map((x) => x.matched),
+    [true, true, true],
+  );
 });
 
 check('resolveSkuBatch 入参方也走归一：多一个空格仍命中', () => {
@@ -382,7 +399,10 @@ check('队列：店铺未归一时**不允许**写映射（写时被店铺校验
 
 check('队列是**实时**的：删掉订单后立刻少一组（证明不是缓存表）', () => {
   const before = pdb.shopSkuQueue();
-  dbRun(`DELETE FROM oi_orders WHERE shop = '店1' AND raw_fields LIKE '%B0X2%'`);
+  dbRun(
+    `DELETE FROM oi_order_items WHERE raw_fields LIKE '%B0X2%'
+       AND order_id IN (SELECT id FROM oi_orders WHERE shop = '店1')`,
+  );
   const after = pdb.shopSkuQueue();
   assert.strictEqual(before.stats.groups, 3);
   assert.strictEqual(after.stats.groups, 2, '删了订单队列没变 → 说明算的是一张会放陈的缓存表');
@@ -515,6 +535,80 @@ check('映射汇总：总数 / 状态分布 / 按店铺（店铺被删也留行�
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ⭐ 改店铺「平台」不得废掉该店映射（2026-10-20，身份 = (店铺, 商品ID)）
+//
+// 映射行的 `platform` 是写映射那刻从店铺行抄来的**副本**。它当匹配键时，在「店铺登记」里
+// 改一次平台（哪怕只是 `AE` → `ae`，`toNameKey` 不折叠大小写）就会让该店全部映射一条都不命中；
+// 更隐蔽的是重配：四列键都不撞 ⇒ 新增一行，旧行仍 confirmed ⇒ 产品详情把两条都算进"已关联"。
+// 本条把四处（认款 / 队列 / 列表展示 / 写入判重）一次钉住 —— 少钉一处就是"改了这处忘了那处"。
+// ═══════════════════════════════════════════════════════════════════════════════
+check('改店铺平台后：认款仍命中、队列仍算已关联、展示跟店铺走、重配是更新（不新增幽灵行）', () => {
+  reset();
+  const shops = seedShops();
+  mapShopNames();
+  const products = seedProducts(2);
+  seedOrders([{ shop: '店1', fields: { 商品ID: 'CHG1' } }]);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'CHG1', productId: products[0] },
+  ]);
+  // 自证前提：改之前四条链路本来就是对的（否则下面的断言可能只是"什么都没发生"）
+  assert.strictEqual(pdb.resolveOrderSku({ shop: '店1', itemId: 'CHG1' })?.productCode, 'P-0001');
+  assert.strictEqual(pdb.shopSkuQueue().stats.mapped, 1);
+  assert.strictEqual(queryMap().rows[0].platform, 'amazon');
+
+  // —— 改平台：等价于「店铺登记」里把下拉框从 amazon 改成 temu（全量提交）——
+  sdb.upsertShop({
+    id: shops[0],
+    platform: 'temu',
+    name: '店铺1',
+    platformShopId: '',
+    shopUrl: '',
+    site: '',
+    status: 'active',
+    openedAt: '',
+    note: '',
+  });
+
+  const hit = pdb.resolveOrderSku({ shop: '店1', itemId: 'CHG1' });
+  assert.strictEqual(hit?.productCode, 'P-0001', '改平台后认款断了 —— 平台不该参与匹配');
+  assert.strictEqual(hit?.platform, 'temu', '返回值里的平台要跟店铺当前值（下游写映射用它）');
+  assert.strictEqual(pdb.shopSkuQueue().stats.mapped, 1, '队列把已关联的商品塞回了待办（用户得重配一遍）');
+  assert.strictEqual(queryMap().rows[0].platform, 'temu', '映射列表还显示旧平台 —— 与店铺登记自相矛盾');
+  assert.strictEqual(pdb.skuMapSummary().byPlatform[0].platform, 'temu', '平台汇总仍按旧副本分组');
+
+  // 重配同一条绑定：必须是**更新**。新增 = 旧行永远命中不了的幽灵关联
+  const out = pdb.upsertSkuMappings([
+    { platform: 'temu', shopId: shops[0], itemId: 'CHG1', productId: products[1] },
+  ]);
+  assert.strictEqual(out.updated, 1);
+  assert.strictEqual(out.created, 0);
+  assert.strictEqual(queryMap().total, 1, '改平台后重配新增了一行 —— 产品详情会把两条都算进"已关联"');
+  assert.strictEqual(queryMap().rows[0].productCode, 'P-0002', '重配没落到原来那条绑定上');
+});
+
+check('改店铺平台**只影响展示**：别的店铺/商品一个都不能跟着变', () => {
+  reset();
+  const shops = seedShops(2);
+  const products = seedProducts(1);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shops[0], itemId: 'M1', productId: products[0] },
+    { platform: 'shopee', shopId: shops[1], itemId: 'M1', productId: products[0] },
+  ]);
+  sdb.upsertShop({
+    id: shops[0], platform: 'temu', name: '店铺1', platformShopId: '', shopUrl: '',
+    site: '', status: 'active', openedAt: '', note: '',
+  });
+  const rows = queryMap().rows;
+  assert.strictEqual(rows.find((r) => r.shopId === shops[0]).platform, 'temu');
+  assert.strictEqual(rows.find((r) => r.shopId === shops[1]).platform, 'shopee', '没有改的店跟着变了（同商品ID 被串了）');
+  // 搜索框按"看到的平台"搜得到（展示已经改了，搜不到就是两套口径）
+  assert.strictEqual(queryMap({ search: 'temu' }).total, 1, '按新平台搜不到 —— 用户会以为映射没了');
+  assert.strictEqual(queryMap({ search: 'shopee' }).total, 1, '另一家店按自己的平台仍要搜得到');
+  // 同商品ID 在两家店各有一条绑定：改其中一家的平台，另一家照样命中
+  assert.strictEqual(pdb.resolveSkuBatch([{ shopId: shops[1], itemId: 'M1' }])[0].matched, true);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ⭐ 人工核对**回流**：在「归类核对」页点名某个款 → 顺手记住「(店铺, 商品ID) → 款 + 色」
 //
 // 为什么必须钉在**数据层**而不是界面：回流的意义是"影响**后续**订单"——
@@ -537,10 +631,12 @@ function seedOrderRows(rows) {
       `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
       [`fp-cls-${fpSeq}`, `ufp-cls-${fpSeq}`, '', ''],
     ).lastInsertRowid;
-    const id = dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
+    const no = `CO-${fpSeq}`;
+    dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES (?,?)`, [no, r.shop]);
+    const h = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]).id);
+    const id = dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?,?,?)`, [
+      h,
       img,
-      `CO-${fpSeq}`,
-      r.shop,
       JSON.stringify(r.fields),
     ]).lastInsertRowid;
     ids.push(id);
@@ -557,10 +653,13 @@ function importOrderRows(rows) {
   const out = [];
   for (const r of rows) {
     fpSeq += 1;
-    const img = dbRun(
-      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
-      [`fp-imp-${fpSeq}`, `ufp-imp-${fpSeq}`, '', ''],
-    ).lastInsertRowid;
+    let img = r.imageId;
+    if (!img) {
+      img = dbRun(
+        `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+        [`fp-imp-${fpSeq}`, `ufp-imp-${fpSeq}`, r.imageUrl ?? '', ''],
+      ).lastInsertRowid;
+    }
     const orderId = odb.insertOrder({
       imageId: img,
       orderNo: r.orderNo ?? `IM-${fpSeq}`,
@@ -574,6 +673,22 @@ function importOrderRows(rows) {
     out.push({ orderId, imageId: img });
   }
   return out;
+}
+
+/**
+ * 采集快照夹具（`pl_shop_items.sku_json`）：按图定色要读它。
+ * 走 `sidb.upsertShopItems` 的**真实落库路径**（帧形状），不手搓 JSON ——
+ * 手搓会把"采集侧颜色/图 URL 存成什么形状"这件事抹平，让错误实现恒绿。
+ */
+function seedSkuSnapshot(shopId, itemId, skus) {
+  const frame = {
+    schema: 'ae-shop-item/v1',
+    store: {},
+    items: [{ itemId, title: `T-${itemId}`, skus }],
+  };
+  const r = sidb.upsertShopItems(frame, { pinnedShopId: shopId });
+  assert.strictEqual(r.inserted ?? 0, 1, `采集快照没落进去：${JSON.stringify(r)}`);
+  return r;
 }
 
 /**
@@ -600,7 +715,7 @@ function seedClassify() {
 /** 某条订单的图片落在哪个款色上（"回填存量"唯一可观测的落点） */
 function styleColorOfOrder(orderId) {
   return dbGet(
-    `SELECT c.color AS color, s.code AS code FROM oi_orders o
+    `SELECT c.color AS color, s.code AS code FROM oi_order_items o
        JOIN oi_images i ON i.id = o.image_id
        LEFT JOIN oi_style_colors c ON c.id = i.style_color_id
        LEFT JOIN oi_styles s ON s.id = c.style_id
@@ -931,10 +1046,12 @@ function seedOrderImage(shop, itemId, localPath) {
     `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
     [`fp-adopt-${adoptSeq}`, `ufp-adopt-${adoptSeq}`, '', localPath],
   ).lastInsertRowid;
-  dbRun(`INSERT INTO oi_orders (image_id, order_no, shop, raw_fields) VALUES (?,?,?,?)`, [
+  const no = `ADO-${adoptSeq}`;
+  dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES (?,?)`, [no, shop]);
+  const h = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?,?,?)`, [
+    h,
     img,
-    `ADO-${adoptSeq}`,
-    shop,
     JSON.stringify({ 商品ID: itemId }),
   ]);
 }
@@ -1064,6 +1181,461 @@ check('与界面同口径：该商品有**覆盖图**时采纳覆盖图（你看
   assert.strictEqual(list.length, 1);
   assert.strictEqual(list[0].localPath, ADOPT_IMG_OVERRIDE, '忽略了人的覆盖图（界面里显示的就是那张）');
   assert.strictEqual(list[0].source, 'item-override');
+});
+
+// ---- 认店第五级：商品ID 反查采集快照（2026-10-19）----
+//
+// 报障形状：用户把店名填进「平台店铺ID」、URL 数字也填错 ⇒ `matchShopByStore` 的
+// URL / storeId / 店名 / 桶键记忆四级全落空 ⇒ 订单**永远认不了店**，映射配了也不生效
+// （`resolveOrderSku` 在"店铺未归一"处直接返回 null）。而订单行上一直带着商品ID，
+// `pl_shop_items` 的键就是 `(shop_id, store_key, item_id)` —— 商品ID 自己就能反证店。
+//
+// 这一组钉住四件事：① 认得出；② 认店后**真写进**了款色；③ 回流不再报 shopUnresolved；
+// ④ 反查不出（没采到过 / 多店歧义）时必须回到"未归一"，绝不猜。
+
+/** 采集快照里播一条"这个商品归在这家店"（走真实落库函数，不手搓行） */
+function seedSnapshot(shopName, itemId) {
+  sidb.upsertShopItems({
+    schema: 'ae-shop-item/v1',
+    store: { name: shopName },
+    items: [{ itemId, title: '', skus: [] }],
+  });
+}
+
+check('反查认店①：店铺原文认不出，但该商品在采集快照里归过某店 → 订单**当场归款**（写进款色）', () => {
+  reset();
+  const shop = seedShops(1)[0]; // 店铺1 / amazon（不 mapShopNames ⇒ '店1' 仍未归一）
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([{ platform: 'amazon', shopId: shop, itemId: 'B0ITEM', productId: pid, status: 'confirmed' }]);
+  // 采过：这个商品当初归在「店铺1」名下
+  seedSnapshot('店铺1', 'B0ITEM');
+
+  // 反证：没有这条采集快照时它认不出店（否则下面的"归款成功"可能来自别的通路）
+  assert.strictEqual(pdb.resolveOrderSku({ shop: '店1', itemId: 'B0NOPE' }), null, '没采到过的商品不该被认店');
+
+  const [row] = importOrderRows([{ shop: '店1', fields: { 商品ID: 'B0ITEM', 商品标题: 'T恤' } }]);
+  assert.strictEqual(styleColorOfOrder(row.orderId).code, 'P-0001', '认店 → 命中映射 → 图片要挂到这个款上');
+});
+
+check('反查认店②：resolveShopRef 带 itemId 才反查（不带就维持原语义，不凭空认店）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  seedSnapshot('店铺1', 'B0ITEM');
+  assert.strictEqual(pdb.resolveShopRef('店1').shopId, 0, '不带 itemId = 没有反查证据，必须维持"未归一"');
+  const ref = pdb.resolveShopRef('店1', 'B0ITEM');
+  assert.strictEqual(ref.shopId, shop);
+  assert.strictEqual(ref.platform, 'amazon', '平台要跟着店走（空平台会写坏映射）');
+});
+
+check('反查认店③：人工核对回流不再报 shopUnresolved，映射真的写进去了', () => {
+  const { style1 } = seedClassify(); // 店1 → 店铺1 已归一，但下面用**野店**
+  seedSnapshot('店铺1', 'B0BACK');
+  const [backId] = seedOrderRows([{ shop: '野店A', fields: { 商品ID: 'B0BACK' } }]);
+  const res = odb.assignOrderStyle({ orderId: backId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.skuBackfill.status, 'written', `回流应写入而不是报未归一：${JSON.stringify(res.skuBackfill)}`);
+  assert.strictEqual(queryMap({ search: 'B0BACK' }).total, 1, '映射行要真落库');
+});
+
+check('反查认店④：反查不出（多店歧义）→ 仍报 shopUnresolved，绝不挑一个店写映射', () => {
+  const { style1 } = seedClassify();
+  const shopA = shopByName('店铺1').id;
+  const shopB = shopByName('店铺2').id;
+  // 同一商品ID 在两家店都采到过（历史重复行的真实形状）
+  for (const shop of [shopA, shopB]) {
+    dbRun(`INSERT INTO pl_shop_items (shop_id, store_key, item_id, sku_json) VALUES (?, '', 'B0AMB', '[]')`, [shop]);
+  }
+  const [ambId] = seedOrderRows([{ shop: '野店B', fields: { 商品ID: 'B0AMB' } }]);
+  const res = odb.assignOrderStyle({ orderId: ambId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.skuBackfill.status, 'shopUnresolved', '歧义 = 没有证据，不许猜');
+  assert.strictEqual(queryMap({ search: 'B0AMB' }).total, 0);
+});
+
+check('反查认店⑤：队列里"其实已配映射"的行不得留在待办（剔除必须先认店再拼键）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([{ platform: 'amazon', shopId: shop, itemId: 'B0QUE', productId: pid, status: 'confirmed' }]);
+  seedSnapshot('店铺1', 'B0QUE');
+  seedOrders([{ shop: '店1', fields: { 商品ID: 'B0QUE' } }]);
+  const q = pdb.shopSkuQueue({});
+  assert.strictEqual(
+    q.rows.filter((r) => r.itemId === 'B0QUE').length,
+    0,
+    '反查认店 + 已配映射 ⇒ 这行是已完成，不能挂在「待关联」里',
+  );
+  assert.ok(q.stats.mapped >= 1, '要计入 mapped（否则关联率永远偏低）');
+  assert.deepStrictEqual(q.stats.unresolvedShops, [], '店已经被反查认出来了，不该再提示用户去归一');
+});
+
+// ---- 按图定色（2026-10-19）----
+// 真实库证据：订单报表的「产品图片链接」是**逐单 SKU 图**（同一商品ID 的 9 条订单对应 4~6 张不同图），
+// 且能对上的 2 条订单，其图与采集 `sku_json[].imageUrl` 逐字节相同。
+// 这四条的立足点：**定不了色是安全的（未分类，人看一眼），定错色=发错货**。
+
+/** 归款结果里的颜色（`''` = 图没归到任何款色） */
+function colorOfImage(imageId) {
+  const r = dbGet(
+    `SELECT COALESCE(c.color,'') AS color FROM oi_images i
+       LEFT JOIN oi_style_colors c ON c.id = i.style_color_id WHERE i.id = ?`,
+    [imageId],
+  );
+  return String(r?.color ?? '');
+}
+
+check('按图定色①：多色商品 + 映射不带色 → 按**订单图**归到对应色（不再全落未分类）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0IMG', productId: pid, status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0IMG', [
+    { color: '7', size: 'M', imageUrl: 'https://cdn/kf/S7.jpg', price: '' },
+    { color: 'Khaki', size: 'M', imageUrl: 'https://cdn/kf/Sk.jpg', price: '' },
+  ]);
+  // 两张订单图分别对应两个色 —— 同一商品ID 的不同订单必须是**各自**的颜色
+  const [a, b] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0IMG' }, imageUrl: 'https://cdn/kf/S7.jpg' },
+    // 带 CDN 查询串也要命中（真实报表给的就是带参数的那一种）
+    { shop: '店1', fields: { 商品ID: 'B0IMG' }, imageUrl: 'https://cdn/kf/Sk.jpg?x-oss-process=resize' },
+  ]);
+  assert.strictEqual(colorOfImage(a.imageId), '7', '图指向哪个色就归哪个色');
+  assert.strictEqual(colorOfImage(b.imageId), 'Khaki', '带查询串的图同样要能对上');
+  assert.strictEqual(styleColorOfOrder(a.orderId).code, 'P-0001', '款仍要走映射定');
+});
+
+check('按图定色②：多色共用同一张图 → 歧义必须落未分类（绝不取第一个）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0AMB2', productId: pid, status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0AMB2', [
+    { color: 'A', size: 'M', imageUrl: 'https://cdn/kf/same.jpg', price: '' },
+    { color: 'B', size: 'M', imageUrl: 'https://cdn/kf/same.jpg', price: '' },
+  ]);
+  const [{ imageId: img }] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0AMB2' }, imageUrl: 'https://cdn/kf/same.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(img), '未分类', '一张图对上两个色 ⇒ 定不了，落占位色');
+});
+
+check('按图定色③：映射配了色 → 配的色赢（图只作兜底，不推翻人的结论）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0PIN', productId: pid, spec: '红色', status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0PIN', [
+    { color: 'Khaki', size: 'M', imageUrl: 'https://cdn/kf/Sk.jpg', price: '' },
+  ]);
+  const [{ imageId: img }] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0PIN' }, imageUrl: 'https://cdn/kf/Sk.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(img), '红色', '人配的颜色压过按图推导');
+});
+
+check('按图定色④：图已有真实色（人工/AI/色图采纳）→ 归款不得冲成未分类', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  const pid = seedProducts(1)[0];
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0KEEP', productId: pid, status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0KEEP', [
+    { color: '7', size: 'M', imageUrl: 'https://cdn/kf/S7.jpg', price: '' },
+  ]);
+  // 先让一条普通订单把款建出来（`oi_styles` 的创建走真实归款路径，不手搓款表）
+  importOrderRows([{ shop: '店1', fields: { 商品ID: 'B0KEEP' }, imageUrl: 'https://cdn/kf/S7.jpg' }]);
+  const styleId = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'P-0001'`).id);
+  // 同一款可能已被前几条用例建过「黑色」（reset 不清 oi_styles）⇒ 先查再建，不硬插
+  let sc = dbGet(`SELECT id FROM oi_style_colors WHERE style_id = ? AND color = '黑色'`, [styleId])?.id;
+  if (!sc) {
+    sc = dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [
+      styleId,
+      '黑色',
+      'P-0001-HEISE',
+    ]).lastInsertRowid;
+  }
+  // 这张图**指向采集里的色 7**（按图推导会得出 7），但它已经归好真实色「黑色」
+  // ⇒ 归款必须保留人的结论，不能被推导冲掉
+  const img = dbRun(
+    `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
+    ['fp-keep-1', 'ufp-keep-1', 'https://cdn/kf/S7.jpg', '', sc],
+  ).lastInsertRowid;
+  const [{ imageId: used }] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0KEEP' }, imageId: img },
+  ]);
+  assert.strictEqual(colorOfImage(used), '黑色', '已有真实色必须原样保留');
+});
+
+// ---- 色名对照（2026-10-19）：平台色名 → 自家色名 ----
+// 真实库证据：平台色是 `Khaki` / `Photo color` / `1..15`，产品色是 `黑色`、`卡其` ——
+// 没有可计算的对应关系，只能由人在核对页指认一次。这两条钉的是：
+//   ① **一次指认、同款复用**（不是"这一行改完就算了"）；
+//   ② **按产品隔离**（同平台色名在不同款上可以有不同叫法，不能一张全局表拍死）。
+// ⚠️ 断言必须让第二单走**没有映射色**的路径：如果它命中了映射里的 spec，
+//    那测的是 `pl_shop_sku.spec`（老逻辑），字典压根没参与 —— 用例会恒绿。
+
+check('色名对照①：核对时把 Khaki 改成自家色名 → 记住这一对，同款其它商品自动用自家名', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  odb.importStyles([{ code: 'P-0001', name: '产品1', color: '卡其', fingerprint: 'fp-alias-a' }]);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0ALIAS', productId: pid, status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0ALIAS', [
+    { color: 'Khaki', size: 'M', imageUrl: 'https://cdn/kf/Sk.jpg', price: '' },
+  ]);
+  // 前提：没配对照时，按采集原样落**平台色名**（否则下面的翻译断言没有对照物）
+  const [first] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0ALIAS' }, imageUrl: 'https://cdn/kf/Sk.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(first.imageId), 'Khaki', '前提：没有对照时落平台色名');
+
+  // 人工核对：改成「卡其」→ 这一对要被记住
+  const res = odb.assignOrderStyle({ orderId: first.orderId, styleCode: 'P-0001', color: '卡其' });
+  assert.deepStrictEqual(res.colorAlias, { from: 'Khaki', to: '卡其' }, '色名对照应被记住');
+  assert.strictEqual(colorOfImage(first.imageId), '卡其', '这一单本身也改到自家色名');
+
+  // 同款的**另一个商品**：映射只到款、没配色 ⇒ 只能靠字典翻译
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0ALIAS2', productId: pid, status: 'confirmed' },
+  ]);
+  seedSkuSnapshot(shop, 'B0ALIAS2', [
+    { color: 'Khaki', size: 'M', imageUrl: 'https://cdn/kf/Sk2.jpg', price: '' },
+  ]);
+  const [second] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0ALIAS2' }, imageUrl: 'https://cdn/kf/Sk2.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(second.imageId), '卡其', '同款其它商品自动用自家色名（不用再改一遍）');
+});
+
+check('色名对照②：别的款上的同一个 Khaki 不受影响（产品级隔离）', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid1, pid2] = seedProducts(2);
+  odb.importStyles([
+    { code: 'P-0001', name: '产品1', color: '卡其', fingerprint: 'fp-alias-b1' },
+    { code: 'P-0002', name: '产品2', color: '驼色', fingerprint: 'fp-alias-b2' },
+  ]);
+  // 只有 P-0001 认过 `Khaki → 卡其`
+  const remembered = odb.rememberColorAlias(pid1, 'Khaki', '卡其');
+  assert.deepStrictEqual(remembered, { from: 'Khaki', to: '卡其' });
+
+  for (const [itemId, pid, url] of [
+    ['B0ISO1', pid1, 'https://cdn/kf/Sk1.jpg'],
+    ['B0ISO2', pid2, 'https://cdn/kf/Sk2.jpg'],
+  ]) {
+    pdb.upsertSkuMappings([{ platform: 'amazon', shopId: shop, itemId, productId: pid, status: 'confirmed' }]);
+    seedSkuSnapshot(shop, itemId, [{ color: 'Khaki', size: 'M', imageUrl: url, price: '' }]);
+  }
+  const [one, two] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0ISO1' }, imageUrl: 'https://cdn/kf/Sk1.jpg' },
+    { shop: '店1', fields: { 商品ID: 'B0ISO2' }, imageUrl: 'https://cdn/kf/Sk2.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(one.imageId), '卡其', '配过对照的款 → 自家色名');
+  assert.strictEqual(colorOfImage(two.imageId), 'Khaki', '没配过的款保持原样（不许被别的款带跑）');
+});
+
+// ───────────────────────────────────────────── 映射重放（全库自愈）
+// 背景：真实库里存在「映射已确认、订单却没吃到」的行 —— 成因是 `upsertSkuMappings`
+// 这条路径**不回填**存量（只有人工核对那一句 `rememberSkuMapping` 会回填），
+// 于是"先导单、后配映射"的商品永远停在未归款，界面上与"没配过映射"完全同形。
+// 这两条钉的是：① 能补、dryRun 不写、且幂等；② 挂在真实颜色上的一律不动。
+
+check('映射重放①：先导单后配映射的漏网行 —— dryRun 只报数，真跑才补，且幂等', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  odb.importStyles([{ code: 'P-0001', name: '产品1', color: '黑色', fingerprint: 'fp-rp-a' }]);
+  // ① 先导单：此刻还没有映射
+  const [o1] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0REPLAY' }, imageUrl: 'https://cdn/kf/Rp.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(o1.imageId), '', '前提：没有映射时不该有归属');
+  // ② 后配映射（这条路径不回填 —— 真实库的漏网正是这么来的）
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0REPLAY', productId: pid, spec: '黑色', status: 'confirmed' },
+  ]);
+  assert.strictEqual(colorOfImage(o1.imageId), '', '前提：配映射不会自动回填存量（否则本用例测不到重放）');
+
+  // ③ dryRun：报得出，但一行都不许写
+  const dry = odb.replaySkuMappings({ dryRun: true });
+  assert.ok(dry.fixableRows >= 1, `dryRun 应报出可补的行（得到 ${JSON.stringify(dry)}）`);
+  assert.strictEqual(dry.fixedRows, 0, 'dryRun 不许写库');
+  assert.strictEqual(colorOfImage(o1.imageId), '', 'dryRun 之后订单仍未被改');
+
+  // ④ 真跑：补上，颜色取映射里配的那个
+  const real = odb.replaySkuMappings();
+  assert.ok(real.fixedRows >= 1, `真跑应补上（得到 ${JSON.stringify(real)}）`);
+  assert.strictEqual(colorOfImage(o1.imageId), '黑色', '补上后颜色应取映射里配的颜色');
+
+  // ⑤ 幂等：再跑一次不该再改任何行（页面加载会反复调它，不幂等就是每次进页面都重写库）
+  const again = odb.replaySkuMappings();
+  assert.strictEqual(again.fixedRows, 0, '重放必须幂等（第二次不该再改）');
+  assert.strictEqual(colorOfImage(o1.imageId), '黑色', '幂等重跑不许把已有归属改坏');
+});
+
+check('映射重放②：已经挂在真实颜色上的行一律不动（重放不许改判人的结论）', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  odb.importStyles([{ code: 'P-0001', name: '产品1', color: '黑色', fingerprint: 'fp-rp-b' }]);
+  // keep 的商品**已有映射（黑色）**：导进来就会自动归到黑色，随后被人改成白色 ——
+  // 这正是"人的结论盖过映射"的真实形态。若夹具让映射色与人工色相同，
+  // 那"重放不许改判"这条断言会恒绿（覆盖了也看不出来）。
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0KEEP', productId: pid, spec: '黑色', status: 'confirmed' },
+  ]);
+  const [keep, miss] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0KEEP' }, imageUrl: 'https://cdn/kf/Kp.jpg' },
+    { shop: '店1', fields: { 商品ID: 'B0MISS' }, imageUrl: 'https://cdn/kf/Ms.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(keep.imageId), '黑色', '前提：映射命中 → 先归到黑色');
+  // 人把它改成白色（这是人的结论，重放不许推翻）
+  odb.assignOrderStyle({ orderId: keep.orderId, styleCode: 'P-0001', color: '白色' });
+  assert.strictEqual(colorOfImage(keep.imageId), '白色', '前提：人工结论已落库');
+  // miss 这一单的商品随后才配上映射（黑色）
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0MISS', productId: pid, spec: '黑色', status: 'confirmed' },
+  ]);
+  odb.replaySkuMappings();
+  assert.strictEqual(colorOfImage(keep.imageId), '白色', '挂在真实颜色上的行不许被重放改判');
+  assert.strictEqual(colorOfImage(miss.imageId), '黑色', '漏网的那单要被补上');
+});
+
+// ───────────────────────────────────────────── 报表规格串定色（2026-10-20）
+// 背景：订单报表没有颜色列，颜色藏在「产品信息」的 `(产品属性:Color:5,...)` 里；而以前唯一来源是
+// 「订单图 → 采集 SKU 色图」。采集没覆盖到的商品（本机库 44/51 单）于是全部落「未分类」——
+// **不同颜色的订单在拣货单上长得一模一样**。这三条钉的是：① 不看图也能定出平台色名、且认一次后
+// 同款自动翻译；② 一单多色**不取第一个**；③ 存量回填只补空值、不覆盖人的结论。
+
+check('报表规格串定色①：映射不带色 + 采集没覆盖 → 色名从规格串来，认一次后同款自动翻译', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  odb.importStyles([{ code: 'P-0001', name: '产品1', color: '黑色', fingerprint: 'fp-props-a' }]);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0PROPS', productId: pid, status: 'confirmed' },
+  ]);
+  // ⚠️ 刻意**不种采集快照**：真实库里多数商品从没采过 ⇒ "按图定色"这条路恒空。
+  //    夹具若补上快照，"规格串"这条就算不实现也会绿（图能定色）。
+  const info = '【1】x\n(产品属性:Color:7,Size:M,Ships From:China Mainland)\n(产品数量:1 piece)';
+  const [o1] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0PROPS', 产品信息: info }, imageUrl: 'https://cdn/kf/Pr1.jpg' },
+  ]);
+  assert.strictEqual(
+    colorOfImage(o1.imageId),
+    '7',
+    '没有色图时颜色要取报表规格串里的平台色名（不是「未分类」）',
+  );
+  const col = dbGet(`SELECT color FROM oi_order_items WHERE id = ?`, [o1.orderId]);
+  assert.strictEqual(String(col?.color ?? ''), '7', '订单行要记下平台色名（界面靠它认出同款不同色）');
+
+  // 人工核对：把 `7` 认成黑色 —— 这一对必须被记住（平台侧原文取自报表规格串，不是刚写下的订单列）
+  const r = odb.assignOrderStyle({ orderId: o1.orderId, styleCode: 'P-0001', color: '黑色' });
+  assert.deepStrictEqual(r.colorAlias, { from: '7', to: '黑色' }, '没有采集快照时也要学会这一对');
+  assert.strictEqual(colorOfImage(o1.imageId), '黑色', '人工结论落库');
+
+  // 同款另一个商品（同一个平台色名 `7`）→ 下一单自动落成自家色名，不必再认一遍
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0PROP2', productId: pid, status: 'confirmed' },
+  ]);
+  const [o2] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0PROP2', 产品信息: info }, imageUrl: 'https://cdn/kf/Pr2.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(o2.imageId), '黑色', '同款不同商品要自动用自家色名');
+});
+
+check('报表规格串定色②：一单多色 → 保持「未分类」（绝不取第一个）', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  odb.importStyles([{ code: 'P-0001', name: '产品1', color: '黑色', fingerprint: 'fp-props-b' }]);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0MULTI', productId: pid, status: 'confirmed' },
+  ]);
+  // 真库形态：一张订单 4 个 SKU 行，两种颜色
+  const info =
+    '【1】x\n(产品属性:Color:10,Size:XL)\n【2】x\n(产品属性:Color:10,Size:XXL)\n' +
+    '【3】x\n(产品属性:Color:6,Size:XL)\n【4】x\n(产品属性:Color:6,Size:L)';
+  const [o] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0MULTI', 产品信息: info }, imageUrl: 'https://cdn/kf/Mu.jpg' },
+  ]);
+  assert.strictEqual(colorOfImage(o.imageId), '未分类', '多色订单不许落色（取第一个就是静默错色）');
+  const col = dbGet(`SELECT color FROM oi_order_items WHERE id = ?`, [o.orderId]);
+  assert.strictEqual(String(col?.color ?? ''), '', '定不出色时订单行保持空（不写第一个）');
+});
+
+check('v5 回填：存量订单只补空值，人工结论一行都不动', () => {
+  reset();
+  for (const t of ['oi_style_colors', 'oi_style_fingerprints', 'oi_styles', 'oi_color_aliases']) dbRun(`DELETE FROM ${t}`);
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const info = '【1】x\n(产品属性:Color:9,Size:M)';
+  const [a, b] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0BACK1', 产品信息: info }, imageUrl: 'https://cdn/kf/Bk1.jpg' },
+    { shop: '店1', fields: { 商品ID: 'B0BACK2', 产品信息: info }, imageUrl: 'https://cdn/kf/Bk2.jpg' },
+  ]);
+  // 造"修好之前的存量形状"：颜色列空（以前没有规格串这条路），另一行已经有人工结论。
+  // 拆表后颜色在明细表；v5 的「从规格串补平台色名、只补空」语义由 `insertOrder` 落库时解析承载，
+  // 这里直接验证那条解析路径 + 明细落点（不再回退版本触发迁移链 —— v8 拆表重建表后重放会崩）。
+  dbRun(`UPDATE oi_order_items SET color = '' WHERE id IN (?, ?)`, [a.orderId, b.orderId]);
+  dbRun(`UPDATE oi_order_items SET color = '黑色' WHERE id = ?`, [b.orderId]);
+  // 重导入 a（走 insertOrder 落库那一刻的 `parseOrderPropsColor`）
+  const a2 = odb.insertOrder({
+    imageId: null, orderNo: `IM-RETRY-${fpSeq + 1}`, shop: '店1', size: 'M',
+    category: '', color: '', logo: '', rawFields: { 商品ID: 'B0BACK1', 产品信息: info },
+  });
+
+  const colorOf = (id) =>
+    String(dbGet(`SELECT color FROM oi_order_items WHERE id = ?`, [id])?.color ?? '');
+  assert.strictEqual(colorOf(a2), '9', '空值行要回填出平台色名');
+  assert.strictEqual(colorOf(b.orderId), '黑色', '已有值（人工结论）一行都不许动');
+});
+
+// 真库取证（2026-10-20）：2 条映射指向**已删除的产品**（`9802`），卡住 10 单 ——
+// 而队列按映射表算"已关联"，于是这些商品**连待办都不进**：用户看到"10 单认不出"却没有任何入口。
+check('映射悬空：产品被删后要回到待办（队列与认款同一口径）', () => {
+  reset();
+  const shop = seedShops(1)[0];
+  mapShopNames(1);
+  const [pid] = seedProducts(1);
+  pdb.upsertSkuMappings([
+    { platform: 'amazon', shopId: shop, itemId: 'B0DANGLE', productId: pid, status: 'confirmed' },
+  ]);
+  importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0DANGLE' }, imageUrl: 'https://cdn/kf/Dg.jpg' },
+  ]);
+  const queued = () => pdb.shopSkuQueue({}).rows.filter((r) => r.itemId === 'B0DANGLE');
+  assert.strictEqual(queued().length, 0, '前提：有生效映射时该商品不在待办里');
+
+  pdb.deleteProduct(pid);
+  const row = queued()[0];
+  assert.ok(row, '产品被删后必须回到待办（否则用户没有地方能修）');
+  assert.strictEqual(row.status, 'unmapped', '店铺已归一 ⇒ 缺的是映射，不是店名');
+  const batch = pdb.resolveSkuBatch([{ platform: 'amazon', shopId: shop, itemId: 'B0DANGLE' }]);
+  assert.strictEqual(
+    batch[0].matched,
+    false,
+    '批量解析同一口径：悬空映射不算命中（否则是 matched + 空产品名）',
+  );
 });
 
 // ---- 收尾 ----

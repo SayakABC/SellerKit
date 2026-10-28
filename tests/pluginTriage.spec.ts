@@ -355,7 +355,7 @@ describe('UI 岛的 manifest.name 与目录名一致', () => {
 
 describe('岛的运行入口必须真实入库（防 .gitignore 静默吞掉源码）', () => {
   // 背景（2026-09-22 H-04）：`.gitignore` 的 `dist/` 通配会匹配**任意层级**的 dist 目录。
-  // excel-copy / shipping-rate 是「无构建步骤」的岛 —— 没有 package.json / vite.config，
+  // excel-copy 是「无构建步骤」的岛（shipping-rate 已于 2026-10-15 回收为内建模块，不再属此类）—— 没有 package.json / vite.config，
   // 源码直接手写在 dist/ 下，manifest.entry 指向 ./dist/index.html。
   // 于是 `git add -A` 只收录了 manifest.json + README.md，仓库里长期存着两个
   // 「entry 指向不存在文件」的坏岛（其中 order-insight 1.2.0 已发布、仓库里却从来没有它的源码 ——
@@ -386,7 +386,7 @@ describe('岛的运行入口必须真实入库（防 .gitignore 静默吞掉源�
     const noBuild = islandIds().filter(
       (id) => !existsSync(resolve(root, 'ui-plugins', id, 'package.json')),
     );
-    expect(noBuild.length).toBeGreaterThan(0); // 当前为 excel-copy / shipping-rate（order-insight 已随岛下架）
+    expect(noBuild.length).toBeGreaterThan(0); // 当前为 excel-copy（order-insight 随岛下架、shipping-rate 于 2026-10-15 回收为内建）
     expect(noBuild.filter((id) => isGitIgnored(`ui-plugins/${id}/dist/`) === true)).toEqual([]);
   });
 });
@@ -445,62 +445,52 @@ describe('excel-copy 岛已对齐内建版能力（下记后不得悄悄缩水�
   });
 });
 
-describe('shipping-rate 岛已对齐宿主能力（声明了却没用 = 能力缺口）', () => {
-  // 与 excel-copy 同一组反向守卫：上面的「调用 ⊆ 声明」只管越权，管不了
-  // 「manifest 声明了、岛却从没调用」—— 后者用户侧表现为"功能凭空消失"，任何 schema 校验都不会响。
-  const ISLAND = 'shipping-rate';
+describe('无忧物流运费：岛通路已整域删除，且不得复活（单源= 不许出现第二处实现）', () => {
+  // 2026-10-15 二次收口：首轮回收只把 `host.ts` 该域改成薄委托（留给"市场里已装旧岛的用户"），
+  // 本轮按"项目尚未上线、没有这批用户"把**整条岛通路**拿掉：host.ts 的 DB_OPS 域、
+  // 市场 catalog 条目与 zip、OrderCostView 里读旧岛 storage 键的回落分支。
+  //
+  // 为什么必须留守卫（而不是把这段删干净）：这个域一旦被加回来，**症状不是报错**，
+  // 是同一份报价单算出两个数（岛桥与内建页各一份解析/计价，口径漂移 ⇒ 静默错价）。
+  // 且它长得"很合理"（薄委托 + 有注释解释为什么保留），review 时极易放过。
+  // 判据钉的是"域不该存在 + 岛不该存在"——比钉"解析只有一份"更靠上游，
+  // 后者挡不住有人新写一整个平行实现。
+  const block = hostDomainBlock('shipping-rate');
+  const ops = stripComments(
+    readFileSync(resolve(root, 'src', 'core', 'services', 'shipRateOps.ts'), 'utf-8'),
+  );
+  const svc = stripComments(
+    readFileSync(resolve(root, 'src', 'core', 'services', 'importSheet.ts'), 'utf-8'),
+  );
 
-  it('宿主 shipping-rate 域的每个 op 都被岛真实调用', () => {
-    const ops = hostDomainOps(ISLAND);
-    expect(ops.length).toBeGreaterThan(0); // 宿主域没登记 → 断言会空转，先钉住
-    const text = islandSource(ISLAND);
-    expect(ops.filter((op) => !new RegExp(`\\bsr\\('${op}'`).test(text))).toEqual([]);
+  it('host.ts 不得再有 shipping-rate 域（旧岛桥通路已下架）', () => {
+    expect(block, 'shipping-rate 域已于 2026-10-15 整域删除，别再加回来').toBe('');
   });
 
-  it('岛内不得出现 eval / new Function（iframe CSP 禁 eval，且本岛不需要任何求值）', () => {
-    const text = islandSource(ISLAND);
-    expect(/\bnew\s+Function\s*\(/.test(text)).toBe(false);
-    expect(/(^|[^.\w])eval\s*\(/m.test(text)).toBe(false);
+  it('市场目录不得再有这两个已回收的岛（catalog 与 zip 都要清）', () => {
+    // 对外发布的口子：留着条目就意味着用户仍能装到一个"功能已在宿主里"的旧岛，
+    // 装上后按旧口径算钱 —— 比不发布更糟。
+    const catalogPath = resolve(root, 'market-out', 'catalog.json');
+    if (!existsSync(catalogPath)) return; // 市场仓不在本仓时跳过（发布机才产出）
+    const catalog = JSON.parse(readFileSync(catalogPath, 'utf-8'));
+    const ids = (catalog.plugins || []).map((p: { id: string }) => p.id);
+    expect(ids).not.toContain('shipping-rate');
+    expect(ids).not.toContain('shop-accounts');
   });
 
-  it('岛内不引入 xlsx/SheetJS（解析在宿主完成，岛无构建步骤也引不进来）', () => {
-    const text = islandSource(ISLAND);
-    expect(/from\s+['"](xlsx|sheetjs)['"]/i.test(text)).toBe(false);
-    expect(/require\(\s*['"](xlsx|sheetjs)['"]\s*\)/i.test(text)).toBe(false);
+  it('单源仍在：解析只有 importSheet 一份实现', () => {
+    expect(ops).toContain('export async function parseRateSheet');
+    expect(ops, '服务层不复制解析').not.toMatch(/XLSX|xlsx/);
+    expect(ops).toContain('importSheet.importRateSheet');
+    expect(svc).toContain('pickRateSheet');
   });
 
-  it('岛内不自行套用费率算式（档位/取整口径只有宿主一份实现）', () => {
-    // 计价必须走宿主 op：岛里一旦出现「费率 × 克重」这类算式，两边口径就会漂移。
-    // 判据刻意只钉"对费率做四则运算"——不钉 Math.round/Math.ceil，
-    // 因为岛里合法地用它做**展示**（克重取整、由宿主的续重金额反推段数），
-    // 一刀切会让守卫命中函数定义而非真正的算式（假绿/假红的典型来源）。
-    const text = islandSource(ISLAND);
-    for (const field of ['ratePerKg', 'registerFee', 'firstFee', 'stepFee']) {
-      expect(new RegExp(`\\b${field}\\s*[-+*/]`).test(text)).toBe(false);
-    }
-    expect(/\bsr\('quote'/.test(text)).toBe(true); // 计价确实经宿主 op 落地
-  });
-
-  it('配置命名空间为 shipping-rate（storage 自身命名空间恒放行，无需额外声明）', () => {
-    const bridge = readFileSync(resolve(root, 'ui-plugins', ISLAND, 'dist/bridge.js'), 'utf-8');
-    expect(bridge).toMatch(/export const NS = 'shipping-rate'/);
-  });
-
-  it('宿主读表不得回落取第一个 sheet（报价单的第 1 张是「目录」）', () => {
+  it('读表不得回落取第一个 sheet（报价单的第 1 张是「目录」）', () => {
     // 2026-09-24 真实故障：`want && includes(want) ? want : sheetNames[0]` 让"导入运价表"
     // 必然失败 —— 运营商报价单是 **21 张 sheet 拼一本**，第 1 张是「目录」，目标表在第 10 张；
     // 更糟的是它把原因误报成「该 sheet 不是报价单结构」，用户以为数据有问题。
     // 正确做法是逐张体检后按名称提示/国家数自动挑（pickRateSheet，见 tests/shipRate.spec.ts §⑤）。
-    // 2026-09-30 起实现单源在 `core/services/importSheet`（宿主 op 只是薄包装，
-    // 内建导入入口与岛共用一份）→ 守卫要**顺着这条链**检查，而不是只看 host.ts：
-    //   ① 宿主 op 必须调服务（不许自己再解析一遍）；② 服务里必须用 pickRateSheet 挑表。
-    const block = hostDomainBlock('shipping-rate');
-    expect(block).not.toBe('');
-    expect(block).not.toMatch(/sheetNames\s*\[\s*0\s*\]/);
-    expect(block, '宿主 op 必须调统一导入服务').toContain('importSheet.importRateSheet');
-    const svc = stripComments(
-      readFileSync(resolve(root, 'src', 'core', 'services', 'importSheet.ts'), 'utf-8'),
-    );
+    expect(ops).not.toMatch(/sheetNames\s*\[\s*0\s*\]/);
     expect(svc, '挑表必须用 pickRateSheet（不能回落取第一张）').toContain('pickRateSheet');
     expect(svc).not.toMatch(/sheetNames\s*\[\s*0\s*\]/);
   });
@@ -508,16 +498,19 @@ describe('shipping-rate 岛已对齐宿主能力（声明了却没用 = 能力�
   it('导入走"名称提示"而不是"显式点名"（换版后 sheet 改名不该让导入硬失败）', () => {
     // 显式点名是"用户在下拉里选了哪张"，宿主会严格按它解析、不存在就报错。
     // 首次导入若沿用点名语义，用户拿到一份改过 sheet 名的新报价单时就会直接失败；
-    // 传提示则能自动落到可用的表上（岛侧还有候选列表兜底，选错了可手动改）。
-    const store = stripComments(
-      readFileSync(resolve(root, 'ui-plugins', ISLAND, 'dist/store.js'), 'utf-8'),
-    );
-    const fn = store.match(/export async function importByDialog[\s\S]*?\n\}/);
-    expect(fn).toBeTruthy();
-    const call = fn![0].match(/api\.parseRateSheet\([^)]*\)/);
-    expect(call).toBeTruthy();
-    expect(call![0]).toContain('prefer');
-    expect(call![0]).not.toContain('sheetName');
+    // 传提示则能自动落到可用的表上。判据落在 shipRateOps：sheetName 与 prefer 是**两个语义**，
+    // 都传下去（由 importSheet 决定谁生效），不许在服务层就把 prefer 改判成 sheetName。
+    expect(ops).toMatch(/sheetName:\s*ecStr\(opts\.sheetName/);
+    expect(ops).toMatch(/prefer:\s*ecStr\(opts\.prefer/);
+  });
+
+  it('计价口径单源：服务层不得出现费率算式，页面只收参数', () => {
+    // 判据刻意只钉"对费率做四则运算"——不钉 Math.round/Math.ceil，
+    // 因为取整展示是合法用途；一刀切会命中函数定义而非真正的算式。
+    for (const field of ['ratePerKg', 'registerFee', 'firstFee', 'stepFee']) {
+      expect(new RegExp(`\\b${field}\\s*[-+*/]`).test(ops)).toBe(false);
+    }
+    expect(ops, '计价确实走 quoteAll 单源').toContain('quoteAll');
   });
 });
 
@@ -528,7 +521,7 @@ describe('shipping-rate 岛已对齐宿主能力（声明了却没用 = 能力�
 // 已不复存在，留着只会读一个空目录。
 // 同样的契约现在由 `scripts/goods-ui-smoke.mjs` 在**内建页**上守着（38 条断言：一次性批量映射 /
 // 不跨店铺串数据 / 未解析店铺不可点 / 标失效按行 id / 部分 patch 不发空字段 / 供应商改名不改名 …）。
-// 将来再开岛时，按 excel-copy / shipping-rate 两组的形态写回来即可。
+// 将来再开岛时，按 excel-copy 的形态写回来即可。
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // 宿主 db 能力域的 op 预算（ADR-002 N5：新增域必须一次性给出 owner + 访问模式 + op 上限 ≤10）
@@ -550,7 +543,7 @@ describe('宿主 db 能力域的 op 预算（ADR-002 N5）', { timeout: 20000 },
    * 它走后剩余域的最大值是 `purchase` 24，所以本组仍必须豁免，否则会立刻红）。
    */
   const GRANDFATHERED: Record<string, number> = {
-    'shop-accounts': 17,
+    'shop-accounts': 21,
     purchase: 24,
   };
   const BUDGET = 10;

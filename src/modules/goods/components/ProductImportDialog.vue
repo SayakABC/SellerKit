@@ -4,7 +4,7 @@
       <div class="wb-dialog__head">
         <span>导入产品</span>
         <span v-if="fileName" class="im-file" :title="filePath">{{ fileName }}</span>
-        <button class="im-x" type="button" aria-label="关闭" @click="close">✕</button>
+        <button class="im-x" type="button" aria-label="关闭" data-act="import-close" @click="close">✕</button>
       </div>
 
       <!-- 步骤条：三步向导必须让用户知道「现在第几步、还差几步」。
@@ -330,7 +330,7 @@
           <button v-if="remaining.length" class="wb-btn" type="button" :disabled="busy" @click="backToPreview">
             返回修改
           </button>
-          <button class="wb-btn wb-btn--primary" type="button" @click="finish">完成</button>
+          <button class="wb-btn wb-btn--primary" type="button" data-act="import-done" @click="finish">完成</button>
         </template>
       </div>
     </div>

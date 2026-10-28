@@ -1,49 +1,37 @@
 <script setup lang="ts">
 // src/modules/order-cost/components/CostRatesSection.vue
-// 「算钱」页的**数据基础**区（C9 收编，2026-09-30）：款级成本表（只读浏览）+ 币种汇率（可改可加）。
+// 「统计」页（2026-10-17 前叫「算钱」）的**数据基础**区（C9 收编，2026-09-30）：
+// 产品当前进价（只读浏览）。
 //
-// 为什么成本表只读：**写入有唯一的家** ——「货与成本 › 进价」页（2026-10-09 P4 落地）。
-// 这一页的定位是**算钱**：它回答"现在成本表里有什么、为什么这行毛利是空的"。把录入放这里
-// 会让同一能力出现第二个平级入口（用户得猜哪个才是"真的"），而录入真正需要的东西
-// （缺价的款清单、款选择、生效区间）也都在那一页。
-// ⚠️ 反过来说，注释里原先写的理由（"手点会让用户在两个地方看到两份成本"）是错的 ——
-//    `ae_cost_map` 就一张表，不是两份；真正的约束是**入口唯一**。
+// 为什么整个区都是只读：**写入有唯一的家** —— 产品编辑抽屉（`ProductEditorDrawer`
+// 的「进价（元）」栏）。这一页的定位是**算钱**：它回答"现在产品价里有什么、
+// 为什么这行毛利是空的"。把录入放这里会让同一能力出现第二个平级入口（用户得猜哪个才是"真的"）。
 //
-// 汇率必须可改：算钱的基准币是 CNY，外币订单整单靠 `ae_rates` 折算；缺汇率 → 该单不进利润合计。
-// 岛内原先那份汇率维护随 C9 收编到这里（岛侧不再有入口）。
+// ⚠️ 这里列的是**产品当前价**（`pl_products.cost_cents`，给新订单钉预估用），
+//    不是某一行的历史成本：订单行自己的两个快照（`cost_cents` 预估 / `actual_cost_cents` 实付）
+//    才是利润的口径 —— 所以 "当前价" 与明细里某行的成本**本来就可能不一样**，不用说成同一份。
+//
+// 汇率维护入口已在 2026-10-22 随「基础数据 › 进价」页一起退役：当前全部订单金额均为人民币，
+// `ae_rates` 仅剩迁移老采集库时读取，实时利润引擎不再依赖它（`orderCost.ts` 无汇率查询）。
 
-import { computed, onMounted, ref, watch } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
-import type { AeCostMapItem, AeRateItem } from '@/types';
+import type { ProductListItem } from '@/types';
 
 const props = defineProps<{
   /** 有"缺成本"的行时自动展开（否则默认收起，不抢主视线的位置） */
   attention?: boolean;
-  /** 父页刷新时一起重取（成本表可能刚被拿货对账写新） */
+  /** 父页刷新时一起重取（产品价可能刚被改） */
   refreshKey?: number;
 }>();
 
 const open = ref(false);
 const loaded = ref(false);
-const costRows = ref<AeCostMapItem[]>([]);
-const rates = ref<AeRateItem[]>([]);
-const drafts = ref<Record<string, string>>({});
+const products = ref<ProductListItem[]>([]);
+const productTotal = ref(0);
 const loading = ref(false);
 const search = ref('');
-const newCur = ref('');
-const newRate = ref('');
-
-const filteredCost = computed(() => {
-  const q = search.value.trim().toUpperCase();
-  if (!q) return costRows.value;
-  return costRows.value.filter(
-    (r) => r.styleCode.toUpperCase().includes(q) || (r.styleName || '').toUpperCase().includes(q)
-  );
-});
-
-/** 成本行主键是 (款编码, 生效日, 来源) —— 同一款可以有多段生效区间，key 不能只用 styleCode */
-const costKey = (r: AeCostMapItem) => `${r.styleCode}|${r.effectiveFrom}|${r.source}`;
 
 function yuan(cents: number): string {
   return (cents / 100).toFixed(2);
@@ -56,17 +44,11 @@ function when(s: string): string {
 async function refresh(): Promise<void> {
   loading.value = true;
   try {
-    const [c, r] = await Promise.all([ipc.aeCostMapList(), ipc.aeRateList()]);
-    if (c.success && c.data) costRows.value = c.data;
-    else toast(`读取成本表失败：${c.error ?? '未知错误'}`, 'error');
-    if (r.success && r.data) {
-      rates.value = r.data;
-      const d: Record<string, string> = {};
-      for (const it of r.data) d[it.fromCurrency] = String(it.rateToCny);
-      drafts.value = d;
-    } else {
-      toast(`读取汇率失败：${r.error ?? '未知错误'}`, 'error');
-    }
+    const p = await ipc.productList({ search: search.value.trim(), limit: 500 });
+    if (p.success && p.data) {
+      products.value = p.data.rows;
+      productTotal.value = p.data.total;
+    } else toast(`读取产品失败：${p.error ?? '未知错误'}`, 'error');
   } finally {
     loading.value = false;
     loaded.value = true;
@@ -79,50 +61,13 @@ function openNow(): void {
   if (!loaded.value) void refresh();
 }
 
-async function saveRate(cur: string): Promise<void> {
-  const v = Number(drafts.value[cur]);
-  if (!Number.isFinite(v) || v <= 0) {
-    toast('汇率必须为大于 0 的数字', 'error');
-    return;
-  }
-  const r = await ipc.aeRateUpsert(cur.toUpperCase(), v);
-  if (r.success) {
-    toast(`已保存 ${cur.toUpperCase()} → ${v} CNY`, 'success');
-    await refresh();
-  } else {
-    toast(`保存失败：${r.error ?? '未知错误'}`, 'error');
-  }
-}
-
-async function addRate(): Promise<void> {
-  const cur = newCur.value.trim().toUpperCase();
-  const v = Number(newRate.value);
-  if (!/^[A-Z]{2,4}$/.test(cur)) {
-    toast('币种请输入 2-4 位字母代码，如 USD / EUR', 'error');
-    return;
-  }
-  if (!Number.isFinite(v) || v <= 0) {
-    toast('汇率必须为大于 0 的数字', 'error');
-    return;
-  }
-  const r = await ipc.aeRateUpsert(cur, v);
-  if (r.success) {
-    toast(`已添加 ${cur} → ${v} CNY`, 'success');
-    newCur.value = '';
-    newRate.value = '';
-    await refresh();
-  } else {
-    toast(`保存失败：${r.error ?? '未知错误'}`, 'error');
-  }
-}
-
 function toggle(): void {
   if (open.value) open.value = false;
   else openNow();
 }
 
 // 「缺成本」的行出现了就自动摊开（它就是这个区能补的东西）；消失后**不自动收起** ——
-// 用户刚翻开正在改汇率时收起来，比多占一点高度更烦。
+// 用户刚翻开正在看产品价时收起来，比多占一点高度更烦。
 watch(
   () => props.attention,
   (v) => {
@@ -130,13 +75,21 @@ watch(
   }
 );
 
-// 已经展开过就跟着页面主刷新一起重取（成本表可能刚被拿货对账写新）
+// 已经展开过就跟着页面主刷新一起重取（产品价可能刚被改）
 watch(
   () => props.refreshKey,
   () => {
     if (loaded.value) void refresh();
   }
 );
+
+// 搜索走后端（分页在服务端）：本地过滤只能筛到前 500 款，会把后面的款藏成"没有"
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+watch(search, () => {
+  if (!loaded.value) return;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void refresh(), 250);
+});
 
 onMounted(() => {
   if (props.attention) openNow();
@@ -147,24 +100,30 @@ defineExpose({ refresh });
 
 <template>
   <section class="cr" data-act="cost-rates">
-    <button class="cr__head" data-act="cr-toggle" @click="toggle">
-      <span class="cr__title">数据基础：成本与汇率</span>
-      <span class="cr__sum">
-        成本表 {{ costRows.length }} 行 · 汇率 {{ rates.length }} 个币种
-      </span>
-      <span v-if="attention && !open" class="wb-tag is-warn cr__alert" data-act="cr-attention"
-        >有行缺成本</span
-      >
-      <span class="cr__chev">{{ open ? '收起' : '展开' }}</span>
-    </button>
+    <!-- 区头只有一颗「展开 / 收起」按钮。
+         2026-10-22：原来右边还有一颗「去维护」跳「基础数据 › 进价」，随那一页整页退役一起撤掉 ——
+         进价现在是产品行上的一列（产品编辑抽屉里的「进价（元）」栏），没有一个可跳的"成本页"；
+         留一颗点下去空白页的按钮，比没有按钮更糟。 -->
+    <div class="cr__head">
+      <button class="cr__toggle" data-act="cr-toggle" @click="toggle">
+        <span class="cr__title">数据基础：产品当前进价</span>
+        <span class="cr__sum">
+          产品 {{ productTotal }} 款
+        </span>
+        <span v-if="attention && !open" class="wb-tag is-warn cr__alert" data-act="cr-attention"
+          >有行缺成本</span
+        >
+        <span class="cr__chev">{{ open ? '收起' : '展开' }}</span>
+      </button>
+    </div>
 
     <div v-if="open" class="cr__body">
       <div class="cr__block">
         <div class="cr__row">
-          <span class="cr__label">款级成本（{{ filteredCost.length }} 行）</span>
+          <span class="cr__label">产品当前进价（{{ productTotal }} 款）</span>
           <span class="cr__note">
-            来源：拿货对账加权均价（落账即自动同步）+ 手工录入；手工的那个在「货与成本」的「进价」页维护。
-            同一款可有多段生效区间
+            给新订单钉预估用的价；已经确认过的订单行用自己的快照，不跟着这里改。
+            在产品编辑抽屉（基础数据 › 产品管理 › 编辑）的「进价（元）」栏维护
           </span>
           <input
             v-model="search"
@@ -174,106 +133,31 @@ defineExpose({ refresh });
           />
         </div>
 
-        <table v-if="filteredCost.length" class="cr__table" data-act="cost-table">
+        <table v-if="products.length" class="cr__table" data-act="cost-table">
           <thead>
             <tr>
               <th>款编码</th>
               <th>款名</th>
-              <th class="cr__num">单价（元）</th>
-              <th class="cr__num">样本数</th>
-              <th>生效日</th>
-              <th>来源</th>
+              <th class="cr__num">当前进价（元）</th>
+              <th>厂家</th>
               <th>更新时间</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in filteredCost" :key="costKey(r)">
-              <td class="cr__mono">{{ r.styleCode }}</td>
-              <td :class="{ cr__muted: !r.styleName }">{{ r.styleName || '—' }}</td>
-              <td class="cr__num">{{ yuan(r.unitPriceCents) }}</td>
-              <td class="cr__num cr__muted">{{ r.sampleCount }}</td>
-              <td class="cr__mono">
-                {{ r.effectiveFrom === '0000-01-01' ? '（最早）' : r.effectiveFrom }}
+            <tr v-for="r in products" :key="r.id">
+              <td class="cr__mono">{{ r.code }}</td>
+              <td :class="{ cr__muted: !r.name }">{{ r.name || '—' }}</td>
+              <td class="cr__num" :class="{ cr__muted: !(r.costCents > 0) }">
+                {{ r.costCents > 0 ? yuan(r.costCents) : '未填' }}
               </td>
-              <td class="cr__muted">{{ r.source === 'manual' ? '手工' : '拿货对账' }}</td>
+              <td class="cr__muted">{{ r.supplierName || '—' }}</td>
               <td class="cr__muted">{{ when(r.updatedAt) }}</td>
             </tr>
           </tbody>
         </table>
         <p v-else class="cr__empty" data-act="cost-empty">
-          成本表为空 —— 手工录在「货与成本」的「进价」页；或录入拿货单并完成对账，成本会自动同步到这里。
+          {{ search.trim() ? '没有匹配的款 —— 换个关键字试试。' : '产品管理里还没有款 —— 去「基础数据 › 产品管理」建档，再在编辑抽屉里填进价。' }}
         </p>
-      </div>
-
-      <div class="cr__block">
-        <div class="cr__row">
-          <span class="cr__label">币种汇率（1 币种 = ? CNY）</span>
-          <span class="cr__note">缺汇率的订单整单不进利润合计（不是按 0 算）</span>
-        </div>
-
-        <table v-if="rates.length" class="cr__table cr__table--rates" data-act="rate-table">
-          <thead>
-            <tr>
-              <th>币种</th>
-              <th>兑 CNY</th>
-              <th>更新时间</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="r in rates" :key="r.fromCurrency">
-              <td class="cr__mono">{{ r.fromCurrency }}</td>
-              <td>
-                <input
-                  v-model="drafts[r.fromCurrency]"
-                  class="wb-input wb-input--sm cr__input cr__input--rate"
-                  :data-act="`rate-input-${r.fromCurrency}`"
-                  type="number"
-                  step="any"
-                  min="0"
-                />
-              </td>
-              <td class="cr__muted">{{ when(r.updatedAt) }}</td>
-              <td class="cr__right">
-                <button
-                  class="wb-btn wb-btn--sm cr__btn"
-                  :data-act="`rate-save-${r.fromCurrency}`"
-                  @click="saveRate(r.fromCurrency)"
-                >
-                  保存
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="cr__empty" data-act="rate-empty">还没有任何汇率 —— 外币订单会整单标缺。</p>
-
-        <div class="cr__row cr__row--add">
-          <span class="cr__note">新增币种</span>
-          <input
-            v-model="newCur"
-            class="wb-input wb-input--sm cr__input cr__input--cur"
-            data-act="rate-new-cur"
-            placeholder="如 EUR"
-          />
-          <span class="cr__note">=</span>
-          <input
-            v-model="newRate"
-            class="wb-input wb-input--sm cr__input cr__input--rate"
-            data-act="rate-new-value"
-            type="number"
-            step="any"
-            min="0"
-            placeholder="兑 CNY"
-          />
-          <button
-            class="wb-btn wb-btn--sm wb-btn--primary cr__btn"
-            data-act="rate-add"
-            @click="addRate"
-          >
-            添加
-          </button>
-        </div>
       </div>
 
       <p v-if="loading" class="cr__loading">读取中…</p>
@@ -290,8 +174,16 @@ defineExpose({ refresh });
   display: flex;
   align-items: center;
   gap: 12px;
-  width: 100%;
   padding: 10px 16px;
+  border-bottom: 1px solid var(--wb-border);
+}
+.cr__toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
   border: 0;
   background: transparent;
   color: var(--wb-text);
@@ -316,7 +208,7 @@ defineExpose({ refresh });
   flex-shrink: 0;
 }
 .cr__chev {
-  margin-left: auto;
+  flex-shrink: 0;
   font-size: 12px;
   color: var(--wb-primary);
 }
@@ -337,11 +229,6 @@ defineExpose({ refresh });
   align-items: center;
   gap: 8px;
 }
-.cr__row--add {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--wb-border);
-}
 .cr__label {
   font-size: 13px;
   font-weight: 500;
@@ -354,23 +241,11 @@ defineExpose({ refresh });
   margin-left: auto;
   width: 200px;
 }
-/* 输入框基座来自全局 .wb-input--sm；这里只留宽度与大小写等本页特有约束。 */
-.cr__input--rate {
-  width: 110px;
-  font-variant-numeric: tabular-nums;
-}
-.cr__input--cur {
-  width: 90px;
-  text-transform: uppercase;
-}
 .cr__table {
   width: 100%;
   margin-top: 10px;
   border-collapse: collapse;
   font-size: 12px;
-}
-.cr__table--rates {
-  min-width: 420px;
 }
 .cr__table th {
   text-align: left;
@@ -390,16 +265,12 @@ defineExpose({ refresh });
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.cr__right {
-  text-align: right;
-}
 .cr__mono {
   font-family: var(--wb-font-mono, ui-monospace, monospace);
 }
 .cr__muted {
   color: var(--wb-text-muted);
 }
-/* 按钮基座来自全局 .wb-btn--sm；.cr__btn 只作为本页可选钩子保留，无自有样式。 */
 .cr__empty {
   margin: 10px 0 0;
   padding: 12px 0;

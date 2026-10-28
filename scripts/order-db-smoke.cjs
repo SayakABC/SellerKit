@@ -11,7 +11,6 @@
 //   · **投影宽了仍不丢行**：`shippingRows` 用 LEFT JOIN 取款编码，未识别的订单行必须仍在
 //   · 状态/时点原样带出（判定口径不在这层）
 //   · `groupStats` 维度白名单（越界维度不许静默返回空）
-//   · 队列（oi_queue）落库/统计/分页
 //   · `clearAll` 清空订单与识别缓存
 // 每个场景自带独立临时库（`initDb` 是单例，换库必须先 `closeDb`）。
 
@@ -44,7 +43,7 @@ function check(name, fn) {
   }
 }
 
-/** 造一张图（订单行挂在图上，`oi_orders.image_id` 有外键） */
+/** 造一张图（订单行挂在图上，`oi_order_items.image_id` 有外键） */
 dbRun(
   `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (1, 'sha1', 'fp1', 'u1', '/tmp/1')`,
@@ -89,19 +88,20 @@ function insert(over = {}) {
 }
 
 console.log('\n[1] 入库与幂等');
+// 拆表后：`oi_order_items` 是明细行表（一 SKU 一行），行数断言看它；`oi_orders` 是主表（一单一表）。
 check('插入一条订单返回自增 id', () => {
   const id = insert();
   assert.ok(id > 0, 'id 应大于 0');
 });
 check('幂等重入：同 (订单号, 图片) 不产生第二行', () => {
-  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n);
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n);
   insert();
-  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), before);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n), before);
 });
 check('同订单号挂到另一张图 → 是另一行（拆行后一单多产品就是这样）', () => {
-  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n);
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n);
   insert({ imageId: 2 });
-  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), before + 1);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n), before + 1);
 });
 
 console.log('\n[2] 金额 / 状态 / 时点入账（分；空列 → NULL 而不是 0）');
@@ -120,11 +120,15 @@ check('报表里没有的金额列 → NULL（**不是 0**）', () => {
   // 本用例样本没有 DDP 之外的"空金额列"了 → 用 vat 的代表性：缺列即 NULL
   const id = odb.insertOrder({ imageId: 1, orderNo: 'NO-EMPTY', shop: '', size: '', orderTime: '',
     category: '', color: '', logo: '', rawFields: { 商品ID: 'X1' } });
-  const r = dbGet(`SELECT amount_cents, vat_cents, ddp_cents FROM oi_orders WHERE id = ?`, [id]);
+  const r = dbGet(
+    `SELECT o.amount_cents, o.vat_cents, o.ddp_cents FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE oi.id = ?`,
+    [id],
+  );
   assert.strictEqual(r.amount_cents, null);
   assert.strictEqual(r.vat_cents, null);
   assert.strictEqual(r.ddp_cents, null);
-  dbRun(`DELETE FROM oi_orders WHERE id = ?`, [id]); // 用完即清：后面的用例按行数断言
+  dbRun(`DELETE FROM oi_order_items WHERE id = ?`, [id]); // 用完即清：后面的用例按行数断言
+  dbRun(`DELETE FROM oi_orders WHERE order_no = 'NO-EMPTY'`);
 });
 check('状态 / 代征代缴 / 发货时点原样带出（业务模式等已精简掉）', () => {
   const r = dbGet(`SELECT biz_status, tax_platform, ship_time FROM oi_orders LIMIT 1`);
@@ -133,9 +137,10 @@ check('状态 / 代征代缴 / 发货时点原样带出（业务模式等已精�
   assert.strictEqual(r.ship_time, '08/31/2026 12:57');
 });
 check('主干两列：source 默认 import、qty 缺省 NULL（真值由采集通道写入）', () => {
-  const r = dbGet(`SELECT source, qty FROM oi_orders LIMIT 1`);
+  const r = dbGet(`SELECT source FROM oi_orders LIMIT 1`);
   assert.strictEqual(r.source, 'import');
-  assert.strictEqual(r.qty, null);
+  const item = dbGet(`SELECT qty FROM oi_order_items LIMIT 1`);
+  assert.strictEqual(item.qty, null);
 });
 
 console.log('\n[2.5] 免图订单（S2-b）：订单报表没有主图列，照样能落主干');
@@ -159,7 +164,11 @@ check('image_id 为 null 的订单能落库，且金额/状态照常提列', () 
       平台是否代征代缴: '平台已税',
     },
   });
-  const r = dbGet(`SELECT image_id, source, amount_cents, vat_cents, biz_status, ship_time FROM oi_orders WHERE id = ?`, [id]);
+  const r = dbGet(
+    `SELECT oi.image_id, o.source, o.amount_cents, o.vat_cents, o.biz_status, o.ship_time
+     FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE oi.id = ?`,
+    [id],
+  );
   assert.strictEqual(r.image_id, null, '无图订单的 image_id 必须是 NULL');
   assert.strictEqual(r.source, 'import');
   assert.strictEqual(Number(r.amount_cents), 16518);
@@ -169,12 +178,13 @@ check('image_id 为 null 的订单能落库，且金额/状态照常提列', () 
 });
 
 check('免图订单**重导不重复插**（幂等判重用 `image_id IS ?`，`= NULL` 会永远不成立）', () => {
-  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders WHERE order_no = 'NOIMG-1'`).n);
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'NOIMG-1'`).n);
   odb.insertOrder({
     imageId: null, orderNo: 'NOIMG-1', shop: '', size: 'L', orderTime: '2026-09-01 10:00:00',
     category: '', color: '', logo: '', rawFields: { 订单号: 'NOIMG-1' },
   });
-  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders WHERE order_no = 'NOIMG-1'`).n), before);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'NOIMG-1'`).n), before);
+  dbRun(`DELETE FROM oi_order_items WHERE order_id IN (SELECT id FROM oi_orders WHERE order_no = 'NOIMG-1')`);
   dbRun(`DELETE FROM oi_orders WHERE order_no = 'NOIMG-1'`);
 });
 
@@ -245,27 +255,15 @@ check('列表回带商品ID 与原始整行（归类核对页按「同商品」�
   const without = odb.listOrdersPage({ limit: 50 }).rows.find((r) => Number(r.id) === Number(id));
   assert.ok(without, '临时行应能查到');
   assert.strictEqual(without.itemId, '', '没有商品ID 列时应回空串（而不是抓到名字相近的列）');
-  dbRun(`DELETE FROM oi_orders WHERE id = ?`, [id]); // 用完即清：后面的用例按行数断言
-});
-
-console.log('\n[5] 队列（oi_queue）');
-check('入队 / 统计 / 分页', () => {
-  const n = odb.enqueueQueueRows('B1', [
-    { rawFields: { 商品ID: 'A1' }, url: 'u1', orderNo: 'N1', info: '' },
-    { rawFields: { 商品ID: 'A2' }, url: 'u2', orderNo: 'N2', info: '' },
-  ]);
-  assert.strictEqual(n, 2);
-  const stats = odb.queueStats('B1');
-  assert.strictEqual(Number(stats.total), 2);
-  const rows = odb.listQueueRows('B1');
-  assert.strictEqual(rows.length, 2);
+  dbRun(`DELETE FROM oi_order_items WHERE id = ?`, [id]); // 用完即清：后面的用例按行数断言
+  dbRun(`DELETE FROM oi_orders WHERE order_no = 'NO-ITEM'`);
 });
 
 console.log('\n[6] 订单归属店铺（order-assign-shop）');
 check('归属：按订单号改 shop 原文，且只改给出的订单', () => {
-  // 现有两行：SMOKE 用的 3076…（图1 与图2 各一行，拆行后一单多行会一起改）
+  // 现有两行：SMOKE 用的 3076…（图1 与图2 各一行，拆行后一单多行）→ 主表一单一行，updated=1
   const r = odb.assignShopToOrders(['3076475435222658'], '店X');
-  assert.strictEqual(r.updated, 2, '同订单号的多行应一起更新');
+  assert.strictEqual(r.updated, 1, '同订单号的一主表行应更新');
   const rows = dbQuery(`SELECT shop FROM oi_orders WHERE order_no = '3076475435222658'`);
   assert.ok(rows.every((x) => x.shop === '店X'), '都应是店X');
 });
@@ -313,10 +311,10 @@ check('⭐「退回待核对」把它放回待核对，且**不碰**这一行的
   // 那正是"被确认掉"的形状（真库现场：23 行 corrected=1 而 color 全空）。
   const one = odb.listOrdersPage({ corrected: true }).rows[0].id;
   odb.updateOrder({ id: one, category: 'T恤', color: '藏青', logo: 'LOGO-X' });
-  const before = dbGet(`SELECT category, color, logo FROM oi_orders WHERE id = ?`, [one]);
+  const before = dbGet(`SELECT category, color, logo FROM oi_order_items WHERE id = ?`, [one]);
 
   assert.strictEqual(odb.reopenOrdersCorrected([one]), 1, '应当更新 1 行');
-  const after = dbGet(`SELECT category, color, logo, corrected FROM oi_orders WHERE id = ?`, [one]);
+  const after = dbGet(`SELECT category, color, logo, corrected FROM oi_order_items WHERE id = ?`, [one]);
   // ① 状态位真的落下去了（不是"函数返回值对、库没动"）
   assert.strictEqual(Number(after.corrected), 0, 'corrected 必须回到 0');
   // ② 其它字段**一个都不要动**：退回是"把这一行放回去重做"，不是"把它清空"。
@@ -344,24 +342,24 @@ check('退回与确认**互为镜像**：都按点名的 id 直接写目标值�
   //    含义分叉，而界面上根本分不出来（「退回」的入口只出现在**已核对**的行上）。
   assert.strictEqual(odb.reopenOrdersCorrected([one]), 1, '点名即写 0（与 mark 同款语义）');
   assert.strictEqual(
-    Number(dbGet(`SELECT corrected FROM oi_orders WHERE id = ?`, [one]).corrected),
+    Number(dbGet(`SELECT corrected FROM oi_order_items WHERE id = ?`, [one]).corrected),
     0,
   );
   // 反过来：确认 → 退回 → 再确认，状态位来回都能落下去（两个方向都不是单向门）
   assert.strictEqual(odb.markOrdersCorrected([one]), 1);
   assert.strictEqual(odb.reopenOrdersCorrected([one]), 1);
   assert.strictEqual(
-    Number(dbGet(`SELECT corrected FROM oi_orders WHERE id = ?`, [one]).corrected),
+    Number(dbGet(`SELECT corrected FROM oi_order_items WHERE id = ?`, [one]).corrected),
     0,
   );
 });
 check('退回的入参边界：空数组 / 不存在的 id → 0，且不误伤别的行', () => {
-  const before = dbQuery(`SELECT id FROM oi_orders WHERE corrected = 0`).length;
+  const before = dbQuery(`SELECT id FROM oi_order_items WHERE corrected = 0`).length;
   assert.strictEqual(odb.reopenOrdersCorrected([]), 0);
   assert.strictEqual(odb.reopenOrdersCorrected([999999]), 0, '不存在的 id 不该命中任何行');
   assert.strictEqual(odb.reopenOrdersCorrected([0, -1, 1.5]), 0, '非正整数一律过滤掉');
   assert.strictEqual(
-    dbQuery(`SELECT id FROM oi_orders WHERE corrected = 0`).length,
+    dbQuery(`SELECT id FROM oi_order_items WHERE corrected = 0`).length,
     before,
     '这几种入参都不该改动任何行',
   );
@@ -378,6 +376,300 @@ console.log('\n[7] 清空');
 check('clearAll 清掉订单（识别缓存同清）', () => {
   odb.clearAll();
   assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), 0);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n), 0);
+});
+
+// ─────────────────────────────────────────────────────────────
+// [8] 行级快照（2026-10-21 阶段 A3/A4/A5）
+//
+// 两个数各自一个写入口，共用一条纪律：**只补空**（已钉过的不重算）。
+// 这里连「结构」一起复刻（款色身份 + 产品编码 + SKU 颜色尺码），否则错误实现也能恒绿：
+//   · 夹具放**两个 SKU**（250g / 999g）—— 取错行（比如不看尺码）会拿到 999，断言立刻红；
+//   · 干扰项：先钉 250 再改 SKU 成 300，断言仍是 250（"改克重不该刷新历史"）。
+// ─────────────────────────────────────────────────────────────
+console.log('\n[8] 行级快照：克重 / 实际进价（只补空）');
+odb.ensureOrderSchema();
+pdb.ensureProductSchema();
+pdb.ensureVariantSchema();
+
+// id 一律自增（前面的场景已经用过 1..N，硬编码会撞主键）
+dbRun(`INSERT INTO oi_styles (code, fingerprint) VALUES ('SNAP-1', 'f-snap')`);
+const snapStyleId = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'SNAP-1'`).id);
+dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?, '黑色', 'SNAP-1-BLACK')`, [
+  snapStyleId,
+]);
+const snapScId = Number(dbGet(`SELECT id FROM oi_style_colors WHERE code = 'SNAP-1-BLACK'`).id);
+const snapProduct = pdb.upsertProduct({
+  id: 0,
+  code: 'SNAP-1',
+  name: '快照款',
+  supplierId: 0,
+  category: '',
+  status: 'active',
+  note: '',
+}).id;
+pdb.variantUpsert({ id: 0, productId: snapProduct, color: '黑色', size: 'M', weightG: 250 });
+pdb.variantUpsert({ id: 0, productId: snapProduct, color: '黑色', size: 'L', weightG: 999 });
+const insOrder = (size, scId) => {
+  // 拆表后：主表（一单一行，order_no 唯一）+ 明细（一 SKU 一行）。明细 id 即"行 id"。
+  // 每个夹具行用独立单号（主表 order_no UNIQUE，旧形状允许同单多行、新形状一单一行）。
+  const no = `SNAP-ORDER-${size}-${scId}-${Math.floor(Math.random() * 1e6)}`;
+  dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES (?, '店')`, [no]);
+  const headerId = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]).id);
+  dbRun(
+    `INSERT INTO oi_order_items (order_id, image_id, size, raw_fields, style_color_id)
+     VALUES (?, NULL, ?, '{}', ?)`,
+    [headerId, size, scId],
+  );
+  return Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ?`, [headerId]).id);
+};
+const orderM = insOrder('M', snapScId);
+const orderL = insOrder('L', snapScId);
+
+check('v7 两列已就位（新库建表与老库补列同向）', () => {
+  const cols = dbQuery(`PRAGMA table_info(oi_order_items)`).map((r) => String(r.name));
+  assert.ok(cols.includes('weight_g'), '缺 weight_g');
+  assert.ok(cols.includes('cost_cents'), '缺 cost_cents');
+});
+
+check('钉克重：按「款色 + 尺码」取到各自的 SKU（M=250 / L=999，不串行）', () => {
+  const n = odb.snapshotOrderWeights([orderM, orderL]);
+  assert.strictEqual(n, 2);
+  assert.strictEqual(Number(dbGet(`SELECT weight_g FROM oi_order_items WHERE id = ?`, [orderM]).weight_g), 250);
+  assert.strictEqual(Number(dbGet(`SELECT weight_g FROM oi_order_items WHERE id = ?`, [orderL]).weight_g), 999);
+});
+
+check('只补空：改 SKU 克重后再钉，历史行不变（快照语义）', () => {
+  const v = dbGet(
+    `SELECT v.id FROM pl_variants v WHERE v.product_id = ? AND v.size = 'M'`,
+    [snapProduct],
+  );
+  pdb.variantUpsert({
+    id: Number(v.id),
+    productId: snapProduct,
+    color: '黑色',
+    size: 'M',
+    weightG: 300,
+  });
+  odb.snapshotOrderWeights([orderM]);
+  assert.strictEqual(Number(dbGet(`SELECT weight_g FROM oi_order_items WHERE id = ?`, [orderM]).weight_g), 250);
+});
+
+check('钉不上就留 NULL（不编数）：未归类的行不会被写成 0', () => {
+  const unclassified = insOrder('M', 0);
+  odb.snapshotOrderWeights([unclassified]);
+  assert.strictEqual(dbGet(`SELECT weight_g FROM oi_order_items WHERE id = ?`, [unclassified]).weight_g, null);
+});
+
+check('回写实际进价：只认已提交拿货单、按身份+尺码匹配，且只补空', () => {
+  const pdb2 = require(path.join(ROOT, 'dist', 'electron', 'purchase-db.js'));
+  pdb2.ensurePurchaseSchema();
+  dbRun(`INSERT INTO suppliers (name) VALUES ('快照厂')`);
+  const supId = Number(dbGet(`SELECT id FROM suppliers WHERE name = '快照厂'`).id);
+  dbRun(`INSERT INTO purchase_orders (supplier_id, biz_date, status) VALUES (?, '2026-10-01', 'submitted')`, [
+    supId,
+  ]);
+  const poId = Number(dbGet(`SELECT id FROM purchase_orders ORDER BY id DESC LIMIT 1`).id);
+  dbRun(
+    `INSERT INTO purchase_items (purchase_id, style_code, color, size, qty, price_cents, amount_cents, style_color_id)
+     VALUES (?, 'SNAP-1', '黑色', 'L', 2, 1200, 2400, ?)`,
+    [poId, snapScId],
+  );
+  const { syncOrderRowCosts } = require(path.join(ROOT, 'dist', 'electron', 'purchase-cost-sync.js'));
+  const out = syncOrderRowCosts();
+  assert.ok(out.rows >= 1, '应至少补上 L 码那一行');
+  assert.strictEqual(
+    Number(
+      dbGet(`SELECT actual_cost_cents FROM oi_order_items WHERE id = ?`, [orderL])
+        .actual_cost_cents,
+    ),
+    1200,
+  );
+  // M 码没有拿货记录 ⇒ 不该被写上（"没拿货"不等于"进货 0 元"）
+  assert.strictEqual(
+    dbGet(`SELECT actual_cost_cents FROM oi_order_items WHERE id = ?`, [orderM]).actual_cost_cents,
+    null,
+  );
+  // 预估列不归它管：拿货实付只写 actual_cost_cents，不能顺手覆盖归类时钉的进价
+  assert.strictEqual(
+    dbGet(`SELECT cost_cents FROM oi_order_items WHERE id = ?`, [orderL]).cost_cents,
+    null,
+  );
+  // 再报一次：幂等（已写的不重复写）
+  const again = syncOrderRowCosts();
+  assert.strictEqual(again.rows, 0);
+});
+
+// ── 阶段 B2：包裹（一单多包 / 拆单个商品行 / 拆合并行数量）────────────────────
+// 这一组防的四个错，都是"界面显示保存成功、其实没生效"的类型：
+//   · 超拆：3 件的行拆成 2+2，两边的界面都敢显示"成功"；
+//   · 跨单：把 A 单的商品行塞进 B 单的包（包与行对不上，账面永远平不了）；
+//   · 缺值当 0：只填了一个包的运费，总运费却按"已知部分之和"报出去；
+//   · 删包留残：包删了、明细还在（外键没级联）。
+check('包裹：建包 / 拆合并行数量 / 超拆被拒 / 跨单被拒 / 汇总不把缺值当 0', () => {
+  // 拆表后：主表 + 明细。明细 id 即"行 id"（parcel_lines.order_item_id 指向它）。
+  dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES ('PKG-1', '店甲')`);
+  const h1 = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = 'PKG-1'`).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, size, qty, raw_fields) VALUES (?, 'M', 3, '{}')`, [h1]);
+  const itemId = Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ?`, [h1]).id);
+  dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES ('PKG-2', '店甲')`);
+  const h2 = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = 'PKG-2'`).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, size, qty, raw_fields) VALUES (?, 'L', 1, '{}')`, [h2]);
+  const otherItem = Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ?`, [h2]).id);
+
+  // 拼错单号不许造孤儿包
+  const ghost = odb.createParcel({ orderNo: 'NO-SUCH-ORDER' });
+  assert.strictEqual(ghost.ok, false, '不存在的订单号必须拒绝');
+
+  const p1 = odb.createParcel({ orderNo: 'PKG-1', label: '箱 1', shipCents: 1500, weightG: 400 });
+  const p2 = odb.createParcel({ orderNo: 'PKG-1', label: '箱 2' }); // 运费/重量故意都不填
+  assert.ok(p1.ok && p1.id > 0 && p2.ok && p2.id > 0, '两个包都应建成功');
+  assert.notStrictEqual(p1.id, p2.id, '一单多包必须是两个不同的包');
+
+  // 3 件拆成 2 + 1
+  assert.strictEqual(odb.setParcelLineQty(p1.id, itemId, 2).ok, true, '2 件应放得进去');
+  const over = odb.setParcelLineQty(p2.id, itemId, 2);
+  assert.strictEqual(over.ok, false, '只剩 1 件，放 2 件必须被拒');
+  assert.ok(String(over.error).includes('1'), `拒绝理由要说清还能放几件：${over.error}`);
+  assert.strictEqual(odb.setParcelLineQty(p2.id, itemId, 1).ok, true, '剩下那 1 件应放得进去');
+
+  const cross = odb.setParcelLineQty(p1.id, otherItem, 1);
+  assert.strictEqual(cross.ok, false, '别的订单的行不许塞进本单的包');
+  assert.ok(String(cross.error).includes('不属于'), `跨单要说清原因：${cross.error}`);
+
+  const detail = odb.parcelDetail('PKG-1');
+  assert.strictEqual(detail.parcels.length, 2);
+  assert.strictEqual(detail.parcels[0].lines.length, 1);
+  assert.strictEqual(detail.items[0].packed, 3, '已分包件数应为 2+1');
+  assert.strictEqual(detail.items[0].remaining, 0, '3 件全分完，剩余应为 0');
+  // ⭐ 缺值不是 0：箱 2 没填运费 ⇒ 整单总运费必须是 null（不能报 1500）
+  assert.strictEqual(detail.totals.shipMissing, 1);
+  assert.strictEqual(detail.totals.shipCents, null, '有包缺运费时总运费必须是 null，不许只加已知部分');
+  assert.strictEqual(detail.totals.weightG, null, '有包缺重量时总重必须是 null');
+
+  // 补齐后才是相加
+  assert.strictEqual(odb.updateParcel({ id: p2.id, shipCents: 500, weightG: 100 }).ok, true);
+  const filled = odb.parcelTotals('PKG-1');
+  assert.strictEqual(filled.shipCents, 2000);
+  assert.strictEqual(filled.weightG, 500);
+  assert.strictEqual(filled.shipMissing, 0);
+
+  // 改数量 = 覆盖不是追加（同一包同一行只一条）
+  assert.strictEqual(odb.setParcelLineQty(p1.id, itemId, 1).ok, true);
+  assert.strictEqual(odb.setParcelLineQty(p2.id, itemId, 2).ok, true);
+  const swapped = odb.parcelDetail('PKG-1');
+  assert.strictEqual(swapped.items[0].packed, 3, '改数量不该把同一行记成两条');
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS n FROM parcel_lines WHERE order_item_id = ?`, [itemId])[0].n,
+    2,
+    '同一行在两个包里各一条',
+  );
+
+  // 清 0 = 从包里移除
+  assert.strictEqual(odb.setParcelLineQty(p2.id, itemId, 0).ok, true);
+  assert.strictEqual(odb.parcelDetail('PKG-1').items[0].packed, 1);
+
+  // 删包连带删明细
+  assert.strictEqual(odb.deleteParcel(p1.id), true);
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS n FROM parcel_lines WHERE parcel_id = ?`, [p1.id])[0].n,
+    0,
+    '删包必须连明细一起删（外键级联）',
+  );
+});
+
+// 删订单行后的包裹收尾：`parcel_lines` 靠 ON DELETE CASCADE 消失，但 `parcels` 自己没有
+// 外键指向订单行（键是 `order_no`）—— 不补一句就会留下「0 条明细的空壳包」：
+// 它照样进 `parcelTotals` 求和（缺值 ⇒ 整单运费被拖成 null），界面上也多一张空卡片。
+check('删订单行：空壳包被收掉，还占着别的行的包不动', () => {
+  dbRun(`INSERT INTO oi_orders (order_no, shop) VALUES ('PKG-3', '店甲')`);
+  const h = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = 'PKG-3'`).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, size, qty, raw_fields) VALUES (?, 'M', 1, '{}')`, [h]);
+  const itA = Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ?`, [h]).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, size, qty, raw_fields) VALUES (?, 'L', 1, '{}')`, [h]);
+  const itB = Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ? AND id <> ?`, [h, itA]).id);
+
+  const pa = odb.createParcel({ orderNo: 'PKG-3', label: '箱 A', shipCents: 700, weightG: 100 });
+  const pb = odb.createParcel({ orderNo: 'PKG-3', label: '箱 B', shipCents: 800, weightG: 200 });
+  assert.ok(pa.ok && pb.ok, '两个包都应建成功');
+  assert.strictEqual(odb.setParcelLineQty(pa.id, itA, 1).ok, true);
+  assert.strictEqual(odb.setParcelLineQty(pb.id, itB, 1).ok, true);
+
+  // 删掉 itA 那一行 ⇒ 箱 A 的明细被级联带走、包本身也该没；箱 B 还占着 itB，必须留下
+  odb.deleteOrder(itA);
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS n FROM parcels WHERE id = ?`, [pa.id])[0].n,
+    0,
+    '明细被删光的那一行必须把空壳包一起收掉',
+  );
+  assert.strictEqual(
+    dbQuery(`SELECT COUNT(*) AS n FROM parcels WHERE id = ?`, [pb.id])[0].n,
+    1,
+    '还占着别的商品行的包不能被顺手删掉',
+  );
+  // 收尾之后总数只算还活着的包（不是把缺值当 0，也不是把空壳算进来）
+  const t = odb.parcelTotals('PKG-3');
+  assert.strictEqual(t.shipCents, 800);
+  assert.strictEqual(t.weightG, 200);
+  assert.strictEqual(t.shipMissing, 0);
+});
+
+// ── 写入口守卫（B1 拆表后）────────────────────────────────────────────────
+// 拆表把 `order_no` 变成主表的 NOT NULL UNIQUE 业务键，两条旧路径随之要做明确决定：
+//   · 空单号：旧实现写 NULL 占位（现在必撞 NOT NULL）；
+//   · 同一单号有两个写入口：导入逐行追加 / 采集整单替换。
+// 断言都读回**行级事实**，不看返回值就算过。
+console.log('\n[9] 写入口守卫：空单号 / 通道互斥 / 重采集清包裹');
+
+check('空订单号：明确报错，且不留下半条主表行', () => {
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n);
+  assert.throws(() => insert({ orderNo: '   ' }), /订单号为空/);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), before, '被拒的行不许留下主表行');
+});
+
+check('导入不能往采集单里追加行（通道互斥，正向）', () => {
+  odb.upsertCollectedOrder({
+    orderNo: 'CH-COLLECT', orderTime: '', bizStatus: '', amountCents: 100,
+    lines: [{ itemId: 'x', qty: 1, color: '黑', size: 'M' }],
+  });
+  assert.throws(() => insert({ orderNo: 'CH-COLLECT' }), /采集通道/);
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'CH-COLLECT'`).n),
+    1,
+    '导入的行不许混进采集单',
+  );
+});
+
+check('采集重推：整单替换，旧包裹一并清掉（不留空壳污染汇总）', () => {
+  const h = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = 'CH-COLLECT'`).id);
+  const it = Number(dbGet(`SELECT id FROM oi_order_items WHERE order_id = ?`, [h]).id);
+  const p = odb.createParcel({ orderNo: 'CH-COLLECT', label: '旧箱', shipCents: 999, weightG: 50 });
+  assert.strictEqual(odb.setParcelLineQty(p.id, it, 1).ok, true);
+  const r = odb.upsertCollectedOrder({
+    orderNo: 'CH-COLLECT', orderTime: '', bizStatus: '', amountCents: 200,
+    lines: [{ itemId: 'x', qty: 2, color: '黑', size: 'L' }],
+  });
+  assert.strictEqual(r.replaced, true);
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders WHERE order_no = 'CH-COLLECT'`).n), 1, '一单只能有一条主表行');
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'CH-COLLECT'`).n),
+    1,
+    '明细应被整单替换，不是追加',
+  );
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM parcels WHERE order_no = 'CH-COLLECT'`).n), 0, '重推后旧包裹必须为 0');
+  assert.strictEqual(odb.parcelTotals('CH-COLLECT').shipCents, null, '没有包裹时总运费是 null（不是旧包的 999）');
+});
+
+check('采集不能整单替换导入单（通道互斥，反向，且不改导入金额）', () => {
+  // imageId 传 null：`[7] clearAll` 已清掉 oi_images，用图 1 会先撞外键，测不到本节的守卫
+  insert({ orderNo: 'IMP-ONLY', imageId: null });
+  assert.throws(
+    () => odb.upsertCollectedOrder({ orderNo: 'IMP-ONLY', orderTime: '', bizStatus: '', amountCents: 1, lines: [] }),
+    /导入/,
+  );
+  const h = dbGet(`SELECT source, amount_cents FROM oi_orders WHERE order_no = 'IMP-ONLY'`);
+  assert.strictEqual(h.source, 'import');
+  assert.strictEqual(Number(h.amount_cents), 16518, '被拒的采集帧不许改动导入单');
 });
 
 closeDb();

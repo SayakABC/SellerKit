@@ -1,13 +1,15 @@
 <template>
   <div class="wb-page pk-view" :class="{ 'is-embedded': embedded }">
-    <!-- 页头：**只在独立页**（「拣货」模块）出现。内嵌进「发货台 › 拿货」时整块不渲染 ——
-         标题由外层页签交代，而"导出 / 更多"两个动作移到下面的精简条上（不能随页头一起消失）。 -->
+    <!-- 页头：**只在独立页**（`embedded=false`）出现。内嵌进「发货台 › 拿货」时整块不渲染 ——
+         标题由外层页签交代，而"导出 / 更多"两个动作移到下面的精简条上（不能随页头一起消失）。
+         ⚠️ 2026-10-17：左导航的「拣货」一级入口已摘（同一份清单在「今天 › 拿货 › 按厂家」里，
+         入口唯一），生产上恒为 `embedded`；页头这一支保留给"将来若再挂成独立页"的复用形态。 -->
     <header v-if="!embedded" class="wb-head">
       <div class="wb-head__main">
         <h1 class="wb-head__title">拣货</h1>
         <p class="wb-head__desc">
-          按未发货订单汇总「还要拿什么、各几件、图与供应商在哪、大概多少钱」，按厂家分组 —— 可导出带图
-          xlsx，也可以把某家的清单图直接复制给厂家
+          按未发货订单汇总「还要拿什么、各几件、图与供应商在哪、大概多少钱」，按厂家分卡 —— 可导出带图
+          xlsx，也可以把某家的清单（图 / 文字）复制给厂家
         </p>
       </div>
       <div class="wb-head__actions">
@@ -38,29 +40,14 @@
       </div>
     </header>
 
-    <!-- 精简条（两种宿主共用）：只剩「这批数是怎么筛出来的（口径）/ 有什么缺口 / 能做什么」——
-         三个数（待拿款色 / 件数 / 预估金额）移到**底部汇总条**（`pk-sum`）上，与逐厂动作同屏。
-         ⚠️ 缺口只在**有缺口**时出现（全齐就不占地方）。 -->
+    <!-- 精简条（2026-10-17 第五轮）：「缺：…」缺口汇总与「未发货 · 近 30 天 · 超窗剔除…」
+         口径说明都按用户要求撤掉 —— 页面只留动作（导出 / 更多）。空态的"为什么空"
+         与动作仍由 `emptyReason` 在清单区说清（口径解释跟着空态走，不常驻占一行）。
+         三个数（待拿款色 / 件数 / 预估金额）在卡面合计行与「生成拿货单（N 件）」按钮上。
+         ⚠️ 条上的两个 span（缺口 / 口径）删掉后，这里只剩"正在汇总…"与右侧两个动作。 -->
     <div class="pk-bar pk-topbar" data-act="pk-bar">
-      <span v-if="summary.groups.length && gapsText" class="wb-muted pk-bar__gaps" data-act="gaps"
-        >缺：{{ gapsText }}</span
-      >
-      <span v-else-if="loading" class="wb-muted">正在汇总…</span>
+      <span v-if="loading" class="wb-muted">正在汇总…</span>
       <span class="pk-bar__spacer"></span>
-      <!-- 默认条件**写在界面上**（不藏进设置）：看不到默认值，用户就会怀疑数字。
-           ⚠️ 天数这一格显示的是 **`scopeDays`（本次清单实际用的那个数）**，不是输入框的 ref ——
-           两者会在"刚改完还没重算"的那一瞬不一致，而这一格恰恰是"这批数是怎么筛出来的"的唯一交代。 -->
-      <span class="wb-muted pk-bar__scope" data-act="scope">
-        未发货 · {{ daysText(scopeDays) }}<template v-if="shopPick"> · {{ shopPick }}</template>
-        <span v-if="summary.excludedFinished" data-act="excluded-finished"
-          > · 排除已终结 {{ summary.excludedFinished }} 行</span
-        >
-        <span v-if="summary.excludedOld"> · 超窗剔除 {{ summary.excludedOld }} 行</span>
-        <span v-if="summary.undated" data-act="undated-hint"
-          > · 无下单日期 {{ summary.undated }} 行（照收）</span
-        >
-        <span v-if="summary.shippedRows"> · 含已发货 {{ summary.shippedRows }} 行</span>
-      </span>
       <!-- 内嵌时页头不渲染 ⇒ 导出 / 更多跟着精简条走（藏了就没有可点的入口了） -->
       <button
         v-if="embedded"
@@ -81,6 +68,52 @@
         {{ showMore ? '收起' : '更多' }}
       </button>
     </div>
+
+    <!-- 未归类（2026-10-20）：**先说"数不准"，再给修复入口**。
+         · 件数照常进统计（排除 = 悄悄少算，比如真库 51 行里有 9 行，18%）；
+         · 但它们扣不掉"已拿"、也取不到图 ⇒ 卡片上会一直显示待拿，用户不被告知就只能猜；
+         · 修复落在**商品ID**上：选中产品后该商品的全部历史订单自动回填款色，不是逐行点。
+         ⚠️ 不可折叠进「更多」：这是"数字不准"的告知，藏起来等于没说。 -->
+    <section v-if="unclassifiedRows.length" class="wb-panel pk-unclass" data-act="pk-unclass">
+      <div class="pk-unclass__head">
+        <span class="wb-tag is-warn" data-act="pk-unclass-tag">未归类</span>
+        <span class="pk-unclass__title" data-act="pk-unclass-title">
+          {{ unclassifiedPieces }} 件没有款色归属（{{ unclassifiedRows.length }} 个商品）
+        </span>
+        <span class="pk-unclass__why wb-muted">
+          件数已照常计入待拿；但它们扣不掉已拿、也取不到图
+        </span>
+        <button
+          type="button"
+          class="wb-link pk-unclass__toggle"
+          data-act="pk-unclass-toggle"
+          :aria-expanded="showUnclassified"
+          @click="showUnclassified = !showUnclassified"
+        >
+          {{ showUnclassified ? '收起' : '处理' }}
+        </button>
+      </div>
+      <div v-if="showUnclassified" class="pk-unclass__body">
+        <div v-for="u in unclassifiedRows" :key="u.itemId || 'no-item'" class="pk-unclass__row" data-act="pk-unclass-row">
+          <span class="pk-unclass__iid">{{ u.itemId ? `商品ID ${u.itemId}` : '订单里没有商品ID' }}</span>
+          <span class="pk-unclass__qty">{{ u.pieces }} 件 · {{ u.rows }} 行</span>
+          <span class="wb-muted pk-unclass__shops">{{ u.shops.join(' / ') || '未知店铺' }}</span>
+          <span class="pk-bar__spacer"></span>
+          <button
+            v-if="fixAction && u.itemId"
+            type="button"
+            class="wb-btn wb-btn--sm"
+            :data-act="`pk-unclass-fix-${u.itemId}`"
+            @click="emit('fix-unclassified', { itemId: u.itemId, pieces: u.pieces, shops: u.shops })"
+          >
+            选产品并归款
+          </button>
+          <span v-else-if="!u.itemId" class="wb-muted pk-unclass__hint">
+            没有商品ID 只能在订单表里核对，这里修不了
+          </span>
+        </div>
+      </div>
+    </section>
 
     <div v-if="showMore" class="pk-more">
       <div class="pk-actions--wrap">
@@ -120,8 +153,10 @@
     </p>
 
     <!-- 空态分两种（UX 审查 D3/P0-3）：「还没生成过」是引导动作；「生成过但没货可拣」要说清为什么空。
-         文案逐字保留（冒烟按 textContent 断言）。 -->
-    <div v-if="!summary.groups.length && !loading" class="wb-empty pk-empty" data-act="empty">
+         文案逐字保留（冒烟按 textContent 断言）。
+         ⚠️ 2026-10-17 合并：判据从 `summary.groups.length` 换成 `hasCards` —— 只有拿货单、
+         没有清单行的厂家（空白单 / 货已发完）也要占一张卡，否则那些单子在合并视图里看不见。 -->
+    <div v-if="!hasCards && !loading" class="wb-empty pk-empty" data-act="empty">
       <span class="wb-empty__icon" v-html="ICON.empty"></span>
       <template v-if="!generated">
         <p class="wb-empty__title">还没生成过待拣清单</p>
@@ -156,203 +191,401 @@
       </template>
     </div>
 
-    <!-- 2026-10-10 卡片网格重设计：**一张卡 = 一个款色**（图 + 尺码角标条 + 款名 + 预估小计），
-         顶部厂家标签筛选，底部汇总条逐厂收口 —— 一条链上"看货 → 复制发厂家 → 生成拿货单"
-         三件事各就各位（原先"表格 + 段标题"两层嵌套，元素多、行高密、动作散）。 -->
-    <template v-else-if="summary.groups.length">
-      <!-- 厂家筛选标签：数 = **待拿款色数**（有货要拿的厂家才占一格；一家的待拿货为 0 就不占位）。
-           一个可筛的都没有时整行不渲染（只剩「全部」的标签栏是纯噪声）。
-           「未指定厂家」也是独立一档（data-supplier="0"）——它的货要能看到，但不该混进别家的筛选里。 -->
-      <div v-if="supplierTabs.length" class="pk-tabs" data-act="pk-tabs">
-        <button
-          type="button"
-          class="pk-tab"
-          :class="{ 'is-on': supplierFilter === 'all' }"
-          data-act="pk-tab-all"
-          @click="supplierFilter = 'all'"
-        >
-          全部 <b>{{ pending.colors }}</b>
-        </button>
-        <button
-          v-for="t in supplierTabs"
-          :key="t.supplierId"
-          type="button"
-          class="pk-tab"
-          :class="{ 'is-on': supplierFilter === t.supplierId }"
-          data-act="pk-tab"
-          :data-supplier="t.supplierId"
-          @click="supplierFilter = t.supplierId"
-        >
-          {{ t.name }} <b>{{ t.colors }}</b>
-        </button>
-      </div>
-
-      <div class="pk-cards" data-act="pk-grid">
-        <!-- 一张卡 = 一个款色（含全部尺码）。已拿完 / 已忽略的排到最后并调暗（还不用动的东西不抢眼）。 -->
+    <!-- 2026-10-17 第三轮（用户反馈"三个区域不协调 / 卡片信息局促"）：**一种厂家卡 + 单宫格**。
+         原形态是三个分区（待拿宫格卡 / 暂不拿灰条 / 已拿折叠列表）三种视觉语言 —— 同一屏上
+         看着像三个人做的。现在：
+           · **一个宫格**，按 待拿 → 暂不拿 → 已拿 排序（`orderedCards`），不再有分区标题；
+           · 卡是**同一种**（同一外壳 / 圆角 / 边框），靠状态签与高矮区分：待拿全卡，
+             暂不拿与已拿收成瘦卡（同格宽，一行高起）；
+           · 款色行只留"照它拿货"要看的：**SKU 图 + 款名·颜色 + 尺码×件数 + 还差 + 忽略** ——
+             款编码是内部身份（`data-key` 仍带，供拖拽/断言定位），**不在界面上展示**；
+             预估金额只在卡底合计行出现，缺口（缺图/缺供应商/无进价）由占位图与合计行的
+             说明文字承担，不再逐行贴标签；
+           · **已开单 + 复制/开单动作吸在卡底**（`margin-top:auto`）：宫格里多卡高矮不一，
+             底部动作永远贴着卡底、横向对齐。
+         拿货单是"照它付钱"的记录 ⇒ **不新增"标记已拿"开关**：拿没拿由已提交的单说话
+         （生成拿货单 → 填价 → 提交 = "标记已拿"，撤销 = 删单，缺口自动回滚）。 -->
+    <div v-else-if="hasCards" class="pu-grid" data-act="pu-grid">
+      <template v-for="c in orderedCards" :key="c.supplierId">
+        <!-- ── 待拿（全卡）：款色行（图 + 款名·颜色 + 尺码×件数）+ 合计 + 已开单 + 动作 ── -->
         <article
-          v-for="c in cards"
-          :key="c.r.key"
-          class="pk-card"
-          :class="{ 'is-off': c.r.ignored, 'is-done': !c.r.ignored && c.r.remaining <= 0 }"
-          :data-key="c.r.key"
-          data-act="pk-card"
+          v-if="c.zone === 'pending'"
+          class="pu-scard"
+          data-act="pu-scard"
+          data-zone="pending"
+          :data-supplier="c.supplierId"
+          :class="{ 'is-drop-target': dropTarget === c.supplierId }"
+          @dragover="onTileDragOver($event, c)"
+          @dragleave="onTileDragLeave($event, c)"
+          @drop="onTileDrop($event, c)"
         >
-          <div class="pk-card__imgs">
-            <img v-if="thumbs[c.r.imagePath]" class="pk-card__img" :src="thumbs[c.r.imagePath]" alt="" />
-            <span v-else class="pk-card__noimg">缺图</span>
-            <span class="pk-card__sup" :class="{ 'is-missing': !c.r.supplierId }">{{ c.supplierName }}</span>
-            <!-- 尺码角标条（压在图的底边）：`L×2` = 这一码**还要拿** 2 件；`L✓` = 已拿完。
-                 tooltip 里是这一码的「需求 · 已拿 · 还差」三个数 —— 折叠展示，不丢数。
-                 ⚠️ 非本卡自造的叠加层：这层半透明底用 `--wb-overlay` 令牌（不写死色值）。 -->
-            <span class="pk-card__sizes" data-act="sizes">
-              <span
-                v-for="s in c.r.sizes"
-                :key="s.size"
-                class="pk-chip"
-                :class="{ 'is-done': s.remaining <= 0, 'is-off': c.r.ignored }"
-                data-act="size-chip"
-                :data-size="s.size"
-                :title="chipTitle(s)"
-                >{{ chipText(s) }}</span
+          <header class="pu-scard__head">
+            <span class="pu-scard__name">{{ c.supplierName || '未指定厂家' }}</span>
+            <!-- 厂家电话：桌面端没有"拨号"这事，一键=复制（粘到微信 / 拨号盘里） -->
+            <span v-if="c.phone" class="pu-scard__phone">
+              <span class="wb-muted">电话</span> {{ c.phone }}
+              <button
+                type="button"
+                class="wb-link"
+                :data-act="`pu-copy-phone-${c.supplierId}`"
+                @click="copyPhone(c)"
               >
+                复制
+              </button>
             </span>
+            <span class="pu-scard__spacer"></span>
+            <span class="wb-tag is-warn">待拿</span>
+          </header>
+
+          <div class="pu-scard__rows">
+            <div
+              v-for="r in c.rows"
+              :key="r.key"
+              class="pu-srow"
+              data-act="pu-srow"
+              :data-key="r.key"
+              :data-style="r.styleCode"
+              :class="{
+                'is-off': r.ignored,
+                'is-done': !r.ignored && r.remaining <= 0,
+                'is-dragging': dragCode === r.styleCode && dragFrom === c.supplierId,
+              }"
+              :title="rowTitle(r)"
+              :draggable="moveAction && r.styleCode ? true : undefined"
+              @dragstart="onRowDragStart($event, r, c)"
+              @dragend="onRowDragEnd"
+            >
+              <!--
+                拖拽把手（2026-10-17 评审 P1：可发现性）。
+                此前"行能拖到别家的格子上"的唯一线索是行 tooltip（要悬停才出现）⇒
+                扫一眼页面没有任何"这些行可以拖"的信号，功能等于不存在。
+                现在每行左缘常驻一个**极淡**的六点把手（常驻才叫线索，藏在 hover 里等于没有；
+                淡到不抢款名）。未识别款 / 不接写通道时不渲染 —— 与 `draggable` 同一条件，
+                不给一个拖不动的行画把手（那会是第二种假动作）。
+              -->
+              <span
+                v-if="moveAction && r.styleCode"
+                class="pu-srow__grip"
+                data-act="pk-grip"
+                aria-hidden="true"
+              ></span>
+              <!-- SKU 图：缩略图已在生成时合批取回（`thumbs`），这里只负责摆。
+                   无图给占位框而不是藏掉 —— "这款没图"本身是要去补的信息（行上不再另贴「缺图」标签）。 -->
+              <img v-if="thumbOf(r)" class="pu-srow__img" :src="thumbOf(r)" :alt="r.key" draggable="false" />
+              <span v-else class="pu-srow__img pu-srow__img--none" v-html="ICON.noimg" aria-hidden="true"></span>
+              <div class="pu-srow__main">
+                <!-- 只留"照它拿货"要看的：款名 · 颜色（款编码是内部身份，不展示）+ 还差件数 -->
+                <div class="pu-srow__top">
+                  <span class="pu-srow__name">{{ rowName(r) }}</span>
+                  <span v-if="r.styleName && r.color" class="pu-srow__color">{{ r.color }}</span>
+                  <span class="pu-srow__spacer"></span>
+                  <span class="pu-srow__qty">{{
+                    r.ignored ? '已忽略' : r.remaining > 0 ? `还差 ${r.remaining} 件` : '已拿完'
+                  }}</span>
+                </div>
+                <div class="pu-srow__sub">
+                  <!-- 尺码角标：`L×2` = 这一码**还要拿** 2 件；`L✓` = 已拿完。
+                       tooltip 里是这一码的「需求 · 已拿 · 还差」三个数 —— 折叠展示，不丢数。 -->
+                  <span class="pu-srow__sizes">
+                    <span
+                      v-for="s in r.sizes"
+                      :key="s.size"
+                      class="pk-chip"
+                      :class="{ 'is-done': s.remaining <= 0, 'is-off': r.ignored }"
+                      data-act="size-chip"
+                      :data-size="s.size"
+                      :title="chipTitle(s)"
+                      >{{ chipText(s) }}</span
+                    >
+                  </span>
+                  <!-- 行尾只发**意图**：确认弹层（要用户敲原因）与写库都在宿主（「拿货」页）——
+                       本组件不认识 `purchase*` 写通道，也不该把确认弹层再实现一遍。
+                       忽略按**款色**整组生效（`ignoreKey` 里没有码）⇒ 动作挂在款色行上。 -->
+                  <span class="pu-srow__acts">
+                    <button
+                      v-if="rowAction && !r.ignored"
+                      type="button"
+                      class="wb-link"
+                      :data-act="`pk-ignore-${r.key}`"
+                      @click="emit('ignore', { styleCode: r.styleCode, color: r.color, remaining: r.remaining })"
+                    >
+                      忽略
+                    </button>
+                    <button
+                      v-else-if="rowAction"
+                      type="button"
+                      class="wb-link"
+                      :data-act="`pk-unignore-${r.key}`"
+                      @click="emit('unignore', { styleCode: r.styleCode, color: r.color })"
+                    >
+                      取消忽略
+                    </button>
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="pk-card__body">
-            <div class="pk-card__head">
-              <span class="pk-card__key wb-mono">{{ c.r.key }}</span>
-              <!-- 四态：**已忽略**（整款色不补）> **已拿完**（还差 0）> 缺哪一环（含无进价）> 齐。
-                   "已拿完"必须与"齐"分开说：一个是"不用再拿了"，一个是"这行照它拿"。 -->
-              <span v-if="c.r.ignored" class="wb-tag pk-tag is-warn" data-act="row-ignored">已忽略</span>
-              <span v-else-if="!c.r.remaining && c.r.taken" class="pk-ok" data-act="row-taken-all">已拿完</span>
-              <span v-else-if="rowGaps(c.r).length" class="wb-tag pk-tag is-warn" data-act="row-gaps">{{
-                rowGaps(c.r).join(' · ')
-              }}</span>
-              <span v-else class="pk-ok">齐</span>
+
+          <p class="pu-scard__sum">
+            合计 {{ c.pending.colors }} 款色 · 待拿 {{ c.pending.pieces }} 件 ·
+            {{ amountText(c.pending.amount, c.pending.noPricePieces, c.pending.pieces)
+            }}{{ noPriceNote(c.pending.noPricePieces, c.pending.pieces) }}
+          </p>
+
+          <!-- 吸底块：已开单 + 三个动作永远贴卡底（宫格内多卡高矮不一，底部横向对齐）。
+               已开单（宿主注入）：这一家已经开了哪些单、什么状态、多少钱 ——
+               与"要拿什么"同卡对照；单子上的动作与旧「按订单」视图同一套 data-act。 -->
+          <div class="pu-scard__bottom">
+            <div v-if="c.orders.length" class="pu-scard__orders" data-act="pu-scard-orders">
+              <span class="pu-scard__orders-title">已开单</span>
+              <div v-for="o in c.orders" :key="o.id" class="pu-orow" :data-act="`pu-orow-${o.id}`">
+                <span class="pu-orow__no wb-mono">#{{ o.id }}</span>
+                <span class="pu-orow__date wb-muted">{{ o.bizDate }}</span>
+                <span class="wb-tag" :class="o.status === 'submitted' ? 'is-on' : 'is-warn'">
+                  {{ o.status === 'submitted' ? '已提交' : '草稿' }}
+                </span>
+                <!-- 包价单 2026-10-20 已删：单子只有"明细"一种形态，不再挂一个恒为"明细"的标签 -->
+                <button
+                  v-if="undecidedOf(o)"
+                  type="button"
+                  class="wb-tag is-warn pu-orow__undecided"
+                  :data-act="`pu-undecided-${o.id}`"
+                  :title="`这 ${undecidedOf(o)} 行买的时候还没定颜色 —— 它们扣不掉待拿（那边会一直显示待拿）。点这里去认色。`"
+                  @click="emit('order-action', { kind: 'edit', id: o.id })"
+                >
+                  {{ undecidedOf(o) }} 行色未定
+                </button>
+                <span class="pu-orow__amount">¥{{ centsMoney(o.totalCents) }}</span>
+                <span class="pu-orow__ops">
+                  <button
+                    type="button"
+                    class="wb-link"
+                    :data-act="`pu-edit-${o.id}`"
+                    @click="emit('order-action', { kind: 'edit', id: o.id })"
+                  >
+                    查看 / 编辑
+                  </button>
+                  <button
+                    v-if="o.status !== 'submitted'"
+                    type="button"
+                    class="wb-link"
+                    :data-act="`pu-submit-${o.id}`"
+                    @click="emit('order-action', { kind: 'submit', id: o.id })"
+                  >
+                    提交
+                  </button>
+                  <button
+                    type="button"
+                    class="wb-link"
+                    :data-act="`pu-export-${o.id}`"
+                    @click="emit('order-action', { kind: 'export', id: o.id })"
+                  >
+                    导出
+                  </button>
+                  <button
+                    type="button"
+                    class="wb-link wb-link--danger"
+                    :data-act="`pu-del-${o.id}`"
+                    @click="emit('order-action', { kind: 'delete', id: o.id })"
+                  >
+                    删除
+                  </button>
+                </span>
+              </div>
             </div>
-            <p v-if="c.r.styleName" class="pk-card__name">{{ c.r.styleName }}</p>
-            <div class="pk-card__foot">
-              <span
-                v-if="c.amount"
-                class="pk-card__amount"
-                :class="{ 'is-none': !c.hasPrice }"
-                data-act="card-amount"
-                title="预估 = 还要拿的件数 × 已查到的进价；不含无进价的件"
-                >{{ c.amount }}</span
-              >
-              <span
-                class="pk-card__unit"
-                title="进价（元/件）：成本表里按订单日期生效的那条；— = 没查到价"
-                ><span data-act="unit-price">{{ c.unitText }}</span
-                ><template v-if="c.hasPrice"> 元/件</template></span
-              >
-              <span class="pk-card__spacer"></span>
-              <!-- 行尾只发**意图**：确认弹层（要用户敲原因）与写库都在宿主（「拿货」页）——
-                   本组件不认识 `purchase*` 写通道，也不该把确认弹层再实现一遍。
-                   忽略按**款色**整组生效（`ignoreKey` 里没有码）⇒ 动作挂在款色卡上。 -->
+
+            <footer class="pu-scard__acts">
+              <!-- 两个复制**成组**（评审 P2）：此前三个按钮平级一行，扫读时分不清
+                   「给厂家发图」与「留一份文字」是同一件事的两种形态；
+                   现在它们贴在一起（组内 4px、与主动作隔开 8px），主次才读得出来。
+                   用途写进 title —— 按钮上只留动作名（12px 图标会把三按钮挤出一行）。 -->
+              <span class="pu-scard__copys">
+                <button
+                  type="button"
+                  class="wb-btn wb-btn--sm"
+                  data-act="pk-copy-text"
+                  :data-supplier="c.supplierId"
+                  title="文字清单：粘进聊天或备忘，字可以改"
+                  @click="copyText(c)"
+                >
+                  复制拿货清单
+                </button>
+                <button
+                  type="button"
+                  class="wb-btn wb-btn--sm"
+                  data-act="pk-copy"
+                  :data-supplier="c.supplierId"
+                  title="清单图：粘到微信直接发出去，厂家照图备货"
+                  :disabled="copyingId !== null && copyingId === c.supplierId"
+                  @click="copyForSupplier(c)"
+                >
+                  {{ copyingId !== null && copyingId === c.supplierId ? '生成中…' : '复制清单图' }}
+                </button>
+              </span>
               <button
-                v-if="rowAction && !c.r.ignored"
+                v-if="supplierAction && c.pending.pieces > 0"
                 type="button"
-                class="wb-link"
-                :data-act="`pk-ignore-${c.r.key}`"
-                @click="emit('ignore', { styleCode: c.r.styleCode, color: c.r.color, remaining: c.r.remaining })"
+                class="wb-btn wb-btn--sm wb-btn--primary"
+                data-act="pk-create-order"
+                :data-supplier="c.supplierId"
+                @click="emit('supplier-action', c.supplierId)"
               >
-                忽略
+                生成拿货单（{{ c.pending.pieces }} 件）
               </button>
-              <button
-                v-else-if="rowAction"
-                type="button"
-                class="wb-link"
-                :data-act="`pk-unignore-${c.r.key}`"
-                @click="emit('unignore', { styleCode: c.r.styleCode, color: c.r.color })"
-              >
-                取消忽略
-              </button>
-            </div>
+            </footer>
           </div>
         </article>
-      </div>
 
-      <!-- 底部汇总条（吸底）：一行一个厂家 = 「这家什么情况 + 复制发哪家 + 一键开单」。
-           一件一单的约束（一张拿货单只能挂一个厂家）直接落在行上，不用先选厂家再对一遍。
-           ⚠️ 必须吸底（sticky）而不是随列表滚：它会随着卡片多寡被顶到几十屏之外，
-           而"生成拿货单"是这条链的下一步动作，找不到就等于没有。 -->
-      <div class="pk-sum" data-act="pk-sum">
+        <!-- ── 暂不拿（瘦卡，同一种外壳压灰）：款色全被忽略 + 用户标的忽略原因 ── -->
         <div
-          v-for="sec in sections"
-          :key="sec.sg.supplierId"
-          class="pk-sum-row"
-          :class="{ 'is-missing': !sec.sg.supplierId }"
-          data-act="pk-sum-row"
-          :data-supplier="sec.sg.supplierId"
+          v-else-if="c.zone === 'skip'"
+          class="pu-scard pu-scard--mini pu-scard--skip"
+          data-act="pu-scard"
+          data-zone="skip"
+          :data-supplier="c.supplierId"
+          :class="{ 'is-drop-target': dropTarget === c.supplierId }"
+          @dragover="onTileDragOver($event, c)"
+          @dragleave="onTileDragLeave($event, c)"
+          @drop="onTileDrop($event, c)"
         >
-          <span class="pk-sum-row__name">{{ sec.sg.supplierName || '未指定厂家' }}</span>
-          <span class="pk-sum-row__meta">{{ sectionMeta(sec) }}</span>
-          <span v-if="!sec.sg.supplierId" class="pk-sum-row__hint"
-            >给产品补上供应商，这些货才会归到厂家名下</span
-          >
-          <span class="pk-sum-row__spacer"></span>
+          <span class="pu-scard__name">{{ c.supplierName || '未指定厂家' }}</span>
+          <span class="wb-tag">暂不拿</span>
+          <span class="pu-scard__meta wb-muted">{{ skipText(c) }}</span>
+          <span class="pu-scard__spacer"></span>
           <button
-            v-if="sec.sg.supplierId && sec.pending.pieces > 0"
             type="button"
-            class="wb-btn wb-btn--sm"
-            data-act="pk-copy"
-            :data-supplier="sec.sg.supplierId"
-            :disabled="copyingId === sec.sg.supplierId"
-            @click="copyForSupplier(sec)"
+            class="wb-link"
+            :data-act="`pu-skip-ignores-${c.supplierId}`"
+            @click="emit('show-ignores')"
           >
-            {{ copyingId === sec.sg.supplierId ? '生成中…' : '复制给厂家' }}
-          </button>
-          <button
-            v-if="supplierAction && sec.sg.supplierId && sec.pending.pieces > 0"
-            type="button"
-            class="wb-btn wb-btn--sm wb-btn--primary"
-            data-act="pk-create-order"
-            :data-supplier="sec.sg.supplierId"
-            @click="emit('supplier-action', sec.sg.supplierId)"
-          >
-            生成拿货单（{{ sec.pending.pieces }} 件）
+            忽略清单
           </button>
         </div>
-        <!-- 总账：与「复制 / 生成」同一判据（待拿 = 还差 > 0 且未忽略，`pendingRollup` 一处算）。
-             一件价都没查到时不写 `¥0.00`（那等于说"这批货值 0 元"），走 `amountText` → `—`。 -->
-        <div class="pk-sum__total pk-metric" data-act="amount">
-          <template v-if="pending.colors">
-            待拿 <b>{{ pending.colors }}</b> 款色 · <b>{{ pending.pieces }}</b> 件 · 预估
-            <b>{{ amountText(pending.amount, pending.noPricePieces, pending.pieces) }}</b>
-            <span v-if="pending.noPricePieces" class="wb-muted">{{
-              noPriceNote(pending.noPricePieces, pending.pieces)
-            }}</span>
-          </template>
-          <span v-else class="wb-muted">清单里的货都已拿完或已忽略 —— 没有要拿的货</span>
+
+        <!-- ── 已拿 · 已开单（瘦卡）：没有待拿的厂家，单子行上管（编辑/提交/导出/删除）。
+             不再默认折叠 —— 单宫格按序排在最后，"拿完的事"安静待在页尾但不消失。 ── -->
+        <div
+          v-else
+          class="pu-scard pu-scard--mini pu-scard--done"
+          data-act="pu-scard"
+          data-zone="done"
+          :data-supplier="c.supplierId"
+          :class="{ 'is-drop-target': dropTarget === c.supplierId }"
+          @dragover="onTileDragOver($event, c)"
+          @dragleave="onTileDragLeave($event, c)"
+          @drop="onTileDrop($event, c)"
+        >
+          <div class="pu-scard__head">
+            <span class="pu-done__ok">✓</span>
+            <span class="pu-scard__name">{{ c.supplierName || '未指定厂家' }}</span>
+            <span class="wb-tag">已拿</span>
+            <span class="pu-scard__meta wb-muted">{{ doneText(c) }}</span>
+            <span class="pu-scard__spacer"></span>
+          </div>
+          <div v-for="o in c.orders" :key="o.id" class="pu-orow" :data-act="`pu-orow-${o.id}`">
+            <span class="pu-orow__no wb-mono">#{{ o.id }}</span>
+            <span class="pu-orow__date wb-muted">{{ o.bizDate }}</span>
+            <span class="wb-tag" :class="o.status === 'submitted' ? 'is-on' : 'is-warn'">
+              {{ o.status === 'submitted' ? '已提交' : '草稿' }}
+            </span>
+            <button
+              v-if="undecidedOf(o)"
+              type="button"
+              class="wb-tag is-warn pu-orow__undecided"
+              :data-act="`pu-undecided-${o.id}`"
+              :title="`这 ${undecidedOf(o)} 行买的时候还没定颜色 —— 它们扣不掉待拿（那边会一直显示待拿）。点这里去认色。`"
+              @click="emit('order-action', { kind: 'edit', id: o.id })"
+            >
+              {{ undecidedOf(o) }} 行色未定
+            </button>
+            <span class="pu-orow__amount">¥{{ centsMoney(o.totalCents) }}</span>
+            <span class="pu-orow__ops">
+              <button
+                type="button"
+                class="wb-link"
+                :data-act="`pu-edit-${o.id}`"
+                @click="emit('order-action', { kind: 'edit', id: o.id })"
+              >
+                查看 / 编辑
+              </button>
+              <button
+                v-if="o.status !== 'submitted'"
+                type="button"
+                class="wb-link"
+                :data-act="`pu-submit-${o.id}`"
+                @click="emit('order-action', { kind: 'submit', id: o.id })"
+              >
+                提交
+              </button>
+              <button
+                type="button"
+                class="wb-link"
+                :data-act="`pu-export-${o.id}`"
+                @click="emit('order-action', { kind: 'export', id: o.id })"
+              >
+                导出
+              </button>
+              <button
+                type="button"
+                class="wb-link wb-link--danger"
+                :data-act="`pu-del-${o.id}`"
+                @click="emit('order-action', { kind: 'delete', id: o.id })"
+              >
+                删除
+              </button>
+            </span>
+          </div>
         </div>
-      </div>
-    </template>
+      </template>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 「拣货」视图（2026-10-10 卡片网格重设计）：一键生成 → 按款色汇总"要拿什么、各几件、图与供应商在哪、
-// 大概多少钱" → 卡片网格（顶部厂家标签筛选）→ 底部汇总条逐厂「复制给厂家 / 生成拿货单」→ 导出带图 xlsx。
+// 「拣货」视图（2026-10-17 合并重设计）：一键生成 → 按款色汇总"要拿什么、各几件、图与供应商在哪、
+// 大概多少钱" → **按厂家分卡**（一张卡 = 一家厂：待拿款色行 + 已开单 + 复制/开单动作）→ 导出带图 xlsx。
+//
+// **2026-10-17 第二轮（合并之后）：宫格 + SKU 图 + 拖拽改厂家**：
+//   · 厂家卡从"一家一张全宽卡竖排"改成**宫格**（一个厂家一个宫格，auto-fill 最小列宽，现为 324）——
+//     厂家一多就得整页滚，且"哪家还有什么"要逐张读完才比得出来；
+//   · 款色行加 **SKU 缩略图**（生成时已合批取回的那批 `thumbs`，这里只负责摆）；
+//     无图给虚线占位框 —— "这款没图"是要去补的信息，不藏行；
+//   · 款色行可**拖到别家的格子**：宿主按款编码改 `pl_products.supplier_id`（`move-supplier` 意图）。
+//     ⚠️ 写是**款级**的（厂家挂在款上，不挂在款色上）⇒ 拖一行 = 这一款的所有款色一起走，
+//        载荷带 `colors` 让宿主把"整款一起移动"说给用户听；
+//   · 未指定厂家（supplierId 0）是合法落点（拖过去 = 取消关联）；未识别款（无款编码）不能拖。
 //
 // 口径（别改，与订单利润页**同一份实现**）：
 //   · 件数 `resolveQty`（结算商品行真值 → 报表块 `商品数量` → 按 1 件并标缺）；
 //   · 分组键 `skuKey`（款 × 色 × 码，缺哪段标哪段）；
-//   · 进价 `pickUnitCost`（款级成本区间 `ae_cost_map`，按该行下单日期取当时生效的那条）——
-//     所以同一条订单在「拣货」与「算钱」两页上的成本是同一个数；
+//   · 进价 `positiveCents` 三级回落（订单行实际进价 → 订单行进价预估 → 产品当前价），
+//     与「统计」页的差别只在最后一级：**拣货是"要花多少钱"的经营估算**，老行还没有预估快照时
+//     用产品当前价兜一下；利润页则只认行级两个快照（历史口径不能跟着产品改价漂移）。
 //   · 范围：**未发货**（宿主按机械事实筛）+ **近 30 天** + **已终结（关闭/已完成）不拣**（`bucketOfStatus`）。
-// 界面上把默认条件写成标签（含被剔除的行数），缺件数/缺图/缺供应商/无进价逐卡标 ——
+// 界面上把默认条件写成标签（含被剔除的行数），缺件数/缺图/缺供应商/无进价逐行标 ——
 // 拣货单是"照它干活"的东西，少一行就是少发一件货、漏一个价就是少带一笔钱。
 //
-// 取数四路（全部经 core 服务，视图内零算术）：
-//   1. 订单行投影（含三层回落后的图）→ `pickingRows`
+// 取数三路（全部经 core 服务，视图内零算术）：
+//   1. 订单行投影（含三层回落后的图 + 两个行级成本字段）→ `pickingRows`
 //   2. 结算商品行件数                → `settleOrders`（键口径 `settleQtyKey`）
-//   3. 款级成本区间（进价唯一来源）  → `aeCostMapList`
-//   4. 缩略图（合批一次往返）        → `orderImageThumbBatch`
-//   动作：导出 `pickingExportExcel`（主进程 exceljs）· 复制发厂清单图 `writeClipboardImage`
+//   3. 缩略图（合批一次往返）        → `orderImageThumbBatch`
+//   动作：导出 `pickingExportExcel`（主进程 exceljs）· 复制清单图 `writeClipboardImage`
+//         · 复制文字清单 `writeClipboard`（模型 `sheetTextOf`，与图/屏上/xlsx 同源）。
+//
+// **2026-10-17 合并（「要拿什么」×「拿了什么」→ 按厂家单页）**：
+// 本视图从"款色卡网格 + 底部汇总条"改成"厂家卡列表"。为此宿主（「拿货」页）注入三样本视图
+// 没有的东西：各厂家的**拿货单**（`supplierOrders`，卡上"已开单"那一截）、**忽略原因**
+// （`ignoreReasons`，"暂不拿"瘦卡要说清为什么）、**厂家电话**（`supplierPhones`）。
+// 单子上的动作（编辑/提交/导出/删除）本视图**只发意图**（`order-action`）—— 确认弹层与写库都在宿主，
+// 与既有的 `ignore` / `supplier-action` 同一规矩（本组件不认识 `purchase*` 写通道）。
+// **2026-10-17 第三轮（用户反馈"三区不协调 / 行信息局促 / 卡底动作要固定"）**：
+// 三分区撤掉 → **单宫格一种卡**（待拿 → 暂不拿 → 已拿 排序，瘦卡与全卡同一外壳）；
+// 款色行瘦身（图 + 款名·颜色 + 尺码×件数 + 忽略；款编码/金额/缺口/涉及订单不再上卡）；
+// 已开单 + 复制/开单动作 `margin-top:auto` 吸卡底。
 import { computed, onMounted, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import { switchModule } from '@/core/services/shell';
-import { writeClipboardImage } from '@/core/services/clipboard';
+import { writeClipboard, writeClipboardImage } from '@/core/services/clipboard';
 import * as ipc from '@/core/services/ipc';
 import {
   aggregatePicking,
@@ -360,7 +593,7 @@ import {
   groupByColor,
   ignoreKey,
   pendingRollup,
-  takenKey,
+  takenKeyOf,
   type PendingRollup,
   type PickingColorGroup,
   type PickingGroup,
@@ -368,16 +601,17 @@ import {
   type PickingSupplierGroup,
   type PickingSummary,
 } from '@/lib/picking';
-import { settleQtyKey, type CostInterval, type SettleQtyInfo } from '@/lib/orderCost';
+import { settleQtyKey, type SettleQtyInfo } from '@/lib/orderCost';
 import { domToJpeg, encodeImagesForExport, sizeQtyBadge } from '@/lib/pickingExport';
 import {
   amountText,
-  money,
+  centsMoney,
   noPriceNote,
   renderSheetPng,
   sheetModelOf,
+  sheetTextOf,
 } from '@/lib/pickingSheet';
-import type { IgnoreRow, OutstandingRow } from '@/types';
+import type { IgnoreRow, PurchaseOrder, TakenRow } from '@/types';
 
 /**
  * `embedded` = 被「发货台」页的页签内嵌（藏掉本页自己的页头，避免"标题下面又一个标题"）。
@@ -389,10 +623,21 @@ import type { IgnoreRow, OutstandingRow } from '@/types';
  *   独立页是**快照工具**（进页面不动手就不该取数，冒烟钉着"首屏不自动取数"）；
  *   而并进「拿货」后它是那一步的**入口视图**（"要拿什么"应当一眼可读，还得让
  *   「按此生成拿货单」有东西可拿）⇒ 两种语义都真实存在，写成一个 prop 才不会互相改坏。
- * `rowAction` = 卡片角给「忽略 / 取消忽略」链接（宿主提供，本组件只发意图，不碰拿货数据）。
- * `supplierAction` = 底部汇总条上给「生成拿货单（N 件）」（宿主提供，本组件只发"这家厂"的意图）。
- *   为什么钉在**厂家行**上而不是页级一个按钮：一张拿货单只能挂**一个厂家**（下游按厂家发单/对账），
- *   页级按钮必然先拉一个"选厂家"的下拉——那一步对用户是白问的，数据里已经分好行了。
+ * `rowAction` = 款色行给「忽略 / 取消忽略」链接（宿主提供，本组件只发意图，不碰拿货数据）。
+ * `supplierAction` = 卡上给「生成拿货单（N 件）」（宿主提供，本组件只发"这家厂"的意图）。
+ *   为什么钉在**厂家卡**上而不是页级一个按钮：一张拿货单只能挂**一个厂家**（下游按厂家发单/对账），
+ *   页级按钮必然先拉一个"选厂家"的下拉——那一步对用户是白问的，数据里已经分好卡了。
+ * `supplierOrders` = 宿主注入的各厂家拿货单（按 supplierId；草稿 + 已提交）。
+ *   只有单子、没有清单行的厂家也据此占一张"已拿 · 已开单"卡 —— 否则空白单 / 货已发完的单
+ *   在合并视图里看不见、也管不动（单子管理本来就都在卡上）。
+ * `ignoreReasons` = 宿主注入的忽略原因（键 = `ignoreKey(款编码, 款色)`）—— "暂不拿"区要说清为什么。
+ * `supplierPhones` = 宿主注入的厂家电话（supplierId → 电话；空串 = 没录，不渲染那一格）。
+ * `moveAction` = 款色行可**拖到别家**（宿主提供写通道，本组件只发意图）。
+ *   为什么是一个独立开关而不是搭 `rowAction`：拖拽改的是**款主数据**（`pl_products.supplier_id`），
+ *   与"忽略"是两件不相干的事；宿主没接这个能力时行就不该看起来能拖（假控件）。
+ * `fixAction` = 「未归类」提示条里给「选产品并归款」（宿主提供写通道，本组件只发商品ID 意图）。
+ *   为什么单独一个开关：这条动作改的是**产品域的映射**（`pl_sku`），不是拿货数据；
+ *   宿主没接时按钮不渲染（否则又是一个点不动的假控件）。
  */
 const props = withDefaults(
   defineProps<{
@@ -401,19 +646,44 @@ const props = withDefaults(
     auto?: boolean;
     rowAction?: boolean;
     supplierAction?: boolean;
+    supplierOrders?: Record<number, PurchaseOrder[]>;
+    ignoreReasons?: Record<string, string>;
+    supplierPhones?: Record<number, string>;
+    moveAction?: boolean;
+    fixAction?: boolean;
   }>(),
-  { embedded: false, refreshToken: 0, auto: false, rowAction: false, supplierAction: false }
+  {
+    embedded: false,
+    refreshToken: 0,
+    auto: false,
+    rowAction: false,
+    supplierAction: false,
+    supplierOrders: () => ({}),
+    ignoreReasons: () => ({}),
+    supplierPhones: () => ({}),
+    moveAction: false,
+    fixAction: false,
+  }
 );
 
 /**
  * `go-import`  空态里的「去导订单」（内嵌时外层接管；本组件不认识页签，只发一个意图）
- * `generated`  清单重算完成 → 把**这一份**清单交给外层（「拿货」据此数"要拿几张/几件"）
- * `ignore` / `unignore`  卡上动作的**意图**（真正的写库与确认弹层由宿主做：
+ * `generated`  清单重算完成 → 把**这一份**清单交给外层（「拿货」据此开单：只取本视图算过的同一批组）
+ * `ignore` / `unignore`  款色行上动作的**意图**（真正的写库与确认弹层由宿主做：
  *   本组件不认识 `purchase*` 写通道，也不该把确认弹层再实现一遍）。
  *   ⚠️ 忽略是**整款色**生效的（同 `lib/picking` 的 `ignoreKey`）⇒ 载荷不带 `size`；
  *   带上反而让宿主以为"只忽略这一码、别的码继续要"。
- * `supplier-action`  汇总条上「生成拿货单」的意图（载荷 = 厂家 id，只发厂商、不带明细：
+ * `supplier-action`  卡上「生成拿货单」的意图（载荷 = 厂家 id，只发厂商、不带明细：
  *   明细由宿主从**自己刚算过的同一份清单**里取，避免"按钮说 12 件、单里 14 件"两套口径）
+ * `order-action`  卡上"已开单"里某个动作的意图（编辑/提交/导出/删除；宿主认单号）。
+ *   全卡与瘦卡上的单子行是**同一套 data-act**（`pu-*-${单号}`）。
+ * `show-ignores`  「暂不拿」区的「忽略清单」链接：让宿主把页级的忽略清单展开（本视图不管它）。
+ * `move-supplier` 把一款拖到别家的**意图**（载荷 = 款编码 / 款名 / 从哪家到哪家 / 该款几个款色）。
+ *   写库在宿主（`pl_products.supplier_id` 是产品域主数据，本组件不认识产品域写通道）。
+ *   ⚠️ 粒度是**款级**的（厂家挂在款上，不挂在款色上）⇒ 载荷必须带 `colors`：
+ *      宿主只有知道"这一款一共几个款色一起走"，才能把话说全（否则用户以为只拖走了看见的那一行）。
+ * `fix-unclassified` 「未归类」行上「选产品并归款」的意图（载荷 = 商品ID / 件数 / 店铺）。
+ *   写库在宿主（产品域映射 `pl_shop_sku`）；本组件只把"要修哪一条"说清。
  */
 const emit = defineEmits<{
   (e: 'go-import'): void;
@@ -421,17 +691,34 @@ const emit = defineEmits<{
   (e: 'ignore', row: { styleCode: string; color: string; remaining: number }): void;
   (e: 'unignore', row: { styleCode: string; color: string }): void;
   (e: 'supplier-action', supplierId: number): void;
+  (e: 'order-action', intent: { kind: 'edit' | 'submit' | 'export' | 'delete'; id: number }): void;
+  (e: 'show-ignores'): void;
+  (
+    e: 'move-supplier',
+    intent: {
+      styleCode: string;
+      styleName: string;
+      fromSupplierId: number;
+      toSupplierId: number;
+      /** 该款在清单里一共几个款色（写是款级的 ⇒ 它们一起走） */
+      colors: number;
+    }
+  ): void;
+  (e: 'fix-unclassified', intent: { itemId: string; pieces: number; shops: string[] }): void;
 }>();
 
 /** 空态图标（内联 SVG，跟随 currentColor） */
 const ICON = {
   empty:
     '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/><path d="M8 10.2v4"/></svg>',
+  // 款色行上的"这款没图"占位（虚线框 + 山形图标）：缺图是要去补的信息，不藏行
+  noimg:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9.5" r="1.4"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>',
 };
 
 const loading = ref(false);
 const error = ref('');
-/** 本页是否**生成过**：空态要分"还没点过"与"点了但没货可拣"两种（后者得说清为什么空） */
+/** 本页是否**生成过**：空态要分"还没点过"与"点了但没货可拣"两种（后者得说清为什么） */
 const generated = ref(false);
 /** 低频筛选默认收起（界面精简）：天数窗 / 店铺 / 含已发货 */
 const showMore = ref(false);
@@ -439,6 +726,7 @@ const days = ref(DEFAULT_PICKING_DAYS);
 const shopPick = ref('');
 const includeShipped = ref(false);
 const shops = ref<string[]>([]);
+/** 款色行 tooltip 之外的临时态已全部随第三轮精简撤掉（涉及订单展开 / 已拿折叠） */
 
 /** 缩略图边长：96 太小 —— 导出时要以它为准转 JPEG 嵌进 Excel（发厂家看图认货），
  *  且**尺码×件数角标要烧进图里**（角标字号按图短边的比例算，图太小字就糊了）；
@@ -450,8 +738,18 @@ const thumbs = ref<Record<string, string>>({});
 const EMPTY: PickingSummary = aggregatePicking([], { today: '' });
 const summary = ref<PickingSummary>(EMPTY);
 
-/**
- * 天数窗的中文说法。
+/* ---- 未归类（2026-10-20）------------------------------------------------------------
+ * 这些订单行没有款色归属：件数**照常进统计**（排除 = 悄悄少算，远比如实标注危险），
+ * 但它们扣不掉"已拿"、也取不到图。界面必须先把"数不准"说出来，再给修复入口 ——
+ * 修的是**商品ID**（选中产品 ⇒ 该商品的全部历史订单自动回填款色），一次修一批。
+ */
+const showUnclassified = ref(false);
+const unclassifiedRows = computed(() => summary.value.unclassifiedItems ?? []);
+const unclassifiedPieces = computed(() =>
+  unclassifiedRows.value.reduce((sum, it) => sum + it.pieces, 0)
+);
+
+/** 天数窗的中文说法。
  * ⚠️ `0` **不能说成「近 0 天」** —— 它的含义是"不限"（`cutoffDate` 见 `lib/picking`），
  * 说成 0 天会读成"只看今天的单"，正好相反。
  */
@@ -460,120 +758,123 @@ function daysText(d: number): string {
 }
 
 /**
- * 条件条上的天数窗 = **本次清单实际用的那个数**（`PickingSummary.days`）。
- *
- * 为什么不直接写输入框的 `days`：条件条回答的是"这批数是怎么筛出来的"，与**表里的数**同源才作数。
- * 正常流程下两者相等（`generate` 会跟着条件重算），但有三处会分开：① 还没生成过（此时显示输入值，
- * 那是"点一下会发生什么"的预告）② 取数失败/抛错（清单还是旧的）③ 有人日后去掉那条重算 watch。
- * 分开时的表现是「标签写着新条件、数还是旧的」—— 用户只能认为改坏了。
+ * 界面的**行动单位是"厂家一张卡"**（2026-10-17 合并重设计）：同厂家的所有款色折进一张卡，
+ * 卡内一行一个款色（尺码并排成小格）。段（厂家）之间沿用 `summary.suppliers` 的顺序
+ * （未指定厂家整段排最后）；分区由 `zoneOf` 判（待拿 > 已拿 > 暂不拿）。
  */
-const scopeDays = computed(() => (generated.value ? summary.value.days : days.value));
-
-/**
- * 界面的**行动单位是"款色一张卡"**（2026-10-10 重设计）：同款同色所有尺码折进卡上的角标条。
- * `groupByColor` 是这层折叠的**唯一实现**（含排序：需求多者在前）。
- * 段（厂家）之间沿用 `summary.suppliers` 的顺序（未指定厂家整段排最后）。
- */
-interface PickingSection {
-  sg: PickingSupplierGroup;
+interface SupplierCard {
+  supplierId: number;
+  supplierName: string;
+  /** 该厂的全部款色行（含已拿完 / 已忽略 —— 合并视图要一眼看全，不是只列还差的） */
   rows: PickingColorGroup[];
+  /** 待拿合计（口径 = `pendingOf` 的款色折叠版；卡面合计行与「生成拿货单（N 件）」同源） */
   pending: PendingRollup;
+  /** 被忽略且还差 > 0 的款色数（"暂不拿"区的口径） */
+  ignoredColors: number;
+  /** 已拿件数合计（Σ 各款色行 taken；"已拿"区的一行摘要用） */
+  takenPieces: number;
+  /** 宿主注入的该厂拿货单（草稿 + 已提交，按日期倒序） */
+  orders: PurchaseOrder[];
+  phone: string;
+  zone: 'pending' | 'skip' | 'done';
 }
-const sections = computed<PickingSection[]>(() =>
-  summary.value.suppliers.map((sg) => {
-    const rows = groupByColor(sg.groups);
-    return { sg, rows, pending: pendingRollup(rows) };
-  }),
-);
+
+const EMPTY_ROLLUP: PendingRollup = { colors: 0, pieces: 0, amount: 0, noPricePieces: 0 };
+
+/** 单子排序：日期倒序 → 单号倒序（新的在前；同一天开的单看单号） */
+const byOrderRecency = (a: PurchaseOrder, b: PurchaseOrder): number =>
+  b.bizDate < a.bizDate ? -1 : b.bizDate > a.bizDate ? 1 : 0 || b.id - a.id;
 
 /**
- * 底部总账 = **待拿**（还差 > 0 且未忽略）—— 与「生成拿货单（N 件）」同一判据（`pendingRollup`）。
+ * 分区判据（方案三态的落地）：
+ *   · **待拿**：还有还差 > 0 且未忽略的款色 —— 不管有没有开过单（开了草稿也还是待拿）；
+ *   · **已拿 · 已开单**：没有待拿，但有**已提交**的单（"拿过"由单说话，不由开关说）；
+ *   · **暂不拿**：没有待拿、没有已提交单，但**有被忽略**的款色（灰条 + 原因）；
+ *   · 其余（只剩草稿 / 已拿完但无单）落「已拿 · 已开单」—— 那一区的标签本就含"已开单"。
+ */
+function zoneOf(c: Omit<SupplierCard, 'zone'>): 'pending' | 'skip' | 'done' {
+  if (c.pending.colors > 0) return 'pending';
+  if (c.orders.some((o) => o.status === 'submitted')) return 'done';
+  if (c.ignoredColors > 0) return 'skip';
+  return 'done';
+}
+
+const supplierCards = computed<SupplierCard[]>(() => {
+  const out: SupplierCard[] = summary.value.suppliers.map((sg: PickingSupplierGroup) => {
+    const rows = groupByColor(sg.groups);
+    const card = {
+      supplierId: sg.supplierId,
+      supplierName: sg.supplierName,
+      rows,
+      pending: pendingRollup(rows),
+      ignoredColors: rows.filter((r) => r.ignored && r.remaining > 0).length,
+      takenPieces: rows.reduce((n, r) => n + r.taken, 0),
+      orders: [...(props.supplierOrders?.[sg.supplierId] ?? [])].sort(byOrderRecency),
+      phone: props.supplierPhones?.[sg.supplierId] ?? '',
+    };
+    return { ...card, zone: zoneOf(card) };
+  });
+  // 只有拿货单、没有清单行的厂家（空白单 / 货已发完）也要占一张卡：
+  // 否则那些单子在合并视图里看不见、也管不动。
+  const seen = new Set(out.map((c) => c.supplierId));
+  for (const [sid, list] of Object.entries(props.supplierOrders ?? {})) {
+    const id = Number(sid);
+    if (!id || seen.has(id) || !list || !list.length) continue;
+    const card = {
+      supplierId: id,
+      supplierName: list[0]?.supplierName ?? '',
+      rows: [],
+      pending: EMPTY_ROLLUP,
+      ignoredColors: 0,
+      takenPieces: 0,
+      orders: [...list].sort(byOrderRecency),
+      phone: props.supplierPhones?.[id] ?? '',
+    };
+    out.push({ ...card, zone: zoneOf(card) });
+  }
+  return out;
+});
+
+/** 宫格排序（2026-10-17 第三轮统一卡）：待拿 → 暂不拿 → 已拿；同档保持清单顺序（有厂家在前）。 */
+const ZONE_RANK: Record<SupplierCard['zone'], number> = { pending: 0, skip: 1, done: 2 };
+const orderedCards = computed(() =>
+  [...supplierCards.value].sort((a, b) => ZONE_RANK[a.zone] - ZONE_RANK[b.zone]),
+);
+/** 有没有卡可渲染（空态判据）：清单行或注入的单子，至少占一样 */
+const hasCards = computed(() => supplierCards.value.length > 0);
+
+/**
+ * 全页待拿总账 = **待拿**（还差 > 0 且未忽略）—— 与「生成拿货单（N 件）」同一判据（`pendingRollup`）。
  *
  * ⚠️ 为什么不用 `summary.remainingGroups / remainingPieces`：那两个含被忽略的组
- * （它们的定义是"总需求还差多少"）。两套数同时出现就会出现"条上说 4 件、按钮说 2 件"——
+ * （它们的定义是"总需求还差多少"）。两套数同时出现就会出现"区标题说 4 件、按钮说 2 件"——
  * 用户没有任何办法判断哪个是对的。
  */
 const pending = computed(() => pendingRollup(groupByColor(summary.value.groups)));
 
-/** 厂家筛选：`'all'` 或厂家 id（含 0 = 未指定厂家）。只筛**网格**，不动底部总账。 */
-const supplierFilter = ref<number | 'all'>('all');
-
-interface SupplierTab {
-  supplierId: number;
-  name: string;
-  colors: number;
-}
-
-/** 可筛的厂家 = **有待拿货**的段（数为待拿款色数）。一家都没有时标签行整行不渲染。 */
-const supplierTabs = computed<SupplierTab[]>(() =>
-  sections.value
-    .filter((sec) => sec.pending.colors > 0)
-    .map((sec) => ({
-      supplierId: sec.sg.supplierId,
-      name: sec.sg.supplierName || '未指定厂家',
-      colors: sec.pending.colors,
-    })),
-);
-
-/** 卡面上预先算好的展示字段（模板里不做算术 —— 金额口径全在 `lib/pickingSheet`，屏上图里同一套字面） */
-interface PickingCard {
-  r: PickingColorGroup;
-  supplierName: string;
-  /** 小计：`''`（不显示：已拿完/已忽略）/ `—`（全无价）/ `≈¥20.00` */
-  amount: string;
-  /** 单价文字：`10.00` / `—`（不带"元/件"后缀 —— 断言要求这格恰好是数字，单位挂在外面） */
-  unitText: string;
-  hasPrice: boolean;
-}
-
-/** 卡序（**全网格**统一）：**还要拿的排前面**，已拿完次之，已忽略最后（同档内维持「段序 + groupByColor 件数降序」） */
-function cardRank(r: PickingColorGroup): number {
-  return r.ignored ? 2 : r.remaining > 0 ? 0 : 1;
-}
-
-/** 卡面小计：已拿完 / 已忽略**不显示钱**（不是待拿就不该报一个数）；全无价写 `—` 不写 `≈¥0.00`。 */
-function cardAmount(r: PickingColorGroup): string {
-  if (r.ignored || r.remaining <= 0) return '';
-  return r.pendingNoPricePieces >= r.remaining ? '—' : `≈¥${money(r.pendingAmount)}`;
-}
-
-const cards = computed<PickingCard[]>(() => {
-  const out: PickingCard[] = [];
-  for (const sec of sections.value) {
-    if (supplierFilter.value !== 'all' && sec.sg.supplierId !== supplierFilter.value) continue;
-    for (const r of sec.rows) {
-      out.push({
-        r,
-        supplierName: sec.sg.supplierName || '未指定厂家',
-        amount: cardAmount(r),
-        unitText: r.unitPrice === null ? '—' : money(r.unitPrice),
-        hasPrice: r.unitPrice !== null,
-      });
-    }
-  }
-  // 排序在**收集完之后**做（不是段内各排一遍）：网格是平铺的（段只体现在卡上的厂家胶囊），
-  // 段内排序会被段序盖过 —— 厂A 整段被忽略后，那张调暗的卡仍会排在未指定厂家的待拿卡**前面**。
-  // Array.sort 稳定 ⇒ 同档内维持「段序 + groupByColor 的件数降序」不变。
-  out.sort((a, b) => cardRank(a.r) - cardRank(b.r));
-  return out;
-});
-
-/** 正在生成/写剪贴板的厂家 id（0 = 空闲；未指定厂家没有复制按钮，不会撞上 0） */
-const copyingId = ref(0);
+/**
+ * 正在生成/写剪贴板的厂家 id。**空闲是 `null`，不是 `0`**（2026-10-17 评审 P0 修）。
+ * 原先拿 0 当哨兵，但「未指定厂家」卡的 `supplierId` 恰好是 0 ⇒
+ * `copyingId === c.supplierId` 恒真 ⇒ 那张卡的「复制清单图」**永远显示「生成中…」且禁用**
+ * （1440/1152 两组截图都已见证）。哨兵必须取业务 id 取值域之外的那个值。
+ */
+const copyingId = ref<number | null>(null);
 
 /**
- * 「复制给厂家」：把**这一家**的待拿行画成一张清单图，写进系统剪贴板（用户粘到微信里发出去）。
+ * 「复制清单图」：把**这一家**的待拿行画成一张清单图，写进系统剪贴板（用户粘到微信里发出去）。
  * 为什么是图而不是文字：厂家要照着备货，图里有货名、款色、尺码件数、单价的排版 ——
  * 纯文字粘进微信会丢表格结构，截屏又会把页签、别家的货一起发出去（见 `lib/pickingSheet` 头部）。
  * 数字全部与屏上同源（`sheetModelOf` 走 `pendingOf`），发出去的图与卡上的数不可能两套。
+ * ⚠️ 与「复制拿货清单」（文字）是**两个按钮**：图给"照着备货"，文字给"转发/存备忘录"——
+ *    合成一个按钮就得让用户在"要图还是要字"里先选一次，那一步是白问的。
  */
-async function copyForSupplier(sec: PickingSection): Promise<void> {
-  if (copyingId.value) return;
-  copyingId.value = sec.sg.supplierId;
+async function copyForSupplier(c: SupplierCard): Promise<void> {
+  if (copyingId.value !== null) return;
+  copyingId.value = c.supplierId;
   try {
     const model = sheetModelOf(summary.value.groups, {
-      supplierId: sec.sg.supplierId,
-      supplierName: sec.sg.supplierName,
+      supplierId: c.supplierId,
+      supplierName: c.supplierName,
       date: todayLocal(),
     });
     if (!model) {
@@ -587,31 +888,52 @@ async function copyForSupplier(sec: PickingSection): Promise<void> {
     const pieces = model.lines.reduce((n, l) => n + l.pieces, 0);
     toast(
       `已复制 ${model.lines.length} 款色 · ${pieces} 件 的清单图 —— 粘贴到微信里发给「${
-        sec.sg.supplierName || '未指定厂家'
+        c.supplierName || '未指定厂家'
       }」`,
       'success',
     );
   } catch (e: unknown) {
     toast(`复制失败：${e instanceof Error ? e.message : '未知错误'}`, 'error');
   } finally {
-    copyingId.value = 0;
+    copyingId.value = null;
   }
 }
 
-/** 缺口汇总（一条里说完，全齐就不占地方）。「无进价」按**件数**说 —— "还有几件算不出钱"才是执行时要看的 */
-const gapsText = computed(() => {
-  const s = summary.value;
-  const out: string[] = [];
-  if (s.missingStyle) out.push(`未识别款 ${s.missingStyle}`);
-  if (s.missingImage) out.push(`缺图 ${s.missingImage}`);
-  if (s.missingSupplier) out.push(`缺供应商 ${s.missingSupplier}`);
-  if (s.missingQty) out.push(`缺件数 ${s.missingQty}`);
-  if (s.noPricePieces) out.push(`无进价 ${s.noPricePieces} 件`);
-  return out.join(' · ');
-});
+/**
+ * 「复制拿货清单」（文字，2026-10-17 合并时加）：同一份模型（`sheetModelOf`）转纯文本，
+ * 写进**文本**剪贴板 —— 用户粘到微信对话框 / 备忘录里转发。数字与清单图、屏上、xlsx 同源。
+ */
+async function copyText(c: SupplierCard): Promise<void> {
+  const model = sheetModelOf(summary.value.groups, {
+    supplierId: c.supplierId,
+    supplierName: c.supplierName,
+    date: todayLocal(),
+  });
+  if (!model) {
+    toast('这家没有要拿的货', 'info');
+    return;
+  }
+  try {
+    const ok = await writeClipboard(sheetTextOf(model));
+    if (!ok) throw new Error('写入剪贴板失败');
+    toast(`已复制 ${model.lines.length} 款色 · ${model.lines.reduce((n, l) => n + l.pieces, 0)} 件的文字清单`, 'success');
+  } catch (e: unknown) {
+    toast(`复制失败：${e instanceof Error ? e.message : '未知错误'}`, 'error');
+  }
+}
+
+/** 「复制」厂家电话（桌面端没有拨号动作，一键 = 复制，粘到微信/拨号盘里） */
+async function copyPhone(c: SupplierCard): Promise<void> {
+  try {
+    const ok = await writeClipboard(c.phone);
+    toast(ok ? `已复制 ${c.supplierName || '厂家'} 的电话 ${c.phone}` : '复制失败', ok ? 'success' : 'error');
+  } catch (e: unknown) {
+    toast(`复制失败：${e instanceof Error ? e.message : '未知错误'}`, 'error');
+  }
+}
 
 /**
- * 图角标上的字（**导出 xlsx 用**，卡面已改尺码角标条）：`尺码×**还要拿的件数**`
+ * 图角标上的字（**导出 xlsx 用**）：`尺码×**还要拿的件数**`
  * （无图可挂 / 已拿完 / 已忽略 → 空串 = 不显示。`drawBadge('')` 与模板的 `v-if` 都按"空串 = 不画"处理）。
  *
  * ⚠️ **要拿的是"还差"不是"需求"**：这张图是直接发给厂家的 ——
@@ -661,8 +983,9 @@ function widenDays(): void {
   showMore.value = true;
 }
 
-/** 逐组的"缺什么"标签（**导出 xlsx 按码列**用；卡面上的缺口由 `rowGaps` 给）。
- *  ⚠️ 「无进价」也进这里 —— 它和缺图/缺件数同类："这行的数不全，别拿它当完整清单用"。 */
+/** 逐组的"缺什么"标签（**导出 xlsx 按码列**用）。
+ *  ⚠️ 「无进价」也进这里 —— 它和缺图/缺件数同类："这行的数不全，别拿它当完整清单用"。
+ *  （款色行上不再逐行贴缺口标签：缺口由占位图与合计行的说明文字承担。） */
 function groupGaps(g: PickingGroup): string[] {
   const out: string[] = [];
   if (g.missingQty) out.push(`缺件数 ${g.missingQty}`);
@@ -673,16 +996,10 @@ function groupGaps(g: PickingGroup): string[] {
   return out;
 }
 
-/** 卡面缺什么（款色口径）：说**哪一类**缺了，不算"缺了几行" —— 一张卡一个款色，行数没有意义。
- *  ⚠️ 「无进价」按**件数**说：这一款色有几件算不出钱，才是执行时要看的。 */
-function rowGaps(r: PickingColorGroup): string[] {
-  const out: string[] = [];
-  if (r.missingStyle) out.push('未识别款');
-  if (r.missingImage) out.push('缺图');
-  if (!r.supplierId) out.push('缺供应商');
-  if (r.missingQty) out.push('缺件数');
-  if (r.noPricePieces > 0) out.push(`无进价 ${r.noPricePieces} 件`);
-  return out;
+/** 款色行的**显示名**：款名（缺款名退颜色，两者都缺 = 未识别款）。
+ *  ⚠️ 款编码是内部身份（`data-key` / 拖拽定位用它），**不进界面** —— 卡上、清单图、文字清单同此口径。 */
+function rowName(r: PickingColorGroup): string {
+  return r.styleName || r.color || '未识别款';
 }
 
 /** 尺码名（空码有专名：写 `×2` 会读成"乘以 2"） */
@@ -701,16 +1018,144 @@ function chipTitle(c: PickingSizeCell): string {
   return `${sizeName(c.size)}：需求 ${c.pieces} · 已拿 ${c.taken} · 还差 ${c.remaining}`;
 }
 
-/** 厂家行上的「N 款色 · 待拿 N 件 · 预估 ¥/—（不含 N 件无进价）」。
- *  口径 = **待拿**（与「生成拿货单（N 件）」同一个数，`pendingRollup` 一处算）。
- *  用单串文本而不是几个元素拼 —— 相邻元素的 `textContent` 之间不插分隔符，拆开拼的字符串会缺空格。 */
-function sectionMeta(sec: PickingSection): string {
-  const p = sec.pending;
-  if (p.colors > 0) {
-    return `${p.colors} 款色 · 待拿 ${p.pieces} 件 · ${amountText(p.amount, p.noPricePieces, p.pieces)}${noPriceNote(p.noPricePieces, p.pieces)}`;
+/** 「暂不拿」灰条上的一行话：几款无需补货 + 用户标的忽略原因（标的时候敲的那句话） */
+function skipText(c: SupplierCard): string {
+  const reasons = [
+    ...new Set(
+      c.rows
+        .filter((r) => r.ignored)
+        .map((r) => props.ignoreReasons?.[ignoreKey(r.styleCode, r.color)] ?? '')
+        .filter(Boolean),
+    ),
+  ];
+  const base = `${c.ignoredColors} 款色无需补货`;
+  return reasons.length ? `${base}（${reasons.join('、')}）` : base;
+}
+
+/** 「已拿 · 已开单」行上的一行话：拿了多少件 / 几张已提交共多少钱 / 几张草稿 / 最近拿货日期 */
+/**
+ * 这张单里有几行"买的时候还没定颜色"（`style_color_id = 0`）。
+ *
+ * 为什么要放到**卡面**上（而不是只在编辑器里提示）：这些行**扣不掉待拿** ——
+ * 身份匹配靠 `style_color_id`，缺了它连带文本兜底都对不上（老单的色名快照是占位
+ * 「未分类」，而需求侧现在显示的是平台真色名「3」「Beige」…）。用户看到的现象就是
+ * "明明拿过货，清单还是全待拿"，却看不出该去哪里修（2026-10-20 真库：2 张已提交单
+ * 共 9 行如此、涉及 3 个款，每款 2~7 个候选色 ⇒ 无法自动定，只能人认）。
+ * 所以这枚标签既是**提示**也是**入口**：点它直接进编辑器那排「色未定 · 选一个」。
+ */
+function undecidedOf(o: PurchaseOrder): number {
+  return (o.items || []).filter((i) => !Number(i.styleColorId)).length;
+}
+
+/** 「已拿 · 已开单」行上的一行话：拿了多少件 / 几张已提交共多少钱 / 几张草稿 / 最近拿货日期 */
+function doneText(c: SupplierCard): string {
+  const submitted = c.orders.filter((o) => o.status === 'submitted');
+  const drafts = c.orders.filter((o) => o.status !== 'submitted');
+  const parts: string[] = [];
+  if (c.takenPieces) parts.push(`已拿 ${c.takenPieces} 件`);
+  if (submitted.length) {
+    // ⚠️ `totalCents` 是**分**（单据口径）⇒ 走 `centsMoney` 除 100；
+    //    用清单口径的 `money`（吃元）会显示成 ¥50000.00（2026-10-17 实测）。
+    const total = submitted.reduce((a, o) => a + (Number(o.totalCents) || 0), 0);
+    parts.push(`${submitted.length} 张已提交 · ¥${centsMoney(total)}`);
   }
-  if (sec.rows.some((r) => r.ignored && r.remaining > 0)) return '余下已忽略（无需补货）';
-  return '已拿齐';
+  if (drafts.length) parts.push(`${drafts.length} 张草稿`);
+  if (submitted[0]) parts.push(`最近 ${submitted[0].bizDate}`);
+  return parts.join(' · ') || '暂无记录';
+}
+
+/** 忽略行上的原因（宿主注入；没敲原因时给一句默认话，不让 title 空着） */
+function ignoreReasonOf(r: PickingColorGroup): string {
+  return props.ignoreReasons?.[ignoreKey(r.styleCode, r.color)] ?? '';
+}
+
+/** 行上的 tooltip：忽略原因 / 为什么不能拖 / 拖拽提示（三条互斥，一次只说一件事） */
+function rowTitle(r: PickingColorGroup): string {
+  if (r.ignored) return ignoreReasonOf(r) || '已忽略：无需补货';
+  // 未识别款没有款编码 ⇒ 没有可改的款（写通道按 code 定位）。说清原因，别让它看起来"坏了"。
+  if (!r.styleCode) return '未识别款：先去认款，之后才能改厂家';
+  return props.moveAction ? '拖到别家的格子即可改厂家' : '';
+}
+
+/** 款色行的缩略图（生成时已合批取回；'' = 这款没图，走占位框） */
+function thumbOf(r: PickingColorGroup): string {
+  return (r.imagePath && thumbs.value[r.imagePath]) || '';
+}
+
+// ───────────────────────── 拖拽改厂家（2026-10-17 合并后第二轮） ─────────────────────────
+//
+// 交互：款色行 draggable → 拖到另一家的格子上松手 → 宿主改 `pl_products.supplier_id`。
+// 三态各自的意义：
+//   · `is-dragging`（行）= 这一款正被拖着（视觉反馈，松手/取消都会清）；
+//   · `is-drop-target`（格）= 合法落点。**从本格拖出去又拖回本格不高亮** ——
+//     高亮了会给"松手有变化"的假象，而那是空操作（from === to，宿主也不会写）；
+//   · 未指定厂家（supplierId 0）是**合法落点**：拖过去 = 取消这款的厂家关联。
+//
+// 为什么 dragstart 里同时 setData：真 drag 的数据通道就是 dataTransfer（拖到应用外也带着它），
+// 视觉态另存一份 ref 供 dragover/drop 同步读 —— drop 时优先读 ref，读不到再回落 getData。
+
+/** 正在拖的款编码（'' = 没在拖） */
+const dragCode = ref('');
+/** 从哪家拖出来的（null = 没在拖；0 = 未指定厂家格） */
+const dragFrom = ref<number | null>(null);
+/** 落点厂家 id（null = 没有；0 = 未指定厂家格是合法落点，不能用 0 当"无"） */
+const dropTarget = ref<number | null>(null);
+
+function onRowDragStart(e: DragEvent, r: PickingColorGroup, c: SupplierCard): void {
+  if (!props.moveAction || !r.styleCode) return;
+  dragCode.value = r.styleCode;
+  dragFrom.value = c.supplierId;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', r.styleCode);
+  }
+}
+
+function onRowDragEnd(): void {
+  dragCode.value = '';
+  dragFrom.value = null;
+  dropTarget.value = null;
+}
+
+function onTileDragOver(e: DragEvent, c: SupplierCard): void {
+  if (!dragCode.value) return;
+  if (dragFrom.value === c.supplierId) {
+    // 原地：不当落点（清了防止从别格掠过来时留着上个格的落点）
+    if (dropTarget.value !== null) dropTarget.value = null;
+    return;
+  }
+  // 不 preventDefault 的话浏览器不放行 drop（默认把元素当"不能放"）
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  dropTarget.value = c.supplierId;
+}
+
+function onTileDragLeave(e: DragEvent, c: SupplierCard): void {
+  // 拖到格子里的子元素上也会冒泡出 dragleave —— 那时 relatedTarget 仍在格内，不能清落点
+  // （不判这一条的表现是落点闪烁：鼠标在卡内移动时高亮一灭一亮）。
+  const to = e.relatedTarget as Node | null;
+  const cur = e.currentTarget as HTMLElement | null;
+  if (to && cur && cur.contains(to)) return;
+  if (dropTarget.value === c.supplierId) dropTarget.value = null;
+}
+
+function onTileDrop(e: DragEvent, c: SupplierCard): void {
+  e.preventDefault();
+  const code = dragCode.value || (e.dataTransfer?.getData('text/plain') ?? '');
+  const from = dragFrom.value;
+  onRowDragEnd();
+  if (!code || from === null || from === c.supplierId) return;
+  // 写是**款级**的（厂家挂在 pl_products 上按款编码）⇒ 这一款的所有款色一起走。
+  // 带上款色数与款名，宿主才能把"整款一起移动"说全（只说拖的那一行会误导）。
+  const src = supplierCards.value.find((x) => x.supplierId === from);
+  const row = src?.rows.find((r) => r.styleCode === code);
+  emit('move-supplier', {
+    styleCode: code,
+    styleName: row?.styleName ?? '',
+    fromSupplierId: from,
+    toSupplierId: c.supplierId,
+    colors: src ? src.rows.filter((r) => r.styleCode === code).length : 0,
+  });
 }
 
 function todayLocal(): string {
@@ -755,26 +1200,24 @@ async function generate(): Promise<void> {
       }
     }
 
-    // 进价/预估金额：取**款级成本区间**（`ae_cost_map`），与「算钱」页同一张表、同一份取价实现。
-    // 读不到就传空数组 → 全部行标「无进价」（**不按 0 算**），不影响清单本身可用。
-    const c = await ipc.aeCostMapList();
-    const costs: CostInterval[] = (c.success ? (c.data ?? []) : []).map((x) => ({
-      styleCode: String(x.styleCode ?? ''),
-      effectiveFrom: String(x.effectiveFrom ?? ''),
-      unitPrice: (Number(x.unitPriceCents) || 0) / 100,
-      source: String(x.source ?? ''),
-    }));
+    // 进价/预估金额：订单行投影已带**两个行级成本字段**（实际进价 / 进价预估）
+    // 与产品当前价（`productCostCents`，只给还没钉预估的老行兜底）。取价优先级在
+    // `aggregatePicking` 内一处实现（`positiveCents` 三级），本页不再拉任何价目表。
 
-    // 已拿 / 已忽略（2026-10-10）：**与「拿货」页同一份口径** —— 已拿来自宿主 `outstanding()`
-    // （已提交拿货单 qty 合计，按款色码），忽略来自 `purchase_ignore`（按款色，整组生效）。
-    // 为什么必须同源：拣货单问的是"**还要**拿什么"，两处各算一次必然出现
-    // "拿货页说拿完了、拣货单还说没拿"这类查不出的悬案（键口径由 `takenKey`/`ignoreKey` 单源给出）。
-    // 读不到就按"没拿过 / 没忽略"处理 —— 只影响"还差"这一列，**不影响清单本身**。
-    const og = await ipc.purchaseOutstanding();
+    // 已拿 / 已忽略：**已拿**来自 `purchase-taken`（**台账**：所有已提交拿货单的 qty 合计，按款色码），
+    // 忽略来自 `purchase_ignore`（按款色，整组生效）。
+    // ⚠️ 2026-10-17 事故（用户实报"已经提交了，状态还是在待拿"）：原先这里读的是 `purchase-outstanding`
+    //   （**缺口**），它末尾有 `missing <= 0 就丢掉` —— **拿齐的那一行根本不会返回**，
+    //   于是"刚拿完"在清单里等价于"一件没拿"，`remaining = pieces`、卡永远停在待拿。
+    //   缺口与台账是两种语义：问"还缺什么"用前者，问"拿过多少"只能用后者。
+    // ⚠️ 2026-10-20：键必须走 `takenKeyOf`（**身份优先**）。拿色名当键时，色行改名一次
+    //   ⇒ 历史明细全匹配不上 ⇒ 每张卡都"待拿"（用户实报的那个现象）。两端口径同一函数。
+    const tg = await ipc.purchaseTaken();
     const ig = await ipc.purchaseIgnoreList();
     const taken: Record<string, number> = {};
-    for (const r of (og.success ? (og.data ?? []) : []) as OutstandingRow[]) {
-      taken[takenKey(r.styleCode, r.color, r.size)] = Number(r.taken) || 0;
+    for (const r of (tg.success ? (tg.data ?? []) : []) as TakenRow[]) {
+      const k = takenKeyOf(r);
+      taken[k] = (Number(taken[k]) || 0) + (Number(r.taken) || 0);
     }
     const ignored = new Set(
       ((ig.success ? (ig.data ?? []) : []) as IgnoreRow[]).map((r) => ignoreKey(r.styleCode, r.color)),
@@ -782,7 +1225,6 @@ async function generate(): Promise<void> {
 
     summary.value = aggregatePicking(rows, {
       settleQty,
-      costs,
       taken,
       ignored,
       days: days.value,
@@ -893,19 +1335,11 @@ watch([days, shopPick, includeShipped], () => {
   if (generated.value) void generate();
 });
 
-// 清单变了就交给外层（「拿货」页据此数"给这家厂要拿几款/几件"并启用「按此生成拿货单」）。
+// 清单变了就交给外层（「拿货」页据此给这家厂开单：只取本视图算过的同一批组）。
 // 为什么用 watch 而不是在 `generate()` 里 emit：`summary` 是**唯一的**清单出口（含以后新增的
-// 取数路径）；钉在出口上，"换了取数方式却忘了通知外层"这类缝就不可能出现。
-// 顺带把筛到一个"已经不在标签里"的厂家回落成「全部」—— 重算后那家可能已经没货要拿了，
-// 不回落就会看到**空网格**（用户会以为整单空了）。
+// 取数路径）；钉在出口上，"换了取数方式却忘了通知外层"这类缝就不可能再出现。
 watch(summary, (s) => {
   emit('generated', s.groups);
-  if (
-    supplierFilter.value !== 'all' &&
-    !supplierTabs.value.some((t) => t.supplierId === supplierFilter.value)
-  ) {
-    supplierFilter.value = 'all';
-  }
 });
 
 onMounted(async () => {
@@ -918,7 +1352,7 @@ onMounted(async () => {
   } catch {
     /* 店铺域不可用不影响拣货 */
   }
-  // `auto`（由外层显式指定）：并进「拿货」后「要拿什么」是那一步的入口视图，应当一眼可读。
+  // `auto`（由外层显式指定）：并进「拿货」后这一屏是那一步的入口视图，应当一眼可读。
   // ⚠️ 放在店铺清单之后：`generate()` 里店铺下拉只是筛选条件，不依赖它，但先拿到店铺能让
   //    自动生成的**第一次**就带上完整条件条（否则条件条少一格，用户看到的默认值与实际不一致）。
   if (props.auto) void generate();
@@ -928,38 +1362,33 @@ onMounted(async () => {
 <style scoped>
 /* 页面外壳由全局 .wb-page 提供；精简条是组件自有的 `.pk-bar`（`.pk-topbar` 类名保留供冒烟断言）。 */
 
-/* 内嵌在「发货台」页签里：顶上紧邻页签栏，全局那 18px 顶部留白会跟页签栏叠成一大块，
-   收一点（其余边距不动 —— 与独立打开时保持同一套栅格）。 */
+/* 内嵌在「今天 › 拿货」里：外层宿主（`PurchasePanel` 的 `.wb-page`）已经给了整套页面内边距
+   （18/20/24），这里**四边全部归零** —— 根节点还挂着全局 `.wb-page`（自带 18/20/24），
+   不清掉就是双层叠加：内容左右缩进 40px、且与宿主的页级面板（"已忽略"折叠条）左缘对不齐
+   （2026-10-17 用户实测"页面很奇怪"，几何取证 pkView pad=[0,20,24]）。
+   若将来再挂成独立页（embedded=false），`.wb-page` 的内边距自然生效，不需要这里补。 */
 .pk-view.is-embedded {
-  padding-top: 12px;
+  padding: 0;
 }
 
 /* 内嵌时页头整块不渲染（标题由外层页签交代，动作在下面的精简条上）——
    原先那条"把页头按钮靠左"的规则随页头一起没了，别再加回来。 */
 
-/* 精简条（两种宿主共用）：一行说完「缺什么 / 什么口径 / 能做什么」——
-   三个数（待拿款色 / 件数 / 预估金额）不在这里，在底部汇总条上与逐厂动作同屏。
-   白卡 + 自动换行 —— 窄窗口逐段折行，不裁不横滚。 */
+/* 精简条（2026-10-17 第五轮）：「缺什么 / 什么口径」两段文案撤掉后，
+   这里只剩右侧「导出带图 xlsx / 更多」两个低频动作 —— 白卡壳随之去掉（左侧大片空白的
+   空壳卡片是"页面很奇怪"的另一来源，几何取证后用户确认）；退成无壳工具行。
+   ⚠️ 数据类条子（分类页的过滤条等）仍保留白卡 —— 有内容的条才配得上卡片外壳。 */
 .pk-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 14px;
-  padding: 9px 14px;
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius-md);
-  background: var(--wb-surface);
-  box-shadow: var(--wb-elev-1);
-  font-size: 13px;
+  flex-shrink: 0;
 }
 
-/* 宽窗口把「口径」推到右端；窄窗口它自己折到下一行 */
+/* 宽窗口把右侧动作推到右端；窄窗口它们自己折到下一行 */
 .pk-bar__spacer {
   flex: 1 1 auto;
-}
-
-.pk-bar__scope {
-  font-size: 12px;
 }
 
 .pk-tag {
@@ -971,6 +1400,75 @@ onMounted(async () => {
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius-md);
   background: var(--wb-surface-2);
+}
+
+/* ---- 未归类提示条（2026-10-20）----
+   为什么给白卡壳（与 `.pk-bar` 退成无壳相反）：它不是工具行，是**一条结论**
+   （"这些数不准"）+ 一份清单 —— 有内容的条才配得上卡片（同 `.pk-bar` 注释里的判据）。
+   颜色用 warn 系而不是故障红：数据本身没错，只是**归属缺一块**。 */
+.pk-unclass {
+  border-color: var(--wb-warning);
+  background: var(--wb-warning-soft);
+}
+
+.pk-unclass__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+}
+
+.pk-unclass__title {
+  font-weight: 600;
+}
+
+/* 后果说明可以被挤（窄窗口折行），但**不能被 `min-width:0` 压成一点** —— 它是这条提示存在的理由 */
+.pk-unclass__why {
+  font-size: 12px;
+  min-width: 12em;
+}
+
+.pk-unclass__toggle {
+  margin-left: auto;
+}
+
+.pk-unclass__body {
+  border-top: 1px solid var(--wb-border);
+  padding: 6px 14px 10px;
+}
+
+.pk-unclass__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--wb-border);
+}
+
+.pk-unclass__row:last-child {
+  border-bottom: 0;
+}
+
+.pk-unclass__iid {
+  font-family: var(--wb-font-mono, monospace);
+  font-size: 12.5px;
+}
+
+.pk-unclass__qty {
+  font-variant-numeric: tabular-nums;
+}
+
+.pk-unclass__shops {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22em;
+}
+
+.pk-unclass__hint {
+  font-size: 12px;
 }
 
 .pk-actions--wrap {
@@ -1007,195 +1505,222 @@ onMounted(async () => {
   box-shadow: var(--wb-elev-1);
 }
 
-/* ───────────────────────── 厂家筛选标签 ───────────────────────── */
+/* ───────────────────────── 一张卡 = 一家厂（三种高矮，同一外壳） ───────────────────────── */
 
-.pk-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.pk-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 12px;
-  border: 1px solid var(--wb-border);
-  border-radius: 999px;
-  background: var(--wb-surface);
-  color: var(--wb-text-muted);
-  font-size: 13px;
-  line-height: 22px;
-  cursor: pointer;
-}
-
-.pk-tab:hover {
-  border-color: var(--wb-border-strong);
-}
-
-.pk-tab b {
-  font-weight: 600;
-  color: var(--wb-text);
-  font-variant-numeric: tabular-nums;
-}
-
-.pk-tab.is-on {
-  border-color: var(--wb-primary);
-  color: var(--wb-primary);
-  background: var(--wb-primary-soft);
-}
-
-.pk-tab.is-on b {
-  color: var(--wb-primary);
-}
-
-/* ───────────────────────── 卡片网格 ───────────────────────── */
-
-.pk-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
-  gap: 12px;
-}
-
-.pk-card {
+/* ⚠️ `flex-shrink: 0`（2026-10-17）——**不能删**，与拣货汇总条 2026-10-10 那次"按钮跟页签走"
+   同一根因：`.wb-page` 是定高弹性列，内容超高时压缩默认可缩的弹性项；卡片自己的
+   `overflow:hidden`（草稿竖线/圆角要它）把自动最小尺寸归零 ⇒ 整张卡被压成一条缝、
+   行与按钮全裁在里面（DOM 还在、`elementFromPoint` 点不到）。修法语义：卡不许缩，
+   装不下就溢出 `.pk-view` 去滚（那才是本来的设计）。 */
+.pu-scard {
+  position: relative;
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
   min-width: 0;
+  padding: 10px 12px;
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius-md);
   background: var(--wb-surface);
   box-shadow: var(--wb-elev-1);
-  overflow: hidden;
 }
 
-/* 已拿完 / 已忽略：调暗（还在网格里 —— "这卡处理过了"是信息，只是不再抢眼） */
-.pk-card.is-off,
-.pk-card.is-done {
-  opacity: 0.68;
-}
-
-/* 图区：定高 + cover —— 卡片等宽等高，网格才是"货架"而不是"瀑布" */
-.pk-card__imgs {
-  position: relative;
-  height: 148px;
-  background: var(--wb-surface-2);
-}
-
-.pk-card__img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.pk-card__noimg {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  font-size: 12px;
-  color: var(--wb-text-muted);
-}
-
-/* 供应商角标（压图左上）：它回答"这张卡是发给哪家的" */
-.pk-card__sup {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  max-width: calc(100% - 16px);
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--wb-surface);
-  color: var(--wb-text-muted);
-  font-size: 12px;
-  line-height: 18px;
-  box-shadow: var(--wb-elev-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pk-card__sup.is-missing {
-  background: var(--wb-warning-soft);
-  color: var(--wb-text);
-}
-
-/* 尺码角标条（压图底边）：半透明底用 `--wb-overlay` 令牌（黑底白字类的固定色值受 §1.6 约束，
-   这里走令牌两套主题各有取值）。 */
-.pk-card__sizes {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 6px 8px;
-  background: var(--wb-overlay);
-}
-
-.pk-card__body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px 10px;
-}
-
-.pk-card__head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.pk-card__key {
-  font-weight: 600;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pk-card__name {
-  margin: 0;
-  font-size: 12px;
-  color: var(--wb-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pk-card__foot {
+.pu-scard__head {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 4px 8px;
+  gap: 4px 10px;
 }
 
-.pk-card__amount {
+/* 厂家名是卡上第一显眼的东西（拿货单是发给谁的） */
+.pu-scard__name {
   font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
-/* `—`（没查到价）按次要文字处理：它不是金额，不该和金额一样抢眼 */
-.pk-card__amount.is-none {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--wb-text-muted);
-}
-
-.pk-card__unit {
+.pu-scard__phone {
   font-size: 12px;
   color: var(--wb-text-muted);
   font-variant-numeric: tabular-nums;
 }
 
-.pk-card__spacer {
+.pu-scard__spacer {
   flex: 1 1 auto;
 }
 
-/* 尺码角标（卡上图底条内）：`L×2` = 还要拿 2 件；`L✓` = 已拿完 */
+/* 状态签（待拿）：与卡上其余部分同一套 `wb-tag`，颜色走令牌 */
+.pu-scard__head .wb-tag {
+  flex-shrink: 0;
+}
+
+.pu-scard__rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ───────────────────────── 厂家宫格（2026-10-17 第三轮：一种卡 + 单宫格） ───────────────────────── */
+
+/* 一个厂家一格：auto-fill + 最小列宽 + 12px 缝。
+   ⚠️ 最小列宽取 **324**（2026-10-17 第六轮从 288 上调）：格子里除了 44px 图 + 款名颜色 +
+     尺码角标 + 动作链接，卡尾还要**一行摆下三个按钮**（复制拿货清单 86 + 复制清单图 74 +
+     生成拿货单（N 件）~121 + 缝 12 + 卡内边距 24 ≈ 317，324 留了两位数件数的余量）——
+     288 时卡尾必然折成两行（用户实测反馈"三个按钮要同一行"）。
+     756×469 窄窗（侧栏 208）下可用宽度 ~500，324 排一列也不亏——厂家卡本来就高。
+   ⚠️ 宫格是 `.wb-page` 的直接子项：`flex-shrink:0` 防止定高弹性列把整格压扁（同 `.pu-scard`）。 */
+.pu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(324px, 1fr));
+  /* ⚠️ 2026-10-17 评审 P0：卡片**按内容高**，不许被同行的高卡拉齐。
+     grid 默认 `stretch` ⇒ 瘦卡（未指定厂家 / 暂不拿 / 已拿）被拉成与同行最高全卡等高，
+     而卡内动作块是 `margin-top:auto` 吸底 ⇒ 中部撑出一大片真空（1440/1152 两组截图都可见），
+     "瘦卡应该矮一截"的第三轮设计意图被 stretch 抵消。
+     代价：同一行卡片底边不再对齐（卡片高度本来就该是内容的函数，不是邻居的函数）。 */
+  align-items: start;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* 拖拽落点（待拿/暂不拿/已拿卡都吃这条）：主色描边 + 选中态浅底 —— 与"待拿"签同色系，
+   松手就会有事发生。⚠️ 从本格拖出去又拖回本格**不**高亮（见 onTileDragOver）：那是空操作。 */
+.pu-scard.is-drop-target {
+  border-color: var(--wb-primary);
+  background: var(--wb-primary-soft);
+}
+
+/* 一个款色一行：SKU 图 + 主列（身份行 / 尺码·钱·动作行两行式）。
+   窄窗口允许折行（不裁不滚）—— 行是"照它干活"的东西，少一截就是少拿一件。 */
+.pu-srow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.pu-srow + .pu-srow {
+  border-top: 1px dashed var(--wb-border);
+}
+
+/* 六点把手（评审 P1：把"这行能拖"从悬停 tooltip 里搬到界面上）。
+   用 background 平铺画点，不引入图标组件 —— 它是**装饰**，读屏也不需要它（aria-hidden）。
+   颜色走一个局部变量：默认取边框色（淡到扫视时不抢款名），行悬浮才提到次要文字色（可操作感）。 */
+.pu-srow__grip {
+  --grip-dot: var(--wb-border-strong);
+
+  flex: 0 0 9px;
+  width: 9px;
+  height: 14px;
+  margin-top: 2px;
+  background-image: radial-gradient(circle 1px at 2px 2px, var(--grip-dot) 100%, transparent 0);
+  background-size: 5px 5px;
+}
+
+.pu-srow:hover .pu-srow__grip {
+  --grip-dot: var(--wb-text-muted);
+}
+
+/* 只有宿主接了写通道（moveAction）才渲染 draggable —— 抓手势只出现在真能拖的行上 */
+.pu-srow[draggable='true'] {
+  cursor: grab;
+}
+
+/* 正在被拖动：半透明（"这款被我拎起来了"）；松手 / 取消都会清掉 */
+.pu-srow.is-dragging {
+  opacity: 0.45;
+}
+
+/* SKU 图：44px 方图。`object-fit: cover` —— 真库 35 张里 31 方 4 竖，竖图不能拉扁。
+   `draggable="false"`（写在模板上）：不让浏览器把图本身当成拖拽源 ——
+   那样拖起来的是那张图，行的 dragstart 根本不触发（拖了没反应，还查不到原因）。 */
+.pu-srow__img {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface-2);
+  object-fit: cover;
+}
+
+/* 无图 = 虚线占位框："这款没图"本身是要去补的信息（与行上的「缺图」标签同一口径），不藏行 */
+.pu-srow__img--none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--wb-text-muted);
+}
+
+.pu-srow__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pu-srow__top {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.pu-srow__spacer {
+  flex: 1 1 auto;
+}
+
+.pu-srow__sub {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+/* 动作组：有空间就贴行右（与旧版行尾同一视觉位置），窄了自然折行 */
+.pu-srow__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-left: auto;
+}
+
+/* 已忽略：划掉的是"再要这些件"，不是"记错了"（数字照留着可回看） */
+.pu-srow.is-off {
+  color: var(--wb-text-muted);
+}
+
+.pu-srow.is-off .pu-srow__name {
+  text-decoration: line-through;
+}
+
+/* 已拿完：调暗（"这行处理过了"是信息，只是不再抢眼） */
+.pu-srow.is-done {
+  color: var(--wb-text-muted);
+}
+
+/* 款名 = 行上第一显眼的东西（款编码不展示，见 rowName） */
+.pu-srow__name {
+  font-weight: 600;
+}
+
+.pu-srow__color {
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
+.pu-srow__sizes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pu-srow__qty {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 尺码角标（行内）：`L×2` = 还要拿 2 件；`L✓` = 已拿完 */
 .pk-chip {
   padding: 0 6px;
   border: 1px solid var(--wb-border);
@@ -1212,104 +1737,148 @@ onMounted(async () => {
   color: var(--wb-text-muted);
 }
 
-/* 已忽略的整款色：划掉 —— 划掉的是"再要这些件"，不是"记错了"（数字照留着可回看） */
+/* 已忽略的整款色：划掉（数字照留） */
 .pk-chip.is-off {
   color: var(--wb-text-muted);
   text-decoration: line-through;
 }
 
-.pk-ok {
-  color: var(--wb-success);
+/* 合计行：与卡身之间一条虚线（它不是数据行，是这一家的收口） */
+.pu-scard__sum {
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--wb-border);
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
+/* ⭐ 吸底块（已开单 + 卡尾动作）：`margin-top:auto` 把它钉在卡底 ——
+   宫格里各卡行数不同，底部动作永远贴着卡的下缘、横向对齐（用户明确要求的形态）。
+   顶线由这块统一给，里面的"已开单"/动作组不再各自画线。 */
+.pu-scard__bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--wb-border);
+}
+
+/* 已开单（宿主注入）：草稿/已提交各一行，动作与旧「按订单」视图同一套 data-act */
+.pu-scard__orders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pu-scard__orders-title {
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
+.pu-orow {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   font-size: 12px;
 }
 
-/* ───────────────────────── 底部汇总条（吸底） ───────────────────────── */
-
-/* ⚠️ 吸底（sticky）而不是随列表滚：卡片一多它就被顶到几十屏之外，而"生成拿货单"是这条链的
-   下一步动作，找不到就等于没有。
-   ⚠️ `margin-top: -16px` 是抵消 `.wb-page` 的 `gap:16px` —— 抵消掉那 16px 才能在吸底时
-   不让卡片从缝隙里露出来（吸底元素只盖住自己的盒子）。
-
-   ⚠️ `flex-shrink: 0`（2026-10-10 修）——**不能删**，这是"按钮时有时无"那个 bug 的修复点：
-   本视图的根节点是 `.wb-page`（定高 `height:100%` 的弹性列），内容（精简条 + 标签 + 卡片网格 +
-   汇总条）超过可用高度时，弹性布局会压缩**默认可缩**的项；而本元素自己的 `overflow: hidden`
-   把自动最小尺寸（min-height:auto）归零 ⇒ 它会被一路压到 **2px**，然后自己的 overflow 再把
-   行与按钮**裁掉**（DOM 里还在、`elementFromPoint` 点不到）。用户看到的症状是"按钮跟页签走"：
-   全部 6 款色 / 集雨 4 款色 ⇒ 压塌最狠、两个按钮都不见；欢喜 / 大众只有 1 款色 ⇒ 压得浅、
-   按钮露出来 —— 其实按钮跟页签**无关**（见模板里的 v-if 判据），只跟"这一屏放不放得下"有关。
-   修复语义：条子不许缩，内容装不下就让它溢出 `.pk-view` 去滚（那才是本来的设计），
-   sticky 负责把**完整的**条子钉在滚动口底边。 */
-.pk-sum {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  flex-shrink: 0;
-  margin-top: -16px;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--wb-border-strong);
-  border-radius: var(--wb-radius-md);
-  background: var(--wb-surface);
-  box-shadow: var(--wb-elev-2);
-  overflow: hidden;
+.pu-orow__no {
+  font-weight: 600;
 }
 
-.pk-sum-row {
+.pu-orow__amount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「N 行色未定」：**伪装成标签的按钮**（既是提示也是入口 —— 点它进编辑器认色）。
+   去掉按钮默认的边框/底色/内边距，否则在 12px 的行里会撑高一行、并把金额挤到换行。 */
+.pu-orow__undecided {
+  border: 0;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.pu-orow__ops {
+  margin-left: auto;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
+  gap: 2px 12px;
+}
+
+/* 卡尾动作：复制文字清单 / 复制清单图 / 生成拿货单（2026-10-17 第六轮：三个按钮**一行**）。
+   按钮水平内边距从 8px 收到 6px（全局 .wb-btn--sm 不动，只收这一处）——
+   三个按钮 + 缝要塞进最小列 324 的内容盒（300px），8px 时合计 ~305 塞不下。
+   ⚠️ flex-wrap 保留：件数到三位数（生成拿货单（100+ 件））按钮变宽时宁可折行也不溢出卡外。 */
+.pu-scard__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 两个复制动作成组（评审 P2）：组内贴紧 4px，与右侧主动作之间由父级的 6px 隔开 ——
+   三个按钮平级一行时，"哪两个是同一件事的两种形态"读不出来。 */
+.pu-scard__copys {
+  display: flex;
+  gap: 4px;
+}
+
+.pu-scard__acts > .wb-btn--sm,
+.pu-scard__copys > .wb-btn--sm {
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+/* ───────────────────────── 暂不拿 / 已拿的瘦卡（同一种外壳，压矮） ───────────────────────── */
+
+.pu-scard--mini {
+  gap: 6px;
   padding: 8px 12px;
   font-size: 13px;
 }
 
-/* 分隔线画在**后续行**的顶边：首行不需要线，末行也不需要（总账那格自带一条） */
-.pk-sum-row + .pk-sum-row {
-  border-top: 1px solid var(--wb-border);
+/* 瘦卡里的单子行（已拿卡）：与大卡"已开单"区同一套行样式，只是上边距收紧 */
+.pu-scard--mini .pu-orow {
+  padding-top: 4px;
+  border-top: 1px dashed var(--wb-border);
 }
 
-/* 未指定厂家：这一行的货要能看到，但要看得出来"还没归属" */
-.pk-sum-row.is-missing {
-  background: var(--wb-warning-soft);
-}
-
-.pk-sum-row__name {
-  font-weight: 600;
-}
-
-.pk-sum-row__meta {
+/* 瘦卡上的说明文字（忽略原因 / 已拿摘要）：超长省略号，title 补全 */
+.pu-scard__meta {
   font-size: 12px;
-  color: var(--wb-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.pk-sum-row__hint {
-  font-size: 12px;
-  color: var(--wb-text-muted);
-}
-
-.pk-sum-row__spacer {
-  flex: 1 1 auto;
-}
-
-/* 总账：待拿 N 款色 · N 件 · 预估 ¥ —— 全页最重要的三个数，压在汇总条最后一行 */
-.pk-sum__total {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-  padding: 9px 12px;
-  border-top: 1px solid var(--wb-border-strong);
+/* 暂不拿：压灰 + 虚线框（"主动不补"不该和待拿一样实） */
+.pu-scard--skip {
   background: var(--wb-surface-2);
-  font-size: 13px;
-}
-
-.pk-metric {
+  border-style: dashed;
   color: var(--wb-text-muted);
 }
 
-.pk-metric b {
-  font-weight: 600;
-  color: var(--wb-text);
-  font-variant-numeric: tabular-nums;
+.pu-scard--skip .pu-scard__name {
+  font-size: 14px;
+}
+
+/* 已拿（评审 P2）：**不再整卡半透明**。
+   0.72 一层会把卡上 12px 的次要文字压到 AA 线下（次要色本来就贴在 5:1 附近），
+   且"已拿"与"暂不拿"会变成两张同样发灰的卡 —— 用户只能靠虚线边框分辨，那太弱了。
+   安静感改由三件不伤可读性的东西承担：瘦卡（矮）、排在页尾、不投影（"浮起来"留给待拿卡）。
+   「拿过了」由行首的绿色 ✓ 说 —— 那是语义信号，不是亮度信号。 */
+.pu-scard--done {
+  box-shadow: none;
+}
+
+.pu-done__ok {
+  color: var(--wb-success);
+  font-weight: 700;
 }
 </style>

@@ -43,37 +43,119 @@
           <p class="text-[11px] font-medium text-[var(--wb-text-muted)]">工作区</p>
         </div>
 
-        <!-- 模块导航 -->
-        <div class="flex-1 w-full flex flex-col items-center gap-1">
-          <div v-for="m in navMetas" :key="m.id" class="relative group w-full flex justify-center">
-            <button
-              @click="activate(m.id)"
-              :class="[
-                'flex items-center rounded-lg transition-colors',
-                collapsed
-                  ? 'w-9 h-9 justify-center'
-                  : 'w-[calc(100%-1rem)] h-10 px-3 gap-3 justify-start',
-                activeId === m.id
-                  ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)]'
-                  : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)]',
-              ]"
+        <!-- 模块导航（一级项 + 分组子项；行序列见 script 里的 navRows） -->
+        <div class="flex-1 w-full min-h-0 overflow-y-auto flex flex-col items-center gap-1">
+          <template v-for="row in navRows" :key="row.key">
+            <!-- 一级分组标题：可展开/收起；侧栏收起时不渲染（子项会平铺，见 navRows） -->
+            <div
+              v-if="row.kind === 'group'"
+              class="relative group w-full flex justify-center flex-shrink-0"
             >
-              <span v-html="iconSvg(m.icon)"></span>
-              <span v-if="!collapsed" class="text-sm truncate">{{ m.name }}</span>
-            </button>
-            <!-- 激活态左侧指示条（贴侧边栏左边缘） -->
-            <span
-              v-if="activeId === m.id"
-              class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[var(--wb-primary)]"
-            ></span>
-            <!-- hover 名称气泡（收起时） -->
-            <span
-              v-if="collapsed"
-              class="pointer-events-none absolute left-full ml-2 px-2 py-1 text-xs whitespace-nowrap rounded-md bg-[var(--wb-text)] text-[var(--wb-surface)] opacity-0 group-hover:opacity-100 transition-opacity z-50 shadow-lg"
+              <button
+                type="button"
+                @click="toggleGroup(row.id)"
+                :aria-expanded="row.expanded ? 'true' : 'false'"
+                :class="[
+                  'flex items-center rounded-lg transition-colors w-[calc(100%-1rem)] h-10 px-3 gap-3 justify-start',
+                  row.childActive
+                    ? 'text-[var(--wb-primary)]'
+                    : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)]',
+                ]"
+              >
+                <span v-html="iconSvg(row.icon)"></span>
+                <span class="text-sm truncate flex-1 text-left font-medium">{{ row.name }}</span>
+                <span
+                  class="transition-transform duration-150"
+                  :class="row.expanded ? 'rotate-90' : ''"
+                  v-html="chevronIcon"
+                ></span>
+              </button>
+            </div>
+
+            <!--
+              模块内二级项（2026-10-17）：缩进 + 名称 + 徽标。
+              点它只切「这个模块里的哪一屏」—— 不换模块、不产生 TitleBar「返回」，
+              所以直接调模块给的 onSelect，走不了 `activate()` 那条换模块的路。
+            -->
+            <div
+              v-else-if="row.kind === 'sub'"
+              class="w-full flex justify-center flex-shrink-0"
             >
-              {{ m.name }}
-            </span>
-          </div>
+              <button
+                type="button"
+                :data-act="row.act"
+                :aria-current="row.active ? 'page' : undefined"
+                @click="row.onSelect()"
+                :class="[
+                  'flex items-center rounded-lg transition-colors w-[calc(100%-1.5rem)] h-8 pl-7 pr-2 gap-2',
+                  row.active
+                    ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)] font-medium'
+                    : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)]',
+                ]"
+              >
+                <IconGlyph v-if="row.icon" :name="row.icon" :size="15" />
+                <span class="text-[12.5px] truncate flex-1 text-left">{{ row.name }}</span>
+                <!-- 徽标：读不到数就**不渲染**（不拿 0 冒充"没有"）；待办类 > 0 用警示色 -->
+                <span
+                  v-if="row.count !== undefined && row.count !== null"
+                  :title="row.countTitle"
+                  :class="[
+                    'flex-shrink-0 min-w-[18px] px-1.5 rounded-full text-[10.5px] font-semibold text-center leading-[1.6]',
+                    row.todo && row.count > 0
+                      ? 'bg-[var(--wb-warning-soft)] text-[var(--wb-warning)]'
+                      : row.active
+                        ? 'bg-[var(--wb-surface)] text-[var(--wb-primary)]'
+                        : 'bg-[var(--wb-surface-2)] text-[var(--wb-text-muted)]',
+                  ]"
+                  >{{ row.count }}</span
+                >
+              </button>
+            </div>
+
+            <!-- 模块项（分组子项带缩进；收起态只显示图标 + 气泡） -->
+            <div v-else class="relative group w-full flex justify-center flex-shrink-0">
+              <button
+                :data-act="`nav-${row.id}`"
+                :aria-expanded="row.hasSub ? (row.subExpanded ? 'true' : 'false') : undefined"
+                @click="onModuleRow(row)"
+                :class="[
+                  'flex items-center rounded-lg transition-colors',
+                  collapsed ? 'w-9 h-9 justify-center' : 'w-[calc(100%-1rem)] h-10 gap-3 justify-start',
+                  !collapsed && row.depth > 0 ? 'pl-7 pr-3' : 'px-3',
+                  activeId === row.id
+                    ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)]'
+                    : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)]',
+                ]"
+              >
+                <span v-html="iconSvg(row.icon)"></span>
+                <span v-if="!collapsed" class="text-sm truncate flex-1 text-left">{{ row.name }}</span>
+                <!--
+                  有二级菜单的模块给一个展开箭头（2026-10-17）。
+                  只在**模块还没打开过**时它才是唯一线索 —— 打开后子项直接出现，箭头就是状态位。
+                  转 90° = 子项正展开；**判据只认 `row.subExpanded`**（前台 + 侧栏展开 + 没被手动收起），
+                  不在模板里重新推一遍条件 —— 两处各推一遍，迟早一处忘了加"手动收起"。
+                -->
+                <span
+                  v-if="row.hasSub && !collapsed"
+                  class="flex-shrink-0 opacity-60 transition-transform duration-150"
+                  :class="row.subExpanded ? 'rotate-90' : ''"
+                  v-html="chevronIcon"
+                ></span>
+              </button>
+              <!-- 激活态左侧指示条（贴侧边栏左边缘） -->
+              <span
+                v-if="activeId === row.id"
+                class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[var(--wb-primary)]"
+              ></span>
+              <!-- hover 名称气泡（收起时） -->
+              <span
+                v-if="collapsed"
+                class="pointer-events-none absolute left-full ml-2 px-2 py-1 text-xs whitespace-nowrap rounded-md bg-[var(--wb-text)] text-[var(--wb-surface)] opacity-0 group-hover:opacity-100 transition-opacity z-50 shadow-lg"
+              >
+                {{ row.name }}
+              </span>
+            </div>
+          </template>
         </div>
 
         <!-- 底部：账户 / 设置入口 -->
@@ -265,11 +347,15 @@ import ToastHost from './components/ToastHost.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import SettingsModal from './components/SettingsModal.vue';
 import UiIslandView from './components/UiIslandView.vue';
+import IconGlyph from './components/IconGlyph.vue';
+import type { IconName } from './components/icons';
 import { useModuleStorage } from './services/storage';
 import { initTheme, useTheme } from './services/theme';
 import { toast } from './services/toast';
 import { ipc } from './services/ipc';
-import type { ModuleCommand, ModuleMeta } from './types';
+import { subNavOf } from './services/subNav';
+import { NAV_GROUPS } from './nav';
+import type { ModuleCommand, ModuleIcon, ModuleMeta } from './types';
 
 // 插件体系入口：从 registry 发现内建插件；贡献点注册表是侧栏 / 视图切换 / ⌘K 命令的单一数据源
 const pm = createBuiltinPluginManager();
@@ -281,6 +367,205 @@ function refreshMetas() {
 }
 // 导航入口列表：过滤 navHidden 模块（保留代码与跨模块跳转激活能力，仅不在侧边栏/⌘K 直接列出）
 const navMetas = computed(() => sortedMetas.value.filter((m) => !m.navHidden));
+
+// ---- 侧栏渲染行（一级项 + 分组子项 + 模块内二级项）-------------------------------
+// 分组定义见 `src/core/nav.ts`。这里把"模块平铺"变成"可渲染的行序列"，模板只做一层 v-for：
+//   · 无 parent 的模块 → 一级行（depth 0）
+//   · 有 parent 的模块 → 收进其分组；分组行带展开箭头，子项 depth 1（缩进）
+//   · 侧栏收起时（仅图标）不渲染分组行，子项平铺 —— 否则唯一入口会被折进点不到的地方
+//   · 空分组 / parent 未登记的分组都不渲染，入口不会因为这两个字段而消失
+//   · 模块内二级项（`kind: 'sub'`，2026-10-17 起）：`meta.subNav` 为 true 的模块在自己
+//     **处于前台且侧栏展开**时，把运行时上报的项渲染成更深一层的缩进行。它与分组的区别是：
+//     分组子项是**模块**（可独立激活、⌘K 可搜），二级项是**同一个模块里的面**（点了只切内容，
+//     不换模块、不产生 TitleBar「返回」）。
+type NavModuleRow = {
+  key: string;
+  kind: 'module';
+  id: string;
+  name: string;
+  icon?: ModuleIcon;
+  depth: number;
+  /** 这个模块有二级菜单（画展开箭头；还没有上报时也画，否则用户不知道里面还有东西） */
+  hasSub?: boolean;
+  /**
+   * 二级菜单此刻是否**展开**（只有 `hasSub` 的行才有意义）。
+   * 判据 = 在前台 + 侧栏展开 + 没被用户手动收起 —— 三者缺一都算收起，
+   * 模板的箭头旋转与 `aria-expanded` 只认这一个布尔（别再各自推一遍条件）。
+   */
+  subExpanded?: boolean;
+};
+type NavGroupRow = {
+  key: string;
+  kind: 'group';
+  id: string;
+  name: string;
+  icon?: ModuleIcon;
+  expanded: boolean;
+  childActive: boolean;
+};
+/** 模块内部的二级项（缩进最深一层；点击 = 让模块自己切一屏，不是激活另一个模块） */
+type NavSubRow = {
+  key: string;
+  kind: 'sub';
+  /** 归属模块（仅为可读性与调试；点击不靠它，靠下面的 onSelect 闭包） */
+  moduleId: string;
+  name: string;
+  icon?: IconName;
+  /** 完整 data-act（保留 `kind-<id>` 这套既有锚点名 —— 冒烟与单测都钉在它上面） */
+  act: string;
+  count?: number | null;
+  countTitle?: string;
+  todo?: boolean;
+  active: boolean;
+  onSelect: () => void;
+};
+type NavRow = NavModuleRow | NavGroupRow | NavSubRow;
+
+/** 用户手动收起的分组 id（持久化于 app-shell 命名空间 `collapsedGroups`） */
+const collapsedGroups = ref<string[]>([]);
+
+/**
+ * 用户手动收起了**哪个模块**的二级菜单（2026-10-17 下午补）。
+ *
+ * 起因：展开态原本只由"是否在这个模块里"决定 ⇒ 点一级项「基础数据」时 `activate` 早退
+ * （`activateCore` 对同模块直接 return），**没有任何办法把它收起来** —— 而那七个缩进项
+ * 常驻约 288px，用户想临时让侧栏回到"只看模块"的形态时无路可走。
+ *
+ * 形态上刻意**只记一个 id、不持久化**（与 `collapsedGroups` 的差别就在这）：
+ *   · 它表达的是一次**临时视图动作**；跨会话记住"基础数据默认收起"会让"点进去才展开"
+ *     这条形态反过来 —— 用户下次点进来发现菜单是空的，以为功能坏了；
+ *   · 只记一个 id 是因为它只对"当前前台模块"有意义，切走就清（见 `activateCore`）。
+ */
+const subCollapsedFor = ref<string>('');
+
+const navRows = computed<NavRow[]>(() => {
+  const metas = navMetas.value;
+  const known = new Set(NAV_GROUPS.map((g) => g.id));
+  // [排序值, 该一级项对应的行序列]
+  const entries: Array<{ order: number; rows: NavRow[] }> = [];
+
+  for (const m of metas) {
+    if (m.parent && known.has(m.parent)) continue; // 归属已知分组的，稍后按分组展开
+    // 二级菜单此刻开不开：**在前台 + 侧栏展开 + 没被手动收起**。
+    // 手动收起是 2026-10-17 下午补的（用户口径：「现在点击基础数据没法收起二级菜单」）——
+    // 少了第三个条件，点自己那次 `activate` 会早退（同模块直接 return），收起无路可走。
+    const subOpen =
+      !!m.subNav &&
+      activeId.value === m.id &&
+      !collapsed.value &&
+      subCollapsedFor.value !== m.id;
+    const rows: NavRow[] = [
+      {
+        key: `m:${m.id}`,
+        kind: 'module',
+        id: m.id,
+        name: m.name,
+        icon: m.icon,
+        depth: 0,
+        hasSub: !!m.subNav,
+        subExpanded: subOpen,
+      },
+    ];
+
+    // 模块内二级项：**只在"它正在前台 + 侧栏展开 + 没被手动收起"时画**（条件即上面的 `subOpen`）。
+    // 这就是用户 2026-10-17 选的那条形态（"点进去才展开、切走自动收起"）——
+    // 一举解决两件事：
+    //   ① 侧栏常驻高度不被八个缩进项长期吃掉（展开时才占，约 8×36 = 288px）；
+    //   ② 子项的 onSelect 只有在模块**确实挂载着**时才存在（模块不上报就没有 sub），
+    //      于是不会出现"点得到但没反应"的幽灵项 —— 这个坑 2026-10-14 的分组那次踩过。
+    // ⚠️ 侧栏收起（48px 纯图标）时**不画**子项：这里与上面分组的规矩**相反**。
+    //    分组子项是"另一个模块的唯一条目"，折进点不到的地方等于入口消失，所以收起时平铺；
+    //    二级项则不是入口 —— 一级项本身就在那儿，点进去就是用户上次停的那一屏。
+    //    十四个图标挤在 48px 里谁也认不出，反而更糟。
+    const sub = subOpen ? subNavOf(m.id) : undefined;
+    if (sub) {
+      for (const it of sub.items()) {
+        rows.push({
+          key: `s:${m.id}:${it.id}`,
+          kind: 'sub',
+          moduleId: m.id,
+          name: it.name,
+          icon: it.icon,
+          // data-act 沿用 `kind-<id>`：这套锚点名从 2026-10-14 起被单测和三个冒烟脚本钉着，
+          // 借这次搬家顺手改一遍等于让一堆断言静默失配（找不到元素 ⇒ 有的用例直接跳过）。
+          act: `kind-${it.id}`,
+          count: it.count,
+          countTitle: it.countTitle,
+          todo: it.todo,
+          active: sub.activeId() === it.id,
+          onSelect: () => sub.onSelect(it.id),
+        });
+      }
+    }
+
+    entries.push({ order: m.order ?? 0, rows });
+  }
+
+  for (const g of NAV_GROUPS) {
+    const children = metas.filter((m) => m.parent === g.id);
+    if (!children.length) continue; // 约束 1：空分组不渲染
+    const childActive = children.some((c) => c.id === activeId.value);
+    // 手动展开/收起 + 子项激活时强制展开（点进去后看得见自己在哪）
+    const expanded = childActive || !collapsedGroups.value.includes(g.id);
+    const rows: NavRow[] = [];
+    if (!collapsed.value) {
+      rows.push({
+        key: `g:${g.id}`,
+        kind: 'group',
+        id: g.id,
+        name: g.name,
+        icon: g.icon,
+        expanded,
+        childActive,
+      });
+    }
+    if (expanded || collapsed.value) {
+      for (const c of children) {
+        rows.push({
+          key: `m:${c.id}`,
+          kind: 'module',
+          id: c.id,
+          name: c.name,
+          icon: c.icon,
+          depth: collapsed.value ? 0 : 1,
+        });
+      }
+    }
+    entries.push({ order: g.order ?? 0, rows });
+  }
+
+  // 一级项之间按 order 升序（与既有 meta.order 同一坐标系；同值保持注册序稳定）
+  return entries
+    .map((e, i) => ({ ...e, i }))
+    .sort((a, b) => a.order - b.order || a.i - b.i)
+    .flatMap((e) => e.rows);
+});
+
+/** 展开/收起一个侧栏分组 */
+function toggleGroup(groupId: string): void {
+  const next = collapsedGroups.value.includes(groupId)
+    ? collapsedGroups.value.filter((id) => id !== groupId)
+    : [...collapsedGroups.value, groupId];
+  collapsedGroups.value = next;
+  persistShell();
+}
+
+/**
+ * 点一级模块行（模板里那个 `@click`）。
+ *
+ * 两种语义合并在一个入口，因为**用户眼里只有"这一行"**：
+ *   · 还没进来 → 激活模块（原行为）；
+ *   · 已经在这一模块里、且它有二级菜单 → 这一下是**收起/展开二级菜单**，
+ *     不重新激活（`activateCore` 对同模块本来就早退，重激活什么也不会发生）。
+ *     2026-10-17 下午用户反馈：「现在点击基础数据没法收起二级菜单」。
+ */
+function onModuleRow(row: NavModuleRow): void {
+  if (row.hasSub && activeId.value === row.id) {
+    subCollapsedFor.value = subCollapsedFor.value === row.id ? '' : row.id;
+    return;
+  }
+  void activate(row.id);
+}
 
 const activeId = ref<string>('');
 const activeView = shallowRef<any>(null);
@@ -363,10 +648,25 @@ async function startStartupExternalPlugins(): Promise<void> {
 }
 
 // 外壳级持久化：记住上次活动模块与侧边栏状态（独立命名空间，不影响业务模块数据）
+// ⚠️ `save()` 是**整对象替换**（`setModuleState` 覆盖该命名空间），故所有写点必须走
+//    `persistShell()` 统一落三字段 —— 否则某处只写两个字段会把第三个字段静默抹掉。
 const shellStorage = useModuleStorage<{
   lastActiveModuleId?: string;
   collapsed?: boolean;
+  /** 手动收起的一级分组 id（见 NAV_GROUPS） */
+  collapsedGroups?: string[];
 }>('app-shell');
+
+/** 统一落盘外壳状态（唯一写点，避免漏字段） */
+function persistShell(): void {
+  shellStorage
+    .save({
+      lastActiveModuleId: activeId.value,
+      collapsed: collapsed.value,
+      collapsedGroups: collapsedGroups.value,
+    })
+    .catch(() => {});
+}
 
 // 插件启停状态：随宿主分发视图插件的"运行时按包启停"持久化（独立命名空间，与业务模块数据隔离）
 const pluginStateStorage = useModuleStorage<{ disabled?: string[] }>('plugins');
@@ -382,6 +682,10 @@ const themeOptions = [
  * 停旧启新、懒加载、贡献注册、业务钩子均由插件管理器统一管理（生命周期状态机）。 */
 async function activateCore(id: string) {
   if (!pm.has(id)) return;
+  // 切模块时忘掉"手动收起"：它只对刚才那个模块有意义。
+  // 不清的话，用户收起「基础数据」→ 去「邮件」→ 再点回「基础数据」，会看到一行空菜单 ——
+  // "点进去才展开"这条形态被反过来，而且没有任何提示让他知道菜单还在（箭头是折着的）。
+  if (id !== activeId.value) subCollapsedFor.value = '';
   if (id === activeId.value && activeView.value) return;
   if (pm.isUiIsland(id) && id === activeIslandId.value) return;
 
@@ -402,7 +706,7 @@ async function activateCore(id: string) {
     activeCommands.value = result.commands;
 
     // 持久化上次活动模块
-    shellStorage.save({ lastActiveModuleId: id, collapsed: collapsed.value }).catch(() => {});
+    persistShell();
   } catch (e) {
     toast.error(e instanceof Error ? e.message : String(e));
   }
@@ -430,9 +734,7 @@ function goBack() {
 
 function toggleCollapse() {
   collapsed.value = !collapsed.value;
-  shellStorage
-    .save({ lastActiveModuleId: activeId.value, collapsed: collapsed.value })
-    .catch(() => {});
+  persistShell();
 }
 
 function runCommand(cmd: ModuleCommand) {
@@ -612,6 +914,7 @@ onMounted(async () => {
       initialId = saved.lastActiveModuleId;
     }
     if (saved?.collapsed !== undefined) collapsed.value = saved.collapsed;
+    if (Array.isArray(saved?.collapsedGroups)) collapsedGroups.value = saved.collapsedGroups;
   } catch {
     /* 忽略读取失败，使用默认模块 */
   }
@@ -714,9 +1017,18 @@ function iconSvg(icon?: string): string {
       '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
     note: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11l4 4v12H5z"/><path d="M15 4v5h5M9 13h6M9 17h6"/></svg>',
     key: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
+    shop: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 9h16v10a1 1 0 01-1 1H5a1 1 0 01-1-1z"/><path d="M3 9l1.5-5h15L21 9M9 20v-5h6v5"/></svg>',
+    // 2026-10-17：「邮件」独立成一级模块后需要一枚信封（没有它就落到 fallback 的 box，
+    // 与侧栏里另一个用 box 的入口撞脸）。
+    inbox:
+      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h18v12H3z"/><path d="M3 7l9 6 9-6"/></svg>',
   };
   return map[icon || ''] || map.box;
 }
+
+/** 分组展开箭头（侧栏一级分组用，展开时旋转 90°） */
+const chevronIcon =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg>';
 
 const accountIcon =
   '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 11a3 3 0 100-6 3 3 0 000 6zM6.5 19a5.5 5.5 0 0111 0"/></svg>';

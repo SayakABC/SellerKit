@@ -10,7 +10,9 @@
 //   product-delete     删除
 //   product-batch-update 批量编辑（部分 patch：厂家/类目/状态/备注，undefined = 不修改）
 //   product-summary    汇总（总数 / 按状态 / 厂家分布 + 全量厂家下拉）
-//   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验）+ 手工进价 → `ae_cost_map`
+//   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验；进价随行写 `pl_products.cost_cents`）
+//   product-cost-set   只改「当前进价」一列（成本面板逐款改价）
+//   product-priced-codes 有当前进价的款编码集合（「今天」缺口卡用；不返回金额）
 //   product-export     导出/模板：主进程用 exceljs 生成 xlsx（按行嵌图）并弹保存框
 //   product-extract-images 从导入的 xlsx 里抽**嵌入图片**，落盘登记后按锚点行报回
 //   product-sku-list   映射列表（店铺商品ID → 产品；筛选 + 分页）
@@ -29,10 +31,12 @@ import { createHash } from 'crypto';
 import {
   ensureProductSchema,
   listProducts,
+  listPricedProductCodes,
   getProduct,
   upsertProduct,
   deleteProduct,
   batchUpdateProducts,
+  moveProductSupplier,
   productSummary,
   importProducts,
   PRODUCT_STATUSES,
@@ -42,6 +46,8 @@ import {
   upsertSkuMappings,
   invalidateSkuMapping,
   attachProductImage,
+  adoptProductImageIfEmpty,
+  getProductCode,
   clearItemImage,
   detachProductImage,
   itemImagePool,
@@ -52,23 +58,25 @@ import {
   variantList,
   variantUpsert,
   SKU_MAP_STATUSES,
+  setProductCostByCode,
   type ProductUpsertInput,
   type ProductImportRow,
   type SkuMapInput,
 } from './product-db';
 import { handle, IMG_EXT_BY_FORMAT, sniffImageFormat } from './ipc-util';
-// 产品导入 → 手工进价落 `ae_cost_map`（写入口径与成本维护界面共用；见 `manual-costs.ts` 的文件头）
-import { applyManualCosts } from './manual-costs';
-// 空库上 `costMapList()` 不会自己建表 ⇒ 带进价的导入要先 ensure（否则第一次就抛）
-import { ensureAeSchema } from './ae-db';
+import { nextStyleCode, adoptStyleColorImageByCode } from './order-db';
 // 供应商「按名称查找、不存在则新建」—— `suppliers` 表的 owner 是采购域（ADR-002 C1 单点写入），
 // 产品域只借它把 Excel 里的厂家名落成一个 id（2026-10-10）
 import { findOrCreateSupplierByName } from './purchase-db';
+import { getShopItemRow, setShopItemImageId } from './shop-item-db';
 // 产品表 xlsx 的生成与抽图（表头/行列宽/锚点归位都在这份里；"图真的嵌进去了没有"与
 // "图归到了哪一行"由 `scripts/product-xlsx-smoke.cjs` 单独钉住）
 import { buildProductWorkbook, extractEmbeddedImages } from './product-xlsx';
 // 映射写入后回填存量订单 —— 只有 handler 层能同时看到两个域（product-db 不得 import order-db，会成环）
-import { reassignOrdersByItemIds } from './order-db';
+import { reassignOrdersByItemIds, ensureOrderSchema } from './order-db';
+// 色图落 **订单图库 oi_images**：与订单主图共用同一份落库实现（见该文件头的闭环说明）。
+// 色图落在产品域 pl_images 时，订单导入的「内容指纹命中」永远看不到它 ⇒ 按图找色一次都不闭（P0-1）。
+import { landOrderImageByUrl } from './order-image-land';
 
 const MAX = {
   code: 64,
@@ -104,6 +112,11 @@ function sanitizeProduct(payload: any): ProductUpsertInput {
     category: str(payload?.category, MAX.category).trim(),
     status: coerceStatus(payload?.status),
     note: str(payload?.note, MAX.note),
+    // 进价：**只有调用方真的传了这个键**才带上（缺省 = 不修改，见 `upsertProduct` 注释）。
+    // 不在这里 `|| 0` —— 那会把"没传"与"填了非法值"都变成 0，静默清掉真实的钱。
+    ...(payload?.costCents !== undefined && payload?.costCents !== null
+      ? { costCents: Number(payload.costCents) }
+      : {}),
   };
 }
 
@@ -138,7 +151,39 @@ handle('product-get', (payload: any) => {
 
 handle('product-upsert', (payload: any) => {
   ensureProductSchema();
-  return upsertProduct(sanitizeProduct(payload));
+  const input = sanitizeProduct(payload);
+  return upsertProduct(input);
+});
+
+/**
+ * 逐款改「当前进价」（成本面板的保存按钮；C2 起成本只有一个真源 = `pl_products.cost_cents`）。
+ * 与 `product-upsert` 的分工：那个是**全量提交**（会重置厂家/类目/状态/备注），这个只改一列。
+ * `costCents = 0` = 清空（读侧按"缺"处理，不是零成本）。
+ */
+handle('product-cost-set', (payload: any) => {
+  ensureProductSchema();
+  const code = str(payload?.code, MAX.code).trim();
+  if (!code) throw new Error('缺少款编码');
+  const cents = Number(payload?.costCents);
+  if (!Number.isFinite(cents) || cents < 0) throw new Error('进价必须是非负数字（分）');
+  return setProductCostByCode(code, Math.round(cents));
+});
+
+/** 有当前进价的款编码集合（缺口卡的存在性检查；不返回金额） */
+handle('product-priced-codes', () => {
+  ensureProductSchema();
+  return { codes: listPricedProductCodes() };
+});
+
+/**
+ * 下一个款编码（建款向导的「系统发号」只读展示）。
+ *
+ * 复用识别链路的同一个发号器（`order-db.nextStyleCode`，编码池 = oi_styles ∪ pl_products）——
+ * 渲染层自己按 max+1 算会漏掉识别侧占用的序号，撞唯一键时报错方向全反。
+ */
+handle('product-next-code', () => {
+  ensureProductSchema();
+  return { code: nextStyleCode() };
 });
 
 handle('product-delete', (payload: any) => {
@@ -166,6 +211,17 @@ handle('product-batch-update', (payload: any) => {
 handle('product-summary', () => {
   ensureProductSchema();
   return productSummary();
+});
+
+// 按款编码改厂家（拣货宫格里"把 SKU 拖到别家"的写入口；0 = 清空关联）。
+// 与 product-batch-update 的分工：那个按**产品 id** 批量改（货品档案的勾选编辑），
+// 这个按 **code** 单款改（拣货清单手上只有款编码）—— 两条路都只改 supplier_id 一列，
+// 不碰 name/category/status/note（全量提交会静默重置它们）。
+handle('product-move-supplier', (payload: any) => {
+  ensureProductSchema();
+  const code = str(payload?.code, MAX.code).trim();
+  if (!code) throw new Error('缺少款编码');
+  return moveProductSupplier(code, toId(payload?.supplierId));
 });
 
 // ---- Excel 批量导入 / 导出 ----
@@ -210,6 +266,8 @@ handle('product-import', (payload: any) => {
       weightG: Math.round(Number(s?.weightG)) || 0,
     })),
     imageId: toId(r?.imageId),
+    // 进价：只认数字（缺省/非数字 = 这行没填 ⇒ 库层不修改已有价，**不是清 0**）
+    costCents: typeof r?.costCents === 'number' ? Number(r.costCents) : undefined,
   }));
 
   // 供应商：库里没有的名字**当场建**（用户口径 2026-10-10：「可以先通过名称查找供应商是否存在，
@@ -234,25 +292,18 @@ handle('product-import', (payload: any) => {
     { ensureSupplier },
   );
 
-  // 手工进价 → `ae_cost_map`（写入口径在 `manual-costs.ts`，与成本维护界面同一份）。
-  // 只对**成功入库**的行写：编码冲突被跳过的行连产品都没进去，价留成孤儿只会误导。
-  // `costCents` 非 number（`null`/缺省）= 这行没填进价 ⇒ **不修改**库内已有价（**不是清 0**）。
-  //
-  // ⚠️ 先 `ensureAeSchema()`：`costMapList()` 不会自己建表，空库上第一次"带进价导入"
-  //    会在这里抛（而产品那半已经落库了 —— 用户看到的是"导入失败"但款其实进来了）。
-  ensureAeSchema();
+  // 进价随产品一起落在 `pl_products.cost_cents`（`importProducts → upsertProduct` 已经写过了）；
+  // C2 起成本只有一个真源 = 产品表，这里**不再写第二张表**，只把"带进价的行数"回报给界面。
   const failedCodes = new Set(outcome.failed.map((f) => f.code));
-  const costs = items
-    .filter((r: any) => typeof r?.costCents === 'number')
-    .filter((r: any) => !failedCodes.has(str(r?.code, MAX.code).trim()))
-    .map((r: any) => ({
-      code: str(r?.code, MAX.code).trim(),
-      name: str(r?.name, MAX.name).trim(),
-      costCents: Number(r.costCents),
-    }));
-  const cost = applyManualCosts(costs, String(payload?.effectiveFrom ?? ''));
+  let costsWritten = 0;
+  let costsSkipped = 0;
+  for (const r of items) {
+    if (typeof r?.costCents !== 'number') continue;
+    if (failedCodes.has(str(r?.code, MAX.code).trim())) costsSkipped++;
+    else costsWritten++;
+  }
 
-  return { ...outcome, costsWritten: cost.written, costsSkipped: cost.skipped };
+  return { ...outcome, costsWritten, costsSkipped };
 });
 
 /**
@@ -554,6 +605,152 @@ handle('product-item-image-set', (payload: any) => {
 
 handle('product-item-image-clear', (payload: any) => {
   return clearItemImage(str(payload?.itemId, 64).trim());
+});
+
+// ---- 采集图下载入库（shop-item-image-fetch；方案 §3.6 唯一新增图片通道）----
+//
+// 一次调用做两段图片的事（方案 P4 主行 + §8.8 P4 扩展）：
+//   ① 商品主图：下载远程主图 → `landImageBuffer`（内容 SHA-256 去重，同图不落两份）→
+//      回填 `pl_shop_items.image_id`（这一行此后可走本地图，不必再热链 CDN）；
+//      带 `adoptMain=true` 且给 `productId` 时**顺手**采纳为款主图（建款向导的勾选）。
+//   ② 每色图（`colors[]`）：逐张下载入库 → 采纳为**款色绑定图**（`adoptStyleColorImageByCode`，
+//      只补空）—— 与订单归款（`autoAssignByMap`）走同一条款色解析，两处绑的是同一个款色。
+//
+// 边界（与 `adoptOrderImages` 同构）：
+//   · 只补空不覆盖：主图看 `pl_products.image_id=0`，色图看"图/色任一侧已绑"（判定都在主进程，
+//     不靠渲染层自觉）；
+//   · **有色图要采纳时失败不外抛**：建档/认款已经写进去了，坏一张图不能让用户以为"没建上"——
+//     主图失败走结构化 `mainError`、色图逐张带 `reason`，渲染层照写回执；
+//   · 已落库的行直接复用（`image_id` 非 0），不重复下载；
+//   · **纯主图调用**（不带 colors）保持"下载失败即抛"：那种调用方没有别的事可做，
+//     静默"成功"比明说失败更糟。
+
+const { downloadFile } = require('./http-client');
+
+/** 下载远程图 → 临时文件 → `landImageBuffer` 入库；失败抛（由调用方决定外抛还是收进 reason） */
+async function fetchImageToLibrary(
+  imageUrl: string,
+): Promise<{ imageId: number; localPath: string; reused: boolean }> {
+  const dir = PRODUCT_IMAGE_DIR();
+  fs.mkdirSync(dir, { recursive: true });
+  // 临时文件用 .img 后缀（不是图片扩展名）：下载失败/格式不对时不会被当成正式缓存图。
+  // 随机后缀：色图是连续多张下载，同一毫秒内两个临时路径不能相撞。
+  const tmpPath = path.join(
+    dir,
+    `dl-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.img`,
+  );
+  try {
+    const r = await downloadFile(imageUrl, tmpPath);
+    if (!r.ok) throw new Error(r.error || '图片下载失败');
+    return landImageBuffer(fs.readFileSync(tmpPath), 'shop-item');
+  } finally {
+    // landImageBuffer 已另存正式文件（内容哈希命名），临时文件必须清掉
+    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+  }
+}
+
+handle('shop-item-image-fetch', async (payload: any) => {
+  const rowId = toId(payload?.id);
+  if (!rowId) throw new Error('缺少采集行 id');
+  const row = getShopItemRow(rowId);
+  if (!row) throw new Error('采集行不存在或已被删除');
+  // 色图入参消毒（preload 已滤过一层，这里按业务口径再来一次——双防线）：
+  // 同色只取第一条（色→图 1:1；矩阵里同一色出现多行时第二条自然被"色侧已绑"挡下）。
+  const colorInputs: { color: string; imageUrl: string }[] = [];
+  const seenColor = new Set<string>();
+  for (const c of Array.isArray(payload?.colors) ? payload.colors : []) {
+    const color = typeof c?.color === 'string' ? c.color.trim().slice(0, 100) : '';
+    const imageUrl = typeof c?.imageUrl === 'string' ? c.imageUrl.slice(0, 1000) : '';
+    if (!color || !imageUrl || seenColor.has(color)) continue;
+    seenColor.add(color);
+    colorInputs.push({ color, imageUrl });
+  }
+  const productId = toId(payload?.productId);
+  if (colorInputs.length && !productId) {
+    // 色图要挂到款色上，款色只能按款编码定位（编码从产品行取）⇒ 缺 productId 无从谈起
+    throw new Error('色图采纳需要 productId');
+  }
+  const colorResults: { color: string; imageId: number; bound: boolean; reason: string }[] = [];
+  if (colorInputs.length) {
+    // 色图登记在 oi_images ⇒ 先确保订单域表在（懒建表：采集通道不碰订单表时它还没建）
+    ensureOrderSchema();
+    const code = getProductCode(productId);
+    if (!code) throw new Error(`产品不存在或已被删除: id=${productId}`);
+    for (const c of colorInputs) {
+      try {
+        // ⚠️ 必须走 `landOrderImageByUrl`（oi_images），**不能**用 `fetchImageToLibrary`（pl_images）：
+        //    后者的 id 属于另一张表，喂给 adoptStyleColorImageByCode 会去改一张不相干的订单图。
+        const landed = await landOrderImageByUrl(c.imageUrl);
+        if (!landed.ok) throw new Error(landed.error);
+        const r = adoptStyleColorImageByCode(code, c.color, landed.image.imageId);
+        colorResults.push({ color: c.color, imageId: landed.image.imageId, bound: r.bound, reason: r.reason || '' });
+      } catch (e: unknown) {
+        // 单张失败不中断其余色（reason 是机器可判的值，渲染层据此分"失败"与"跳过"）
+        colorResults.push({
+          color: c.color,
+          imageId: 0,
+          bound: false,
+          reason: 'download-failed',
+        });
+      }
+    }
+  }
+  // ---- ① 商品主图 ----
+  if (row.imageId) {
+    // 已有本地图 = 复用；但**采纳仍要做**（这一行可能是早先直连认款时只下载没采纳的）
+    let adopted = false;
+    if (productId && payload?.adoptMain === true) {
+      adopted = adoptProductImageIfEmpty(productId, row.imageId);
+    }
+    return {
+      imageId: row.imageId,
+      localPath: '',
+      reused: true,
+      adopted,
+      mainError: '',
+      colors: colorResults,
+    };
+  }
+  if (!row.imageUrl) {
+    if (colorResults.length) {
+      return {
+        imageId: 0,
+        localPath: '',
+        reused: false,
+        adopted: false,
+        mainError: '这一行没有采集图地址',
+        colors: colorResults,
+      };
+    }
+    throw new Error('这一行没有采集图地址');
+  }
+  try {
+    const landed = await fetchImageToLibrary(row.imageUrl);
+    setShopItemImageId(rowId, landed.imageId);
+    let adopted = false;
+    if (productId && payload?.adoptMain === true) {
+      // 只补空；采纳本身失败不影响"图已入库 + 行已回填"这个事实
+      adopted = adoptProductImageIfEmpty(productId, landed.imageId);
+    }
+    return {
+      imageId: landed.imageId,
+      localPath: landed.localPath,
+      reused: landed.reused,
+      adopted,
+      mainError: '',
+      colors: colorResults,
+    };
+  } catch (e: unknown) {
+    if (!colorResults.length) throw e;
+    return {
+      imageId: 0,
+      localPath: '',
+      reused: false,
+      adopted: false,
+      mainError: e instanceof Error ? e.message : String(e),
+      colors: colorResults,
+    };
+  }
 });
 
 /** 单次取图池上限（映射列表一页 ≤500 行；队列分批拉） */

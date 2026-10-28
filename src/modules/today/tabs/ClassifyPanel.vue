@@ -34,6 +34,10 @@
                 标题与紧挨着的分段项说的是同一件事（范围 + 属于哪一批），而分段控件自己就带
                 `is-on` 高亮 + 计数，**它是唯一真源**。⇒ 删标题，范围只说这一处。
                 （原标题还想防的"列的是已核对"由 `is-on` 状态与计数表达，不缺信息。） -->
+        <!-- 自愈回执：只有这一轮真的补过才出现（"刚刚发生了改变"，与常驻说明不同） -->
+        <span v-if="healed > 0" class="cl-healed" data-act="cl-auto-healed">
+          已按现有映射自动补了 {{ healed }} 行归属
+        </span>
         <div class="wb-seg cl-scope" role="tablist" aria-label="核对范围" data-act="cl-scope">
           <button
             type="button"
@@ -72,25 +76,30 @@
              理由本身不丢：它在**发生的那一刻**说（「同商品」徽标的 title、保存后的回流 toast），
              不需要在页头先讲一遍。改这段时**别把原因再抄回来**（冒烟有长度守卫）。
              ⚠️ 两个范围的动作**不同**（待核对＝编辑+保存；已核对＝退回），说明必须跟着换 ——
-             一句话盖两边必然有一边是错的（"点保存"在已核对里根本没有那个按钮）。 -->
+             一句话盖两边必然有一边是错的（"点保存"在已核对里根本没有那个按钮）。
+             ⚠️ 2026-10-28 加"批量"这半句：勾选后吸底动作条才出现，说明里不提一句的话，
+                用户不会知道有这条路（而那正是这一轮要治的问题）。长度仍在 80 字以内。 -->
         <span class="wb-muted" data-act="cl-guide">
           {{
             scope === 'pending'
-              ? '先点名「归属款」，再选这个款的颜色，点「保存」；没问题就点「确认无误」。回车＝保存并跳下一条'
+              ? '点「归属款」挑款 → 选色 → 保存并下一条；多行可勾选后批量定款 / 确认无误。回车＝保存并跳下一条'
               : '这些是核对过的行。要改哪一行，点「退回待核对」把它放回待核对列表，改好再保存'
           }}
         </span>
         <!-- 「全部确认无误」只在待核对范围有意义：对已核对的行再确认一次是**空动作**
-             （那些行本来 corrected 就是 1）。留在那里会让用户以为它能做别的什么。 -->
+             （那些行本来 corrected 就是 1）。留在那里会让用户以为它能做别的什么。
+             ⚠️ 2026-10-28 文案改「这批」：原名会让人以为动的是全库（而它原先**真的**动全库，
+                那是 bug；现在动的是"今天这批 + 当前搜索"，名字必须跟着说清范围）。 -->
         <span v-if="scope === 'pending'" class="cl-actions">
           <button
             type="button"
             class="wb-btn wb-btn--sm"
             data-act="cl-all-ok"
             :disabled="busy || !total"
+            :title="`把当前筛选下（${applied ? '搜索结果里的' : '今天这批里的'}）所有待核对行一起确认`"
             @click="confirmAll"
           >
-            全部确认无误
+            这批全部确认无误
           </button>
         </span>
       </div>
@@ -99,6 +108,20 @@
         <table class="wb-table cl-table" data-act="cl-table">
           <thead>
             <tr>
+              <!-- 勾选列（2026-10-28 批量）：只在待核对范围出现 —— 已核对是只读列表，
+                   "退回"是一行一个判断，攒批退回会把"哪一行出错了"这件事糊掉。 -->
+              <th v-if="scope === 'pending'" class="cl-sel-col">
+                <input
+                  type="checkbox"
+                  class="cl-sel"
+                  data-act="cl-select-all"
+                  :checked="allSelected"
+                  :indeterminate="someSelected && !allSelected"
+                  :disabled="!selectableRows.length || busy"
+                  :title="allSelected ? '取消全选本页' : `选中本页 ${selectableRows.length} 行`"
+                  @change="toggleSelectAll"
+                />
+              </th>
               <th class="cl-thumb-col">图</th>
               <th>订单号</th>
               <th>店铺</th>
@@ -109,7 +132,24 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="o in rows" :key="o.id" @keydown.enter="onRowEnter(o, $event)">
+            <tr
+              v-for="o in rows"
+              :key="o.id"
+              :class="{ 'is-selected': isSelected(o) }"
+              @keydown.enter="onRowEnter(o, $event)"
+            >
+              <!-- 勾选框旁**不加**禁用：有未保存改动的行也能勾（禁用而不解释 = 一次静默失败）。
+                   批量「确认无误」会跳过它并在回执里点名，判据写在 title 里。 -->
+              <td v-if="scope === 'pending'" class="cl-sel-col">
+                <input
+                  type="checkbox"
+                  class="cl-sel"
+                  :data-act="`cl-select-${o.id}`"
+                  :checked="isSelected(o)"
+                  :title="isDirty(o) ? '这行有未保存的改动：批量「确认无误」会跳过它（改动不会被丢）' : '勾选后可批量确认 / 批量定款'"
+                  @change="toggleSelect(o)"
+                />
+              </td>
               <td class="cl-thumb-col">
                 <!-- 核对必须看得全图：识别结果对不对，是**拿图比**出来的而不是读文字读出来的。
                      ⚠️ 基座 `.wb-thumb` 是 40px + `object-fit: cover`（会裁掉边缘），本页在
@@ -143,15 +183,20 @@
                      它只在 >1 时出现；没有商品ID 的行（`o.itemId` 空串）永远没有它 ——
                      "同一个商品"与"没有商品ID"是两件事，别让它们长成一个样子。
                      ⚠️ 只在**待核对**范围出现：它说的是"给其中一行点名款，其余行以后会自动归类"，
-                        那是一个**要做的动作**；已核对范围里没有可点名的下拉，留着它就成了空承诺。 -->
-                <span
+                        那是一个**要做的动作**；已核对范围里没有可点名的下拉，留着它就成了空承诺。
+                     ⚠️ 2026-10-28 改成**可点**：点一下 = 勾选本页这个商品的所有行。这是批量定款
+                        最自然的起点（用户看到"同商品 ×6"的下一个念头就是"那把 6 行一起定了吧"）。
+                        原先它只是个 span，用户得自己一行一行勾 —— 那正是"路径太长"的一部分。 -->
+                <button
                   v-if="scope === 'pending' && sameCount(o) > 1"
+                  type="button"
                   class="wb-tag cl-same"
                   :data-act="`cl-same-${o.id}`"
-                  :title="`本页有 ${sameCount(o)} 行是这家店的同一个商品。给其中任意一行点名款，其余行以后会自动归类`"
+                  :title="`本页有 ${sameCount(o)} 行是这家店的同一个商品。点这里把这 ${sameCount(o)} 行一起勾上，再一次定款；也可以只给其中一行点名款，其余行以后会自动归类`"
+                  @click.stop="selectSameProduct(o)"
                 >
                   同商品 ×{{ sameCount(o) }}
-                </span>
+                </button>
               </td>
               <td>{{ o.shop || '—' }}</td>
               <!-- ── 颜色（2026-10-10 用户口径重做）──────────────────────────────
@@ -197,21 +242,58 @@
               <td>{{ o.size || '—' }}</td>
               <td class="cl-style-col">
                 <template v-if="scope === 'pending'">
-                  <select
+                  <!-- ── 归属款（2026-10-28 换掉原生下拉）────────────────────────────
+                       用户原话：「只是通过下拉列表看文字，不够直观，也容易对应错」。
+                       原生 `<select>` 有两条死路：① 选项里放不了图；② 展开时没法把这一行的
+                       订单图摆在旁边。而这件事的全部判据就是**图**（"这款是不是这一单"）。
+                       ⇒ 换成"带款首图的格子 + 弹层选择器"：
+                         · 格子常显**当前款的首图**（一眼看出这行挂的是哪款，不是一串编码）；
+                         · 点开弹层，左边固定这一行的订单图，右边带图列表 + 搜索 —— 拿图挑款。
+                       ⚠️ `data-style` 是给冒烟/脚本读**当前值**的锚点（换掉 value 之后，
+                          原来靠 `<select>.value` 的断言会全部失效 —— 值必须有个等价出口）。
+                       ⚠️ 「自动匹配」这一支仍在（弹层底部「不点名款」）：改错了要能退回去。 -->
+                  <button
                     v-if="styleOptions.length"
-                    v-model="draftOf(o).styleCode"
-                    class="wb-input wb-input--sm cl-cell"
+                    type="button"
+                    class="cl-style-btn"
+                    :class="{ 'is-auto': !draftOf(o).styleCode }"
                     :data-act="`cl-style-${o.id}`"
-                    @change="onStylePick(o)"
+                    :data-style="draftOf(o).styleCode"
+                    :title="styleBtnTitle(o)"
+                    @click="openPicker(o)"
                   >
-                    <option value="">
-                      自动匹配{{ o.styleCode ? `（当前 ${o.styleCode}）` : '（未归类）' }}
-                    </option>
-                    <option v-for="s in styleOptions" :key="s.code" :value="s.code">
-                      {{ s.code }}{{ s.name ? ` · ${s.name}` : '' }}{{ s.status === 'archived' ? '（停用）' : '' }}
-                    </option>
-                  </select>
-                  <span v-else class="wb-muted">产品库为空 —— 先到「货与成本」建档</span>
+                    <img
+                      v-if="draftOf(o).styleCode && styleThumbOf(draftOf(o).styleCode)"
+                      :src="styleThumbOf(draftOf(o).styleCode)"
+                      class="cl-style-btn__img"
+                      :data-act="`cl-style-thumb-${o.id}`"
+                      alt=""
+                    />
+                    <!-- 点了款、但这款没有图 ⇒ 虚线占位（"没图"是个事实，要说出来）；
+                         没点名款 ⇒ **不留图位** —— 自动匹配本来就没有"哪一款"，摆一个空框
+                         会被读成"这行缺数据"（2026-10-28 首版截图实测，看着像坏了）。 -->
+                    <span
+                      v-else-if="draftOf(o).styleCode"
+                      class="cl-style-btn__img cl-style-btn__img--empty"
+                      :data-act="`cl-style-thumb-empty-${o.id}`"
+                      aria-hidden="true"
+                    ></span>
+                    <span class="cl-style-btn__text">
+                      <template v-if="draftOf(o).styleCode">
+                        <b class="wb-mono">{{ draftOf(o).styleCode }}</b>
+                        <span v-if="styleNameOf(draftOf(o).styleCode)" class="wb-muted cl-style-btn__name">
+                          {{ styleNameOf(draftOf(o).styleCode) }}
+                        </span>
+                      </template>
+                      <template v-else>
+                        <span class="cl-style-btn__auto">
+                          自动匹配{{ o.styleCode ? `（当前 ${o.styleCode}）` : '（未归类）' }}
+                        </span>
+                      </template>
+                    </span>
+                    <span class="cl-style-btn__go" aria-hidden="true">选</span>
+                  </button>
+                  <span v-else class="wb-muted">产品库为空 —— 先到「产品管理」建档</span>
                   <!-- 「填了颜色却没有款可挂」：颜色的**载体是款色**（`oi_style_colors(款, 色)`），
                        没点名款、又没有可用于自动匹配的特征时，这个颜色落不到任何地方 ——
                        原先它照样能保存（宿主只写订单自己的 color 列，提示还是"已保存"），
@@ -262,6 +344,19 @@
                 >
                   退回待核对
                 </button>
+                <!-- 拆包（2026-10-21，阶段 B2）：一单多包、按商品行拆数量。
+                     ⚠️ 它与"核对"是两件事：核对定的是"这行是什么款"，拆包定的是"这些件怎么装箱"。
+                        所以**两个范围都给**（已核对的行照样要装包），且不占「保存/确认」那组的位置。 -->
+                <button
+                  type="button"
+                  class="wb-link"
+                  :data-act="`cl-parcel-${o.id}`"
+                  :disabled="busy"
+                  title="一单多包、按商品行拆件数"
+                  @click="openParcel(o)"
+                >
+                  拆包<template v-if="parcelCounts[o.orderNo]"> ×{{ parcelCounts[o.orderNo] }}</template>
+                </button>
               </td>
             </tr>
           </tbody>
@@ -275,8 +370,10 @@
              三种空态各自的下一步不同 ——
                · 今天还没导   → 去导入（本页无对象可核对）
                · 搜不到       → 不给按钮（清空搜索框就在旁边，塞个按钮反而多一步）
-               · 这批核对完了 → **去算钱 / 去看要拿什么**（流程的第 3、4 步）——
+               · 这批核对完了 → **去「统计」看利润 / 去「拿货」页签**（独立模块 + 第 3 步）——
                  原先这里什么都没有，用户核对完就"断"在这一页上。
+             ⚠️ 2026-10-17：算钱整步撤出发货台后，第一个出口变成**真跳「统计」模块**
+                （`openModule('order-cost')`）；「去「拿货」页签」仍是就地切页签（第 3 步）。
              ⚠️ 2026-10-12 补第三个出口：**看已核对的行**。前两个出口都是"往前走"，
                 而"核对完了发现漏了两行"是往后走 —— 没有这个出口时，用户会以为
                 这一页到此为止、那两行再也改不了（真库现场：23 行全已核对，用户找不到回去的路）。
@@ -308,9 +405,9 @@
               type="button"
               class="wb-btn wb-btn--primary"
               data-act="cl-goto-cost"
-              @click="go('cost')"
+              @click="openModule('order-cost')"
             >
-              去算钱
+              去「统计」看利润
             </button>
             <button
               type="button"
@@ -318,7 +415,7 @@
               data-act="cl-goto-purchase"
               @click="go('purchase')"
             >
-              去看要拿什么
+              去「拿货」页签
             </button>
             <button
               type="button"
@@ -362,6 +459,46 @@
         </div>
       </div>
 
+      <!-- ── 批量动作条（2026-10-28）─────────────────────────────────────────────
+           用户原话：「归属款还是只能一个一个选，路径太长（点击、选择、关闭、确认）」。
+           这条是"勾选 → 一次提交"的落点，吸附在可视区底部（表格再长也够得着）。
+
+           ⚠️ 按钮上的数字 = **真的会被处理的行数**，不是勾选数：
+              「确认无误（3）」在有 2 行脏的时候显示 3 而不是 5，并另说"其中 2 行有未保存的改动"。
+              数字诚实是这条动作条的全部价值 —— 一个点了之后"少做了两行"的批量确认，
+              比没有批量更糟（用户以为全好了，结果是明天在对账页上发现）。
+           ⚠️ 挂着 `v-if="selectedIds.size"`：没勾任何行时它**不在页面上**，
+              不是"灰着一条"。空动作条占 40px 高，而这一页每多 40px 就少半行订单。 -->
+      <div v-if="scope === 'pending' && selectedIds.size" class="cl-bulk" data-act="cl-bulk">
+        <span class="cl-bulk__count" data-act="cl-bulk-count">已选 {{ selectedIds.size }} 行</span>
+        <span v-if="dirtySelected > 0" class="wb-muted cl-bulk__hint" data-act="cl-bulk-dirty">
+          其中 {{ dirtySelected }} 行有未保存的改动，不会一起确认
+        </span>
+        <span class="cl-bulk__spacer"></span>
+        <button
+          type="button"
+          class="wb-btn wb-btn--sm"
+          data-act="cl-bulk-style"
+          :disabled="busy"
+          title="给这几行按商品分组定款（同一个商品只选一次）"
+          @click="openBulkPicker"
+        >
+          批量定款…
+        </button>
+        <button
+          type="button"
+          class="wb-btn wb-btn--sm wb-btn--primary"
+          data-act="cl-bulk-ok"
+          :disabled="busy || !bulkConfirmable.length"
+          @click="bulkConfirm"
+        >
+          确认无误（{{ bulkConfirmable.length }}）
+        </button>
+        <button type="button" class="wb-link" data-act="cl-bulk-clear" @click="clearSelection">
+          清空选择
+        </button>
+      </div>
+
       <div v-if="total > PAGE_SIZE" class="wb-panel__foot wb-pager" data-act="cl-pager">
         <span>共 {{ total }} 条 · 第 {{ page + 1 }} / {{ totalPages }} 页</span>
         <span class="wb-pager__spacer"></span>
@@ -394,6 +531,46 @@
     <datalist id="cl-color-options" data-act="cl-color-options">
       <option v-for="c in colorSuggestions" :key="c" :value="c"></option>
     </datalist>
+
+    <!-- 归属款选择器（带图）。⚠️ 放在**空态 `v-else` 之后**（同上面 viewer 的纪律）：
+         插进 `v-if="rows.length"` 与 `v-else` 之间，那个 `v-else` 会改绑到这个弹层上，
+         于是表格与空态同时渲染。 -->
+    <StylePicker
+      v-if="pickerRow"
+      :styles="styleOptions"
+      :order-image="thumbs[pickerRow.localPath || ''] || ''"
+      :order-no="pickerRow.orderNo"
+      :shop="pickerRow.shop"
+      :size="pickerRow.size"
+      :order-color="displayColor(pickerRow)"
+      :current-style="draftOf(pickerRow).styleCode"
+      :current-color="draftOf(pickerRow).color"
+      :has-next="pickerRowIdx >= 0 && pickerRowIdx < rows.length - 1"
+      :busy="busy"
+      @close="closePicker"
+      @zoom-order="zoomPickedOrder"
+      @pick="onStylePicked"
+      @clear="onStyleCleared"
+    />
+
+    <!-- 批量定款弹层（2026-10-28）：勾选 N 行 → 按商品分组，每组选一次款 → 一次落库。
+         ⚠️ 与 `StylePicker` 一样放在空态 `v-else` **之后**（插进 two-way 之间会让 v-else 改绑）。 -->
+    <BulkStylePicker
+      v-if="bulkGroups"
+      :groups="bulkGroups"
+      :styles="styleOptions"
+      :style-thumbs="styleThumbs"
+      :busy="busy"
+      @close="closeBulkPicker"
+      @apply="applyBulkStyles"
+    />
+
+    <!-- 拆包抽屉：打开时按 `orderNo` 拉整单（包裹 + 商品行 + 汇总），关掉重算行内徽标 -->
+    <ParcelDrawer
+      :visible="!!parcelOrderNo"
+      :order-no="parcelOrderNo"
+      @close="closeParcel"
+    />
   </div>
 </template>
 
@@ -429,14 +606,15 @@
 //   ⇒ **识别该以什么形态回来尚未拍板**（导入时后台跑 / 逐行「识这张图」按钮 / 只做建议不落库）。
 //   在拍板前本页只留逐行核对这条**必然正确**的路径。
 //
-//   ⚠️ 连带：识别原语（`readEngine` / `recognizeOrder`）仍保留在 `../classify.ts`，**当前无调用方**
-//   —— 留着是因为「设置 › 识别」写的那份引擎配置必须有个读取方，且它们正是重新接入识别时要用的现成件。
-//   若最终决定不做自动识别，**两者与「设置 › 识别」页应一并删除**（别让它们烂在那里）。
+//   ✅ **2026-10-28 已拍板：不做云端识别** —— 识别原语（`readEngine` / `recognizeOrder`）、
+//   `src/core/ai`、`order-api-key-*` 与「设置 › 识别」页**一并删除**。本页要的"自动认出款与色"
+//   改走**本地视觉**（无网络、无云模型）：路线与落点见
+//   `docs/notes/2026-10-28-classify-local-vision-direction.md`。别再把云端引擎接回来。
 //
 // ⚠️ **2026-10-12 加「已核对」范围 + 行内「退回待核对」**（与用户确认过的口径）。要治的是：
 //   核对过之后发现定错了款/色 —— 那些行按定义不在待核对列表里（本页只查 `corrected = 0`），
 //   于是**屏幕上根本没有它们**，也就没有任何地方能改回去。真库现场：23 行全 `corrected=1`、
-//   `oi_orders.color` 全空、款色全是「未分类」（"填了没存、然后被确认掉了"留下的痕迹），
+//   `oi_order_items.color` 全空、款色全是「未分类」（"填了没存、然后被确认掉了"留下的痕迹），
 //   而代码里此前**没有任何一处**会把 `corrected` 置回 0 ⇒ 用户再也回不到那些行。
 //   三条口径（改这块前先读）：
 //     ① **范围切换**放页头（原来那句只读计数「待核对 X · 已核对 Y」的两个数各自成为一个范围）。
@@ -459,10 +637,15 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
 import { COLOR_WHITELIST } from '@/lib/orderClassifier';
+import ParcelDrawer from './ParcelDrawer.vue';
+import StylePicker from './StylePicker.vue';
+import BulkStylePicker from './BulkStylePicker.vue';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
+import { groupByProduct, pickColorFor, productKeyOf, type BulkGroupView } from '@/lib/classifyBulk';
 import { localDayKey } from '@/lib/localDay';
-import type { OrderRecord, SkuBackfillOutcome, StyleRecord } from '@/types';
+import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered } from '@/types';
 import { useShipping } from '../flowCtx';
+import { styleImages } from '../purchase';
 import {
   PAGE_SIZE,
   listCorrected,
@@ -474,7 +657,7 @@ import {
   saveCorrection,
 } from '../classify';
 
-const { token, go, bump } = useShipping();
+const { token, go, bump, openModule } = useShipping();
 
 /** 本页的两个**互斥范围**（同一张表的两种筛法，不是两个页面） */
 type Scope = 'pending' | 'corrected';
@@ -501,6 +684,8 @@ interface Draft {
 const loading = ref(false);
 const busy = ref(false);
 const error = ref('');
+/** 本次进页按已有映射**自动补上**的行数（0 = 没有漏网的，不显示） */
+const healed = ref(0);
 const search = ref('');
 /** 已提交给主进程的关键字（与输入框里正在敲的 `search` 分开 —— 否则每次输入都会触发分页重置） */
 const applied = ref('');
@@ -522,6 +707,34 @@ const thumbs = ref<Record<string, string>>({});
 const viewer = ref<{ orderNo: string; src: string; full: boolean } | null>(null);
 /** 连点只认最后一次：晚到的原图不许盖到用户后来点的那一行上 */
 let viewerSeq = 0;
+
+// ---- 拆包（阶段 B2）----
+/** 正在拆包的订单号；空串 = 抽屉关着 */
+const parcelOrderNo = ref('');
+/** 各订单已拆了几个包（行内「拆包 ×N」徽标；不在表里的 = 还没拆包） */
+const parcelCounts = ref<Record<string, number>>({});
+
+function openParcel(o: OrderRecord) {
+  parcelOrderNo.value = o.orderNo;
+}
+
+/** 抽屉关了要重算徽标 —— 用户可能刚在里面加了包，徽标不更新等于"看不到自己做过的事" */
+function closeParcel() {
+  parcelOrderNo.value = '';
+  void refreshParcelCounts();
+}
+
+async function refreshParcelCounts() {
+  const nos = [...new Set(rows.value.map((o) => String(o.orderNo ?? '')).filter(Boolean))];
+  if (!nos.length) {
+    parcelCounts.value = {};
+    return;
+  }
+  const r = await ipc.orderParcelCounts(nos);
+  // 徽标只是提示，取不到就保持原样（不弹窗打断核对）；但**不诈称 0**，也不清空已有徽标
+  if (!r.success) return;
+  parcelCounts.value = r.data ?? {};
+}
 const drafts = reactive<Record<number, Draft>>({});
 /** 库里已用过的颜色写法（`pendingCounts` 顺带返回）—— 自由输入时的建议 */
 const usedColors = ref<string[]>([]);
@@ -582,7 +795,7 @@ const emptyDesc = computed(() => {
   if (scope.value === 'corrected') {
     return '点过「保存」或「确认无误」的行会出现在这里。发现哪一行定错了款或颜色，把它退回待核对，改好再保存。';
   }
-  return `这 ${counts.corrected} 行都点过「保存」或「确认无误」了 —— 接着去第 3 步算钱，或直接看第 4 步要拿什么。`;
+  return `这 ${counts.corrected} 行都点过「保存」或「确认无误」了 —— 接着去第 3 步拿货；要算这批单赚不赚，去「统计」页。`;
 });
 
 // ───────────────────────────────────────── 款 → 颜色（2026-10-10 新口径）
@@ -642,14 +855,166 @@ function colorTitle(o: OrderRecord): string {
 /**
  * 换了归属款之后跟着换色卡：草稿里的颜色**不在新款色卡里**就清空（让用户重新选）。
  *
- * 这一支**只在用户手点下拉时触发**（`@change`），不在载入时触发 —— 载入的取值口径在
- * `initialColor` 里，两处都做的话"清空"会跟"记住的颜色"打架（先选中再被清掉，症状是
- * "明明记住了却永远要重选"）。在色卡里的就保留：那多半正是图片记住的那个颜色（省一次点击）。
+ * ⚠️ 2026-10-28 起这条规则**搬到了 `StylePicker.pickRow`**（换控件后"换款"只发生在弹层里）：
+ *    那边选款时就按新色卡判一次，且**没选色不许确定** —— 于是"换了款、颜色还挂在旧款的色上"
+ *    这个中间态在界面上根本不存在了。这里刻意**不再**补一份：两处各判一次，
+ *    症状是"明明选了颜色却还是被清掉"（载入口径 `initialColor` 与清空口径打架）。
  */
-function onStylePick(o: OrderRecord): void {
+// ───────────────────────────────────────── 归属款：带图选择（2026-10-28）
+
+/** 正在挑款的那一行；`null` = 弹层关着 */
+const pickerRow = ref<OrderRecord | null>(null);
+/**
+ * 款首图（款编码 → dataUrl）。行内格子上常显 —— 用户要治的是"只能看文字、容易对应错"，
+ * 所以**不选的时候也要看得见图**，不能只在弹层里有。
+ *
+ * ⚠️ 取数只在 `load()` 之后对**本页出现的款**做（去重 + 上限），不跟翻页/逐行保存重复跑。
+ */
+const styleThumbs = ref<Record<string, string>>({});
+
+function styleNameOf(code: string): string {
+  const c = String(code ?? '').trim();
+  if (!c) return '';
+  return styleOptions.value.find((s) => s.code === c)?.name ?? '';
+}
+
+function styleThumbOf(code: string): string {
+  const c = String(code ?? '').trim();
+  return c ? (styleThumbs.value[c] ?? '') : '';
+}
+
+/** 格子的 title：把"这个款有几个颜色 / 还没录颜色"说出来（灰因不能只躺在弹层里） */
+function styleBtnTitle(o: OrderRecord): string {
   const d = draftOf(o);
-  const palette = colorsFor(d.styleCode);
-  if (palette.length && !palette.includes(d.color.trim())) d.color = '';
+  if (!d.styleCode) return '没点名款 —— 按图片指纹自动匹配。点这里从带图的列表里挑一个款';
+  const s = styleOptions.value.find((x) => x.code === d.styleCode);
+  const n = s?.colors.length ?? 0;
+  const cols = n ? `这个款有 ${n} 个颜色` : '这个款还没录颜色';
+  return `归属 ${d.styleCode}${s?.name ? ` · ${s.name}` : ''} —— ${cols}；点这里换款`;
+}
+
+function openPicker(o: OrderRecord): void {
+  pickerRow.value = o;
+  void loadStyleThumbs();
+}
+
+/** 正在挑款的行在**当前页**里的下标（-1 = 不在列表里）；主按钮文案与"下一条"都看它 */
+const pickerRowIdx = computed(() => {
+  const o = pickerRow.value;
+  if (!o) return -1;
+  return rows.value.findIndex((r) => Number(r.id) === Number(o.id));
+});
+
+/**
+ * 下一次 `load()` 结束后要接着打开的那一行（下标）；-1 = 不接。
+ *
+ * ⚠️ 用**下标**而不是 id：保存会把该行置为已核对、它随即离开列表、后面的行整体上移一位，
+ *    "下一条"正好落在同一下标上（与 `applyFocus` 同一条理由）。
+ * ⚠️ 必须在 `saveOne` **之前**赋值：`bump()` 触发的 `load()` 与本次 continue 谁先跑没有保证，
+ *    先赋值 ⇒ 无论谁先，`load()` 结束时都能看见它。
+ */
+let nextAfterSave = -1;
+
+function closePicker(): void {
+  pickerRow.value = null;
+}
+
+/** 弹层里点订单图放大 —— 复用本页既有的原图弹层（`openImage`），不另开一套 */
+function zoomPickedOrder(): void {
+  const o = pickerRow.value;
+  if (o) void openImage(o);
+}
+
+/**
+ * 弹层回填：**款与色一起写**（弹层里已经按新色卡选好了，这里不再二次判色）。
+ *
+ * `save = true`（主按钮「保存 / 保存并下一条」）⇒ 立刻落库并**接着开下一行**，
+ * 用户从此不必"关弹层 → 点保存 → 找到下一行再点开"（那三步正是用户嫌长的部分）。
+ * `save = false`（「只填上」）⇒ 只回填草稿，行内「保存」变亮 —— 可退回的中间态，不是主路径。
+ *
+ * ⚠️ 保存失败时**不推进**：弹层留着，用户能看见原因并重试；推进了就等于"这次改动丢了、
+ *    而且人还走远了"。这就是 `saveOne` 必须返回布尔的原因。
+ */
+async function onStylePicked(p: { styleCode: string; color: string }, save: boolean): Promise<void> {
+  const o = pickerRow.value;
+  if (!o) return;
+  const d = draftOf(o);
+  d.styleCode = p.styleCode;
+  d.color = p.color;
+  if (!save) {
+    pickerRow.value = null;
+    return;
+  }
+  const idx = pickerRowIdx.value;
+  nextAfterSave = idx;
+  const ok = await saveOne(o, { force: true });
+  if (!ok) {
+    nextAfterSave = -1;
+    return;
+  }
+  // 先关掉；`load()` 末尾若还有下一行会重新打开（见 load 里的消费点）
+  pickerRow.value = null;
+}
+
+/**
+ * 「不点名款」= 回到按图片指纹自动匹配。
+ *
+ * ⚠️ **只清款、不清颜色**，与换控件之前一致（原 `@change` 在 `palette` 为空时不碰颜色）：
+ *    没点名款时颜色格回落自由输入，那个值仍会随保存写进订单行 —— 顺手抹掉等于
+ *    "用户点了一下自动匹配，之前填的颜色没了"。
+ */
+function onStyleCleared(): void {
+  const o = pickerRow.value;
+  if (!o) return;
+  const d = draftOf(o);
+  d.styleCode = '';
+  pickerRow.value = null;
+}
+
+/**
+ * 取"本页涉及的款"的首图：`styleImages`（按款编码 + 款色查订单域代表图）→ 缩略图。
+ *
+ * ⚠️ 两条通道必须串起来（前一条只给本地路径）；任何一步失败都**静默** ——
+ *    图是"帮你认"，不是"能不能核对"的前提（退化成空占位，格子照样能点开挑款）。
+ */
+let styleThumbSeq = 0;
+async function loadStyleThumbs(): Promise<void> {
+  // 缓存只增不减会长期攒下几百条 dataUrl（每条几 KB base64）；翻过几十页就换一轮。
+  // 上限给 200：一页最多 30 行、款去重后远小于它 ⇒ 正常使用几乎不会触发。
+  if (Object.keys(styleThumbs.value).length > 200) styleThumbs.value = {};
+  const codes = [
+    ...new Set(
+      rows.value
+        .map((o) => String(draftOf(o).styleCode ?? '').trim())
+        .filter(Boolean)
+    ),
+  ].slice(0, 60);
+  const want = codes.filter((c) => !styleThumbs.value[c]);
+  if (!want.length) return;
+  const seq = ++styleThumbSeq;
+  try {
+    const paths = await styleImages({
+      items: want.map((c) => ({ styleCode: c, color: colorsFor(c)[0] ?? '' })),
+    });
+    const hit: { code: string; path: string }[] = [];
+    want.forEach((c, i) => {
+      const p = paths[i];
+      if (p) hit.push({ code: c, path: p });
+    });
+    if (!hit.length) return;
+    const t = await ipc.orderImageThumbBatch(hit.map((h) => ({ localPath: h.path, maxEdge: 128 })));
+    if (seq !== styleThumbSeq) return;
+    if (!t.success) return;
+    const urls = t.data?.dataUrls ?? [];
+    const next = { ...styleThumbs.value };
+    hit.forEach((h, i) => {
+      const url = urls[i];
+      if (url) next[h.code] = url;
+    });
+    styleThumbs.value = next;
+  } catch {
+    /* 图是装饰：取不到就空占位 */
+  }
 }
 
 /**
@@ -683,7 +1048,7 @@ function canAttachColor(o: OrderRecord): boolean {
  *
  * 为什么拦住才叫对：颜色的载体是款色（`oi_style_colors(款, 色)`），下游（拿货单 / 算钱 / 取图 /
  * 商品ID 映射回流）读的都是**款色**，而不是订单自己的 `color` 列。没有款可挂时保存只会写
- * `oi_orders.color` 并把该行置为已核对，界面上一切正常、`toast` 还说"已保存"，而用户要的那件事
+ * `oi_order_items.color` 并把该行置为已核对，界面上一切正常、`toast` 还说"已保存"，而用户要的那件事
  * 一件都没发生（2026-10-11 用户报的就是这一类"设了颜色却不生效"）。
  * 与 `colorMissing`（有款没色）是一对：**款与色是「款 + 色」的两半，缺哪一半都不该放行**。
  */
@@ -695,18 +1060,14 @@ function colorUnattached(o: OrderRecord): boolean {
 // ───────────────────────────────────────── 「同商品」分组（这一页真正要做多少决定）
 
 /**
- * 分组键 = **店铺原文 + 商品ID**。商品ID 由主进程给（`OrderRecord.itemId`），渲染层不自己推 ——
- * 它与回流写映射时用的是同一个 `extractSkuFields`，推两遍就会出现"徽标说同商品、回流按另一个键记"。
+ * 分组键 = **店铺原文 + 商品ID**。
  *
- * ⚠️ 已知的**欠算**：这里用的是店铺**原文**，而回流用的是归一后的店铺实体。同一家店在报表里
- * 写法不同（多一个空格/全角括号）时，这里会当成两个商品（徽标少算）。刻意不修：要修就得把
- * 店铺归一下沉到渲染层（那是 `sk_name_map` 的事，两处各判一次必分叉）。徽标是**提示**不是承诺，
- * 少算只会让人多核对一次，不会把两件商品混成一件。
+ * ⚠️ 2026-10-28 搬到 `@/lib/classifyBulk`：批量定款弹层的分组与这里的「同商品 ×N」徽标
+ *    **必须是同一个函数**（各写一份的典型症状：徽标说这 3 行同商品，批量弹层却拆成 3 组）。
+ *    那边有单测（`tests/classifyBulk.spec.ts`），改规则请改那一处。
  */
 function productKey(o: OrderRecord): string {
-  const itemId = String(o.itemId ?? '').trim();
-  if (!itemId) return '';
-  return `${String(o.shop ?? '').trim()}\u0000${itemId}`;
+  return productKeyOf(o);
 }
 
 /** 本页每个商品占了几行（只收有商品ID 的行） */
@@ -724,6 +1085,187 @@ const productRows = computed(() => {
 function sameCount(o: OrderRecord): number {
   const k = productKey(o);
   return k ? (productRows.value.get(k) ?? 1) : 0;
+}
+
+// ───────────────────────────────────────── 批量选择（2026-10-28）
+
+/**
+ * 勾选的行 id。
+ *
+ * ⚠️ 存**新 Set**而不是原地改：`reactive(new Set())` 在模板里读 `size` 也能追踪，但
+ *    "读 size"与"读 has"走的是两条不同的追踪路径，混用时报不更新最难查（列表没反应、
+ *    动作条不出现）。整体替换是笨办法，但行为只有一种。
+ */
+const selectedIds = ref<Set<number>>(new Set());
+
+const selectedRows = computed(() => rows.value.filter((o) => selectedIds.value.has(Number(o.id))));
+/**
+ * 可以勾选的行 = 本页所有行（**刻意不排除脏行**）。
+ *
+ * 排除脏行看起来更"安全"，但代价是：勾选框灰着、没有任何解释，用户只看到"这一行勾不上"。
+ * 而脏行恰恰是"刚改了款/色、正要保存"的行 —— 它们更需要能被批量动作看见。
+ * 真正的守卫放在动作里：批量「确认无误」只处理不脏的行，并把跳过的行数说出来。
+ */
+const selectableRows = computed(() => rows.value);
+const allSelected = computed(
+  () => rows.value.length > 0 && rows.value.every((o) => selectedIds.value.has(Number(o.id)))
+);
+const someSelected = computed(() => rows.value.some((o) => selectedIds.value.has(Number(o.id))));
+/** 勾中但有未保存改动的行数 —— 它们**不会**被批量确认（改动不能被静默丢掉） */
+const dirtySelected = computed(() => selectedRows.value.filter((o) => isDirty(o)).length);
+/** 批量「确认无误」真正会处理的行（= 勾中 − 脏行）；按钮上的数字取它 */
+const bulkConfirmable = computed(() => selectedRows.value.filter((o) => !isDirty(o)));
+
+function isSelected(o: OrderRecord): boolean {
+  return selectedIds.value.has(Number(o.id));
+}
+
+function toggleSelect(o: OrderRecord): void {
+  const next = new Set(selectedIds.value);
+  const id = Number(o.id);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+
+function toggleSelectAll(): void {
+  if (allSelected.value) {
+    selectedIds.value = new Set();
+    return;
+  }
+  selectedIds.value = new Set(rows.value.map((o) => Number(o.id)));
+}
+
+function clearSelection(): void {
+  selectedIds.value = new Set();
+}
+
+/**
+ * 点「同商品 ×N」= 勾选本页这个商品的所有行。
+ *
+ * 这是批量定款最自然的起点：用户看见"同商品 ×6"，下一个念头就是"那 6 行一起定了吧"。
+ * 原先徽标只是个说明，用户得自己一行行勾 —— 那正是"路径太长"的一部分。
+ *
+ * ⚠️ 只勾**本页**（这一页 30 行）而不是库里该商品的全部行：看不见的行不能被勾上，
+ *    否则"我明明只勾了 6 行，怎么报了 9 行"。跨页的靠"同一行点名款 → 商品ID 回流"自动归类。
+ */
+function selectSameProduct(o: OrderRecord): void {
+  const k = productKey(o);
+  if (!k) return;
+  const next = new Set(selectedIds.value);
+  let n = 0;
+  for (const r of rows.value) {
+    if (productKey(r) !== k) continue;
+    next.add(Number(r.id));
+    n += 1;
+  }
+  selectedIds.value = next;
+  toast(`已勾上这个商品在本页的 ${n} 行 —— 接着点「批量定款」一次给它们定款`, 'info');
+}
+
+/**
+ * 批量「确认无误」：**一次 IPC、一次重载**（逐行调会重载 N 次，那正是逐行操作慢的来源）。
+ *
+ * ⚠️ 只发**不脏**的行（`bulkConfirmable`）—— 「确认无误」不写任何字段，所以脏行一旦被它
+ *    带走，刚填的款/色就静默丢了（真库 2026-10-11 的 23 行 `corrected=1` 而 `color` 全空就是
+ *    这么来的）。脏行留在勾选里并说明，让用户自己决定是保存还是放弃。
+ * ⚠️ 回执里的数字取自**库返回的 updated**，不是"我以为提交了几行"。
+ */
+async function bulkConfirm(): Promise<void> {
+  const ids = bulkConfirmable.value.map((o) => Number(o.id));
+  const skipped = selectedRows.value.length - ids.length;
+  if (!ids.length) {
+    toast('勾中的行都有未保存的改动 —— 先逐行点「保存」，再批量确认', 'info');
+    return;
+  }
+  busy.value = true;
+  try {
+    const n = await markCorrected(ids);
+    const tail = skipped > 0 ? `；另外 ${skipped} 行有未保存的改动，没有一起确认` : '';
+    toast(`已确认 ${n} 行${tail}`, skipped > 0 ? 'info' : 'success');
+    // 确认掉的行已经离开列表 ⇒ 勾选里只剩"没被处理的"，保留它们（用户正要接着处理）
+    selectedIds.value = new Set(selectedRows.value.filter((o) => isDirty(o)).map((o) => Number(o.id)));
+    bump();
+  } catch (e: unknown) {
+    toast(e instanceof Error ? e.message : '批量确认失败', 'error');
+  } finally {
+    busy.value = false;
+  }
+}
+
+// ───────────────────────────────────────── 批量定款（2026-10-28）
+
+/** 打开批量定款弹层时**快照**下来的分组（弹层期间列表可能被别处 bump，不能边选边变） */
+const bulkGroups = ref<BulkGroupView[] | null>(null);
+
+function openBulkPicker(): void {
+  const chosen = selectedRows.value;
+  if (!chosen.length) return;
+  bulkGroups.value = groupByProduct(chosen, (o) => draftOf(o).styleCode).map((g) => ({
+    ...g,
+    images: g.rows.map((o) => thumbs.value[String(o.localPath ?? '')] ?? '').filter(Boolean),
+  }));
+  void loadStyleThumbs();
+}
+
+function closeBulkPicker(): void {
+  bulkGroups.value = null;
+}
+
+/**
+ * 把「组 → 款」落到每一行。
+ *
+ * 三件事必须一起看：
+ *   ① 颜色**按行**定（`pickColorFor`）：同款不同单可以不同色，批量定款不能连带把颜色一锅端；
+ *   ② 颜色定不出来的行**不保存**（不猜），留在列表并**重新勾上** —— 那是"接下来还要做"的那几行，
+ *      取消勾选等于把它们混回 30 行里再也找不到；
+ *   ③ 全程只 `bump()` **一次**（`saveOne` 带 `defer`）：逐行 bump 会让 30 行变成 30 次整页重载，
+ *      而批量操作的全部意义就是把这个数降到 1。
+ *
+ * ⚠️ 落库是**串行逐行**的（没有事务边界）⇒ 部分失败是**可能**的，回执必须把三类数字分开报：
+ *    已存 / 缺色 / 失败。谎称"全部成功"比失败本身更糟。
+ */
+async function applyBulkStyles(picks: { key: string; styleCode: string }[]): Promise<void> {
+  const groups = bulkGroups.value ?? [];
+  const codeOf = new Map(picks.map((p) => [p.key, p.styleCode]));
+  busy.value = true;
+  let done = 0;
+  const needColorRows: OrderRecord[] = [];
+  const failed: string[] = [];
+  try {
+    for (const g of groups) {
+      const code = codeOf.get(g.key);
+      if (!code) continue;
+      const palette = colorsFor(code);
+      for (const o of g.rows) {
+        const color = pickColorFor(o, palette);
+        if (!color) {
+          needColorRows.push(o);
+          continue;
+        }
+        const d = draftOf(o);
+        d.styleCode = code;
+        d.color = color;
+        const ok = await saveOne(o, { force: true, silent: true, defer: true });
+        if (ok) done += 1;
+        else failed.push(o.orderNo);
+      }
+    }
+  } finally {
+    busy.value = false;
+  }
+  bulkGroups.value = null;
+  // 缺色的行留在勾选里：它们就是"下一步要处理的那几行"
+  selectedIds.value = new Set(needColorRows.map((o) => Number(o.id)));
+
+  const parts = [`已定款并保存 ${done} 行`];
+  if (needColorRows.length) {
+    parts.push(`${needColorRows.length} 行要先选颜色（这个款的颜色不止一个，没有替你猜）—— 已留在列表并勾好`);
+  }
+  if (failed.length) parts.push(`${failed.length} 行保存失败`);
+  const tone = failed.length ? 'error' : needColorRows.length ? 'info' : 'success';
+  toast(parts.join('；'), tone);
+  bump();
 }
 
 // ───────────────────────────────────────── 键盘流（回车＝保存并往下走）
@@ -843,6 +1385,8 @@ async function load(): Promise<void> {
       return;
     }
     styleOptions.value = st;
+    // 「拆包 ×N」徽标：本页各行所属订单的包数（失败只影响徽标，不影响核对本身）
+    void refreshParcelCounts();
     counts.pending = cnt.pending;
     counts.corrected = cnt.corrected;
     counts.unclassified = cnt.unclassified;
@@ -852,6 +1396,28 @@ async function load(): Promise<void> {
     for (const o of rows.value) draftOf(o);
     // 缩略图跟着**本页**走（失败不影响核对本身）
     await loadThumbs();
+    // 款首图（行内「归属款」格子常显）—— 它只影响"看得见"，失败静默，不等它
+    void loadStyleThumbs();
+    // 勾选里那些已经不在本页的行（刚被保存/确认走了，或翻了页）要把 id 清掉 ——
+    // 留着一个看不见的 id 会让"已选 3 行"与屏幕上能看见的 2 行对不上，而动作条上的数字
+    // 是用户决定"要不要点那一下"的唯一依据。
+    const liveIds = new Set(rows.value.map((o) => Number(o.id)));
+    const keep = [...selectedIds.value].filter((id) => liveIds.has(id));
+    if (keep.length !== selectedIds.value.size) selectedIds.value = new Set(keep);
+    // 「保存并下一条」的落地：**必须在取数之后**——这一行已离开列表，后面的行整体上移一位，
+    // 所以"下一条"就落在它原来的下标上（与 `applyFocus` 同一条理由）。
+    if (nextAfterSave >= 0) {
+      const i = nextAfterSave;
+      nextAfterSave = -1;
+      const nxt = rows.value[i] ?? rows.value[i - 1] ?? null;
+      pickerRow.value = nxt;
+      if (nxt) void loadStyleThumbs();
+    } else if (pickerRow.value) {
+      // 弹层开着的时候别处 bump 了：把行换成列表里的新对象 —— 否则弹层显示的是上一批快照
+      // （单号/颜色/图都可能已经变了），而用户以为自己在看当前这一行。
+      const curId = Number(pickerRow.value.id);
+      pickerRow.value = rows.value.find((r) => Number(r.id) === curId) ?? null;
+    }
     // 键盘流：保存后（或按回车往下走）把焦点送回目标行 —— 必须在**取数之后**做，
     // 否则元素还是上一批的老 DOM（保存会把那一行移走、后面的行整体上移）
     await applyFocus();
@@ -946,33 +1512,60 @@ function backfillNote(bf?: SkuBackfillOutcome): string {
       // ⚠️ 入口名必须写**屏幕上真有的名字**。
       //    原先写的是「「货与成本」的映射清单」—— 全仓没有任何一处叫「映射清单」：
       //    「货与成本」只是模块名，页内那一段叫「已建立映射」（工作台右栏的分段控件），
-      //    它在页签「建档与关联」下（名字的唯一来源是 `src/modules/goods/tabs.ts`）。
+      //    它在页签「款与商品」下（名字的唯一来源是 `src/modules/goods/tabs.ts`）。
       //    用户照字面去找，找不到。写成「货与成本 › 商品ID 映射」这种自造路径同样不行 ——
       //    `tests/uxEntryNames.spec.ts` 会把"去/在/到「X」"里的 X 拿去对真实入口名。
       return `；这个商品已配过映射（${bf.conflictCode || '其他款'}），没敢覆盖 ——`
-        + `要改绑请到「货与成本」的「建档与关联」页签、右栏「已建立映射」里改`;
+        + `要改绑请到「基础数据 › 产品管理」的「款与商品」页签、右栏「已建立映射」里改`;
     case 'shopUnresolved':
       // ⚠️ 2026-10-08 R1 起「店铺登记」已**收进内建**（市场岛的「店铺账号管家」在默认包里没有，
       //    原文让用户去那个岛 = 指着一个装都没装的地方，这是那次走查抓到的 D1 死锁）。
-      return '；这家店还没归一，暂时记不住这个商品（请先到「货与成本」的「店铺登记」页签，把这家店认下来）';
+      return '；这家店还没归一，暂时记不住这个商品（请先到「基础数据」的「店名归一」把这家店认下来）';
     default:
       return '';
   }
 }
 
-async function saveOne(o: OrderRecord): Promise<void> {
+/**
+ * 色名对照记下时的一句话。
+ *
+ * 为什么必须说：用户以为自己只是改了**这一行**的颜色，实际给了系统一条**通用规则**
+ * （这一款的 `Khaki` 以后都算「卡其」）。不说的话，下次别的订单自动变成「卡其」
+ * 会让人以为串了数据 —— 而这种"静默生效的规则"正是最难查的一类问题。
+ */
+function colorAliasNote(ca?: ColorAliasRemembered | null): string {
+  if (!ca?.from || !ca?.to) return '';
+  return `；已记住「${ca.from}」＝「${ca.to}」，这款以后自动用这个名字`;
+}
+
+/**
+ * 保存一行。返回**是否真的写进去了**（批量与"保存并下一条"都要据此决定下一步，
+ * 原来返回 `void`，调用方无从判断成败，只能乐观地继续 —— 那正是"弹层关了、行还在"的来源）。
+ *
+ * 参数：
+ *   · `force`  —— 即使这一行看起来"没改动"也落库。判断依据是"用户点了保存"这件事本身：
+ *                 弹层里重新选了同一个款/色，`isDirty` 是 false，但用户的意图是"这行我核过了"。
+ *                 （行内那个「保存」按钮仍然是"改动才亮"，两处口径不同**是有意的**：
+ *                 行内按钮是"有没有东西要写"，弹层是"我要把这一行定下来"。）
+ *   · `silent` —— 不逐行弹 toast（批量时 30 行会刷屏）；结果由调用方汇总成一句。
+ *   · `defer`  —— 不 `bump()`（批量时由调用方在最后统一重载**一次**）。
+ */
+async function saveOne(
+  o: OrderRecord,
+  opts: { force?: boolean; silent?: boolean; defer?: boolean } = {}
+): Promise<boolean> {
   const d = draftOf(o);
-  if (!isDirty(o)) return;
+  if (!opts.force && !isDirty(o)) return true;
   // 点名了款却没给颜色 ⇒ 拦住（宿主落库时颜色是款色的主键之一，空颜色会落出一个没有名字的款色）
   if (colorMissing(o)) {
     toast('先给这个款选一个颜色：颜色是「款 + 色」的一半，不选会落出一个没有名字的款色', 'info');
-    return;
+    return false;
   }
   // 给了颜色却没有款可挂 ⇒ 同样拦住。放它过去的话，宿主只会写订单自己的 color 列并把该行置为
   // 已核对，提示还说"已保存" —— 而拿货单 / 算钱 / 取图读的全是**款色**，用户要的事一件没发生。
   if (colorUnattached(o)) {
     toast('这个颜色落不到任何地方：先在上面的「归属款」里点名一个款，颜色才有地方挂', 'info');
-    return;
+    return false;
   }
   busy.value = true;
   try {
@@ -985,13 +1578,18 @@ async function saveOne(o: OrderRecord): Promise<void> {
       targetStyle: d.styleCode,
       fieldsChanged: fieldsChanged(o),
     });
-    const base = r.styleCode ? `已保存，归属 ${r.styleCode}` : '已保存（未归到款）';
-    // 回流"没生效"时用 info 色调：归属是成功的，别让红/绿把两件事混成一件
-    const tone = r.skuBackfill?.status === 'conflict' || r.skuBackfill?.status === 'shopUnresolved' ? 'info' : 'success';
-    toast(base + backfillNote(r.skuBackfill), tone);
-    bump();
+    if (!opts.silent) {
+      const base = r.styleCode ? `已保存，归属 ${r.styleCode}` : '已保存（未归到款）';
+      // 回流"没生效"时用 info 色调：归属是成功的，别让红/绿把两件事混成一件
+      const tone =
+        r.skuBackfill?.status === 'conflict' || r.skuBackfill?.status === 'shopUnresolved' ? 'info' : 'success';
+      toast(base + backfillNote(r.skuBackfill) + colorAliasNote(r.colorAlias), tone);
+    }
+    if (!opts.defer) bump();
+    return true;
   } catch (e: unknown) {
-    toast(e instanceof Error ? e.message : '保存失败', 'error');
+    if (!opts.silent) toast(e instanceof Error ? e.message : '保存失败', 'error');
+    return false;
   } finally {
     busy.value = false;
   }
@@ -1023,6 +1621,21 @@ async function confirmOne(o: OrderRecord): Promise<void> {
   }
 }
 
+/**
+ * 「确认这批全部无误」= 把**当前筛选下的所有待核对行**标记为已核对。
+ *
+ * ⚠️⚠️ 2026-10-28 修了一个**会误伤历史数据**的实现：原先走 `markCorrected({ all: true })`，
+ *    宿主是 `UPDATE ... WHERE corrected = 0` —— **全库**、不带导入日、不带搜索词，
+ *    而这一页只显示"今天这批"。于是：
+ *      · 页面上 5 行、库里 300 行未核对 ⇒ 那 295 行（别的日子、甚至别的批次）一起被确认；
+ *      · 还顺带把它们的克重/进价快照钉死（`snapshotOrderWeights/Costs`），事后无从判断
+ *        当时是什么价。搜索状态下点它更危险：看得见的是 3 行，动的是全库。
+ *    ⇒ 改成：先按**本页同一套筛**（导入日 + 搜索词）取全部 id，再点名标记。
+ *      没有新 IPC（`orderList` + `orderMarkCorrected(ids)` 都是现成的），语义与页面表述一致了。
+ *
+ * ⚠️ 取数上限 2000（`orderList` 的天花板）：一天的行数量级远低于它，真撞上了要**说出来**
+ *    （"超过 2000 行的部分没处理"），不能默默只做前 2000 行 —— 那是一次静默的部分成功。
+ */
 async function confirmAll(): Promise<void> {
   // 同一条守卫的批量版：本页**任何一行**有没保存的改动，都不许"全部确认"（那些改动会被丢掉，
   // 而且是一起丢，用户再也说不清哪几行是填过的）。
@@ -1033,8 +1646,26 @@ async function confirmAll(): Promise<void> {
   }
   busy.value = true;
   try {
-    const n = await markCorrected({ all: true });
-    toast(`已把 ${n} 条订单标记为已核对`, 'success');
+    const all = await listPending({
+      offset: 0,
+      limit: 2000,
+      search: applied.value,
+      importDate: localDayKey(),
+    });
+    const ids = all.rows.map((o) => Number(o.id)).filter((n) => n > 0);
+    if (!ids.length) {
+      toast('当前筛选下没有待核对的行', 'info');
+      return;
+    }
+    const n = await markCorrected(ids);
+    const truncated = all.total > ids.length;
+    toast(
+      truncated
+        ? `已确认 ${n} 行；还有 ${all.total - ids.length} 行超出单次上限没有处理 —— 先用搜索缩小范围再确认`
+        : `已确认 ${n} 行（${applied.value ? '当前搜索结果里的全部' : '今天这批里的全部'}）`,
+      truncated ? 'info' : 'success'
+    );
+    selectedIds.value = new Set();
     page.value = 0;
     bump();
   } catch (e: unknown) {
@@ -1079,8 +1710,32 @@ async function reopenOne(o: OrderRecord): Promise<void> {
 // ⚠️ 重新加回来时必须同步 `scripts/today-ui-smoke.mjs` 的 `classify` 段 —— 那里现在有一条
 //    **反向断言**「工具条不再有识别按钮」，加了按钮它会红，那是设计如此（逼你确认是"要加回来"）。
 
-onMounted(() => void load());
-// 保活的代价要还回去：容器 `token` 变了（导入 / 别处改了订单）就重取本页
+/**
+ * 进页时**先自愈、再取数**：把「映射已确认、订单却没吃到」的行按映射补上。
+ *
+ * 为什么不给按钮：这是把**已被确认的事实**重新套一遍（确定性推导），唯一不确定的只是
+ * "有没有漏"，而那正是这一步算出来的。让人点一下，只是把"系统该自愈"变成"人记得点"。
+ * 详见 `docs/notes/2026-10-20-replay-mappings-on-load.md` 与 MEMORY 的「人工介入最少」原则。
+ *
+ * 只在**挂载 / 外部数据变更（`token`）**时跑；翻页、搜索不跑 —— 那些不改变"有没有漏网"，
+ * 而重放要扫一遍能补的行（订单量级大时不是零成本）。
+ *
+ * ⚠️ 这里**不调 `bump()`**：`bump` 会改 `token`，而 `token` 的 watch 又调本函数 ——
+ *    第一轮补到东西就会自我触发。汇总数由本页 `load()` 里的 `pendingCounts` 重取，
+ *    容器那一层的统计下次进模块会自己重算，不值得为它引入递归。
+ */
+async function bootstrap(): Promise<void> {
+  const r = await ipc.orderReplayMappings();
+  healed.value = r.success ? Number(r.data?.fixedRows ?? 0) || 0 : 0;
+  await load();
+}
+
+onMounted(() => void bootstrap());
+// 保活的代价要还回去：容器 `token` 变了（导入 / 别处改了订单）就重取本页。
+// ⚠️ 这里**只 load、不再自愈**：`token` 在本页保存一行、翻一页都会变（本页自己也在 `bump()`），
+//    跟着它重放 = 每动一下就把全表扫一遍（冒烟实测过：一次进页被触发 21 次）。
+//    而"刚导进来的订单"落库那一刻已经走过 `autoAssignByMap`，恰恰不需要重放；
+//    重放治的是**历史漏网**，进页一次就够。
 watch(
   () => token.value,
   () => void load()
@@ -1115,6 +1770,13 @@ watch(
 .cl-scope {
   margin-left: -2px;
 }
+/* 自愈回执：放在范围控件左边，用成功色 —— 它说的是"刚刚发生了什么"，
+   不是常驻说明；补 0 行时整块不渲染（`v-if`），所以不会长期占位。 */
+.cl-healed {
+  font-size: 12px;
+  color: var(--wb-success, #15803d);
+  white-space: nowrap;
+}
 /* 已核对范围里款/色两格的**只读文本**。刻意与可编辑那两支长得不同：
    输入框/下拉有边框、只读文本没有 —— 一眼能看出"这里现在动不了"。
    ⚠️ 别用 `cursor` 或灰色来区分：那两样都只是"看着不太一样"，而"能不能点"是个结构事实。 */
@@ -1123,6 +1785,63 @@ watch(
 }
 .cl-table {
   width: 100%;
+}
+/* ── 勾选列（2026-10-28 批量）─────────────────────────────────────────────
+   30px 够点、又不抢图列的位置。⚠️ 它成了表首列 ⇒ `.wb-table-wrap` 那条
+   `th:first-child / td:first-child { position: sticky }` 现在钉的是它（勾选框跟着横向滚不动，
+   图列会滚走）。这是可接受的取舍：只在很窄的窗口才横滚，而横滚时"勾选"比"图"更需要固定在眼前
+   （图有 `cl-zoom-*` 可以点开看原图）。 */
+.cl-sel-col {
+  width: 30px;
+  min-width: 30px;
+  padding-left: 8px;
+  padding-right: 2px;
+  text-align: center;
+}
+.cl-sel {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+/* 勾中的行整行提亮：动作条上的"N 行"必须能在表里数出来（数字与看得见的行要一致）。
+   ⚠️ 只靠浅底不够：`--wb-primary-soft` 是 #eff1f4，与行底色 #fff 差得很小（截图实测
+   在两个主题下都数不出来）⇒ 再给勾选列一道左侧竖条。判据是"能不能一眼数清"，不是"有没有底色"。 */
+.cl-table tbody tr.is-selected td {
+  background: var(--wb-primary-soft);
+}
+.cl-table tbody tr.is-selected td.cl-sel-col {
+  box-shadow: inset 3px 0 0 var(--wb-primary);
+}
+/* ── 吸底批量动作条 ─────────────────────────────────────────────────────
+   `sticky` 而不是 `fixed`：它属于这个面板（换页签要跟着走），且宽度由面板决定 ——
+   fixed 会横跨整窗、盖到侧栏上。外层面板若自身滚动，它照样贴在可视区底部。 */
+.cl-bulk {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--wb-primary);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-surface);
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
+}
+.cl-bulk__count {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cl-bulk__hint {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cl-bulk__spacer {
+  flex: 1;
 }
 .cl-cell {
   width: 100%;
@@ -1205,15 +1924,83 @@ watch(
   object-fit: contain;
 }
 /* 「同商品」徽标紧跟在单号后面：它是**这一行的属性**，不是独立一列
-   （独立成列会让"没有商品ID"的行留一个大空格，看着像缺数据） */
+   （独立成列会让"没有商品ID"的行留一个大空格，看着像缺数据）。
+   ⚠️ 2026-10-28 起它是**按钮**（点一下 = 勾选本页这个商品的所有行）⇒ 必须清掉 button 的
+   默认边框/字体/底色，否则与 `.wb-tag` 的样式叠成"两个控件压在一起"。 */
 .cl-same {
   margin-left: 6px;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
 }
 .cl-color-col {
   min-width: 110px;
 }
 .cl-style-col {
-  min-width: 200px;
+  /* 200 → 232：格子里多了一枚 36px 的款首图（2026-10-28 换掉原生下拉）。
+     宽度不够时名字会被截断成"看不清是哪款"，而名字正是图之外的第二判据。 */
+  min-width: 232px;
+}
+
+/* ── 归属款格子（2026-10-28）：带款首图的按钮，取代原生下拉 ──────────────────
+   视觉上要像"一个可点的框"而不是链接：它有边框、有内边距，与同行的颜色下拉同一高度，
+   扫一眼就知道"这一格是个控件"。`is-auto`（没点名款）时文字走灰，与"已定款"区分开。 */
+.cl-style-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  /* 高度两档必须一致：有款（36px 图 + 上下 padding = 44）与没点名款（只有一行文字）。
+     不写死的话，未归类那行的框会比有图的**矮一截** —— 同一列两种高度，看着像没做完。 */
+  min-height: 44px;
+  padding: 3px 6px 3px 3px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.cl-style-btn:hover {
+  border-color: var(--wb-primary);
+}
+.cl-style-btn__img {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: var(--wb-radius-sm);
+  object-fit: contain;
+  background: var(--wb-surface-2);
+}
+.cl-style-btn__img--empty {
+  display: block;
+  border: 1px dashed var(--wb-border);
+}
+.cl-style-btn__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.25;
+}
+.cl-style-btn__name {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cl-style-btn__auto {
+  color: var(--wb-text-muted, var(--wb-muted, #888));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 右侧「选」：常显（不是悬停才出现）—— 触屏 / 不会悬停的人也要知道这一格能点 */
+.cl-style-btn__go {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--wb-text-muted, var(--wb-muted, #888));
 }
 /* 「点了款但还没选颜色」的行内原因：它挡的是「保存」按钮，不说清就是一次"按不下去" */
 .cl-warn {

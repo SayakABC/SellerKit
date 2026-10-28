@@ -117,6 +117,9 @@ const reset = () => {
  * 但要看一眼 v3 重建时的 SELECT 列清单是否仍与下面这份 DDL 对得上。
  */
 function seedLegacyOrderShape() {
+  // 拆表后 `oi_order_items` 外键引用 `oi_orders`：造 D1 之前老形状必须先删明细，
+  // 否则 v3 迁移 RENAME `oi_orders` 时外键被自动改指 legacy 表、DROP 后变成悬空引用。
+  dbRun(`DROP TABLE IF EXISTS oi_order_items`);
   dbRun(`DROP TABLE IF EXISTS oi_orders`);
   dbRun(`DROP TABLE IF EXISTS oi_styles`);
   dbRun(`CREATE TABLE oi_orders (
@@ -205,7 +208,6 @@ const shopRow = (over = {}) => ({
   platform: 'amazon',
   name: '店A',
   site: '',
-  shopSetId: 0,
   status: 'active',
   openedAt: '',
   note: '',

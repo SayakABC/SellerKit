@@ -57,7 +57,6 @@ const shop = sdb.upsertShop({
   name: '店A',
   platformShopId: '',
   site: '',
-  shopSetId: 0,
   status: 'active',
   openedAt: '',
   note: '',
@@ -71,7 +70,7 @@ function daysAgo(n) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-// 订单图片（`oi_orders.image_id` 有外键）
+// 订单图片（`oi_order_items.image_id` 有外键）
 dbRun(
   `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (1, 'sha1', 'fp1', 'u1', '/tmp/order-1.jpg')`,
@@ -109,12 +108,15 @@ function order(over = {}) {
     ...(over.rec ?? {}),
   });
 }
-/** 直接把一行的机械字段改成"已发货"（insertOrder 不写 ship_time/status，故用 SQL 置位） */
+/** 直接把一行的机械字段改成"已发货"（insertOrder 不写 ship_time/status，故用 SQL 置位）
+ *  拆表后：`ship_time` 在主表、`status` 在明细。 */
 function markShipped(orderNo) {
-  dbRun(`UPDATE oi_orders SET ship_time = ?, status = 'shipped' WHERE order_no = ?`, [
-    `${daysAgo(1)} 12:00:00`,
-    orderNo,
-  ]);
+  const st = `${daysAgo(1)} 12:00:00`;
+  dbRun(`UPDATE oi_orders SET ship_time = ? WHERE order_no = ?`, [st, orderNo]);
+  dbRun(
+    `UPDATE oi_order_items SET status = 'shipped' WHERE order_id = (SELECT id FROM oi_orders WHERE order_no = ?)`,
+    [orderNo],
+  );
 }
 
 console.log('\n[1] 未发货筛选：只认机械事实');
@@ -245,7 +247,7 @@ check('meta.rows = 返回行数，且不超过上限（界面按它说清"这批
 
 check('脏 raw_fields（不是合法 JSON）不毁整批：该行仍回，rawFields 为空对象（件数按 1 件并标缺）', () => {
   const id = order({ orderNo: 'J-DIRTY' });
-  dbRun(`UPDATE oi_orders SET raw_fields = 'not-json' WHERE id = ?`, [id]);
+  dbRun(`UPDATE oi_order_items SET raw_fields = 'not-json' WHERE id = ?`, [id]);
   const r = pick.pickingRows({});
   const hit = r.rows.find((x) => x.orderNo === 'J-DIRTY');
   assert.ok(hit, '脏行也必须回得来（不能让一条脏数据毁掉整批）');

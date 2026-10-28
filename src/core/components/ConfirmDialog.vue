@@ -6,6 +6,16 @@
         <slot />
       </div>
       <div class="wb-dialog__foot">
+        <button
+          v-if="extraText"
+          class="wb-btn wb-dialog__extra"
+          type="button"
+          data-act="confirm-extra"
+          :disabled="busy"
+          @click="$emit('extra')"
+        >
+          {{ extraText }}
+        </button>
         <button class="wb-btn" type="button" data-act="confirm-cancel" :disabled="busy" @click="$emit('close')">
           取消
         </button>
@@ -43,11 +53,19 @@ withDefaults(
     busy?: boolean;
     /** 不可逆操作用危险色（红）——普通确认仍是主色，避免"到处都红" */
     danger?: boolean;
+    /**
+     * 第三个出口（次要、**非破坏**方向），排在「取消」左边。
+     *
+     * 2026-10-25 加：SKU 删除确认里，用户经常是"误点把整列取消了"而不是真的要删 ——
+     * 只给"取消 / 删除"，他只能整轮重来。给一条"把这几格加回来"才救得回来。
+     * 默认不传 ⇒ 其它调用方的两按钮外观不变。
+     */
+    extraText?: string;
   }>(),
-  { confirmText: '确认', busyText: '处理中…', busy: false, danger: true }
+  { confirmText: '确认', busyText: '处理中…', busy: false, danger: true, extraText: '' }
 );
 
-defineEmits<{ close: []; confirm: [] }>();
+defineEmits<{ close: []; confirm: []; extra: [] }>();
 </script>
 
 <style scoped>
@@ -58,5 +76,9 @@ defineEmits<{ close: []; confirm: [] }>();
 }
 .wb-dialog__body :deep(p:last-child) {
   margin-bottom: 0;
+}
+/* 第三个出口靠左：它和「删除」不是同一类决定，别让人在相邻位置误点 */
+.wb-dialog__extra {
+  margin-right: auto;
 }
 </style>

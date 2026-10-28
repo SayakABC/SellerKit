@@ -14,7 +14,7 @@ P1-4 / P1-5 / P2-1 / P2-2 / P2-3）全部落地，外加报告建议的 **P1-1 �
 
 | 条目 | 判据（一句话） | 位置 |
 | --- | --- | --- |
-| **P1-1 简洁模式** | 一个布尔值只留一个控件；默认开；只作用于工作台形态 | `src/modules/goods/simple.ts`（新）· `GoodsView.vue:91`（`data-act="simple-toggle"`，`:aria-pressed`）· `ProductPane.vue:133/167/203` · `PoolPane.vue`（`PoolMetrics` 条件渲染） |
+| **P1-1 简洁模式** | 一个布尔值只留一个控件；默认开；只作用于工作台形态 | `src/modules/goods/simple.ts`（新；⚠️ 2026-10-25 已随简洁模式撤除）· `GoodsView.vue:91`（`data-act="simple-toggle"`，`:aria-pressed`）· `ProductPane.vue:133/167/203` · `PoolPane.vue`（`PoolMetrics` 条件渲染） |
 | **P0-5 空态说清先做哪个** | `queueEmpty === true`（**不是** `!queueEmpty`）才翻顺序 | `ProductPane.vue:381-435`（`data-act="empty-go-today"`）· `GoodsWorkbenchView.vue:142` |
 | **P1-2 行展开可被发现** | 常显提示，**不**默认展开第一行 | `ProductPane.vue:447`（`data-act="expand-hint"`） |
 | **P1-4 失效有汇总入口** | 入口随计数出现、按下即筛、**0 时不渲染** | `PoolPane.vue:365/376`（`mapped-invalid-only` / `mapped-invalid-on`）· `PoolPane.vue:735` |
@@ -33,7 +33,7 @@ P1-4 / P1-5 / P2-1 / P2-2 / P2-3）全部落地，外加报告建议的 **P1-1 �
 3. **不隐藏右栏队列每行的勾选框**。那是**认款**（勾商品 → 落到款上）的唯一选择方式，
    藏掉等于"简洁模式不能认款"。那是把主功能藏了，不叫简洁。
 
-> 三条写进了 `simple.ts` 的文件头注释 —— 下一个想"顺手更简洁一点"的人先看到这些话。
+> 三条写进了 `simple.ts` 的文件头注释（该文件 2026-10-25 已删） —— 下一个想"顺手更简洁一点"的人先看到这些话。
 
 ---
 

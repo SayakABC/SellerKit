@@ -11,15 +11,16 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 
 | 文档 | 主旨 | 读者 | 状态 | 最后更新 |
 |---|---|---|---|---|
-| [`../AGENTS.md`](../AGENTS.md) | **架构基线 + 编码红线**（三层边界 / 模块化 / 插件体系 / 命名 / 异常 / 红线 1–23）**+ §0 跨工具协作契约** | 开发者、AI 助手 | ✅ 活跃（唯一规则源） | 2026-09-30 |
+| [`../AGENTS.md`](../AGENTS.md) | **架构基线 + 编码红线**（三层边界 / 模块化 / 插件体系 / 命名 / 异常 / 红线 1–23）**+ §0 跨工具协作契约** | 开发者、AI 助手 | ✅ 活跃（唯一规则源） | 2026-10-22 |
 | [`notes/README.md`](notes/README.md) | **跨工具结论笔记**：多 AI 工具交替开工时"以后要记住什么"的结论层（命名 / 必须登记索引 / 与工具私有记忆的关系，规则见 `AGENTS.md` §0） | 开发者、AI 助手 | ✅ 活跃 | 2026-09-30 |
-| [`baseline/PROJECT_BASELINE.md`](baseline/PROJECT_BASELINE.md) | **项目基线快照**：结构、规模、模块/插件注册表、IPC 契约、持久化、依赖、质量门禁现状 | 开发者、新人 | ✅ 活跃（随版本刷新） | 2026-09-30 |
+| [`baseline/PROJECT_BASELINE.md`](baseline/PROJECT_BASELINE.md) | **项目基线快照**：结构、规模、模块/插件注册表、IPC 契约、持久化、依赖、质量门禁现状 | 开发者、新人 | ✅ 活跃（随版本刷新） | 2026-10-22 |
 | [`baseline/REFACTOR_PLAN.md`](baseline/REFACTOR_PLAN.md) | Phase 0–3 单体 → 模块化重构计划 | 架构/开发者 | 🗄️ 已完成归档 | 2026-08-21 |
 | [`architecture/PLUGIN_ARCHITECTURE.md`](architecture/PLUGIN_ARCHITECTURE.md) | 插件化方向性架构：Phase 1–5、Worker 沙箱、权限门、UI 岛方案 | 架构/开发者 | ✅ 活跃（方向性，规则以 AGENTS.md 为准） | 2026-09-08 |
 | [`architecture/PLUGIN_DEVELOPMENT.md`](architecture/PLUGIN_DEVELOPMENT.md) | 外置插件与 UI 岛开发、调试、发布操作手册 | 插件作者 | ✅ 活跃 | 2026-09-15 |
 | [`architecture/UI_ISLAND_INTAKE_CHECKLIST.md`](architecture/UI_ISLAND_INTAKE_CHECKLIST.md) | **UI 岛接入 / 改动 / 排障逐步清单**：§1 步骤 · §2 检查项 · 故障速查表 · 一键冒烟 | 插件作者 | ✅ 活跃（新增或改岛前先过一遍） | 2026-09-24 |
 | [`decisions/ADR-001-island-settings-stay-in-island.md`](decisions/ADR-001-island-settings-stay-in-island.md) | **ADR-001**：`excel-copy` / `order-insight` 的设置**保留在岛内视图**（不收编进宿主设置中心）—— 含判据与重新评估条件 | 架构/开发者 | ✅ 已裁定（改这两个插件的设置入口前必读） | 2026-09-25 |
-| [`decisions/ADR-002-master-data-layer.md`](decisions/ADR-002-master-data-layer.md) | **ADR-002**：建立「主数据层」—— 基础数据独立维护、**以 ID 关联**（C1–C4 单一写入方 / 共享只读域 / G2 历史文本不改写 / D4b 变动即替换） | 架构/开发者 | ✅ 已裁定（S1 店铺实体已落地） | 2026-09-27 |
+| [`decisions/ADR-002-master-data-layer.md`](decisions/ADR-002-master-data-layer.md) | **ADR-002**：建立「主数据层」—— 基础数据独立维护、**以 ID 关联**（C1–C4 单一写入方 / 共享只读域 / G2 历史文本不改写 / D4b 变动即替换） | 架构/开发者 | ✅ 已裁定（S1 店铺实体已落地）；⚠️ 物理分表结论部分被 ADR-003 取代 | 2026-10-22 |
+| [`decisions/ADR-003-shop-account-physical-merge.md`](decisions/ADR-003-shop-account-physical-merge.md) | **ADR-003**：店铺与账号**物理合并**为一张 `sk_shops`（含加密凭据），`sk_shop_sets` 删除；保留 ADR-002 C1–C4，**凭据边界下沉到 API 层**（共享域不返回密文、明文只走 owner reveal） | 架构/开发者 | ✅ 已裁定并落地（2026-10-22，`shop.main` v1 已在真库执行） | 2026-10-22 |
 | [`features/MAIL_INBOX.md`](features/MAIL_INBOX.md) | 集中收件箱 M1–M3 设计与落地（IMAP / FTS / 附件缓存）+ 正文渲染通道 `sk-mail://`（内联图与远程图） | 开发者 | ✅ 活跃 | 2026-10-04 |
 | [`features/PROFIT_TRACKER.md`](features/PROFIT_TRACKER.md) | 速卖通利润追踪三端方案与落地路线（**跨端协议唯一权威来源**） | 架构/开发者 | ✅ 活跃（含 2026-09-16 漂移提示） | 2026-09-15 |
 | [`features/PRODUCT_LIBRARY.md`](features/PRODUCT_LIBRARY.md) | **跨境产品库**：产品（款式）主数据 + SKU/克重 + 店铺商品清单 + 商品ID↔产品映射。⚠️ **2026-10-01 起 UI 收归内建「货与成本」**（原 UI 岛已下架，§6.2 的域表已成历史，见 §0-A）；§1–§3、§5.1、§5.2 仍描述现状 | 架构/开发者 | 🟢 数据层 P0–P4 已落地（P5 未开工）；UI = 内建页 | 2026-10-01 |
@@ -40,17 +41,41 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | [`plans/PICKING_PLAN.md`](plans/PICKING_PLAN.md) | **拣货线计划**：按 SKU（款×色×码）汇总订单需求 → 拣货单。含现状（**不依赖 `pl_variants`**）、P1–P5 阶段表与件数/范围口径的**实测证据** | 架构/开发者 | ✅ P1–P5 已落地（P5 的岛发版待攒批） | 2026-09-30 |
 | [`plans/DAILY_SHIPPING_FLOW_PLAN.md`](plans/DAILY_SHIPPING_FLOW_PLAN.md) | **每日发货全流程改造方案**：日导出→归类→拣货→拿货→发货→结算→对账 六步的差距审查（成熟度 90/60/35/30/85/85%）+ 三个点名问题（商品ID↔厂家产品**项目已预留未启用** / 颜色**要有权威源不是看图更准** / 进价**能算缺出口**）+ S0–S6 阶段表 + 4 项待拍板。**一句话结论：数据能补齐，缺口在三处缝合与两处新增，不新建主数据表** | 架构/开发者 | 🟢 待拍板 4 项 | 2026-10-05 |
 | [`plans/PRODUCT_SKU_LINKING_PLAN.md`](plans/PRODUCT_SKU_LINKING_PLAN.md) | **产品-商品关联与 SKU 克重管理方案审查**：对一份"单屏左右分栏"提案逐条裁定（✅ 已有 6 / 🔸 形态不同 9 / 🕳️ 值得补 2 / ⛔ 冲突 3 / 🚫 不采纳 5）+ 三条硬约束 + 加法路线 P0–P3（认款看图 / 对比模式 / 产品侧已关联反查）+ 3 项待拍板。**一句话结论：数据模型与核心原则现状已落地，界面形态（左右分栏重构）不建议照抄** | 架构/开发者 | ✅ 已拍板（冻结为裁定记录；执行方案见 `plans/GOODS_WORKBENCH_PLAN.md`） | 2026-10-08 |
+| [`plans/GOODS_TAB_REDESIGN_2026-10-25.md`](plans/GOODS_TAB_REDESIGN_2026-10-25.md) | **「款与商品」页重设计方案（P2 / P3 施工用）**：把「建档与关联」的杂乱拆成可施工的步骤 —— 诊断 6 条（认款 4 个近义入口 / 右栏把"来源"当并列页签 / 左展开区与右映射表同屏重复 / 款·产品·商品三词混用 等，均带 `data-act` 取证）+ 目标判据（认款入口 4→1、右栏分段 3→2、行详情 4 件事→0）+ 信息架构与两源合并的视图模型（不改主进程）+ 认款单动线 + 施工 S1–S5 与每步的冒烟改动清单 + 回退与变异复核。**一句话结论：改名与层级已落地，真正的减法必须连冒烟断言一起改，不能靠折叠面板"过断言"** | 架构/开发者/产品 | 🟡 P0/P1 已完成，P2 待开工 | 2026-10-25 |
 | [`plans/GOODS_UX_REFACTOR_PLAN.md`](plans/GOODS_UX_REFACTOR_PLAN.md) | **「货与成本」新手可用性交互重构方案（真机走查版）**：CDP 实测推翻"只差包装"——4 个硬 bug（已关联数缓存不刷新 / 「显示更多」假动作 / 窄形态空态被裁不可点 / 默认 1200×800 下「对比」不可达）+ 死锁实测成立 + R0 修 bug → R1 解死锁 → R2 包装 → R3 首次动线，守卫升级为**可达性断言**；新增待拍板 UX-G6/G7 | 架构/开发者/产品 | 🟢 待拍板 2 项（UX-G6/G7） | 2026-10-08 |
 | [`plans/GOODS_WORKBENCH_PLAN.md`](plans/GOODS_WORKBENCH_PLAN.md) | **「货与成本」工作台重构方案**：把「产品」+「映射与关联」两页签合并为**左产品 / 右商品池**分栏工作台。含三项已拍板决策 · 三条硬约束的保住方式（编码锚点 / 队列非缓存 / 不做硬删）+ 第 4 条取图口径 · 数据层最小改动（**只加 `productId` 反向过滤，零新通道**）· 列裁剪对照（10→6 列 + 行展开 / 9→7 列）· S0–S5 阶段 · **守卫选择器迁移表 + 7 条变异清单** · `GOODS_LAYOUT` 回退开关与窗口宽度下限。**一句话结论：可以重构，但那是重写两个成熟表格页 —— 代价用"列裁剪 + 行展开"补，硬约束一条不放开** | 架构/开发者/产品 | 🟢 已拍板，待开工 | 2026-10-08 |
-| [`plans/AE_SHOP_ITEM_SYNC_PLAN.md`](plans/AE_SHOP_ITEM_SYNC_PLAN.md) | **速卖通店铺商品采集**方案：扩展采「店里有什么」→ 右栏「店铺商品」段 → 认款/建款向导（新增面 = 1 端点 + 1 快照表 `pl_shop_items` + `sk_shops` 1 列 + 1 向导，**零新写口径**）；§8 SKU 色图闭环（采集色图 → 认款时采纳为款色绑定图 → 订单同图走既有去重自动归色） | 架构/开发者 | 🟢 已审定（修订清单见审查稿） | 2026-10-12 |
+| [`reviews/AE_SHOP_ITEM_SYNC_PLAN_IMPL_REVIEW_2026-10-13.md`](reviews/AE_SHOP_ITEM_SYNC_PLAN_IMPL_REVIEW_2026-10-13.md) | **店铺商品采集 P0–P5 实现复核**：逐期核对 + **两个可复现脚本实跑**（非静态推断）+ 断言反查夹具。**1 个 P0**（色图采纳把 `pl_images` 的 id 当 `oi_images` 用 ⇒ 真的把**无关订单图**绑进款色，污染订单归款，回执还报 `bound:true`）+ **2 个 P1**（岛版 `shopUpsert` 漏透传 `shop_url` ⇒ 编辑一次静默清空地址；保底通道点名店铺却落未登记桶）+ 6 条 P2 + 文档陈旧。**一句话结论：功能面八成五、门禁全绿，但那 5 条"色图采纳"用例是恒绿守卫——夹具插的是 `oi_images`，生产传的是 `pl_images`** | 架构/开发者 | ✅ 活跃（未修，待拍板修法） | 2026-10-13 |
+| [`plans/AE_SHOP_ITEM_SYNC_PLAN.md`](plans/AE_SHOP_ITEM_SYNC_PLAN.md) | **速卖通店铺商品采集**方案：扩展采「店里有什么」→ 右栏**「待关联采集商品」**段（2026-10-16 由「店铺商品」改名且恒只列未认款，见该文 §4.2 现状回改）→ 认款/建款向导（新增面 = 1 端点 + 1 快照表 `pl_shop_items` + `sk_shops` 1 列 + 1 向导，**零新写口径**）；§8 SKU 色图闭环（采集色图 → 认款时采纳为款色绑定图 → 订单同图走既有去重自动归色） | 架构/开发者 | 🟢 已审定（修订清单见审查稿） | 2026-10-12 |
+| [`plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md`](plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md) | **订单归款归色与克重取数简化方案**：两个目标的最小键都是「商品ID」，现状绑在「款色码」上多绕两跳 ⇒ P0 修 `variantUpsert` 全量提交清 `code/weight`（多店铺合并静默毁数据，有触发路径）+ P1 克重加第二级键 `(商品ID,尺码)`（未认款也能算运费）+ P2 单色商品自动定色 + P3 变体级对照（可选）+ P4 订单 size 归一；含 DDL、读写口、迁移回滚、5 条变异清单、5 项待拍板。**一句话结论：运费不该等认款，但产品成本仍然要** | 架构/开发者 | 🟡 待拍板（P0 建议先做） | 2026-10-19 |
+| [`reviews/ORDER_PICKING_SIMPLIFY_2026-10-20.md`](reviews/ORDER_PICKING_SIMPLIFY_2026-10-20.md) | **「订单 → 拿货」链路简化审查**：四个需求（导入 / 分析款色码 / 按款色码统计拿货 / 拿全·拿了多少·花了多少）逐条对照现状，定位 **3 套需求口径 · 10 处手拼文本键 · 3 套金额口径 · 2 条取图链 · 9 个归色重算触发点**；F1–F16 逐条带 `文件:行` 与真库取证（需求按行数、已拿按件数会漏货；INNER JOIN 让 9/51 行对缺口不可见；色名当身份 ⇒ 改名即失联）。目标模型只加 4 列 + 3 条 SQL，分 P0/P1/P2 三期，含"明确不做"清单与 D1–D4 待拍板。**一句话结论：不是功能复杂，是分析结论没有落点 —— 款色只能从图片间接派生，于是每个消费者各走一遍、各拼一套键** | 架构/开发者/产品 | 🟢 待拍板（P0 建议先做） | 2026-10-20 |
+| [`reviews/LEDGER_REVIEW_2026-10-27.md`](reviews/LEDGER_REVIEW_2026-10-27.md) | **记账模块审查**（功能完整性 / 逻辑漏洞 / 交互 / 可理解性）：四项硬骨头（分摊单点实现 + 守恒断言、结算金额结构上不可手填、结算行部分唯一索引、已结算字段前后端同一判据）全部正确，**未发现算错钱的实现缺陷**；2 个阻断入口（「全部日期」下记一笔不可用、台账读取失败反显"对账通过"）+ 5 处错账缺口（导入全选勾进重复行、公共条目无库内查重、批量操作静默截断 500 条、全已结算时自动预选"撤销结算"、单店下拉不显示当前店）+ 主流程第四步「发现记错人后改挂」动线断点。含体检④恒零空转、`其中公共` 收支混加等 4 处口径问题与三批修复顺序 | 架构/开发者/产品 | ✅ 已修（24 项四批全部落地，验收记录见 [`plans/LEDGER_FIX_PLAN_2026-10-27.md`](plans/LEDGER_FIX_PLAN_2026-10-27.md) §10.1） | 2026-10-27 |
 | [`plans/UX_POLISH_PLAN.md`](plans/UX_POLISH_PLAN.md) | **体验优化计划**：对 `reviews/UX_REVIEW_2026-09-30.md` 的逐条复核 + 实施计划（P0 宿主外壳零发版 7 项 / P1 结构含 2 次岛发版攒批 / P2 打磨），含 2 条改法（移回默认包 / 完整向导）与 4 项待拍板 | 架构/开发者 | 🟢 待拍板 4 项 | 2026-09-30 |
 | [`plans/RESTRUCTURE_PLAN.md`](plans/RESTRUCTURE_PLAN.md) | **平台重构方案**：形态判据（岛 = 可选加工 / 宿主 = 主干）· 目标 IA（今天 / 订单 / 货与成本 / 运费 / 算钱 / 设置）· **9 处「多套」收敛清单** · 10 项历史坑删除**待拍板** · S1–S6 迁移顺序 + 四条防复发守卫 | 架构/开发者 | 🟢 待拍板 10 项（含 1 项大手术） | 2026-09-30 |
 | [`plans/PAID_LICENSE_PLAN.md`](plans/PAID_LICENSE_PLAN.md) | **付费授权方案**：Pro 档功能 + 月/年双档订阅 + 零自建（托管授权 API）；三条工程事实（岛是明文静态站点 / 判定必须落主进程 / 客户端永远可 patch）· **三个执法闸门**（安装门 / 激活门 / 调用门，零新协议）· 到期降级语义 · P0–P3 改动清单与门禁 | 架构/开发者 | 🟢 方案已定稿，未开工（待拍板 5 项） | 2026-09-30 |
+| [`plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md) | **订单-采购模型简化执行计划**：把「进价/克重/运费」从实时反查（`ae_cost_map`/`pl_shop_sku`/`sr_rate_snapshots`）改成落库快照，利润只依赖订单域三表。分阶段 A 快照前置（`pl_products`+进价、`pl_variants`+image_id、订单表+总克重/总物流费、关联表+克重/实际进价、`purchase-cost-sync`/`manual-costs` 改落点、利润引擎改读快照）/ B 拆表+包裹（`parcels`+`parcel_lines` 支持一单多包拆数量）/ C 退役表。方案前提见 `notes/2026-10-21-order-purchase-model-simplify.md`。**A / B1 / B2 / C1 / C2 全部落地（含 `ae_cost_map` 删除，`order.main` v10），计划已收口** | 架构/开发者 | ✅ 已完成 | 2026-10-21 |
+| [`plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`](plans/SHOP_ACCOUNT_REDESIGN_PLAN.md) | **店铺账号表与界面重构方案（物理合并版）**：店铺 + 账号合成一张 `sk_shops`（`name` / `email` 任一非空即可，分别表示「只有账号」「只有店铺」），删除 `sk_shop_sets`；紫鸟/ERP 独立成 `sk_tool_accounts`（一条登录一份密码），手机号与支付宝归企业、国际支付宝密码留店；邮件外键改指 `sk_shops`。含真库取证（10 账号无店、3 店无账号、12 账号共用 1 个 ERP）、一次性重建两张表的迁移与预检、旧 id 1–9 保留、合并列表/编辑器/一次保存 + 企业/手机/支付宝联动筛选、删除保护与明确不做清单 | 架构/开发者/产品 | ✅ **已落地（2026-10-22，P0–P3）**，判据核对见其 §7.1 | 2026-10-22 |
+| [`plans/LEDGER_PLAN.md`](plans/LEDGER_PLAN.md) | **记账（店铺收支 + 公共费用分摊 + 资金相关人往来结算）设计方案 v1.3**：口径先定（记账=已发生业务收支，**与「统计」的订单毛利不可相加**）· `bk_*` 十表（`period` 用 SQLite 生成列、结算行用**部分唯一索引** `WHERE active=1` 才允许撤销后重结）· 店铺轴分摊三基准 + 最大余数法尾差 · **相关人轴往来六数（应收/应付/净往来/已结/未结清/分方向未结清）** · 结算三件套（幂等 / 台账恒等式 / **按方向上限**拦截）· **变更相关人拆三路（改挂 / 改挂+留旧账 / 撤销后改挂）** · **相关人必填** · P0–P4 分期与 19 条 FR。**一句话结论：难点不在记账表单，在于把第四套金额口径隔离干净、让分摊是可重算的派生数据，并让"改人"分成纠错与转移两件事** | 架构/开发者/产品 | 🟢 **P0 数据层 + P1 界面已落地**（明细页 / 记一笔含公共分摊 / 相关人与科目管理）；P2 剩余：营收占比基准 / 分摊方案存取 / 分摊明细展开 / 店铺删除保护；往来与结算待下一轮 | 2026-10-25 |
+| [`plans/LEDGER_FIX_PLAN_2026-10-27.md`](plans/LEDGER_FIX_PLAN_2026-10-27.md) | **记账模块修改计划**：把审查的 2 阻断 / 5 错账缺口 / 4 处口径 / 15 项交互拆成 **A 界面止血（12 项、零迁移）→ B 拦截与口径（7 项、改 handlers/db）→ C 体检与治理（4 项、含迁移 v3）→ D 文档订正**；每项给 `文件:行` 改法、可执行验收、**变异点（改坏哪一行必须红）**、风险与回滚，另含 6 项待拍板与「明确不做」清单。**一句话结论：先把「点过全部就记不了账」「读取失败反显对账通过」清掉再谈口径；B 批必须早于 C 批（B5 与 C1 落在同一段汇总 SQL）** | 架构/开发者 | ✅ 已完工（A/B/C/D 四批全部落地，含迁移 v3；见 §10.1 实施记录） | 2026-10-27 |
 | [`archive/manual.md`](archive/manual.md) | 早期简版用户手册 | 历史追溯 | 🗄️ 已归档（被 `guides/USER_GUIDE.md` 取代） | 2026-06-03 |
 
 状态图例：✅ 活跃 · 🟡 活跃但有已知缺口 · ⚠️ 已过期 · 🗄️ 已归档（仅历史对照）
 
-> `docs/**` 现存 **97 个 `.md`**（含本文件）；判据是 `find docs -name '*.md'`，不是记忆。
+> `docs/**` 现存 **186 个 `.md`**（含本文件）；判据是 `find docs -name '*.md' | wc -l`，不是记忆。
+> （2026-10-27 第 22 次订正：**178 → 186**。本轮新增 `reviews/LEDGER_REVIEW_2026-10-27.md` 与
+> `plans/LEDGER_FIX_PLAN_2026-10-27.md`；另有 6 篇（10-26 起入库）此前未计入。**当场改。**）
+> （2026-10-25 第 21 次订正：**175 → 178**。本轮新增 `notes/2026-10-25-ledger-p1-ui.md`；
+> 另有 2 篇同期（10-25）笔记此前未计入 —— 并行改动仍在产笔记，**计数以当场实测为准**。**当场改。**）
+> （2026-10-25 第 20 次订正：**172 → 175**。本轮新增 `notes/2026-10-25-ledger-p0-formula-fixes.md`；
+> 另有 2 篇同期笔记此前未计入。**当场改。**）
+> （2026-10-25 第 19 次订正：**152 → 172**。本轮新增 `plans/LEDGER_PLAN.md`；同时实测发现
+> 上一次计数已落后 19 篇（10-22 之后入库的笔记/方案均未计入）。**当场改。**）
+> （2026-10-22 第 18 次订正：**150 → 152**。本轮加 `decisions/ADR-003-shop-account-physical-merge.md` 与 `notes/2026-10-22-shop-account-physical-merge.md`。**当场改**。）
+> （2026-10-22 第 17 次订正：**145 → 150**。本轮实测 149（第 16 次记 145 后又有 4 篇入库未计入），加 `plans/SHOP_ACCOUNT_REDESIGN_PLAN.md` 后 150。**当场改**。）
+> （2026-10-21 第 16 次订正：**144 → 145**。本轮新增 `notes/2026-10-21-parcel-model-b2.md`（阶段 B2 包裹）。
+> **当场改**。上一轮（同日第 15 次）131 → 144。）
+> （2026-10-21 第 15 次订正：**131 → 144**。上一轮（10-19）之后停更，本轮实测 144（含本轮新增 `notes/2026-10-21-order-purchase-model-simplify.md` 与 `plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` 两篇 + 期间新增的笔记）。**当场改**。）
+> （2026-10-19 第 14 次订正：**100 → 131**。上一轮（10-13）之后停更，本轮实测 130、加 `plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md` 后 131。**当场改**。）
+> （2026-10-13 第 13 次订正：**97 → 100**。上一轮（10-12）之后又停更：实测 99（含本轮两篇 `notes/2026-10-13-*`），加本复核稿后 100。**当场改**。）
 > （2026-10-12 第 12 次订正：**70 → 97**。上一轮（10-09）之后计数又停更，本轮实测 96、加本审查稿后 97 —— 中间新增的笔记/方案均未计入。漂移量本身就是提醒：**计数必须当场改**。）
 > （2026-10-08 第 10 次订正：**68 → 69**，本轮加 `notes/2026-10-08-goods-ux-refactor-closing-batch.md`。**当场改**。）
 > （2026-10-08 第 9 次订正：**67 → 68**，本轮加 `notes/2026-10-08-goods-ux-refactor-r0-r3.md`。**当场改**。）
@@ -78,7 +103,7 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | **要清理内置插件 / 外置化** | `plans/PLUGIN_TRIAGE_PLAN.md` → `AGENTS.md` §1.8/§1.9 + 红线 23 → `baseline/PROJECT_BASELINE.md` §4 |
 | **要梳理业务数据 / 把各功能串起来** | `plans/DOMAIN_INTEGRATION_PLAN.md`（§1 盘点 → §2 断裂诊断 → §3 方案 → §4 阶段）→ `decisions/ADR-002-master-data-layer.md` → `features/PRODUCT_LIBRARY.md` |
 | **要数据分层 / 定写入权（主数据）** | `decisions/ADR-002-master-data-layer.md`（谁是 owner、哪些能共享、哪些只能读）→ `plans/DOMAIN_INTEGRATION_PLAN.md` §3 |
-| **要改物流运费（运价换版 / 计价口径）** | `plans/SHIPPING_RATE_ISLAND_PLAN.md` → `ui-plugins/shipping-rate/README.md`（换版流程 + 自检陷阱表）→ `tests/shipRate.spec.ts`（改口径必同步的断言） |
+| **要改物流运费（运价换版 / 计价口径）** | `notes/2026-10-15-shipping-rate-intake.md`（2026-10-15 回收为内建「基础数据 › 物流运费」：当前实现的入口与口径说明）→ `src/core/services/shipRateOps.ts`（**六 op 的唯一实现**：解析委托 `importSheet`、计价走 `@/lib/shipRateQuote`）→ `tests/shipRate.spec.ts`（改口径必同步的断言）→ `scripts/shipping-rate-ui-smoke.mjs`（接线断言）。⚠️ 原计划的 `ui-plugins/shipping-rate/README.md` 随该岛 2026-10-15 下架，历史换版流程留档在 `plans/SHIPPING_RATE_ISLAND_PLAN.md` |
 | **要评估体验 / 改界面与文案** | `reviews/UX_REVIEW_2026-09-30-R2.md`（**最新**：§0 结论 + §2 问题清单 + §3 上一轮复核）→ `reviews/UX_REVIEW_2026-09-30.md`（第一轮，看历史）→ `plans/UX_POLISH_PLAN.md`（逐条复核 + 执行顺序 + 待拍板）→ `plans/DOMAIN_INTEGRATION_PLAN.md`（数据侧同一批断点） |
 | **要做付费授权 / 加付费墙** | `plans/PAID_LICENSE_PLAN.md`（§1 三条工程事实 → §4 定案设计 → §5 改动清单）→ `notes/2026-09-30-paid-license-enforcement.md` → `AGENTS.md`（§1.1 三层边界 / §1.8 域与权限门）→ `architecture/PLUGIN_ARCHITECTURE.md` §9 |
 | **终端用户** | **应用内**：「货与成本」页头的「?」；空库时页面自己给的引导卡（`guides/USER_GUIDE.md` 已下线，只在需要追溯历史时看） |
@@ -130,7 +155,8 @@ docs/
 │   └── UI_ISLAND_INTAKE_CHECKLIST.md  # UI 岛接入/改动/排障清单
 ├── decisions/                     # 架构决策记录（ADR）
 │   ├── ADR-001-...md              # 岛设置留岛内
-│   └── ADR-002-master-data-layer.md
+│   ├── ADR-002-master-data-layer.md
+│   └── ADR-003-shop-account-physical-merge.md
 ├── features/                      # 业务方案
 │   ├── MAIL_INBOX.md
 │   ├── PRODUCT_LIBRARY.md

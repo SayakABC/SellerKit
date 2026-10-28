@@ -1,8 +1,8 @@
 // electron/mail-db.ts
 // 「集中邮件收件箱」主进程数据访问层，基于 electron/db.ts 公共层。
 //
-// 业务模型：一个店铺套（sk_shop_sets，业务主键=邮箱）可接入一个邮箱账号（sk_mail_accounts），
-//   账号下的邮件按 (account_id, folder, uid) 唯一定位；正文分表懒存，附件只存元信息。
+// 业务模型：一家店铺（sk_shops，2026-10-22 物理合并后店铺与账号同一行）可接入一个邮箱账号
+//   （sk_mail_accounts.shop_id），账号下的邮件按 (account_id, folder, uid) 唯一定位；正文分表懒存，附件只存元信息。
 //
 // 设计要点（吸收 Mailspring / Thunderbird 的做法）：
 //   - 窄列 + 分表：**不**把整封邮件塞进单个 JSON 列（Mailspring 已公开反思该设计导致行过宽、扫描变慢）；
@@ -16,7 +16,7 @@
 //     better-sqlite3 未编译 FTS5 时自动降级为 LIKE（见 isMailFtsAvailable）；
 //   - 附件本地缓存：sk_mail_attachment_cache 只存**落盘路径**（二进制不入库，见 mail-cache.ts）。
 //
-// 依赖：better-sqlite3（同步 API）；关联表 sk_shop_sets（外键级联删除）。
+// 依赖：better-sqlite3（同步 API）；关联表 sk_shops（外键级联删除）。
 
 export {};
 
@@ -43,7 +43,8 @@ export const MAIL_ACCOUNT_STATUSES: MailAccountStatus[] = ['idle', 'syncing', 'e
 /** 账号行（DB 列名 → 本文件统一转驼峰输出） */
 export interface MailAccountRow {
   id: number;
-  shopSetId: number;
+  /** 所属店铺行（`sk_shops.id`；物理合并后店铺与账号同一行） */
+  shopId: number;
   email: string;
   providerId: string;
   imapHost: string;
@@ -67,7 +68,8 @@ export interface MailAccountRow {
 
 export interface MailAccountUpsertInput {
   id?: number;
-  shopSetId: number;
+  /** 所属店铺行（`sk_shops.id`） */
+  shopId: number;
   email: string;
   providerId?: string;
   imapHost?: string;
@@ -171,7 +173,7 @@ export interface MailMessageUpsertRow {
 const MAIL_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sk_mail_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shop_set_id INTEGER NOT NULL UNIQUE REFERENCES sk_shop_sets(id) ON DELETE CASCADE,
+    shop_id INTEGER NOT NULL UNIQUE REFERENCES sk_shops(id) ON DELETE CASCADE,
     email TEXT NOT NULL DEFAULT '',
     provider_id TEXT NOT NULL DEFAULT '',
     imap_host TEXT NOT NULL DEFAULT '',
@@ -179,6 +181,7 @@ const MAIL_SCHEMA: string[] = [
     imap_secure INTEGER NOT NULL DEFAULT 1,
     proxy TEXT NOT NULL DEFAULT '',
     folder TEXT NOT NULL DEFAULT 'INBOX',
+    folders TEXT NOT NULL DEFAULT '',
     sync_enabled INTEGER NOT NULL DEFAULT 1,
     sync_days INTEGER NOT NULL DEFAULT 30,
     max_body_bytes INTEGER NOT NULL DEFAULT 204800,
@@ -545,7 +548,7 @@ function setMailMeta(key: string, value: string): void {
 function toAccountRow(r: Record<string, any>): MailAccountRow {
   return {
     id: Number(r.id),
-    shopSetId: Number(r.shop_set_id),
+    shopId: Number(r.shop_id),
     email: String(r.email || ''),
     providerId: String(r.provider_id || ''),
     imapHost: String(r.imap_host || ''),
@@ -595,19 +598,22 @@ function toMessageRow(r: Record<string, any>): MailMessageRow {
 
 const ACCOUNT_SELECT = `SELECT * FROM sk_mail_accounts`;
 
-/** 新增或更新账号（shop_set_id 唯一，重复接入同一店铺套即覆盖配置） */
+/** 新增或更新账号（shop_id 唯一，重复接入同一店铺即覆盖配置） */
 export function upsertMailAccount(input: MailAccountUpsertInput): number {
   ensureMailSchema();
   const now = new Date().toISOString();
-  const shopSetId = Number(input.shopSetId);
-  if (!Number.isFinite(shopSetId) || shopSetId <= 0) throw new Error('店铺套不存在或已被删除');
+  const shopId = Number(input.shopId);
+  if (!Number.isFinite(shopId) || shopId <= 0) throw new Error('店铺不存在或已被删除');
+  // 外键在，但错误信息要说人话：指向不存在的店铺时先自己拦一道
+  const owner = stmt(`SELECT id FROM sk_shops WHERE id = ?`).get(shopId) as { id: number } | undefined;
+  if (!owner) throw new Error('店铺不存在或已被删除');
 
-  const existing = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_set_id = ?`).get(shopSetId) as
+  const existing = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_id = ?`).get(shopId) as
     | Record<string, any>
     | undefined;
 
   const values = {
-    shopSetId,
+    shopId,
     email: String(input.email || existing?.email || '').trim().slice(0, 200),
     providerId: String(input.providerId ?? existing?.provider_id ?? '').slice(0, 40),
     imapHost: String(input.imapHost ?? existing?.imap_host ?? '').trim().slice(0, 200),
@@ -633,7 +639,7 @@ export function upsertMailAccount(input: MailAccountUpsertInput): number {
          imap_secure = @imapSecure, proxy = @proxy, folder = @folder, folders = @folders,
          sync_enabled = @syncEnabled,
          sync_days = @syncDays, max_body_bytes = @maxBodyBytes, updated_at = @now
-       WHERE shop_set_id = @shopSetId`,
+       WHERE shop_id = @shopId`,
     ).run(values);
     const accountId = Number(existing.id);
     replaceMailFolders(accountId, JSON.parse(String(values.folders || '[]')) as string[]);
@@ -642,11 +648,11 @@ export function upsertMailAccount(input: MailAccountUpsertInput): number {
 
   const info = stmt(
     `INSERT INTO sk_mail_accounts
-       (shop_set_id, email, provider_id, imap_host, imap_port, imap_secure, proxy, folder, folders,
+       (shop_id, email, provider_id, imap_host, imap_port, imap_secure, proxy, folder, folders,
         sync_enabled, sync_days, max_body_bytes, status, last_error, last_synced_at,
         uid_validity, last_uid, created_at, updated_at)
      VALUES
-       (@shopSetId, @email, @providerId, @imapHost, @imapPort, @imapSecure, @proxy, @folder, @folders,
+       (@shopId, @email, @providerId, @imapHost, @imapPort, @imapSecure, @proxy, @folder, @folders,
         @syncEnabled, @syncDays, @maxBodyBytes, 'idle', '', '', 0, 0, @now, @now)`,
   ).run(values);
   const accountId = Number(info.lastInsertRowid);
@@ -685,10 +691,10 @@ export function getMailAccount(id: number): MailAccountRow | undefined {
   return row ? toAccountRow(row) : undefined;
 }
 
-/** 按店铺套 id 取账号 */
-export function getMailAccountByShopSet(shopSetId: number): MailAccountRow | undefined {
+/** 按店铺 id 取账号（物理合并后店铺与账号同一行） */
+export function getMailAccountByShop(shopId: number): MailAccountRow | undefined {
   ensureMailSchema();
-  const row = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_set_id = ?`).get(Number(shopSetId) || 0) as
+  const row = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_id = ?`).get(Number(shopId) || 0) as
     | Record<string, any>
     | undefined;
   return row ? toAccountRow(row) : undefined;

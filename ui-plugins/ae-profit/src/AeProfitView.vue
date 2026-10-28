@@ -6,6 +6,10 @@
 // （趋势/明细/成本表/汇率维护都在那里，读同一份主干数据）。这里不再重复一次 ——
 // 「同一件事只有一个入口」是这套信息架构的铁律，重复入口会让两个页面的数字看起来像两套。
 // 本岛独特的价值只剩这条链：浏览器扩展 / curl 把订单推到这个接收端，数据进 `oi_orders` 主干。
+// ⚠️ 2026-10-17：那个页面改名叫「统计」（`order-cost` 的 `name`），且成本表与汇率维护已搬到
+//   「基础数据」⇒ 下方 tip-card 的文案跟着改。**本次没发版**：用户手上已装的旧岛仍写「算钱」，
+//   要让这行文案到用户手里得走发布四步（打包 → market-out commit → publish → 安装），见
+//   `docs/notes/2026-09-30-island-publish-runbook.md`。
 
 import { computed, onMounted, ref } from 'vue';
 import { aeDbEnsure, aeReceiverStatus } from '@/core/services/ipc';
@@ -110,7 +114,7 @@ onMounted(() => {
       <p class="tip-title">数据和利润看哪里</p>
       <p class="tip-body">
         推来的订单会落进订单主干（与 Excel 导入的订单同一张表，只是「来源」不同），
-        直接在侧栏 <b>「算钱」</b> 页看利润、明细、趋势，以及成本表与汇率维护；
+        直接在侧栏 <b>「统计」</b> 页看利润、明细、趋势（成本表与汇率维护已搬到 <b>「基础数据」</b>）；
         <b>「拣货」</b> 页看待发货要拣什么。这里只负责把数据收进来。
       </p>
     </div>

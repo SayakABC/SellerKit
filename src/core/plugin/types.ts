@@ -107,6 +107,16 @@ export interface ViewContribSpec {
   order?: number;
   /** true 时不出现在侧栏与 ⌘K 切换列表（仍可被跨模块跳转激活），对应 ModuleMeta.navHidden */
   navHidden?: boolean;
+  /**
+   * 该模块有二级菜单（侧栏里点进来后展开若干缩进项），对应 `ModuleMeta.subNav`。
+   *
+   * ⚠️ 这个字段与 `navHidden` 一样是"从 meta 搬到 spec 再搬回 meta"的**过路字段**：
+   * `managerDiscover` 建 manifest 时抄一遍、`metasFromContributions` 往回映射时再抄一遍。
+   * 少抄任何一处，模块自己写的 `subNav: true` 就在到达 `AppShell` 之前**静默消失** ——
+   * 表现为"二级菜单怎么都不出现"，而 TypeScript 一句话都不报（两处都是白名单字面量）。
+   * 2026-10-17 建这个字段时就踩了一次。
+   */
+  subNav?: boolean;
   /** host=Vue 组件直渲（Level 0 内建）；webview/declared 留给 Phase 3+ 外置插件 */
   container: 'host' | 'webview' | 'declared';
 }

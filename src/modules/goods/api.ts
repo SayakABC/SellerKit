@@ -14,7 +14,6 @@
 import * as ipc from '@/core/services/ipc';
 import { unwrapAsync } from './unwrapApi';
 import type {
-  AeCostMapItem,
   ImageDataUrl,
   ItemImagePoolEntry,
   ProductBatchUpdateInput,
@@ -22,6 +21,9 @@ import type {
   ProductStatus,
   ProductSummary,
   ProductUpsertInput,
+  ShopItemRow,
+  ShopItemSummaryRow,
+  ShopItemImageFetchResult,
   ShopProductItem,
   ShopProductRelation,
   ShopSkuRow,
@@ -63,6 +65,8 @@ export const list = (payload?: {
   withoutSupplier?: boolean;
   /** 只看至少有一个 SKU 缺克重的款 */
   onlyMissingWeight?: boolean;
+  /** 只看还没维护进价的款（当前价 0 视为未维护）—— 承接原「基础数据 › 进价」页的缺价待办 */
+  onlyMissingCost?: boolean;
   offset?: number;
   limit?: number;
 }): Promise<{ rows: ProductListItem[]; total: number }> => unwrap(ipc.productList(payload));
@@ -70,6 +74,9 @@ export const list = (payload?: {
 export const get = (id: number): Promise<ProductListItem | null> => unwrap(ipc.productGet(id));
 
 export const summary = (): Promise<ProductSummary> => unwrap(ipc.productSummary());
+
+/** 下一个款编码（建款向导「系统发号」只读展示） */
+export const nextCode = (): Promise<{ code: string }> => unwrap(ipc.productNextCode());
 
 /** 新增 / 更新（**全量提交**；编码冲突会抛错，不静默改名） */
 export const upsert = (
@@ -83,18 +90,6 @@ export const remove = (id: number): Promise<{ deleted: boolean }> =>
 /** 批量编辑（**部分 patch**：只传要改的字段；`supplierId: 0` = 清空关联） */
 export const batchUpdate = (payload: ProductBatchUpdateInput): Promise<{ updated: number }> =>
   unwrap(ipc.productBatchUpdate(payload));
-
-/* ============================================================================
-   成本（`ae_cost_map`；owner 是 ae 域）
-   ============================================================================ */
-
-/**
- * 成本表全量（款级 + 生效区间 + `source`）。
- *
- * 进价**展示**（列表列）与**导出**（模板补价）共用这一个读取口；取「当前生效价」的
- * 口径在消费侧用 `pickUnitCost`（`@/lib/orderCost`），与算钱 / 拣货两页同一份实现。
- */
-export const costMapList = (): Promise<AeCostMapItem[]> => unwrap(ipc.aeCostMapList());
 
 /* ============================================================================
    SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）
@@ -153,6 +148,54 @@ export const skuInvalidate = (id: number): Promise<{ changed: boolean }> =>
   unwrap(ipc.productSkuInvalidate(id));
 
 /* ============================================================================
+   店铺商品采集快照（pl_shop_items；AE_SHOP_ITEM_SYNC_PLAN P1）
+   ============================================================================ */
+
+/**
+ * 店铺商品段列表（采集而来 = 平台事实）。
+ * 与队列的区别：队列是**订单侧**实时聚合（还没配映射的商品ID），这里是**采集侧**快照
+ * （店里有什么）—— 同一个认款动作的两个输入源，写路径共用 `skuMap`。
+ */
+export const shopItemsList = (payload?: {
+  shopId?: number;
+  search?: string;
+  page?: number;
+  pageSize?: number;
+  onlyUnconfirmed?: boolean;
+  /** 只看「当前认到这个款」的采集行（产品编辑「从采集商品导入」用） */
+  productId?: number;
+}): Promise<{ rows: ShopItemRow[]; total: number }> => unwrap(ipc.shopItemsList(payload));
+
+/** 采集汇总（每家店：采集数 / 已认款数 / 最近采集时间） */
+export const shopItemsSummary = (): Promise<ShopItemSummaryRow[]> => unwrap(ipc.shopItemsSummary());
+
+/** 手贴商品ID导入（保底通道：列表页选择器全落空时贴 ID；行落 source=manual） */
+export const shopItemsImport = (payload: {
+  shopId?: number;
+  ids?: string[];
+}): Promise<{ received: number; inserted: number; updated: number; skipped: number }> =>
+  unwrap(ipc.shopItemsImport(payload));
+
+/**
+ * 下载采集图入库（方案 P4）：主图下载去重后回填采集行；`adoptMain` = 采纳为款主图（只补空）；
+ * `colors` = 每色图采纳为款色绑定图（只补空）。失败走结构化结果（mainError / reason），不抛。
+ */
+export const shopItemImageFetch = (payload: {
+  id: number;
+  productId?: number;
+  adoptMain?: boolean;
+  colors?: { color: string; imageUrl: string }[];
+}): Promise<ShopItemImageFetchResult> => unwrap(ipc.shopItemImageFetch(payload));
+
+/**
+ * 删一条采集行（按**行 id**）。唯一键是 (shop_id, store_key, item_id) 三元组 ——
+ * 同一个商品ID 在多家店 / 未登记桶下各是一行，按 item_id 删会误删别家那份。
+ * 不联动删 `pl_shop_sku` 认款映射（快照与人的决定是两套，§3.3）。行不存在时抛错。
+ */
+export const shopItemDelete = (id: number): Promise<{ removed: boolean }> =>
+  unwrap(ipc.shopItemsDelete({ id }));
+
+/* ============================================================================
    产品图片
    ============================================================================ */
 
@@ -185,6 +228,30 @@ export const itemImagePool = (
 export const imageThumbBatch = (
   items: { localPath: string; maxEdge?: number }[]
 ): Promise<{ dataUrls: (string | null)[] }> => unwrap(ipc.orderImageThumbBatch(items));
+
+/**
+ * 按「款编码 + 款色」批量取**订单域**的款色代表图（本地路径，未命中为 null）。
+ * 产品矩阵里的色图**只作显示**（产品 SKU 没有色图字段）—— 与拿货单编辑器同一份实现，
+ * 口径只有一处（`order-db#findStyleColorImagePath`）。
+ */
+export const styleImagePaths = (payload: {
+  items: { styleCode: string; color: string; size?: string; styleColorId?: number }[];
+}): Promise<{ paths: (string | null)[] }> => unwrap(ipc.purchaseStyleImages(payload));
+
+/**
+ * 款色改名（产品侧改色名 → 订单侧色行跟着改**标签**；款色 id / 编码 / 绑定的图不动）。
+ *
+ * 色图是按「款编码 + 色名」查的，所以只改产品侧名字等于把图和名字之间的唯一线索剪断：
+ * 重开抽屉图就是空（2026-10-23 用户实报「改颜色，图片就没了」）。
+ * 撞名（目标色名已是另一个色行）时主进程**拒绝合并**并回 `target-exists` —— 合并要人看图决定。
+ */
+export const styleColorRename = (payload: {
+  productId: number;
+  styleCode: string;
+  from: string;
+  to: string;
+}): Promise<{ renamed: boolean; styleColorId?: number; reason?: string }> =>
+  unwrap(ipc.styleColorRename(payload));
 
 /**
  * 读**原图**（不缩放）—— 「点开看大图」专用。

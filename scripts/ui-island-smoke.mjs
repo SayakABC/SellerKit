@@ -348,7 +348,18 @@ async function main() {
     await host.evaluate(
       `window.dispatchEvent(new CustomEvent('open-settings', { detail: { category: 'recognition' } }))`
     );
-    await sleep(1500);
+    // ⚠️ 不能只 sleep 一个固定值就读数：设置面板是**惰性动态 import**
+    // （registry.settingsPanelLoaders → @/core/settings/panels → RecognitionSettings.vue），
+    // dev 模式下 vite 首次编译这条链常常超过 1.5s（2026-10-15 实测：固定 1500ms 稳定误红，
+    // 分类导航只剩 general / plugins，看起来像"宿主设置贡献整个没注册"，其实只是还没加载完）。
+    // 判据改成轮询等锚点出现，等不到再判失败 —— 与上文「等侧栏出现」同一写法。
+    for (let i = 0; i < 30; i++) {
+      const ready = await host.evaluate(
+        `!!document.querySelector('[data-act="settings-cat"][data-cat="recognition"]')`
+      );
+      if (ready) break;
+      await sleep(700);
+    }
     const settingsRaw = await host.evaluate(`(() => {
       const cats = Array.from(document.querySelectorAll('[data-act="settings-cat"]')).map((el) => ({
         id: el.getAttribute('data-cat') || '',

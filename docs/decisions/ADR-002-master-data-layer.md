@@ -7,6 +7,11 @@
 （由真实数据确定）；域命名**定为规则**、新增按规则生成。来处：`docs/plans/DOMAIN_INTEGRATION_PLAN.md` 盘点结论 +
 项目方提出的方向（"能独立维护基础数据、数据间建立关联关系，各插件基于这些做统计分析和业务"）。
 
+> ⚠️ **2026-10-22 部分被 [ADR-003](ADR-003-shop-account-physical-merge.md) 取代**（方案已拍板、代码未开工）：
+> 按该裁定，`sk_shops` 不再是「凭据无关的物理身份层」，而是店铺 + 账号 + 加密凭据同居一张表。
+> **C1–C4 继续有效**，凭据边界下沉到 API 层（共享只读域 `shop` 不返回密文列，明文只经 owner 域 reveal）。
+> 本文下方「关键设计点」保留为当时的论证，不再代表目标表结构；§5 域改名表中的 `shop-set` 也将随之失效。
+
 ## Background
 
 `DOMAIN_INTEGRATION_PLAN.md` 的盘点结论是：当前 6 个业务域、27 个表，**功能之间串不起来的根因不是接口不够，
@@ -73,11 +78,16 @@ C4 的论证：`security.ts:113-124` 要求 `db` 能力的每个 `domain` 都必
 
 跑通这条纵切 = 骨架被验证，其余 4 个实体是复制粘贴。
 
-> **关键设计点：`sk_shops` 不是把 `sk_shop_sets` 搬出去，而是剥离出可共享的「身份层」。**
+> **关键设计点（2026-10-22 已不再成立，保留为当时的论证）：`sk_shops` 不是把 `sk_shop_sets` 搬出去，
+> 而是剥离出可共享的「身份层」。**
 > `sk_shop_sets` 含凭据（有独立的 `reveal` op 与 `security()`/`secureStorage` 检查）。
 > 消费方需要的只是"有哪些店铺、分别属于哪个平台/账号"，**绝不需要密码**。
 > 凭据继续由 owner 岛独占、不进共享域。这从安全上正面论证了"身份层必须独立成表"，
 > 而不只是为了 join 方便。
+>
+> ⚠️ **ADR-003 推翻了"必须独立成表"这一步**：店铺与账号物理合并后，凭据与身份同表，
+> 但「消费方绝不需要密码」这个结论仍然成立 —— 它改由 **API 边界**保证（共享域不返回密文列、
+> 明文只走 owner 域 reveal），而不是由物理分表保证。合并的理由与代价见 ADR-003。
 
 ### 5. 能力域命名规则（Q4 —— 新增域一律按此生成）
 
@@ -100,6 +110,11 @@ C4 的论证：`security.ts:113-124` 要求 `db` 能力的每个 `domain` 都必
 | `shop-accounts`            | 拆为 `shop-set`（账号套装·含凭据）+ `company`（企业主体）      | **优先**：与 `shop` 撞名歧义 |
 | `order-insight`            | `order`                                                        | 下次发版                     |
 | `purchase` / `ae` / `mail` | 已合规（`ae` 是历史混合域，后续可拆 `ae-order` + `cost-rate`） | —                            |
+
+> ⚠️ **2026-10-22 订正**：`shop-accounts → shop-set + company` 这一行随 ADR-003 失效 ——
+> `sk_shop_sets` 将被删除，不存在 `shop-set` 实体。目标域划分是：
+> `shop-accounts`（owner，读写，含工具账号）/ `shop`（共享只读，店铺身份）/
+> `company`（企业）。本轮**不做**域拆分（见 ADR-003 §Consequences）。
 
 > 为什么"顺手改"成本≈0：S2 本来就要给订单归类、利润追踪、店铺账号管家各**发一次版**
 > （给它们的 manifest 加 `domains:["shop"]`）。既然 manifest 要动一次，域改名就搭同一班车，
@@ -160,6 +175,11 @@ C4 的论证：`security.ts:113-124` 要求 `db` 能力的每个 `domain` 都必
 | Q4  | 域命名                                            | 📐 **定规则，新增一律按规则生成**；存量随下次发版对齐。规则见 Decision §5           |
 
 ### Q2 的执行口径（裁定为"现在就做"后新增的范围）
+
+> ⚠️ **2026-10-21 已被取代（就地标注，正文保留为当时的裁定）**：成本不再落 `ae_cost_map`，改为
+> **产品当前价 `pl_products.cost_cents` + 订单明细行两字段**（`cost_cents` 预估 / `actual_cost_cents` 实付），
+> 旧表已由 `order.main` v10 删除。原因与迁移见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5 与
+> `docs/notes/2026-10-21-cost-two-fields-c2.md`。
 
 **落点：改 `ae_cost_map` 自身，不新增第二套成本表。** 现状是"每 `style_code` 一行、覆盖式更新"，
 历史单价被后一次导入直接盖掉。改为**每 `style_code` 可多行、带生效区间**：

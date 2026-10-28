@@ -10,8 +10,9 @@
 //
 // ⚠️ **不用 `toISOString().slice(0,10)`**：那是 UTC 日期。东八区下午 8 点之后跑，
 //    它会返回**前一天** —— 于是"今晚导的单"被当成"昨天导的"，整天的过滤静默错位。
-// ⚠️ `electron/manual-costs.ts` 里另有一份同名 `todayKey`：主进程是 CJS 构建、不 import
-//    `src/`，那份是**刻意的双份**（同 `tests/*.spec.ts` 之间不互相 import 的理由）。
+// ⚠️ 主进程侧（CJS 构建、不 import `src/`）需要同一口径时，只能**刻意再写一份**——
+//    原先 `electron/manual-costs.ts` 就有一份同名 `todayKey`（该模块已随 C2 删表删除）；
+//    现在主进程侧的日期归一在 `electron/order-db.ts` 的迁移里是冻结副本。
 export function localDayKey(d: Date = new Date()): string {
   const p = (x: number): string => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;

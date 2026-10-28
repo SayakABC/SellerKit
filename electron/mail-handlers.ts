@@ -117,13 +117,13 @@ handle('mail-provider-list', () =>
 
 handle('mail-account-upsert', (payload: any) => {
   ensureMailSchema();
-  const shopSetId = toInt(payload?.shopSetId, 0);
-  if (shopSetId <= 0) throw new Error('店铺套不存在或已被删除');
+  const shopId = toInt(payload?.shopId, 0);
+  if (shopId <= 0) throw new Error('店铺不存在或已被删除');
 
-  const shopSet = getShopAccount(shopSetId);
-  if (!shopSet) throw new Error('店铺套不存在或已被删除');
+  const shop = getShopAccount(shopId);
+  if (!shop) throw new Error('店铺不存在或已被删除');
 
-  const email = String(payload?.email || shopSet.email || '').trim().slice(0, MAX_LEN.email);
+  const email = String(payload?.email || shop.email || '').trim().slice(0, MAX_LEN.email);
   if (!email.includes('@')) throw new Error('邮箱格式不正确');
 
   const syncEnabled = payload?.syncEnabled === undefined ? true : Boolean(payload?.syncEnabled);
@@ -136,7 +136,7 @@ handle('mail-account-upsert', (payload: any) => {
     : undefined;
 
   const id = upsertMailAccount({
-    shopSetId,
+    shopId,
     email,
     providerId: String(payload?.providerId || '').slice(0, MAX_LEN.providerId),
     imapHost: String(payload?.imapHost || '').slice(0, MAX_LEN.host),
@@ -152,7 +152,7 @@ handle('mail-account-upsert', (payload: any) => {
   // 授权码写入既有加密列（空串 = 清空；未传 = 保持原值）
   const secret = payload?.secrets?.mailAuthPwd;
   if (typeof secret === 'string') {
-    setShopAccountSecret(shopSetId, 'mailAuthPwd', secret.slice(0, MAX_LEN.secret));
+    setShopAccountSecret(shopId, 'mailAuthPwd', secret.slice(0, MAX_LEN.secret));
   }
   return { id };
 });

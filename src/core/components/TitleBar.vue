@@ -11,11 +11,14 @@
       </svg>
     </button>
 
-    <!-- 业务流来源返回（switch-module 跨模块跳转后出现；模块内 Tab 切换不产生返回入口） -->
+    <!-- 业务流来源返回（switch-module 跨模块跳转后出现；模块内 Tab 切换不产生返回入口）。
+         data-act 锚点：2026-10-14 起跨模块跳转成了常规动线（「货与成本」→「基础数据」登记店铺），
+         「有来有回」必须能在冒烟里点得到 —— 没有锚点，那条回路只能靠人肉走查。 -->
     <button
       v-if="backLabel"
       class="flex items-center gap-1 h-7 pl-1 pr-2.5 ml-1 rounded-lg text-xs font-medium text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)] transition-colors flex-shrink-0 max-w-[150px]"
       style="-webkit-app-region: no-drag"
+      data-act="title-back"
       :title="`返回${backLabel}首页`"
       @click="$emit('back')"
     >

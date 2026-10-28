@@ -110,16 +110,18 @@ const pkgLines = active
   .filter(Boolean);
 
 // —— 设置面板入口（settings.ts 存在才生成 loader；SettingsModal 分类导航按此贡献驱动）——
-// 两个来源，同一个队列：
+// 三个来源，同一个队列：
 //   · 插件包：`extensions/<id>/src/settings.ts`（随宿主分发的视图插件包）
+//   · 内建模块：`src/modules/<id>/settings.ts`（2026-10-14 起 —— 岛回收为内建模块后，
+//     原 `manifest.settings` 的 iframe 岛设置页改为宿主组件贡献，形状与上面完全一致）
 //   · **宿主自有**：`src/core/settings/panels.ts`（如「识别」引擎与密钥 —— 它不属于任何业务模块，
 //     但按 AGENTS §1.5 必须**走贡献**而不是硬编码进 SettingsModal；键 `core` 不是模块 id，故不可被停用）
+const settingsEntryExists = (id: string): boolean =>
+  roots[id] === 'extensions'
+    ? existsSync(resolve(root, `extensions/${id}/src/settings.ts`))
+    : existsSync(resolve(root, `src/modules/${id}/settings.ts`));
 const settingsLoaderLines = active
-  .filter(
-    (id) =>
-      roots[id] === 'extensions' &&
-      existsSync(resolve(root, `extensions/${id}/src/settings.ts`)),
-  )
+  .filter((id) => settingsEntryExists(id))
   .map((id) => `  '${id}': () => import('${entryPath(id, 'settings')}'),`)
   .concat(
     existsSync(resolve(root, 'src/core/settings/panels.ts'))

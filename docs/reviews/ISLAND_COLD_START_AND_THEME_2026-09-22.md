@@ -94,14 +94,14 @@ electron .sk-probe/main3.js order-insight dark new
 | `order-insight`（订单归类） | `html=normal date=normal select=normal` ❌ | `html=dark date=dark select=dark` ✅ |
 | `ae-profit`（利润追踪） | `html=light date=light select=light` ❌（`style.css` 写死 light） | `html=dark date=dark select=dark` ✅ |
 | `excel-copy` | `html=normal …` ❌（同一缺陷，用户未提及） | `html=dark …` ✅ |
-| `shop-accounts` | `html=dark …` ✅ | 未受影响（岛内 `ui-plugins/shop-accounts/src/theme.js` 自己按 `--wb-bg` 亮度回写过） |
+| `shop-accounts` | `html=dark …` ✅ | 未受影响（岛内 theme.js（已随 2026-10-14 内迁删除，主题回写职责现归宿主全局样式）自己按 `--wb-bg` 亮度回写过） |
 
 `order-insight` 的命中点最直白：`ui-plugins/order-insight/dist/views/stockin.js` 里「拿货对账」时间窗与「拿货日期」
 就是 `<input type="date">`，深色下原本渲染成白色控件。
 
 ### 2.3 `shop-accounts` 的先例
 
-同一现象在 2026-09-21 已被 `ui-plugins/shop-accounts/src/theme.js` 记录并绕过（岛内自行按 `--wb-bg` 亮度回写 `color-scheme`）。
+同一现象在 2026-09-21 已被岛内 theme.js（该文件已随 2026-10-14 内迁删除）记录并绕过（岛内自行按 `--wb-bg` 亮度回写 `color-scheme`）。
 本次改为**宿主统一下发**：宿主本来就知道自己是哪套主题（`data-theme`），不必让每个岛去嗅探颜色亮度；
 `shop-accounts` 的旧机制与宿主新机制取值一致，不冲突。
 
@@ -118,7 +118,7 @@ electron .sk-probe/main3.js order-insight dark new
 | `docs/architecture/PLUGIN_ARCHITECTURE.md` | §15.3 主题条款补 `theme.mode` 与原生件说明 |
 | `docs/baseline/PROJECT_BASELINE.md` | §10 双端契约由「两条纪律」扩为四条（补 ③ 不轮转 token / ④ theme.mode） |
 | `CHANGELOG.md` | `[Unreleased]` 增 Fixed 段 |
-| `ui-plugins/shop-accounts/src/components/AccountEditor.vue` | `.date-input` 元素级 `color-scheme: light` → `inherit`；删除永不命中的 `:global([data-theme='dark'])` 死规则 |
+| `src/modules/shop-accounts/components/AccountEditor.vue` | `.date-input` 元素级 `color-scheme: light` → `inherit`；删除永不命中的 `:global([data-theme='dark'])` 死规则 |
 | `ui-plugins/ae-profit/src/style.css` | `@layer components` 日期/时间输入组 `color-scheme: light` → `inherit` |
 | `ui-plugins/{shop-accounts,ae-profit}/manifest.json` + `package.json` | 版本递增 1.4.4 / 1.0.2（同版本改内容会撞 sha256 校验，见开发指南 §9） |
 
@@ -146,7 +146,7 @@ electron .sk-probe/main3.js order-insight dark new
 
 | # | 项 | 处置 |
 |---|---|---|
-| 1 | `shop-accounts/src/components/AccountEditor.vue` `.date-input` 元素级 `color-scheme: light` + 永不命中的 `:global([data-theme='dark'])` 选择器 | ✅ 改为 `inherit`、删除死选择器；随 1.4.4 重建并重装 |
+| 1 | `src/modules/shop-accounts/components/AccountEditor.vue` `.date-input` 元素级 `color-scheme: light` + 永不命中的 `:global([data-theme='dark'])` 选择器 | ✅ 改为 `inherit`、删除死选择器；随 1.4.4 重建并重装 |
 | 2 | `ae-profit/src/style.css` `@layer components` 里日期/时间输入组 `color-scheme: light` | ✅ 改为 `inherit`；随 1.0.2 重建并重装 |
 | 3 | `excel-copy` 无 `color-scheme` 声明 | ✅ 无需改动（已由宿主机制覆盖） |
 | 4 | `.sk-probe/` 无头探针 | ✅ 已删除（按用户指示）；需要复现时按 §6 重建 |
@@ -160,7 +160,7 @@ electron .sk-probe/main3.js order-insight dark new
 
 | 文件 | 改动 | 版本 |
 |---|---|---|
-| `ui-plugins/shop-accounts/src/components/AccountEditor.vue` | `.date-input { color-scheme: inherit }`；删除 `:global([data-theme='dark']) .date-input` 死规则 | 1.4.3 → **1.4.4** |
+| `src/modules/shop-accounts/components/AccountEditor.vue` | `.date-input { color-scheme: inherit }`；删除 `:global([data-theme='dark']) .date-input` 死规则 | 1.4.3 → **1.4.4** |
 | `ui-plugins/ae-profit/src/style.css` | `input[type='date'\|'datetime-local'\|'month'\|'time'] { color-scheme: inherit }` | 1.0.1 → **1.0.2** |
 | `ui-plugins/*/package.json` | 版本号同步（发布脚本与工程版本一致） | — |
 

@@ -8,7 +8,9 @@
 // 三条口径**刻意与订单利润页共用同一份实现**（同一批数据两处显示不同的数，是查不出的悬案）：
 //   · 件数 —— `orderCost.resolveQty`（结算商品行真值 → 报表块内 `商品数量` → 按 1 件并标缺）；
 //   · SKU 分组键 —— `orderCost.skuKey`（`款 · 色 · 码`，缺哪段标哪段）；
-//   · 进价 —— `orderCost.pickUnitCost` + `orderCost.round2`（款级成本区间，按该行下单日期取当时生效的那条）。
+//   · 进价 —— 订单行**实际进价**（`actual_cost_cents`）> 订单行**进价预估**（`cost_cents`）>
+//     产品**当前进价**（`pl_products.cost_cents`，仅供还没钉预估的老行做估算；与利润页的
+//     "actual > estimate > none" 的差别就在这里：拣货是"要花多少钱"的经营估算，不是历史口径）。
 //
 // **范围口径**（默认"未发货 · 近 30 天"）也在本层：日期要认 `order_time` 的多种写法
 // （实测有 `2026-09-10 12:00:00` 与 `08/30/2026 07:00` 两种，在 SQL 里做字符串比较会**静默丢掉**
@@ -21,8 +23,10 @@
 // **缺进价的算不出金额**。一条都不许静默糊过去 —— 拣货单是"照它干活"的东西。
 //
 // **"已拿 / 还差"（2026-10-10）**：拣货单问的是"**还要**拿什么"，而不只是"这批订单要什么"。
-// `opts.taken`（键 `takenKey(款,色,码)`）来自**已提交拿货单**（与 `purchase-db.outstanding()`
-// 同一粒度、同一含义），`opts.ignored` 是「无需补货」的款色集合。两者都缺省时全部按 0 / 无忽略
+// `opts.taken`（键 `takenKey(款,色,码)`）来自**已提交拿货单**（与 `purchase-db.takenLedger()`
+// 同一粒度、同一含义）。⚠️ 必须是**台账**不是**缺口**（2026-10-17 事故）：`outstanding()` 会丢掉
+// "缺为 0"的行 ⇒ 拿齐的款色在台账里消失 ⇒ 清单按已拿 0 算、卡永远停在待拿。
+// `opts.ignored` 是「无需补货」的款色集合。两者都缺省时全部按 0 / 无忽略
 // ⇒ 输出与加这两项之前**逐字一致**（既有断言不会因为"多算了已拿"而变红）。
 // `remaining = max(0, pieces − taken)` 夹到 0：多拿了是"拿多了"，不是"还差负数"。
 //
@@ -34,11 +38,10 @@ import type { PickingRowProjection } from '@/types';
 import {
   bucketOfStatus,
   dateKey,
-  pickUnitCost,
+  positiveCents,
   resolveQty,
   round2,
   skuKey,
-  type CostInterval,
   type SettleQtyInfo,
 } from './orderCost';
 
@@ -46,7 +49,7 @@ import {
 export const DEFAULT_PICKING_DAYS = 30;
 
 /**
- * 「已拿 / 还要拿」的键（款 · 色 · 码）—— **与 `electron/purchase-db.ts` 的 `outstanding()`
+ * 「已拿 / 还要拿」的键（款 · 色 · 码）—— **与 `electron/purchase-db.ts` 的 `takenLedger()`
  * 分组粒度逐字一致**（`style_code|color|size`，三个原文、不归一）。
  *
  * 为什么把它抬成导出函数：拣货单要显示"已拿多少、还差多少"，而"已拿"来自已提交的拿货单。
@@ -54,6 +57,51 @@ export const DEFAULT_PICKING_DAYS = 30;
  */
 export function takenKey(styleCode: unknown, color: unknown, size: unknown): string {
   return `${String(styleCode ?? '')}|${String(color ?? '')}|${String(size ?? '')}`;
+}
+
+/**
+ * 「已拿」的**身份优先**键（2026-10-20）：有款色 id 就用 `#id|码`，没有才回落文本三元组。
+ *
+ * 为什么必须由同一个函数生成：id 行与文本行是**互斥**的两拨（`takenLedger()` 也是这么分的），
+ * 两边各拼一套键就会出现"已拿算两遍"（缺口提前变 0 ⇒ 漏货）或"一遍都算不上"（全待拿，用户实报）。
+ * 台账侧与清单侧**只能调这一个函数**。
+ */
+export function takenKeyOf(row: {
+  styleColorId?: unknown;
+  styleCode?: unknown;
+  color?: unknown;
+  size?: unknown;
+} | null | undefined): string {
+  const id = Number(row?.styleColorId) || 0;
+  return id > 0 ? `#${id}|${String(row?.size ?? '')}` : takenKey(row?.styleCode, row?.color, row?.size);
+}
+
+/**
+ * 从已拿台账查一行的**已拿件数**：身份键 + 文本兜底，**不双算**。
+ *
+ * 为什么是"两段相加"而不是"有 id 就不看文本"（2026-10-20）：
+ * 台账按 `takenKeyOf` **互斥分桶** —— 带 id 的明细只进 `#id|码`，老明细（id=0）只进文本键。
+ * 这是两拨**不同的单据行**，相加不会重复；反过来"有 id 就只看 id"会让老明细（id=0 但色名恰好
+ * 没改过）永远算不上 ⇒ 拿过的货又出现在待拿里（用户实报的"全待拿"的另一个来源）。
+ *
+ * ⚠️ 与 `electron/purchase-db.ts` 的 `outstanding()` 必须同口径（那边是 `byId + byText`）。
+ * 主进程不能 import 本文件（两套 tsconfig），所以口径靠这条注释 + `tests/picking.spec.ts` 钉住。
+ */
+export function takenFrom(
+  map: Record<string, number> | null | undefined,
+  row: {
+    styleColorId?: unknown;
+    styleCode?: unknown;
+    color?: unknown;
+    size?: unknown;
+  },
+): number {
+  if (!map || typeof map !== 'object') return 0;
+  const n = (k: string): number => Math.max(0, Number(map[k]) || 0);
+  const byId = n(takenKeyOf(row));
+  const id = Number(row?.styleColorId) || 0;
+  if (id <= 0) return byId;
+  return byId + n(takenKey(row?.styleCode, row?.color, row?.size));
 }
 
 /** 「无需补货」的键（款 · 色，**不含码**）—— 忽略是按整款色生效的（同 `purchase_ignore`） */
@@ -68,15 +116,9 @@ export interface PickingScope {
   /** "今天"（yyyy-mm-dd）；缺省用本机当天 —— 用例靠它固定住，别让断言随日期漂移 */
   today?: string;
   /**
-   * **款级成本区间**（`ae_cost_map`，与「算钱」页**同一份取价实现** `orderCost.pickUnitCost`）。
-   *
-   * 为什么必须同源：拣货单要回答"这批货大概要花多少钱"，利润页要回答"这笔订单的成本" ——
-   * 两页只要各自去取一次价，就会出现"同一条订单在两页上成本不一样"的悬案。
-   * 不传 / 空数组 → 全部行标「无进价」（**不按 0 算**，见 `noPricePieces`）。
-   */
-  costs?: CostInterval[] | null;
-  /**
-   * **已拿件数**（键 = `takenKey(款, 色, 码)`）—— 来自**已提交**的拿货单（宿主 `outstanding()` 的同一份口径）。
+   * **已拿件数**（键 = `takenKeyOf(行)`：有款色 id 用 `#id|码`，老数据用 `款|色|码`）
+   * —— 来自**已提交**的拿货单（宿主 `purchaseTaken()` 的同一份口径）。
+   * ⚠️ 只能喂**台账**（`takenLedger`）：喂"缺口"（`outstanding`）时拿齐的款色会缺项 ⇒ 还差算成满额。
    *
    * 为什么必须有它：拣货单问的是"要拿什么"，而"要拿"= 需求 − 已拿。没有这一项，
    * 开完拿货单后清单**一件不少**（订单还没发货），用户只能自己去第 5 步重新对一遍。
@@ -111,6 +153,8 @@ export interface PickingGroup {
   styleName: string;
   /** **有效颜色**（宿主侧已做回落：款色 → 订单原文色）。分组键用它，不直接用订单原文。 */
   color: string;
+  /** 组内**第一个非 0** 的款色 id（身份键，0 = 未归类）。"已拿"匹配优先用它，见 `takenKeyOf`。 */
+  styleColorId: number;
   size: string;
   /** **要拣几件** = 组内各行件数之和（分不清件数的行按 1 件，见 `missingQty`） */
   pieces: number;
@@ -211,6 +255,23 @@ export interface PickingSummary {
   missingStyle: number;
   /** 已发货的行数（默认范围不该有；混进来时界面要说清楚） */
   shippedRows: number;
+  /**
+   * **未归类订单行**（没有款色归属）按**商品ID** 聚合 —— 界面据此提示"这批数不准"并给修复入口。
+   *
+   * 为什么要单独一块（2026-10-20）：未归类行照样进统计（漏掉就是悄悄少算），但它们
+   * 既扣不掉"已拿"、也取不到图 ⇒ 界面必须**明确标出**是哪些商品、几件，而不是让用户
+   * 面对一堆"待拿"去猜为什么拿不完。按商品ID 聚合是因为修复动作就落在商品ID 上
+   * （选中产品 → 该商品的历史订单自动回填款色），一次修一批。
+   */
+  unclassifiedItems: {
+    itemId: string;
+    /** 件数（与 `pieces` 同口径 = resolveQty 之和） */
+    pieces: number;
+    /** 订单行数 */
+    rows: number;
+    /** 涉及店铺（去重） */
+    shops: string[];
+  }[];
   /** ---- 范围口径（界面把默认值写在标签上，并说清剔掉了什么）---- */
   /**
    * 到手的总行数 = 参与聚合的 `rows` + 剔除的 `excludedFinished` + `excludedOld`
@@ -255,12 +316,12 @@ function todayLocal(): string {
  * 未识别款 / 缺色 / 缺码的行**各自成组**（`skuKey` 把缺的那段写进键）—— 丢掉它们会让
  * "合计对不上"变成查不出的悬案，而拣货单漏一行就是少发一件货。
  *
- * **进价 / 预估金额**（S3，2026-10-05）：
- *   · 单价 = `pickUnitCost(costs, 款编码, 该行的下单日期)` —— **与「算钱」页同一份取价实现**，
- *     所以同一条订单在两页上的产品成本是同一个数；
- *   · 逐行 `件数 × 单价` 累加（不是"件数合计 × 某一个单价"）：同一 SKU 的订单可能跨成本生效区间，
+ * **进价 / 预估金额**（S3，2026-10-05；C2 改口径 2026-10-21）：
+ *   · 单价 = 行级**实付真值** > 行级**进价预估** > 产品**当前进价**（分三档，逐行取第一个正数）；
+ *     前两档与利润页同一口径（同一行同一字段），第三档只补"预估还没钉过"的经营估算；
+ *   · 逐行 `件数 × 单价` 累加（不是"件数合计 × 某一个单价"）：同一 SKU 的各行价可能不同，
  *     按组相乘会挑错价；
- *   · `costs` 空 / 该款没有成本行 → 该行**不计入金额**并累到 `noPricePieces`（**不按 0 蒙**：
+ *   · 三档都没有 → 该行**不计入金额**并累到 `noPricePieces`（**不按 0 蒙**：
  *     按 0 算会让"估算偏低"和"真便宜"长得一模一样）。
  */
 export function aggregatePicking(
@@ -270,12 +331,13 @@ export function aggregatePicking(
   const list = Array.isArray(rows) ? rows : [];
   const days = Number.isFinite(Number(opts?.days)) ? Number(opts.days) : DEFAULT_PICKING_DAYS;
   const cutoff = cutoffDate(String(opts?.today ?? '') || todayLocal(), days);
-  const costs = Array.isArray(opts?.costs) ? opts.costs : [];
   // 已拿 / 已忽略：缺省 = 空（行为与"还没有拿货单"逐字一致）
   const takenMap = opts?.taken && typeof opts.taken === 'object' ? opts.taken : {};
   const ignoredSet = opts?.ignored instanceof Set ? opts.ignored : null;
   const agg = new Map<string, PickingGroup>();
   const allOrders = new Set<string>();
+  /** 未归类（无款色身份）行 → 按商品ID 聚合（口径与主循环完全一致：同一过滤、同一 qty） */
+  const unclassified = new Map<string, { itemId: string; pieces: number; rows: number; shops: string[] }>();
   const summary: PickingSummary = {
     groups: [],
     suppliers: [],
@@ -293,6 +355,7 @@ export function aggregatePicking(
     missingSupplier: 0,
     missingStyle: 0,
     shippedRows: 0,
+    unclassifiedItems: [],
     scanned: list.length,
     days,
     excludedFinished: 0,
@@ -324,8 +387,12 @@ export function aggregatePicking(
       { orderNo: r?.orderNo, itemId: r?.itemId, rawFields: r?.rawFields },
       opts?.settleQty,
     );
-    // 进价：与「算钱」页同一行、同一份实现（款级成本区间，按该行的下单日期取当时生效的那条）
-    const unit = pickUnitCost(costs, String(r?.styleCode ?? ''), dateKey(r?.orderTime));
+    // 进价三档：实付真值 > 进价预估 > 产品当前价（见函数头注释；0 一律当"没有"）
+    const unitCents =
+      positiveCents(r?.actualCostCents) ??
+      positiveCents(r?.costCents) ??
+      positiveCents(r?.productCostCents);
+    const unit = unitCents === null ? null : round2(unitCents / 100);
     const lineAmount = unit === null ? null : round2(qty * unit);
     const noImage = !String(r?.imagePath ?? '');
     const noSupplier = !Number(r?.supplierId);
@@ -340,6 +407,7 @@ export function aggregatePicking(
         styleCode: String(r?.styleCode ?? ''),
         styleName: String(r?.styleName ?? ''),
         color: String(r?.color ?? ''),
+        styleColorId: 0,
         size: String(r?.size ?? ''),
         pieces: 0,
         // 已拿 / 还差 / 忽略在**组维度**上算（见下方 `for (const g of agg.values())`），
@@ -389,6 +457,8 @@ export function aggregatePicking(
       }
     }
     if (noStyle) g.missingStyle += 1;
+    // 款色 id：组内**第一个非 0** 的留着（同款色码的各行应当同 id；未归类行为 0，不覆盖已认出的）
+    if (!g.styleColorId) g.styleColorId = Number(r?.styleColorId) || 0;
     // 款名：组内**第一个非空**的留着（同款的各行名字一致；识别链降级时可能整组都为空）
     if (!g.styleName) {
       const nm = String(r?.styleName ?? '');
@@ -401,6 +471,15 @@ export function aggregatePicking(
     summary.rows += 1;
     summary.pieces += qty;
     if (orderNo) allOrders.add(orderNo);
+    // 未归类：款式归属为 0（后端 `style_color_id`）—— 件数照收，但单独列出来让人知道"这不全准"
+    if (!(Number(r?.styleColorId) > 0)) {
+      const iid = String(r?.itemId ?? '').trim();
+      const it = unclassified.get(iid) ?? { itemId: iid, pieces: 0, rows: 0, shops: [] };
+      it.pieces += qty;
+      it.rows += 1;
+      if (shop && !it.shops.includes(shop)) it.shops.push(shop);
+      unclassified.set(iid, it);
+    }
     if (noImage) summary.missingImage += 1;
     if (qtySource === 'assumed') summary.missingQty += 1;
     if (noSupplier) summary.missingSupplier += 1;
@@ -412,12 +491,12 @@ export function aggregatePicking(
     g.orderNos.sort();
     g.shops.sort();
     g.supplierNames.sort();
-    // 进价 = 有价件数的加权均价（同一 SKU 跨成本区间时各行单价可能不同 → 表里给的是均价）
+    // 进价 = 有价件数的加权均价（同一 SKU 的各行可能一个用实付、一个用预估 → 表里给的是均价）
     g.unitPrice = g.pricedPieces > 0 ? round2(g.amount / g.pricedPieces) : null;
     if (g.noPricePieces > 0) summary.noPriceGroups += 1;
     // 已拿 / 还差 / 忽略：**组维度一次算**（逐行加会把同一行重复计）。
     // `remaining` 夹到 0 —— 多拿了是"拿多了"，不是"还差负数"（负数会让"已拿够"看起来像"还缺"）。
-    g.taken = Math.max(0, Number(takenMap[takenKey(g.styleCode, g.color, g.size)]) || 0);
+    g.taken = takenFrom(takenMap, g);
     g.remaining = Math.max(0, g.pieces - g.taken);
     g.ignored = !!(ignoredSet && ignoredSet.has(ignoreKey(g.styleCode, g.color)));
     summary.takenPieces += g.taken;
@@ -428,6 +507,9 @@ export function aggregatePicking(
     (a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
   );
   summary.orders = allOrders.size;
+  summary.unclassifiedItems = [...unclassified.values()]
+    .map((it) => ({ ...it, shops: [...it.shops].sort() }))
+    .sort((a, b) => b.pieces - a.pieces || (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0));
   summary.suppliers = groupBySupplier(summary.groups);
   return summary;
 }
@@ -536,6 +618,13 @@ export interface PickingColorGroup {
   noPricePieces: number;
   /** 涉及订单数（各码订单号的**并集**去重 —— 同单跨码只算一单） */
   orders: number;
+  /**
+   * 涉及订单号（各码订单号的**并集**，升序去重）—— 界面行上"涉及 N 个订单"展开后列的就是它。
+   *
+   * 为什么要并集而不是"某一码的"：一行是一个款色（含全部尺码），用户问"这行牵扯哪几单"时
+   * 要的是这一行**所有码**合起来的单子；同单跨码只出现一次（2026-10-17 合并视图加）。
+   */
+  orderNos: string[];
 }
 
 /** 尺码的自然序：字母码 XS→XXXL、数字码按数值、其余按原串（`''` 的"无尺码"排最后）。
@@ -595,6 +684,7 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
           missingStyle: 0,
           noPricePieces: 0,
           orders: 0,
+          orderNos: [],
         },
         groups: [],
       };
@@ -635,9 +725,11 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
       }
     }
     row.unitPrice = paidPieces > 0 ? round2(paid / paidPieces) : null;
-    const orders = new Set<string>();
-    for (const g of gs) for (const no of g.orderNos) orders.add(no);
-    row.orders = orders.size;
+    // 订单号：各码的并集（同一单跨码只算一次）；排序让展开列表不随输入顺序跳位
+    const nos = new Set<string>();
+    for (const g of gs) for (const no of g.orderNos) nos.add(no);
+    row.orderNos = [...nos].sort();
+    row.orders = row.orderNos.length;
     out.push(row);
   }
   return out.sort((a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

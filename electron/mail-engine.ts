@@ -356,7 +356,7 @@ async function runMailSync(accountId: number): Promise<void> {
   emitMailEvent({ type: 'status', accountId, email: account.email, status: 'syncing' });
 
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) {
     updateMailAccountStatus(accountId, {
       status: 'error',
@@ -634,7 +634,7 @@ async function openOnDemandClient(accountId: number, folder?: string): Promise<{
   const account = getMailAccount(accountId);
   if (!account) throw new Error('邮箱账号不存在');
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) throw new Error('未配置 IMAP 授权码（登录密码不能用于 IMAP）');
   const client = createClient(preset, account, password);
   await client.connect();
@@ -881,7 +881,7 @@ export async function listMailRemoteFolders(accountId: number): Promise<MailRemo
   const account = getMailAccount(Number(accountId));
   if (!account) throw new Error('邮箱账号不存在');
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) throw new Error('未配置 IMAP 授权码（登录密码不能用于 IMAP）');
   const client = createClient(preset, account, password);
   try {

@@ -1,16 +1,15 @@
 <template>
-  <div class="wb-page oc-view" :class="{ 'is-embedded': embedded }">
+  <div class="wb-page oc-view">
     <!-- 页头：原先整页没有标题，第一行就是四个统计数字 —— 用户不知道这页在算什么。
-         `embedded` 时只藏**标题那两行**（外层页签已经交代了），
-         ⚠️ **不能整块藏掉**：未归属 / 费率与归属 两个动作都在这个 header 里（同拣货页的教训）。
-         「刷新」是唯一例外（2026-10-11）：内嵌时藏掉 —— 容器页头已有一个「刷新」且是超集
-         （`bump()` 波及所有面板，含本页），同一屏两个同名按钮只会让人停下来想"点哪个"。
-         ⚠️ 冒烟取 `[data-act="refresh"]` 是 `querySelector`（**取文档序第一个**）：内嵌时它
-            命中的必须是容器那个 —— 把这里换成 v-show 之类的"藏而不断"，第一个就变成藏起来的
-            这个按钮，断言会点到一个看不见的按钮上。 -->
-    <header class="wb-head" :class="{ 'is-toolbar': embedded }">
-      <div v-if="!embedded" class="wb-head__main">
-        <h1 class="wb-head__title">算钱</h1>
+         ⚠️ 2026-10-17 起本页**只有独立形态**：原来它还能被「发货台」的「算钱」页签内嵌
+            （`embedded` prop 藏标题、藏刷新按钮、只算今天导入的那批）。用户裁定把算钱整步
+            撤出发货台、都归拢到这里 ⇒ 那个形态已无消费者，整套分支（prop / emit / `oc-scope`
+            口径标签 / `is-embedded` 样式）一并删掉：留着它只会让人以为"还有第二个入口"，
+            而两个入口给两个口径的数正是这页最早的病。
+         「刷新」是页面自己的按钮（没有容器页头再顶一个，不必再藏）。 -->
+    <header class="wb-head">
+      <div class="wb-head__main">
+        <h1 class="wb-head__title">统计</h1>
         <p class="wb-head__desc">
           按订单行算收入、运费、成本与毛利；缺哪一环逐行标出（缺的不按 0 算）
         </p>
@@ -30,7 +29,6 @@
           未归属 {{ unassignedCount }} 单 · 去归属
         </button>
         <button
-          v-if="!embedded"
           class="wb-btn oc-btn"
           data-act="refresh"
           :disabled="loading"
@@ -62,11 +60,6 @@
             「标签 <b>数字</b>」不能被拆成兄弟元素。 -->
     <div class="oc-overview">
       <div class="wb-metabar oc-topbar">
-        <!-- 口径标签（2026-10-11）：内嵌在「发货台」里时只算**今天导入**的订单行。
-             ⚠️ 独立打开「算钱」模块时**不加这个筛**（那时用户问的是"这批订单赚不赚"，
-                不限今天）—— 所以标签跟着 `importDate` 走：没有筛就不写。
-                不写出来的话，同一页在两个入口下的数字不一样，用户只会以为其中一个坏了。 -->
-        <span v-if="importDate" class="wb-tag oc-scope" data-act="oc-scope">今天导入</span>
         <span class="wb-metric" data-act="metric-rows"
           >订单行 <b>{{ summary.total }}</b></span
         >
@@ -144,9 +137,9 @@
             v-if="multiPieceRows"
             class="wb-tag oc-tag is-warn"
             data-act="multi-piece-hint"
-            :title="`${multiPieceRows} 行的件数大于 1，但成本与运费仍按 1 件算（多件合并计费尚未支持）`"
+            :title="`${multiPieceRows} 行的件数大于 1：成本按单件价算（不乘件数）；运费只有已拆包的单会按件数摊包裹实付，未拆包的单仍按 1 件估`"
           >
-            多件 {{ multiPieceRows }} 行按 1 件计
+            多件 {{ multiPieceRows }} 行按单件计
           </span>
         </div>
 
@@ -505,11 +498,11 @@
                   class="wb-num"
                   data-act="shipping"
                   :class="{ 'oc-muted': r.shipping === null }"
-                  :title="r.rateVersion ? `按运价表 ${r.rateVersion}` : '按当前那份运价表'"
+                  :title="shippingTitle(r)"
                 >
                   {{ money(r.shipping) }}
                 </td>
-                <td class="wb-num" data-act="product-cost" :class="{ 'oc-muted': r.productCost === null }">
+                <td class="wb-num" data-act="product-cost" :class="{ 'oc-muted': r.productCost === null }" :title="costTitle(r)">
                   {{ money(r.productCost) }}
                 </td>
                 <td class="wb-num" data-act="tax" :class="{ 'oc-muted': r.taxCost === null }">
@@ -565,7 +558,8 @@
                   <!-- 空态 = 一段"导入后会得到什么"的承诺 + 一个可点的下一步。
                        原文案里的「（宿主自己会拆行入库，不需要装插件）」已删（2026-10-11）：
                        它拿内部架构向用户解释（§1.10 禁用词），而用户只需要"去哪、点哪个"。
-                       也不再提"再回来点刷新" —— 内嵌时 token 会自动重算、独立打开时重挂即取。 -->
+                       也不再提"再回来点刷新" —— 重挂即取（原来的"内嵌时 token 自动重算"随
+                       内嵌形态一起删掉，2026-10-17）。 -->
                   <p class="oc-empty__desc">
                     导一份订单报表，这里就按订单行算收入、运费、成本与毛利；缺的那一环逐行标出来。
                   </p>
@@ -575,7 +569,7 @@
                       data-act="empty-import"
                       @click="goImport"
                     >
-                      {{ embedded ? '去「导入订单」' : '去「发货台」导入' }}
+                      去「发货台」导入
                     </button>
                   </div>
                 </td>
@@ -592,7 +586,7 @@
 </template>
 
 <script setup lang="ts">
-// 「算钱」视图（id 仍为 order-cost）：取数 → 纯计算层算 → 渲染。
+// 「统计」视图（id 仍为 order-cost；2026-10-17 显示名由「算钱」改为「统计」）：取数 → 纯计算层算 → 渲染。
 // 两条摄取通道（采集 / 导入）在同一张表里，按「来源」列与顶部计数区分。
 //
 // 口径（用户 2026-09-29 裁定，别改）：
@@ -601,25 +595,32 @@
 //   · 平台代征代缴 → 增值税不是我们的成本（确定的 0）；不知道谁承担 → 标缺、**不按 0 算**。
 //   · 平台费（佣金/手续费）暂无数据源 → 全局提示"未扣"，**不按 0 算**。
 //   · 任一环缺 → 毛利为 `null` 并逐行标出来（0 与"不知道"必须分开）。
-//   · 件数是**拣货口径**：结算商品行真值 → 订单报表块内 `商品数量` → 按 1 件并标「缺件数」；
-//     它**不参与**成本/运费算术（多件合并计费是运价岛的开放项）—— 有件数 > 1 的行时界面显式提示。
+//   · 件数是**拣货口径**：结算商品行真值 → 订单报表块内 `商品数量` → 按 1 件并标「缺件数」。
+//     它**不乘进**成本（成本是单件价）；**已拆包的单**运费按件数把包裹实付摊到各行。
 //
-// 四路取数（全部经 core 服务，视图内零算术）：
+// 取数（全部经 core 服务，视图内零算术）：
 //   1. 订单行（含店铺/时点/款编码 + 金额/状态/时点列）→ `orderShippingRows`
+//      —— 其中 `weightG`/`costCents` 是**行级快照**（阶段 A4/A5），有值就优先用（见 `computeOrderCosts`）
 //   2. 克重（批量，一次调用）                        → `loadSkuWeights()`（SKU 级，`pl_variants.weight_g`）
 //      ⚠️ 2026-10-01 起克重**只**来自 SKU：原「商品ID → 克重」那条链（`productWeightGet` +
 //      `pl_item_weights`）已随领域裁定整条删除（克重是一款的属性，不是某个商品的属性）。
-//   3. 款级成本（含生效区间）                        → `aeCostMapList`（分 → 元）
-//   4. 运价表：宿主快照（`shipRateSnapshotCalc`，按订单日期取"当时那份"）；
-//      一条快照都没有时才回落岛存储的"当前那份"（`useModuleStorage('shipping-rate')`）
+//      现只作**回落**：订单行没钉过快照时才算。
+//   3. 成本（行级两字段，C2）                        → `costCents`（进价预估）/ `actualCostCents`（实际进价）
+//      取数口径 `actual > estimate > none`，两处都没有就标缺 —— 不再回查任何"款级价目表"。
+//   4. 包裹运费汇总（批量，按单号）                   → `orderParcelTotals`（阶段 C1）
+//      已拆包的单：运费 = **包裹实付合计**（按件数摊到各行），**不再**看运价表；
+//      已拆包但缺运费：标 `parcel` 缺口、**不回落估算**（否则"按包记的真值"会被估算盖掉）。
+//   5. 运价表：**只有**宿主快照（`shipRateSnapshotCalc`，按订单日期取"当时那份"）——只算还没拆包的单
 //
-// ⚠️ 第 4 路的「岛存储回落」是**一个版本期的读回退**（M6 运价表回迁，2026-09-30）：
-//    真源已归宿主 `sr_rate_snapshots`（岛只显示、不再存也不回传）；宿主快照表是空的**只可能是**
-//    "老库 + 还没打开过「无忧物流运费」"—— 该岛首次打开会把旧表一次性迁上来（`rateAdopt`）。
-//    等所有用户都迁过一轮，这一路回落连同 `useModuleStorage('shipping-rate')` 一起删掉。
-//    在那之前**不要**在宿主再存一份 —— 两份真相必然漂移。另外：报价单会更新，要"按历史复算"
-//    就得给它加生效区间（同 `ae_cost_map` 的做法）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+// ⚠️ 第 4 路原有一层「岛存储回落」，2026-10-15 随 `shipping-rate` 岛整体下架一并删除：
+//    真源早已归宿主 `sr_rate_snapshots`（M6，2026-09-30；岛只显示、不再存也不回传），
+//    那层回落只覆盖"老库 + 还没打开过运费页"的过渡期。岛一没，键永远读不到值
+//    ⇒ 恒不生效的死代码，比没有更容易骗人（"看起来还兼容着"）。
+//    算法层 `computeOrderCosts` 的单表口径分支**故意留着**（那分支本身合法，
+//    `tests/orderCost.spec.ts` 钉着"快照优先于单表"），只是生产恒传 null。
+//    另外：报价单会更新，要"按历史复算"就得给它加生效区间（`sr_rate_snapshots` 就是这么做的）；
+//    成本侧同理 —— 订单行自己钉 `cost_cents` / `actual_cost_cents` 两个快照，本页不回查产品当前价。
+import { computed, nextTick, onMounted, ref } from 'vue';
 import { selectExcelFile } from '@/core/services/dialog';
 import { useModuleStorage } from '@/core/services/storage';
 import { toast } from '@/core/services/toast';
@@ -634,7 +635,6 @@ import {
   trendOf,
   type BizBucket,
   type CostGroupDim,
-  type CostInterval,
   type OrderCostGap,
   type QtySource,
   type RateSnapshot,
@@ -645,20 +645,12 @@ import CostRatesSection from './components/CostRatesSection.vue';
 import type { RateTable } from '@/lib/shipRate';
 
 /**
- * `embedded` = 被「发货台」页的页签内嵌（藏掉本页自己的页头，避免双层标题）。
- * `refreshToken` = 宿主的数据版本号：订单/成本一变，`today` 那边 +1 ⇒ 本页重算。
- *   页签是 `KeepAlive` 保活的，没有它就会一直显示"导入之前"那份利润 —— 保活的代价必须还回去。
- * `importDate` = **「发货台」的每日口径**（`yyyy-mm-dd`）：内嵌时只算**今天导入**的订单行。
- *   ⚠️ 独立打开本模块（「算钱」）时**不传** ⇒ 全库（用户问的是"这批订单赚不赚"，不限今天）。
- *   两种入口给两个数是有意的，页面上用 `oc-scope` 标签写清楚（不写 = 用户以为其中一个坏了）。
+ * ⚠️ 本组件**不收任何 prop**（2026-10-17）。
+ * 原先是"一份视图两个入口"：被「发货台」的「算钱」页签内嵌时收 `embedded` / `refreshToken` /
+ * `importDate`（藏页头、跟容器的数据版本重算、只算今天导入的那批），独立打开时不传（全库）。
+ * 用户裁定把算钱整步撤出发货台、都归拢到这里 ⇒ 只剩**一个入口、一个口径（全库）**，
+ * 三种入参随之删掉 —— 留着它们就会重新长出"同一页两个数"那类缝。
  */
-const props = withDefaults(
-  defineProps<{ embedded?: boolean; refreshToken?: number; importDate?: string }>(),
-  { embedded: false, refreshToken: 0, importDate: '' }
-);
-
-/** 内嵌时"去导订单"交给外层页签系统（本组件不认识页签，只发意图） */
-const emit = defineEmits<{ (e: 'go-import'): void }>();
 
 /** 「数据基础：成本与汇率」区的重取信号（主刷新时 +1） */
 const costRatesKey = ref(0);
@@ -675,13 +667,15 @@ const error = ref('');
 const feeRatePercent = ref(0);
 /** 上一次取到的四路输入：改费率时**复用它们重算**，不必再打三次 IPC */
 const inputs = ref<Parameters<typeof computeOrderCosts>[0] | null>(null);
-const summary = ref(computeOrderCosts({ orders: [], rateTable: null, costs: [] }));
+const summary = ref(computeOrderCosts({ orders: [], rateTable: null }));
 
 const GAPS: { key: OrderCostGap; label: string }[] = [
   { key: 'revenue', label: '缺收入' },
+  { key: 'fx', label: '缺汇率' },
   { key: 'country', label: '缺国家' },
   { key: 'weight', label: '缺克重' },
   { key: 'rate', label: '缺运价表' },
+  { key: 'parcel', label: '缺包裹运费' },
   { key: 'style', label: '未识别款' },
   { key: 'cost', label: '缺成本' },
   { key: 'tax', label: '税未知' },
@@ -765,11 +759,46 @@ function qtyTitle(source: QtySource): string {
 }
 
 /** 克重单元格的悬停说明：克重只有一个来源（产品库 SKU 表），把"按哪一行 SKU 取的"说清楚 */
-function weightTitle(r: { weightG: number | null }): string {
+function weightTitle(r: { weightG: number | null; weightSource?: string }): string {
   if (r.weightG === null) {
-    return '没查到克重：这一行没识别出款/色/码，或该 SKU 在「货与成本」里没维护克重';
+    return '没查到克重：这一行没识别出款/色/码，或该 SKU 在「产品管理」里没维护克重';
   }
-  return '克重按款 × 色 × 码取自产品库 SKU（在「货与成本」维护）';
+  if (r.weightSource === 'snapshot') {
+    return '克重取自这一行**钉住的快照**（归类核对「确认无误」时定下的值），之后改 SKU 克重不会回改它';
+  }
+  return '克重按款 × 色 × 码取自产品库 SKU（在「基础数据 › 产品管理」维护；本行还没钉快照）';
+}
+
+/**
+ * 成本单元格的悬停说明：把"这笔成本是真值还是预估"讲明。
+ * 两种来源给的数会不一样（拿货实付 vs 确认时钉的预估），不说清就会出现"同一单两个页面两个成本"。
+ */
+function costTitle(r: { productCost: number | null; costSource?: string }): string {
+  if (r.productCost === null) {
+    return '没有这一行的成本：款没识别出来，或该款在产品管理里没有当前进价（不按 0 算）';
+  }
+  if (r.costSource === 'snapshot') {
+    return '成本 = 这一行的**实际进价**（拿货单落账时回写的实付真值）';
+  }
+  return '成本 = 这一行的**进价预估**（归类核对「确认无误」时按产品当时价钉的快照；之后改价不回改它）';
+}
+
+/**
+ * 运费单元格的悬停说明：把"真值 / 估算"和"缺了为什么不估"讲明。
+ * 包裹与运价表是**互斥**的：拆了包就只认包裹实付，缺了也标缺 —— 不拿运价表去补，
+ * 否则用户在拆包面板填的数会被估算悄悄盖掉，且行上没有任何痕迹。
+ */
+function shippingTitle(r: {
+  shipping: number | null;
+  shippingSource?: string;
+  rateVersion?: string;
+}): string {
+  if (r.shippingSource === 'parcel') {
+    return r.shipping === null
+      ? '这一单已拆包，但还有包裹没填运费 —— 不按运价表估算；去「归类核对 › 拆包」把每个包的运费补上'
+      : '运费 = 这一单所有包裹的运费合计（实付真值），按件数摊到各行；在「归类核对 › 拆包」维护';
+  }
+  return r.rateVersion ? `按运价表 ${r.rateVersion}` : '按当前那份运价表';
 }
 
 async function load(): Promise<void> {
@@ -777,35 +806,27 @@ async function load(): Promise<void> {
   error.value = '';
   try {
     // **一个读口**：主干 `oi_orders` 的投影（`source` 由宿主标好，页面不再自己打标签）
-    // ⚠️ `importDate` 为空串 = 不筛（独立模块）；内嵌在发货台时是今天 ⇒ 只算今天导入的那批。
-    const ord = await ipc.orderShippingRows({ limit: limit.value, importDate: props.importDate });
+    // ⚠️ 不按导入日筛：本页问的是"这些订单赚不赚"，不限今天（原内嵌形态的"今天导入"口径
+    //    已随发货台那个页签一起删掉，2026-10-17）。
+    const ord = await ipc.orderShippingRows({ limit: limit.value });
     if (!ord.success || !ord.data) throw new Error(ord.error || '读取订单失败');
     const orders: UnifiedOrderRow[] = ord.data;
 
     // 克重只有一个来源：产品库 SKU 表（款×色×码）—— 取数口在 `core/services/skuWeights`（三处共用一份）
     const skuWeights = await loadSkuWeights();
 
-    const c = await ipc.aeCostMapList();
-    if (!c.success) throw new Error(c.error || '读取成本失败');
-    const costs: CostInterval[] = (c.data ?? []).map((x) => ({
-      styleCode: String(x.styleCode ?? ''),
-      effectiveFrom: String(x.effectiveFrom ?? ''),
-      unitPrice: (Number(x.unitPriceCents) || 0) / 100,
-      source: String(x.source ?? ''),
-    }));
-
-    // 运价表：宿主快照（按订单日期取"当时那份"，历史可复算）；
-    // 一条快照都没有时才回落到岛存储里的"当前那份" —— 一个版本期的读回退，
-    // 仅覆盖"老库且还没打开过「无忧物流运费」"（该岛首次打开会一次性把旧表迁到宿主）。
+    // 运价表：宿主快照（按订单日期取"当时那份"，历史可复算）。
+    // ⚠️ 这里**只**读宿主快照，不再回落到"岛存储里的当前那份"（2026-10-15 删除）：
+    //   该回落本是为"老库 + 还没打开过运费页"的过渡期准备的，而 `shipping-rate` 岛
+    //   同日整体下架、宿主侧的岛桥域也一并删除 ⇒ 那个键永远读不到值 ⇒ 恒不生效的死代码
+    //   （"看起来还兼容着，实际分支永远进不去"，比没有更容易骗人）。
     const snap = await ipc.shipRateSnapshotCalc({ limit: 50 });
     const rateSnapshots: RateSnapshot[] = (snap.success ? (snap.data?.rows ?? []) : [])
       .filter((r) => r.table)
       .map((r) => ({ effectiveFrom: String(r.effectiveFrom ?? ''), table: r.table as RateTable }));
 
-    const st = await useModuleStorage<{ table?: RateTable; rounding?: string }>(
-      'shipping-rate'
-    ).load();
-    const rateTable = (st?.table as RateTable | undefined) ?? null;
+    // 只保留**查询偏好**（取整方式）：它是用户设置、仍在写，不是岛的遗留数据。
+    const st = await useModuleStorage<{ rounding?: string }>('shipping-rate').load();
     const rounding = st?.rounding === 'ceil' ? 'ceil' : 'round';
 
     // 订单行直接传：金额/状态/税承担方那几个字段与 `OrderCostInput` 同名
@@ -829,25 +850,41 @@ async function load(): Promise<void> {
       }
     }
 
+    // 包裹运费（阶段 C1）：已拆包的单用包裹实付合计，缺了标缺。
+    // 读失败**不能**当成"都没拆包"—— 那会静默回落到运价表估算，行上看着有数，
+    // 实际把用户在拆包面板填的真值盖掉了；故与成本/订单同样走抛错。
+    const parcelRes = orderNos.length ? await ipc.orderParcelTotals(orderNos) : null;
+    if (parcelRes && !parcelRes.success) throw new Error(parcelRes.error || '读取包裹运费失败');
+    const parcelTotals = parcelRes?.data ?? {};
+
     inputs.value = {
       orders,
       skuWeights,
-      rateTable,
+      // 恒传 null：单表口径的**唯一生产来源**（岛存储里的表）已随岛下架删除
+      // （2026-10-15）。算法层的这个回退分支本身仍保留（单表口径本身合法，
+      // tests/orderCost.spec.ts 也钉着"快照优先于单表"）——只是没有生产数据能走它。
+      rateTable: null,
       rateSnapshots,
-      costs,
+      parcelTotals,
       rounding,
       settleByOrder,
       settleQty,
     };
     recompute();
-    if (!rateSnapshots.length && !rateTable) {
+    // 只有"还需要靠运价表"的单才提示 —— 全部已拆包时运费走包裹实付，没运价表也照样算得出，
+    // 此时再喊"去导报价单"就是把用户支去补一份他根本用不到的数据。
+    const needsRate = orders.some((o) => !((parcelTotals[String(o.orderNo ?? '')]?.count ?? 0) > 0));
+    if (!rateSnapshots.length && needsRate) {
       // ⚠️ 指路指向**宿主自己的导入入口**（发货台 › 导入订单），不再指向岛「无忧物流运费」
       //   （2026-10-11 改）：统一导入已能导报价单（`importSheet.importShipRate` 落到
       //   `sr_rate_snapshots`），而那个岛可能根本没装 —— 指一个装没装都不一定的入口，
       //   对没装的用户就是"死路"。
-      toast('还没读到运价表 —— 去「发货台」的「导入订单」导一份报价单（Excel），运费才算得出来', 'info');
+      toast(
+        '还没读到运价表 —— 还没拆包的订单要靠它算运费：去「发货台」的「导入订单」导一份报价单（Excel）',
+        'info'
+      );
     }
-    costRatesKey.value += 1; // 成本表可能刚被拿货对账改动，跟着主刷新一起重取
+    costRatesKey.value += 1; // 产品当前价可能刚被改过，跟着主刷新一起重取
   } catch (e: unknown) {
     error.value = `读取失败：${e instanceof Error ? e.message : '未知错误'}`;
     toast(error.value, 'error');
@@ -930,7 +967,7 @@ function openMore(focus: 'shop' | 'rate'): void {
   });
 }
 
-/** 多件行（件数 > 1）：件数只用于拣货，成本/运费仍按 1 件计 —— 有这类行就把口径写在界面上 */
+/** 多件行（件数 > 1）：成本按单件价；运价表估算也按单件 —— 有这类行就把口径写在界面上 */
 const multiPieceRows = computed(() => summary.value.rows.filter((r) => r.qty > 1).length);
 
 /** 落盘这些页面偏好（费率 / 店铺 / 来源 / 税口径）—— 改动即存，别让用户每次重设 */
@@ -1048,13 +1085,9 @@ async function assignShop(): Promise<void> {
   }
 }
 
-/** 空态里的下一步：去导订单。内嵌时发事件（`switchModule('today')` 等于跳到本页再跳回来）；
- *  独立打开时切到「发货台」模块（那儿的「导入 Excel」/导入页签是统一入口）。 */
+/** 空态里的下一步：去「发货台」导订单（那儿的「导入订单」页签是统一入口）。
+ *  本页不再有内嵌形态（2026-10-17），所以只有"真跳转"这一条路。 */
 function goImport(): void {
-  if (props.embedded) {
-    emit('go-import');
-    return;
-  }
   switchModule('today');
 }
 
@@ -1084,12 +1117,7 @@ async function importSettle(): Promise<void> {
   }
 }
 
-// 数据变了（导入了订单/结算明细、改了成本）→ 重算（本页本来就是"进页就算"，无需额外条件）
-watch(
-  () => props.refreshToken,
-  () => void load()
-);
-
+// 进页即取（本页没有"别人改了数据要通知我"的第二入口了：容器 `refreshToken` 那套随内嵌形态删除）
 onMounted(async () => {
   // 店铺清单（可选：读不到就只影响"归到该店"与店铺维度）
   try {
@@ -1125,27 +1153,10 @@ onMounted(async () => {
 /* 页面外壳（栅格 / 内边距 / 滚动）由全局 .wb-page 提供。
    `.oc-topbar` 交给全局 .wb-metabar；`.oc-view` 类名保留（冒烟用它判"挂载成功"）。 */
 
-/* 内嵌在「发货台」页签里：顶上紧邻页签栏，把全局那 18px 顶部留白收一点
-   （其余边距不动 —— 与独立打开时保持同一套栅格）。 */
-.oc-view.is-embedded {
-  padding-top: 12px;
-}
-
-/* 内嵌时页头只剩动作按钮 ⇒ 当工具栏用：靠左（不留 `margin-left:auto` 顶到右边）。 */
-.oc-view.is-embedded .wb-head__actions {
-  margin-left: 0;
-}
-
-/* 口径标签「今天导入」（仅内嵌在发货台时出现）：它是**下面所有数字的作用域**，
-   所以贴在指标条最左端、比指标低一档 —— 读数字之前先读到范围。 */
-.oc-scope {
-  align-self: center;
-  margin-right: 2px;
-}
-
 /* 概览卡：**一行结论 + 一行体检**装进同一张卡。
    原先「指标条 / 分桶 / 缺口」是三条各自带边框的全宽横条、底色还两套，
-   叠加「口径条」共 4 层同权重信息摞在表格之上 —— 这是"杂乱"的根源，不是信息太多。 */
+   叠加「口径条」共 4 层同权重信息摞在表格之上 —— 这是"杂乱"的根源，不是信息太多。
+   （「口径条」本身已随内嵌形态删除，2026-10-17：本页只有全库一个口径，没有要声明的范围。） */
 .oc-overview {
   display: flex;
   flex-direction: column;

@@ -1,25 +1,29 @@
 // 「订单成本」纯计算层的契约用例。
 //
 // 钉住的是**口径**而不是实现：
-//   · 成本按生效区间取（`effective_from <= 订单日` 最近一条）、同日 manual 优先、无命中回落最早一条；
-//   · 缺哪一环就标哪一环（无国家 / 无克重 / 运价表没这张卡 / 未识别款 / 该款无成本），**不静默按 0 算**；
+//   · 成本只认**订单行自己钉的两个快照**：实际进价 > 进价预估 > 缺（C2 两字段，2026-10-21）；
+//     0 / null 一律当"没有"—— 不按 0 算，也不回查产品当前价（否则改价会改写历史利润）；
+//   · 缺哪一环就标哪一环（无国家 / 无克重 / 运价表没这张卡 / 未识别款 / 该行没成本），**不静默按 0 算**；
 //   · 任一分项缺失时 `total` 为 null —— 这是本层最重要的一条：0 与"不知道"必须区分开，
 //     否则"缺成本的订单"会显示成"零成本的高利润"。
 import { describe, expect, it } from 'vitest';
 import type { RateTable } from '../src/lib/shipRate';
 import {
   bucketOfStatus,
+  buildSkuWeightIndex,
+  canonSizeKey,
   collectItemIds,
   computeOrderCosts,
   dateKey,
   pickRateSnapshot,
-  pickUnitCost,
+  positiveCents,
+  resolveWeightG,
   settleQtyKey,
+  skuSizeWeightKey,
   skuWeightKey,
   summarizeOrderCosts,
   trendOf,
   taxBearerOf,
-  type CostInterval,
 } from '../src/lib/orderCost';
 
 /** 最小合成运价表：US 一张 CNY 卡（0–2000g，perKg 80 + 挂号 8，最低计费 10g） */
@@ -113,6 +117,9 @@ function order(over: Partial<Parameters<typeof computeOrderCosts>[0]['orders'][n
     ddpCents: 2294,
     bizStatus: '交易完成',
     taxPlatform: '平台已税',
+    // 行级**进价预估**快照（C2）：默认 10 元 —— 成本类用例的 `gaps` 不会被「缺成本」淹掉。
+    // 需要"这一行没有成本"的用例显式给 `costCents: null`；需要"实际进价"的用例给 `actualCostCents`。
+    costCents: 1000,
     rawFields: baseRawFields(rawFields),
     ...rest,
   };
@@ -121,10 +128,6 @@ function order(over: Partial<Parameters<typeof computeOrderCosts>[0]['orders'][n
 /** 款色码 → 克重查表（与实现同一份建键函数；默认款 S1 / 黑 / L） */
 function skuW(g: number, code = 'S1', color = '黑', size = 'L'): Record<string, number> {
   return { [skuWeightKey(code, color, size)]: g };
-}
-
-function cost(over: Partial<CostInterval> = {}): CostInterval {
-  return { styleCode: 'S1', effectiveFrom: '2026-01-01', unitPrice: 10, source: 'purchase', ...over };
 }
 
 describe('dateKey', () => {
@@ -161,39 +164,23 @@ describe('collectItemIds', () => {
   });
 });
 
-describe('pickUnitCost：生效区间', () => {
-  const rows: CostInterval[] = [
-    cost({ effectiveFrom: '2026-01-01', unitPrice: 10 }),
-    cost({ effectiveFrom: '2026-06-01', unitPrice: 12 }),
-    cost({ effectiveFrom: '2026-09-01', unitPrice: 15 }),
-  ];
-
-  it('取 <= 业务日的最近一条', () => {
-    expect(pickUnitCost(rows, 'S1', '2026-08-31')).toBe(12);
-    expect(pickUnitCost(rows, 'S1', '2026-09-01')).toBe(15);
-    expect(pickUnitCost(rows, 'S1', '2026-12-31')).toBe(15);
+describe('positiveCents：0 / 空 / 非数一律算"没有"', () => {
+  it('正数原样返回', () => {
+    expect(positiveCents(1)).toBe(1);
+    expect(positiveCents(1234)).toBe(1234);
   });
 
-  it('早于最早区间 → 回落最早一条（不是缺成本）', () => {
-    expect(pickUnitCost(rows, 'S1', '2025-01-01')).toBe(10);
+  it('0 与负数不算有值（0 是"没维护"，不是"零成本"）', () => {
+    expect(positiveCents(0)).toBeNull();
+    expect(positiveCents(-5)).toBeNull();
   });
 
-  it('同生效日 manual 优先（读取侧定优先级）', () => {
-    const both: CostInterval[] = [
-      cost({ effectiveFrom: '2026-01-01', unitPrice: 10, source: 'purchase' }),
-      cost({ effectiveFrom: '2026-01-01', unitPrice: 99, source: 'manual' }),
-    ];
-    expect(pickUnitCost(both, 'S1', '2026-05-01')).toBe(99);
-  });
-
-  it('日期认不出时取最早一条', () => {
-    expect(pickUnitCost(rows, 'S1', '')).toBe(10);
-  });
-
-  it('未识别款 / 该款无任何成本行 → null（不是 0）', () => {
-    expect(pickUnitCost(rows, '', '2026-09-10')).toBeNull();
-    expect(pickUnitCost(rows, 'S9', '2026-09-10')).toBeNull();
-    expect(pickUnitCost([], 'S1', '2026-09-10')).toBeNull();
+  it('null / undefined / NaN / 非数文本 → null（不猜）', () => {
+    expect(positiveCents(null)).toBeNull();
+    expect(positiveCents(undefined)).toBeNull();
+    expect(positiveCents(Number.NaN)).toBeNull();
+    expect(positiveCents('abc')).toBeNull();
+    expect(positiveCents('')).toBeNull();
   });
 });
 
@@ -203,7 +190,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order()],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost({ unitPrice: 10 })],
     });
     expect(r.total).toBe(1);
     expect(r.ok).toBe(1);
@@ -231,7 +217,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
     const base = {
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost({ unitPrice: 10 })],
       platformFeeRatePercent: 10,
     };
     const open = order({ id: 1, orderNo: 'OPEN' });
@@ -260,7 +245,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order()],
       skuWeights: {},
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.rows[0].shipping).toBeNull();
     expect(r.rows[0].total).toBeNull();
@@ -282,12 +266,118 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
     expect(skuWeightKey('S1', '黑', '')).not.toBe('');
   });
 
+  // 尺码是两个世界的分界线：产品 SKU 写 `3XL`，同一批订单写 `XXXL`。
+  // 逐字节比 ⇒ 一条也命中不了，症状是"补了克重还是缺克重"（2026-10-19 真库取证）。
+  it('尺码比较归一：重复 X 与数字写法等价，XS 不被并进 S', () => {
+    expect(canonSizeKey('XXXL')).toBe('3XL');
+    expect(canonSizeKey('3xl')).toBe('3XL');
+    expect(canonSizeKey('xxl')).toBe('2XL');
+    expect(canonSizeKey('XXXXL')).toBe('4XL');
+    expect(canonSizeKey('5XL')).toBe('5XL');
+    expect(canonSizeKey('ＸＬ')).toBe('XL');
+    // 不猜：XS 与 S 是两个码，均码/70B 这类原样留着
+    expect(canonSizeKey('XS')).toBe('XS');
+    expect(canonSizeKey('均码')).toBe('均码');
+    expect(canonSizeKey('  ')).toBe('');
+    // 建键时生效：订单 `XXXL` 与产品 `3XL` 必须同键
+    expect(skuWeightKey('S1', '黑', 'XXXL')).toBe(skuWeightKey('S1', '黑', '3XL'));
+    expect(skuWeightKey('S1', '黑', 'XXXL')).not.toBe(skuWeightKey('S1', '黑', 'XXL'));
+  });
+
+  it('同款同码键：颜色留空，与带色键不相等（不能互相冒名）', () => {
+    expect(skuSizeWeightKey('S1', 'L')).toBe(skuWeightKey('S1', '', 'L'));
+    expect(skuSizeWeightKey('S1', 'L')).not.toBe(skuWeightKey('S1', '黑', 'L'));
+    expect(skuSizeWeightKey('', 'L')).toBe('');
+    expect(skuSizeWeightKey('S1', '')).toBe('');
+  });
+
+  it('克重两级：精确款色码优先，未命中才用同款同码；都没有 → null', () => {
+    const both = { ...skuW(275, 'S1', '黑', 'L'), ...{ [skuSizeWeightKey('S1', 'L')]: 320 } };
+    // ① 精确命中，不被"同款同码"顶掉
+    expect(resolveWeightG({ styleCode: 'S1', color: '黑', size: 'L' }, both)).toBe(275);
+    // ② 平台色名（产品库里没有这个色）→ 落到同款同码
+    expect(resolveWeightG({ styleCode: 'S1', color: '7', size: 'L' }, both)).toBe(320);
+    // ③ 没有该码 → 仍是 null（不拿别的码顶）
+    expect(resolveWeightG({ styleCode: 'S1', color: '7', size: 'M' }, both)).toBeNull();
+    // ④ 只有带色键、色对不上 → null（同款同码键不存在就不许瞎套）
+    expect(resolveWeightG({ styleCode: 'S1', color: '7', size: 'L' }, skuW(275))).toBeNull();
+    expect(resolveWeightG(null, both)).toBeNull();
+  });
+
+  it('平台色名的订单靠同款同码把运费算出来（不再因"颜色对不上"整单缺数）', () => {
+    const r = computeOrderCosts({
+      orders: [order({ color: '7', size: 'XXXL' })],
+      skuWeights: { [skuSizeWeightKey('S1', '3XL')]: 275 },
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].weightG).toBe(275);
+    expect(r.rows[0].shipping).toBeCloseTo(30, 2);
+    expect(r.rows[0].gaps).toEqual([]);
+  });
+
+  // 折叠（不加色也能取到克重）的**安全边界**：只有"这款这码各色确实同重"才成立。
+  // 守的是最贵的一类错：拿别的色的重量报出一个看起来正常的运费。
+  describe('buildSkuWeightIndex：折叠只在"各色同重"确实成立时', () => {
+    const codeOf = new Map<number, string>([[1, 'S1']]);
+    const v = (color: string, size: string, weightG: number, status = 'active') => ({
+      productId: 1,
+      color,
+      size,
+      weightG,
+      status,
+    });
+
+    it('各色都填了且同重 → 产出同款同码键，且不顶掉精确键', () => {
+      const idx = buildSkuWeightIndex([v('黑', 'L', 300), v('白', 'L', 300)], codeOf);
+      expect(idx[skuWeightKey('S1', '黑', 'L')]).toBe(300);
+      expect(idx[skuWeightKey('S1', '白', 'L')]).toBe(300);
+      expect(idx[skuSizeWeightKey('S1', 'L')]).toBe(300);
+    });
+
+    it('有一个色没填 → **不折叠**（免得把"没维护"当成"同重"）', () => {
+      const idx = buildSkuWeightIndex([v('黑', 'L', 300), v('白', 'L', 0)], codeOf);
+      expect(idx[skuSizeWeightKey('S1', 'L')]).toBeUndefined();
+      expect(resolveWeightG({ styleCode: 'S1', color: '白', size: 'L' }, idx)).toBeNull();
+    });
+
+    it('各色不同重 → **不折叠**（平台色名对不上时宁可缺克重，也不报错数）', () => {
+      const idx = buildSkuWeightIndex([v('黑', 'L', 300), v('白', 'L', 380)], codeOf);
+      expect(idx[skuSizeWeightKey('S1', 'L')]).toBeUndefined();
+      expect(resolveWeightG({ styleCode: 'S1', color: '黑', size: 'L' }, idx)).toBe(300);
+    });
+
+    it('已归档的变体不参与折叠判定（不发货），但它的精确键照样生效', () => {
+      const idx = buildSkuWeightIndex(
+        [v('黑', 'L', 300), v('白', 'L', 300), v('灰', 'L', 999, 'archived')],
+        codeOf,
+      );
+      expect(idx[skuSizeWeightKey('S1', 'L')]).toBe(300);
+      expect(idx[skuWeightKey('S1', '灰', 'L')]).toBe(999);
+    });
+
+    it('颜色为空的行不建精确键（否则它自己就成了"同款同码"键，绕过折叠判定）', () => {
+      const idx = buildSkuWeightIndex([v('', 'L', 300), v('黑', 'L', 380), v('白', 'L', 500)], codeOf);
+      expect(idx[skuSizeWeightKey('S1', 'L')]).toBeUndefined();
+      expect(resolveWeightG({ styleCode: 'S1', color: '7', size: 'L' }, idx)).toBeNull();
+    });
+
+    it('款编码为空 / 产品不在 codeOf 里 → 一个键都不建（不拿别的款顶上）', () => {
+      expect(buildSkuWeightIndex([v('黑', 'L', 300)], new Map())).toEqual({});
+      expect(buildSkuWeightIndex([v('黑', 'L', 300)], new Map([[1, '  ']]))).toEqual({});
+      expect(buildSkuWeightIndex(null, codeOf)).toEqual({});
+    });
+
+    it('尺码写法不同也算同一码（订单 XXXL vs 产品 3XL）', () => {
+      const idx = buildSkuWeightIndex([v('黑', '3XL', 420), v('白', '3XL', 420)], codeOf);
+      expect(resolveWeightG({ styleCode: 'S1', color: '7', size: 'XXXL' }, idx)).toBe(420);
+    });
+  });
+
   it('克重按**款色码**取（唯一来源）：命中 → 算得出来', () => {
     const r = computeOrderCosts({
       orders: [order({ color: '黑', size: 'L' })],
       skuWeights: skuW(275),
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     const row = r.rows[0];
     expect(row.weightG).toBe(275);
@@ -305,7 +395,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       ],
       skuWeights: { ...skuW(100, 'S1', '黑', 'L'), ...skuW(400, 'S1', '白', 'M') },
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.rows[0].weightG).toBe(100);
     expect(r.rows[1].weightG).toBe(400);
@@ -318,7 +407,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order({ color: '黑', size: 'L' })],
       skuWeights: skuW(275, 'S2', '黑', 'L'), // 是另一款
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.rows[0].weightG).toBeNull();
     expect(r.rows[0].gaps).toEqual(['weight']);
@@ -329,7 +417,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order({ rawFields: { 商品ID: 'ITEM1' } })],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.rows[0].gaps).toEqual(['country']);
     expect(r.rows[0].total).toBeNull();
@@ -340,7 +427,6 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order()],
       skuWeights: skuW(100),
       rateTable: null,
-      costs: [cost()],
     });
     expect(r.rows[0].shipping).toBeNull();
     expect(r.rows[0].gaps).toEqual(['rate']);
@@ -352,18 +438,16 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [order({ rawFields: { 收货国家: '火星', 商品ID: 'ITEM1' } })],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.rows[0].gaps).toEqual(['rate']);
     expect(r.rows[0].shippingReason).toBe('unknownCountry');
   });
 
-  it('订单行未识别款：标 style + cost + weight（克重按款色码取，认不出款就查不到 → 如实标缺）', () => {
+  it('订单行未识别款且没钉成本：标 style + cost + weight（克重按款色码取，认不出款就查不到 → 如实标缺）', () => {
     const r = computeOrderCosts({
-      orders: [order({ styleCode: '' })],
+      orders: [order({ styleCode: '', costCents: null })],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     // 2026-10-01：克重的唯一来源是 SKU（款×色×码）—— 款都没识别出来就无从取克重，
     // 于是运费也缺（旧模型还能靠"商品ID 克重"兜一层，那条链已删）。
@@ -373,12 +457,11 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
     expect(r.rows[0].total).toBeNull();
   });
 
-  it('款识别了但该款没有成本行：只标 cost', () => {
+  it('款识别了但行上没钉成本（预估/实际都空）：只标 cost', () => {
     const r = computeOrderCosts({
-      orders: [order()],
+      orders: [order({ costCents: null })],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost({ styleCode: 'S9' })],
     });
     expect(r.rows[0].gaps).toEqual(['cost']);
   });
@@ -388,11 +471,10 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
       orders: [
         order({ id: 1 }),
         order({ id: 2, rawFields: { 商品ID: 'ITEM1' } }), // 缺国家
-        order({ id: 3, styleCode: '' }), // 缺款
+        order({ id: 3, styleCode: '', costCents: null }), // 缺款（且没钉成本）
       ],
       skuWeights: skuW(100),
       rateTable: tinyTable(),
-      costs: [cost()],
     });
     expect(r.total).toBe(3);
     expect(r.ok).toBe(1);
@@ -404,7 +486,7 @@ describe('computeOrderCosts：逐行结论与缺口', () => {
   });
 
   it('空输入不炸', () => {
-    const r = computeOrderCosts({ orders: [], skuWeights: {}, rateTable: null, costs: [] });
+    const r = computeOrderCosts({ orders: [], skuWeights: {}, rateTable: null });
     expect(r.rows).toEqual([]);
     expect(r.total).toBe(0);
     expect(r.ok).toBe(0);
@@ -421,7 +503,6 @@ describe('利润层：收入 / 税 / 毛利 / 分桶', () => {
   const base = {
     skuWeights: skuW(100),
     rateTable: tinyTable(),
-    costs: [cost({ unitPrice: 10 })],
   };
 
   it('平台已税 → 税记确定的 0（不是"未知"），毛利 = 收入 − 运费 − 成本', () => {
@@ -449,11 +530,30 @@ describe('利润层：收入 / 税 / 毛利 / 分桶', () => {
     expect(row.grossProfit).toBeNull();
   });
 
-  it('缺订单金额 → 标 revenue 缺口、毛利为 null', () => {
-    const r = computeOrderCosts({ ...base, orders: [order({ amountCents: null })] });
+  it('缺订单金额（导入单）→ 标 revenue 缺口、毛利为 null', () => {
+    const r = computeOrderCosts({ ...base, orders: [order({ source: 'import', amountCents: null })] });
     expect(r.rows[0].revenue).toBeNull();
     expect(r.rows[0].gaps).toContain('revenue');
+    expect(r.rows[0].gaps).not.toContain('fx');
     expect(r.rows[0].grossProfit).toBeNull();
+  });
+
+  it('缺汇率（采集单）与缺收入（导入单）**分开标** —— 两者补法不同，不能压成一档', () => {
+    // 非空转：两个输入只差 `source`，期望的缺口必须不同；
+    // 若实现不看 source（或把两档并成一个 key），下面任一条断言都会红。
+    const r = computeOrderCosts({
+      ...base,
+      orders: [
+        order({ id: 1, source: 'collect', amountCents: null }),
+        order({ id: 2, source: 'import', amountCents: null }),
+      ],
+    });
+    expect(r.rows[0].gaps).toContain('fx');
+    expect(r.rows[0].gaps).not.toContain('revenue');
+    expect(r.rows[1].gaps).toContain('revenue');
+    expect(r.rows[1].gaps).not.toContain('fx');
+    expect(r.gapCounts.fx).toBe(1);
+    expect(r.gapCounts.revenue).toBe(1);
   });
 
   it('关闭单单独成桶，且**不进**利润合计', () => {
@@ -499,7 +599,7 @@ describe('bucketOfStatus / taxBearerOf（判定口径在主进程只解析原文
 // ─────────────────────────────────────────────────────────── 运价表生效区间（历史可复算）
 //
 // 背景：报价单会更新。只留"当前那份"的话，历史订单的预测运费会随报价单更新而变 —— 预测不可复算。
-// 口径同 `ae_cost_map`：`effective_from <= 订单日` 最近一份；早于所有快照 → 回落最早一份。
+// 结算口径：`effective_from <= 订单日` 最近一份；早于所有快照 → 回落最早一份。
 describe('运价表快照：按订单日期取当时那份', () => {
   const snap = (effectiveFrom: string, ratePerKg: number) => ({
     effectiveFrom,
@@ -524,7 +624,6 @@ describe('运价表快照：按订单日期取当时那份', () => {
       ],
       skuWeights: skuW(100),
       rateTable: null,
-      costs: [cost({ unitPrice: 10 })],
       rateSnapshots: [snap('2026-06-01', 80), snap('2026-09-01', 100)],
     });
     // 100g：80/kg → 8 + 挂号 8 = 16；100/kg → 10 + 8 = 18
@@ -541,10 +640,93 @@ describe('运价表快照：按订单日期取当时那份', () => {
       orders: [order({ orderTime: '2026-09-15 10:00:00' })],
       skuWeights: skuW(100),
       rateTable: tableWithRate(200), // 单表故意设成天价
-      costs: [cost()],
       rateSnapshots: [snap('2026-09-01', 100)],
     });
     expect(r.rows[0].shipping).toBeCloseTo(18, 2); // 用的是快照，不是单表
+  });
+});
+
+// ─────────────────────────────────────────────────────────── 包裹运费（阶段 C1：有包用真值）
+//
+// 为什么：B2 让用户按包裹记运费，但利润引擎一直只认运价表估算 ⇒ 用户填了实付、利润不动。
+// 口径：**订单有包裹 ⇒ 运费用包裹合计**（按件数摊到各行），缺运费就标缺、**不回落估算**
+// （回落会让"填没填"看不出来，且估算会盖掉真值）。
+describe('包裹运费：有包用真值，缺则标缺不回落（C1）', () => {
+  const parcel = (over: Partial<{ count: number; shipCents: number | null; weightG: number | null; shipMissing: number; weightMissing: number }> = {}) => ({
+    count: 1,
+    shipCents: 3000,
+    weightG: 1000,
+    shipMissing: 0,
+    weightMissing: 0,
+    ...over,
+  });
+
+  it('有包裹：用包裹合计（30 元），不再按运价表算（那张表会算成 16）', () => {
+    const r = computeOrderCosts({
+      orders: [order()],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+      parcelTotals: { NO1: parcel() },
+    });
+    expect(r.rows[0].shipping).toBe(30);
+    expect(r.rows[0].shippingSource).toBe('parcel');
+    expect(r.rows[0].shippingReason).toBe('');
+    expect(r.rows[0].rateVersion).toBe('');
+    expect(r.rows[0].gaps).not.toContain('parcel');
+  });
+
+  it('同单多行：包裹运费按**件数**分摊，各行之和 == 整单合计', () => {
+    const r = computeOrderCosts({
+      orders: [
+        order({ id: 1, orderNo: 'NO1', qty: 3 }),
+        order({ id: 2, orderNo: 'NO1', qty: 1, rawFields: baseRawFields({ 商品信息: infoBlock(1) }) }),
+      ],
+      skuWeights: skuW(100),
+      rateTable: null,
+      parcelTotals: { NO1: parcel({ shipCents: 4000 }) },
+    });
+    expect(r.rows.map((x) => x.shipping)).toEqual([30, 10]);
+    expect(r.shippingTotal).toBe(40);
+  });
+
+  it('分摊除不尽：末行吃残差，合计仍与包裹总额精确相等', () => {
+    const r = computeOrderCosts({
+      orders: [1, 2, 3].map((id) => order({ id, orderNo: 'NO1' })),
+      skuWeights: skuW(100),
+      rateTable: null,
+      parcelTotals: { NO1: parcel({ shipCents: 1001 }) },
+    });
+    expect(r.rows.map((x) => x.shipping)).toEqual([3.34, 3.34, 3.33]);
+    expect(r.shippingTotal).toBe(10.01);
+  });
+
+  it('包裹缺运费：该行标「缺包裹运费」且**不回落运价表**（即便有表、有克重/国家）', () => {
+    const r = computeOrderCosts({
+      orders: [order()],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+      parcelTotals: { NO1: parcel({ count: 2, shipCents: null, shipMissing: 1 }) },
+    });
+    expect(r.rows[0].shipping).toBeNull();
+    expect(r.rows[0].shippingSource).toBe('parcel');
+    expect(r.rows[0].shippingReason).toBe('parcelShipMissing');
+    expect(r.rows[0].gaps).toContain('parcel');
+    // 没有回落 ⇒ 不应该再冒出"缺运价表 / 缺国家 / 缺克重"
+    expect(r.rows[0].gaps).not.toContain('rate');
+    expect(r.gapCounts.parcel).toBe(1);
+    expect(r.shippingTotal).toBe(0);
+  });
+
+  it('没有包裹的单：仍按运价表估算，来源标 rate', () => {
+    const r = computeOrderCosts({
+      orders: [order()],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+      parcelTotals: {},
+    });
+    expect(r.rows[0].shipping).toBeCloseTo(16, 2);
+    expect(r.rows[0].shippingSource).toBe('rate');
+    expect(r.rows[0].gaps).not.toContain('parcel');
   });
 });
 
@@ -557,7 +739,6 @@ describe('平台费率（近似）', () => {
   const base = {
     skuWeights: skuW(100),
     rateTable: tinyTable(),
-    costs: [cost({ unitPrice: 10 })],
     orders: [order()],
   };
 
@@ -605,7 +786,6 @@ describe('双轨：预测 / 精准', () => {
   const base = {
     skuWeights: skuW(100),
     rateTable: tinyTable(),
-    costs: [cost({ unitPrice: 10 })],
     orders: [order()],
   };
 
@@ -642,8 +822,7 @@ describe('双轨：预测 / 精准', () => {
   it('结算数据在、但成本/运费缺 → 精准毛利为 null（不拿净收入当毛利）', () => {
     const r = computeOrderCosts({
       ...base,
-      orders: [order({ styleCode: '' })],
-      costs: [],
+      orders: [order({ styleCode: '', costCents: null })],
       settleByOrder: { NO1: { netIncomeCents: 9086 } },
     });
     expect(r.rows[0].tier).toBe('precise');
@@ -665,7 +844,7 @@ describe('双轨：预测 / 精准', () => {
 // 口径两条：①**只统计非关闭单**（与汇总同口径；实测某批 2/3 是关闭单，混进每组都会虚高）；
 //          ②**未识别款 / 缺国家 / 缺成本的行各自成组，不丢**（丢了会让"合计对不上"查不出来）。
 describe('summarizeOrderCosts', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
 
   it('按款汇总：收入/成本/毛利 + 精准毛利', () => {
     const r = computeOrderCosts({
@@ -674,9 +853,8 @@ describe('summarizeOrderCosts', () => {
       orders: [
         order({ id: 1, styleCode: 'S1' }),
         order({ id: 2, styleCode: 'S1', orderNo: 'NO2' }),
-        order({ id: 3, styleCode: 'S2', orderNo: 'NO3', styleColor: '蓝' }),
+        order({ id: 3, styleCode: 'S2', orderNo: 'NO3', styleColor: '蓝', costCents: 2000 }),
       ],
-      costs: [cost({ styleCode: 'S1', unitPrice: 10 }), cost({ styleCode: 'S2', unitPrice: 20 })],
       settleByOrder: { NO2: { netIncomeCents: 9086 } },
     });
     const byStyle = summarizeOrderCosts(r.rows, 'style');
@@ -734,10 +912,9 @@ describe('summarizeOrderCosts', () => {
       ...base,
       skuWeights: { ...skuW(100, 'LOW'), ...skuW(100, 'HIGH') },
       orders: [
-        order({ id: 1, styleCode: 'LOW' }),
-        order({ id: 2, orderNo: 'NO2', styleCode: 'HIGH' }),
+        order({ id: 1, styleCode: 'LOW', costCents: 10000 }),
+        order({ id: 2, orderNo: 'NO2', styleCode: 'HIGH', costCents: 100 }),
       ],
-      costs: [cost({ styleCode: 'LOW', unitPrice: 100 }), cost({ styleCode: 'HIGH', unitPrice: 1 })],
     });
     const g = summarizeOrderCosts(r.rows, 'style');
     expect(g[0].key).toBe('HIGH'); // 成本低 → 毛利高 → 排前面
@@ -751,7 +928,7 @@ describe('summarizeOrderCosts', () => {
 });
 
 describe('summarizeOrderCosts：按店铺维度', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
 
   it('按店铺分组；未归属的自成一组（不丢行）', () => {
     const r = computeOrderCosts({
@@ -775,7 +952,7 @@ describe('summarizeOrderCosts：按店铺维度', () => {
 // SKU 维度是**取证用**的：色/码到底填得全不全，决定"拣货能不能做准"。缺哪段就把哪段写在 key 里，
 // 于是"缺色 3 组"在统计表上肉眼可见（而不是静默合并成一组）。
 describe('summarizeOrderCosts：按 SKU / 按供应商', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
 
   it('SKU 维度：同款同色同码合成一组；缺色/码各自成组并标出来', () => {
     const r = computeOrderCosts({
@@ -829,7 +1006,7 @@ describe('summarizeOrderCosts：按 SKU / 按供应商', () => {
 //      把合计给到每一行会翻倍）；② 订单报表「商品信息」块内的 `商品数量`；③ 都没有 → 按 1 件并标缺。
 // 同时钉住一条**刻意的口径**：件数不参与成本/运费/毛利算术（多件合并计费仍是开放项）。
 describe('件数口径', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
   // 无件数：`商品信息` 显式给空串（列在但没有值 —— 与"列不存在"同一条判据：取不到就不猜）
   const noQtyFields = { 收货国家: '美国', 商品ID: 'ITEM1', 商品信息: '' };
 
@@ -937,7 +1114,7 @@ describe('件数口径', () => {
 // 且采集侧"没有代征代缴列"这个缺口不能用"猜一个默认"糊过去 —— 默认只作用于**自己没说**的行，
 // 并且**写在界面上**（`taxDefault`），行自己的声明永远优先。
 describe('来源标记与税口径默认（C1 合并）', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
 
   it('逐行带 source：缺省按 import；显式 collect 标出来', () => {
     const r = computeOrderCosts({
@@ -991,7 +1168,7 @@ describe('来源标记与税口径默认（C1 合并）', () => {
 });
 
 describe('件数：源直接给的件数（采集行真值）', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
 
   it('行带 qty → 用它（来源 order），**不去解析文本也不标缺件数**', () => {
     const r = computeOrderCosts({
@@ -1031,7 +1208,7 @@ describe('件数：源直接给的件数（采集行真值）', () => {
 
 // ─────────────────────────────────────────────────────────── 时间趋势（C9：补上岛「利润统计」的独有内容）
 describe('trendOf：按月 / 按日（只统计非关闭单）', () => {
-  const base = { skuWeights: skuW(100), rateTable: tinyTable(), costs: [cost({ unitPrice: 10 })] };
+  const base = { skuWeights: skuW(100), rateTable: tinyTable() };
   const rowsOf = (orders: ReturnType<typeof order>[]) => computeOrderCosts({ ...base, orders }).rows;
 
   it('按月归档：收入/成本/毛利逐桶合计，只含非关闭单', () => {
@@ -1075,5 +1252,110 @@ describe('trendOf：按月 / 按日（只统计非关闭单）', () => {
   it('空输入 / null 不炸', () => {
     expect(trendOf([], 'month')).toEqual([]);
     expect(trendOf(null, 'day')).toEqual([]);
+  });
+});
+
+// ───────────────────────────────────────── 行级两字段：实际 > 预估 > 缺（C2，2026-10-21）
+//
+// 成本**只**取订单行自己钉的两个快照，次序不能反：
+//   · `actualCostCents`（`oi_order_items.actual_cost_cents`，拿货落账回写的实付真值）先赢；
+//   · 没有实际进价才用 `costCents`（`oi_order_items.cost_cents`，归类确认时按产品当时价钉的预估）；
+//   · 两者都没有 → 缺，**不按 0 算、也不回查产品当前价**（回查会让改价改写历史利润）。
+// 克重同理：`oi_order_items.weight_g`（确认时钉的快照）优先于现查产品库 SKU。
+describe('computeOrderCosts：行级快照（A7 / C2）', () => {
+  it('克重快照优先：行上有 weightG 就不查 SKU（干扰项 900g 不该生效）', () => {
+    const r = computeOrderCosts({
+      orders: [order({ weightG: 100 })],
+      skuWeights: skuW(900),
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].weightG).toBe(100);
+    expect(r.rows[0].weightSource).toBe('snapshot');
+    expect(r.rows[0].shipping).toBeCloseTo(16, 2); // 100g × 80/kg = 8 + 挂号 8
+  });
+
+  it('快照缺失或为 0 → 回落 SKU 查表（0 不是"零克重"）', () => {
+    for (const w of [null, undefined, 0]) {
+      const r = computeOrderCosts({
+        orders: [order({ weightG: w })],
+        skuWeights: skuW(100),
+        rateTable: tinyTable(),
+      });
+      expect(r.rows[0].weightG).toBe(100);
+      expect(r.rows[0].weightSource).toBe('lookup');
+    }
+  });
+
+  it('实际进价优先：两个字段都有 → 用实际进价（预估只作干扰）', () => {
+    const r = computeOrderCosts({
+      orders: [order({ costCents: 800, actualCostCents: 1200 })],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].productCost).toBe(12);
+    expect(r.rows[0].costSource).toBe('snapshot');
+    expect(r.rows[0].gaps).toEqual([]);
+  });
+
+  it('没有实际进价 → 用进价预估（costSource=estimate）', () => {
+    const r = computeOrderCosts({
+      orders: [order({ costCents: 1200 })],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].productCost).toBe(12);
+    expect(r.rows[0].costSource).toBe('estimate');
+    expect(r.rows[0].gaps).toEqual([]);
+  });
+
+  it('实际进价为 0 / 空 → 回落预估（0 不是"免费"，也不遮蔽预估）', () => {
+    for (const a of [0, null, undefined]) {
+      const r = computeOrderCosts({
+        orders: [order({ costCents: 900, actualCostCents: a })],
+        skuWeights: skuW(100),
+        rateTable: tinyTable(),
+      });
+      expect(r.rows[0].productCost).toBe(9);
+      expect(r.rows[0].costSource).toBe('estimate');
+    }
+  });
+
+  it('两个字段都空 → 标「缺成本」且 costSource=none（不按 0 算）', () => {
+    for (const c of [0, null, undefined]) {
+      const r = computeOrderCosts({
+        orders: [order({ costCents: c, actualCostCents: c })],
+        skuWeights: skuW(100),
+        rateTable: tinyTable(),
+      });
+      expect(r.rows[0].productCost).toBeNull();
+      expect(r.rows[0].costSource).toBe('none');
+      expect(r.rows[0].gaps).toContain('cost');
+      expect(r.rows[0].total).toBeNull();
+    }
+  });
+
+  it('成本快照不依赖款编码：行上钉了价，未识别款也照样有成本（只影响克重/运费）', () => {
+    // C2 之前成本按款去价目表查，款认不出来就必然缺；现在价钉在**行**上，
+    // 款识别与成本是两件事 —— 这条守住"别再偷偷回查款级表"。
+    const r = computeOrderCosts({
+      orders: [order({ styleCode: '', costCents: 1500 })],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].productCost).toBe(15);
+    expect(r.rows[0].costSource).toBe('estimate');
+    expect(r.rows[0].gaps).toContain('style');
+    expect(r.rows[0].gaps).not.toContain('cost');
+  });
+
+  it('不改写历史：同样的行，产品当前价（无论多少）不参与本层计算', () => {
+    // 本层入参根本没有"产品当前价"这一项 —— 这个用例是**结构性**的：
+    // 若以后有人加回 `costs` / `productCosts` 之类的入口，这里补的干扰项才有意义。
+    const r = computeOrderCosts({
+      orders: [order({ costCents: 1200 })],
+      skuWeights: skuW(100),
+      rateTable: tinyTable(),
+    });
+    expect(r.rows[0].productCost).toBe(12);
   });
 });

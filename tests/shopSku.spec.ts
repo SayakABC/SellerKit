@@ -12,10 +12,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateQueue,
+  bindingKey,
   buildQueueView,
   extractSkuFields,
-  mappingKey,
+  normImageUrl,
   pickField,
+  skuColorsByImage,
   toSkuKey,
   type SkuOrderRow,
 } from '../electron/shopSku';
@@ -45,29 +47,28 @@ describe('toSkuKey：商品ID 与店铺名同一套归一口径', () => {
   });
 });
 
-describe('mappingKey：复合键不撞车', () => {
-  it('同平台同店同商品 → 同键（商品ID 与平台都走归一）', () => {
-    expect(mappingKey('amazon', 3, 'B0X1')).toBe(mappingKey('amazon', 3, ' B0X1 '));
-    // 平台的写入口有两处（sk_shops.platform / pl_shop_sku.platform），只 trim 的一侧会与折叠空白的一侧对不上
-    expect(mappingKey('shopee  tw', 3, 'B0X1')).toBe(mappingKey('shopee tw', 3, 'B0X1'));
-    expect(mappingKey(' shopee tw ', 3, 'B0X1')).toBe(mappingKey('shopee tw', 3, 'B0X1'));
+describe('bindingKey：映射身份 = (店铺, 商品ID)', () => {
+  it('同店同商品 → 同键（商品ID 走归一）', () => {
+    expect(bindingKey(3, 'B0X1')).toBe(bindingKey(3, ' B0X1 '));
+    expect(bindingKey(3, 'B0X1')).toBe(bindingKey('3', 'B0X1')); // 入参来自 SQL / 表单，类型不稳定
   });
 
-  it('平台 / 店铺 / 商品 任一不同 → 不同键', () => {
-    expect(mappingKey('amazon', 3, 'B0X1')).not.toBe(mappingKey('shopee', 3, 'B0X1'));
-    expect(mappingKey('amazon', 3, 'B0X1')).not.toBe(mappingKey('amazon', 4, 'B0X1'));
-    expect(mappingKey('amazon', 3, 'B0X1')).not.toBe(mappingKey('amazon', 3, 'B0X2'));
+  it('店铺 / 商品 任一不同 → 不同键（不跨店复用）', () => {
+    expect(bindingKey(3, 'B0X1')).not.toBe(bindingKey(4, 'B0X1'));
+    expect(bindingKey(3, 'B0X1')).not.toBe(bindingKey(3, 'B0X2'));
   });
 
-  it('分隔符防撞：空平台 + 店铺 12 不与「平台 1 + 店铺 2」同键', () => {
-    expect(mappingKey('', 12, 'A')).not.toBe(mappingKey('1', 2, 'A'));
+  it('⭐ 平台**不在**键里：同一 (店, 商品) 只有一个身份（这是 2026-10-20 的设计）', () => {
+    // 平台是店铺行的属性，映射表那列只是写入时的副本。副本当键 ⇒ 店铺登记里改一次平台，
+    // 该店全部映射一条都不命中，用户只能全量重配。故本函数**不收平台参数**（类型层面就不给机会）；
+    // 行为侧的守卫在下面「队列：改过平台仍算已关联」那条。
+    expect(bindingKey.length).toBe(2);
   });
 
-  it('分隔符必须是文本里不可能出现的字符（带连字符的平台/商品ID 不得撞键）', () => {
-    // 分隔符若用 '-'：`'a' + 1 + '2-b'` 与 `'a-1' + 2 + 'b'` 都拼成 "a-1-2-b" —— 两个不同
+  it('分隔符必须是文本里不可能出现的字符（带连字符的商品ID 不得撞键）', () => {
+    // 分隔符若用 '-'：`'' + 1 + '2-b'` 与 `'' + 2 + 'b'` 这类拼接会撞成同一个串 —— 两个不同
     // 的 (店, 商品) 共用一个映射，症状是"关联到了别的商品"且完全查不出原因。
-    // 平台名带连字符（shopee-tw）与商品ID 带连字符都是现实写法，故这条必须钉住。
-    expect(mappingKey('a', 1, '2-b')).not.toBe(mappingKey('a-1', 2, 'b'));
+    expect(bindingKey(1, '2-b')).not.toBe(bindingKey(2, 'b'));
   });
 });
 
@@ -185,7 +186,21 @@ describe('buildQueueView：归类与已关联剔除', () => {
       manualShopIdByKey: new Map([['店A', 3]]),
       autoShopByKey: new Map(),
       shopsById,
-      mappedKeys: new Set([mappingKey('amazon', 3, 'X1')]),
+      mappedKeys: new Set([bindingKey(3, 'X1')]),
+    });
+    expect(r.rows).toHaveLength(0);
+    expect(r.stats.mapped).toBe(1);
+  });
+
+  it('⭐ 店铺改过平台仍算已关联（键里没有平台）—— 改平台不该让人重配一遍', () => {
+    const r = buildQueueView({
+      orders: [row('店A', { 商品ID: 'X1' })],
+      manualShopIdByKey: new Map([['店A', 3]]),
+      autoShopByKey: new Map(),
+      // 店铺已改成 temu，而映射行是当年在 amazon 下写的：键若含平台，这里就查不中 ⇒
+      // 该商品被当成"未关联"重新塞回待办（用户必须先发现、再全量重配）
+      shopsById: new Map([[3, { name: '店铺3', platform: 'temu' }]]),
+      mappedKeys: new Set([bindingKey(3, 'X1')]),
     });
     expect(r.rows).toHaveLength(0);
     expect(r.stats.mapped).toBe(1);
@@ -267,10 +282,73 @@ describe('buildQueueView：归类与已关联剔除', () => {
       autoShopByKey: new Map(),
       shopsById,
       // 映射只存在于 amazon/3 下 —— shopee/4 必须仍然进队列
-      mappedKeys: new Set([mappingKey('amazon', 3, 'X1')]),
+      mappedKeys: new Set([bindingKey(3, 'X1')]),
     });
     expect(r.rows).toHaveLength(1);
     expect(r.stats.mapped).toBe(0);
+  });
+
+  it('店铺原文认不出、但商品ID 能反查采集快照 → 按已认店处理（不再报"店铺未归一"）', () => {
+    const r = buildQueueView({
+      orders: [row('Shop1105671703 Store', { 商品ID: 'X1' })],
+      manualShopIdByKey: new Map(),
+      autoShopByKey: new Map(),
+      shopsById,
+      mappedKeys: new Set(),
+      resolveShopByItemId: (itemId) => (itemId === 'X1' ? 4 : 0),
+    });
+    expect(r.rows[0]).toMatchObject({
+      status: 'unmapped',
+      shopId: 4,
+      shopName: '店铺4',
+      platform: 'shopee',
+      autoShopId: 0,
+    });
+    expect(r.stats.shopUnresolved).toBe(0);
+  });
+
+  it('反查认店后若已有该店生效映射 → 计入 mapped，**不得**留在待办里', () => {
+    // 这条是"事后修补"实现抓不住的：剔除发生在 buildQueueView 内部，必须先认店再拼 bindingKey
+    const r = buildQueueView({
+      orders: [row('Shop1105671703 Store', { 商品ID: 'X1' })],
+      manualShopIdByKey: new Map(),
+      autoShopByKey: new Map(),
+      shopsById,
+      mappedKeys: new Set([bindingKey(4, 'X1')]),
+      resolveShopByItemId: () => 4,
+    });
+    expect(r.rows).toHaveLength(0);
+    expect(r.stats.mapped).toBe(1);
+  });
+
+  it('人工归一优先：原文已归一就不再走反查（两个来源不许打架，也不白查）', () => {
+    let asked = 0;
+    const r = buildQueueView({
+      orders: [row('店A', { 商品ID: 'X1' })],
+      manualShopIdByKey: new Map([['店A', 3]]),
+      autoShopByKey: new Map(),
+      shopsById,
+      mappedKeys: new Set(),
+      resolveShopByItemId: () => {
+        asked += 1;
+        return 4;
+      },
+    });
+    expect(asked).toBe(0);
+    expect(r.rows[0].shopId).toBe(3);
+  });
+
+  it('反查不出（0 = 没采到过 / 多店歧义）→ 仍报 shopUnresolved，绝不猜一个店', () => {
+    const r = buildQueueView({
+      orders: [row('店C', { 商品ID: 'X1' })],
+      manualShopIdByKey: new Map(),
+      autoShopByKey: new Map(),
+      shopsById,
+      mappedKeys: new Set(),
+      resolveShopByItemId: () => 0,
+    });
+    expect(r.rows[0]).toMatchObject({ status: 'shopUnresolved', shopId: 0, platform: '' });
+    expect(r.stats.shopUnresolved).toBe(1);
   });
 
   it('stats 对账：unmapped + shopUnresolved + mapped = 聚合组数', () => {
@@ -286,7 +364,7 @@ describe('buildQueueView：归类与已关联剔除', () => {
       ]),
       autoShopByKey: new Map(),
       shopsById,
-      mappedKeys: new Set([mappingKey('amazon', 3, 'X1')]),
+      mappedKeys: new Set([bindingKey(3, 'X1')]),
     });
     const s = r.stats;
     expect(s.unmapped + s.shopUnresolved + s.mapped).toBe(s.groups);
@@ -316,5 +394,62 @@ describe('buildQueueView：归类与已关联剔除', () => {
     // 而单看行数仍然"返回了 limit 行"，看起来完全正常。
     expect(r.rows[0].itemId).toBe('X1');
     expect(r.rows[0].orderCount).toBe(2);
+  });
+});
+
+// 按图定色（2026-10-19）：订单报表的「产品图片链接」= 逐单 SKU 图（真实库验过：
+// 同一商品ID 的 9 条订单对应 4~6 张不同图），故图能反查颜色。
+// 立足点同前：**定不了色是安全的（回落未分类，人看一眼），定错色是不可逆的（发错货）**。
+describe('normImageUrl：只剥"不属于图本身"的部分', () => {
+  it('剥查询串 / 锚点 / 尺寸后缀', () => {
+    const base = 'https://ae-pic-a1.aliexpress-media.com/kf/Scb31.jpg';
+    expect(normImageUrl(`${base}?x-oss-process=image/resize,w_220`)).toBe(base);
+    expect(normImageUrl(`${base}#frag`)).toBe(base);
+    // CDN 缩略图形态：`原图.jpg_220x220.jpg`
+    expect(normImageUrl(`${base}_220x220.jpg`)).toBe(base);
+    expect(normImageUrl(`  ${base}  `)).toBe(base);
+  });
+
+  it('不折大小写 —— 图床文件名大小写敏感，折叠会造假命中', () => {
+    expect(normImageUrl('https://x/kf/Abc.jpg')).not.toBe(normImageUrl('https://x/kf/abc.jpg'));
+  });
+
+  it('空 / 非字符串 → 空串', () => {
+    expect(normImageUrl('')).toBe('');
+    expect(normImageUrl('   ')).toBe('');
+    expect(normImageUrl(null)).toBe('');
+    expect(normImageUrl(undefined)).toBe('');
+    expect(normImageUrl(123)).toBe('');
+  });
+});
+
+describe('skuColorsByImage：一张图 → 颜色（歧义必须暴露，不能取第一个）', () => {
+  const rows = [
+    { color: '7', imageUrl: 'https://x/kf/S7.jpg' },
+    { color: '7', imageUrl: 'https://x/kf/S7.jpg' }, // 同色多码共用一张图 —— 常态
+    { color: 'Khaki', imageUrl: 'https://x/kf/Sk.jpg' },
+    { color: '', imageUrl: 'https://x/kf/S7.jpg' }, // 无色行不参与
+    { color: '*', imageUrl: 'https://x/kf/S7.jpg' }, // 未指定色哨兵不是颜色
+  ];
+
+  it('同色多行去重成一条；带查询串也能命中', () => {
+    expect(skuColorsByImage(rows, 'https://x/kf/S7.jpg')).toEqual(['7']);
+    expect(skuColorsByImage(rows, 'https://x/kf/S7.jpg?x-oss-process=resize')).toEqual(['7']);
+    expect(skuColorsByImage(rows, 'https://x/kf/Sk.jpg_220x220.jpg')).toEqual(['Khaki']);
+  });
+
+  it('多色共用一张图 → 返回多个（上游据此放弃，不猜）', () => {
+    const shared = [
+      { color: 'A', imageUrl: 'https://x/kf/same.jpg' },
+      { color: 'B', imageUrl: 'https://x/kf/same.jpg' },
+    ];
+    expect(skuColorsByImage(shared, 'https://x/kf/same.jpg')).toEqual(['A', 'B']);
+  });
+
+  it('对不上 / 空图 / 空行 → 空数组', () => {
+    expect(skuColorsByImage(rows, 'https://x/kf/other.jpg')).toEqual([]);
+    expect(skuColorsByImage(rows, '')).toEqual([]);
+    expect(skuColorsByImage([], 'https://x/kf/S7.jpg')).toEqual([]);
+    expect(skuColorsByImage(null, 'https://x/kf/S7.jpg')).toEqual([]);
   });
 });

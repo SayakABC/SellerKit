@@ -2,7 +2,8 @@
 //
 //   npm run order-profit:ui
 //
-// 为什么需要它：这一页有四路取数（订单行 / SKU 克重 / 款级成本 / 运价表快照）与一条跨域算账链，
+// 为什么需要它：这一页有四路取数（订单行 / SKU 克重 / 包裹运费 / 运价表快照）与一条跨域算账链
+// （C2 起成本只认订单行自己的两个快照，不再单独拉一张款级价目表），
 // 但纯层单测只覆盖到 `computeOrderCosts`；**接线**（IPC 键名、字段名、分→元、快照是否真被走）
 // 从未被跑过 —— 而这类错全是静默的（数字不对但页面正常）。
 //
@@ -58,7 +59,7 @@ const FAKE_BRIDGE = `<script>
   window.__smokeCalls = calls;
   function rec(name, payload) { (calls[name] = calls[name] || []).push(payload); }
 
-  // ---- 可验算的样本：275g → 80/kg×0.275 + 挂号 8 = 30 元；款级成本 10 元；收入 165.18；平台已税 → 税 0 ----
+  // ---- 可验算的样本：275g → 80/kg×0.275 + 挂号 8 = 30 元；行上进价预估 10 元；收入 165.18；平台已税 → 税 0 ----
   var RATE_TABLE = {
     sheetName: 'smoke', countries: [{ code: 'US', nameCn: '美国', nameEn: 'United States', cards: [
       { minG: 0, maxG: 2000, categories: ['general'], mode: 'perKg', ratePerKg: 80, registerFee: 8,
@@ -82,6 +83,9 @@ const FAKE_BRIDGE = `<script>
     id: 1, orderNo: 'SMOKE-1', source: 'import', shop: '', orderTime: '2026-09-10 12:00:00',
     styleCode: 'S1', styleColor: '红', color: '黑', size: 'L',
     supplierId: 7, supplierName: '厂A',
+    // C2：利润只认订单行自己的两个成本快照（实际进价 > 进价预估 > 缺）。
+    // 这一行是"确认过、钉了预估"的样本（10.00）；采集行没有快照 ⇒ 如实标缺成本。
+    costCents: 1000, actualCostCents: null,
     amountCents: 16518, vatCents: 3469, ddpCents: 2294,
     bizStatus: '交易完成', taxPlatform: '平台已税',
     rawFields: { '收货国家': '美国', '商品ID': 'ITEM1', '商品信息': '【1】 smoke 款 (产品属性:Color:黑、Size:L)\\n(商品数量:2 piece)' },
@@ -104,8 +108,19 @@ const FAKE_BRIDGE = `<script>
       row.rawFields = {}; for (var f in ORDER.rawFields) row.rawFields[f] = ORDER.rawFields[f];
       if (window.__noQtyInfo) delete row.rawFields['商品信息'];
       row.shop = window.__shop || '';
+      // 缺汇率：采集帧是外币、ae_rates 查不到该币种 ⇒ 宿主落库时金额**只能是 NULL**（写 0 会把
+      // "算不出来"伪装成"收入为零"）。造这一支只为验「界面把缺汇率与缺收入分开标」——
+      // 两者补法不同（去「成本与汇率」补一条 / 报表里压根没有），见 src/lib/orderCost.ts 的 fx。
+      var collected = COLLECTED;
+      if (window.__rateMissing) {
+        collected = COLLECTED.map(function (r) {
+          var c = {}; for (var k in r) c[k] = r[k];
+          c.amountCents = null;
+          return c;
+        });
+      }
       // **一个读口**：采集行与导入行在同一个返回里（按 source 区分，标签由宿主给）
-      return { success: true, data: window.__collectedOn ? [row].concat(COLLECTED) : [row] };
+      return { success: true, data: window.__collectedOn ? [row].concat(collected) : [row] };
     },
     // ⚠️ **已删通道的绊线**：productWeightGet（商品ID → 克重，pl_item_weights）随 2026-10-01 的
     //    领域裁定整条退场（克重是 SKU 属性），表已被 product.sku v3 迁移 DROP。
@@ -114,7 +129,7 @@ const FAKE_BRIDGE = `<script>
       rec('productWeightGet', p);
       return { success: true, data: { weights: {} } };
     },
-    'productList': function (p) { rec('productList', p); return { success: true, data: { rows: [{ id: 1, code: 'S1', name: '款一', supplierId: 0, supplierName: '', category: '', status: 'active' }], total: 1 } }; },
+    'productList': function (p) { rec('productList', p); return { success: true, data: { rows: [{ id: 1, code: 'S1', name: '款一', supplierId: 0, supplierName: '', category: '', status: 'active', costCents: 1000, updatedAt: '' }], total: 1 } }; },
     'productVariantList': function (p) {
       rec('productVariantList', p);
       // __noSkuWeight 打开 → 模拟"这一款还没在「货与成本」里维护克重"：该行必须如实标缺，不许静默当 0
@@ -123,12 +138,9 @@ const FAKE_BRIDGE = `<script>
       }
       return { success: true, data: { rows: [{ id: 11, productId: 1, code: '', name: '黑 L', color: '黑', size: 'L', weightG: 275, status: 'active' }] } };
     },
-    'aeCostMapList': function () {
-      rec('aeCostMapList', {});
-      return { success: true, data: [{ styleCode: 'S1', styleName: '款1', unitPriceCents: 1000, sampleCount: 1,
-        lastBizDate: '2026-01-01', effectiveFrom: '2026-01-01', source: 'manual', updatedAt: '' }] };
-    },
-    // 成本与汇率（C9 从岛收编进「算钱」）：汇率必须有数据，否则"可改可加"这条接线测不到
+    // 成本与汇率（C9 从岛收编进「算钱」；2026-10-14 整合后本区**只读**，写入搬去「基础数据」）：
+    // 汇率必须有数据，否则"只读也列得出现状"这条测不到；upsert 桩保留但断言要求 0 次调用
+    // （真录入闭环在 scripts/master-data-ui-smoke.mjs 的 rates 步）。
     'aeRateList': function () {
       rec('aeRateList', {});
       return { success: true, data: [{ fromCurrency: 'USD', rateToCny: 7.1, updatedAt: '' }] };
@@ -159,6 +171,21 @@ const FAKE_BRIDGE = `<script>
     'shipRateSnapshotCalc': function (p) {
       rec('shipRateSnapshotCalc', p);
       return { success: true, data: { rows: [{ id: 1, effectiveFrom: '2026-09-01', sourceFile: 'smoke.xlsx', sheetName: 's1', table: RATE_TABLE }] } };
+    },
+    // 包裹运费（阶段 C1）：默认"还没拆包"；打开 __parcelOn → SMOKE-1 两个包合计 45.00。
+    // 45 ≠ 运价表的 30 —— 只有不同的两个数才能证明"到底走了哪条链"（同值会让断言语义空转）。
+    // __parcelMissing 再打开 → 其中一个包没填运费（shipCents=null）⇒ 整单运费必须给「—」并标缺，
+    // **不回落运价表估算**（回落会把用户填的真值盖掉且行上无痕）。
+    'orderParcelTotals': function (p) {
+      rec('orderParcelTotals', p);
+      if (!window.__parcelOn) return { success: true, data: {} };
+      return { success: true, data: { 'SMOKE-1': {
+        count: 2,
+        shipCents: window.__parcelMissing ? null : 4500,
+        weightG: 330,
+        shipMissing: window.__parcelMissing ? 1 : 0,
+        weightMissing: 0,
+      } } };
     },
   };
 
@@ -334,8 +361,8 @@ async function main() {
         !!document.querySelector('[data-act="fee-missing"]'),
       'none=' + !!document.querySelector('[data-act="gaps-none"]') +
         ' fee-missing=' + !!document.querySelector('[data-act="fee-missing"]'));
-    // 件数 > 1 的行 → 界面显式说明"成本/运费仍按 1 件算"（不让人以为毛利已经算上 2 件）
-    report('多件行提示出现（件数 2 → 成本/运费仍按 1 件算）；件数并不缺，故不列「缺件数」',
+    // 件数 > 1 的行 → 界面显式说明成本按单件价（未拆包的单运费也按 1 件估）
+    report('多件行提示出现（件数 2 → 成本按单件计）；件数并不缺，故不列「缺件数」',
       !!document.querySelector('[data-act="multi-piece-hint"]') &&
         !document.querySelector('[data-act="gap-qty"]'),
       gaps);
@@ -349,9 +376,8 @@ async function main() {
       (calls('productWeightGet') || []).length === 0, JSON.stringify(calls('productWeightGet') || []));
     report('运价表走**宿主快照**（不是岛存储回退）', calls('shipRateSnapshotCalc').length >= 1,
       'snapshotCalc=' + calls('shipRateSnapshotCalc').length);
-    report('成本取全量款级成本', calls('aeCostMapList').length >= 1);
     // 数据基础区默认收起：没有"缺成本"的行时它不该占主视线（展开行为在 cost-rates 步验）
-    report('「成本与汇率」区默认收起（不抢主视线）',
+    report('「数据基础：产品当前进价」区默认收起（不抢主视线）',
       !!document.querySelector('[data-act="cost-rates"]') && !document.querySelector('[data-act="cost-table"]'));
 
     step('refresh');
@@ -652,6 +678,30 @@ async function main() {
       cCells.indexOf('0.00') >= 0 && !document.querySelector('[data-act="gap-tax"]'),
       cCells.join(' | '));
 
+    // ⭐ 「缺汇率」与「缺收入」必须**分开标**：同一行、只把 amountCents 改成 NULL（其余一字不动），
+    //    缺口文案要从"没有金额缺口"变成「缺汇率」、且**不许**变成「缺收入」。
+    //    ⚠️ 非空转的关键是"两档结果必须不同"：若实现不看 source（或把两档并成一个 key），下面必红；
+    //    反过来，若断言只写"出现了某个缺口"，把两档合并成一个 key 也照样绿 —— 那种写法测不到本功能。
+    window.__rateMissing = true;
+    document.querySelector('[data-act="refresh"]').click();
+    await waitFor(function () {
+      var g = document.querySelector('[data-act="gap-fx"]');
+      return !!g && flat(g).indexOf('缺汇率 1') >= 0;
+    }, 8000);
+    report('缺汇率的采集行 → 缺口 chip 是「缺汇率 1」而不是「缺收入」',
+      !!document.querySelector('[data-act="gap-fx"]') && !document.querySelector('[data-act="gap-revenue"]'),
+      'gaps=' + flat(document.querySelector('.oc-gaps')));
+    var fxRow = Array.prototype.filter.call(detailTable().querySelectorAll('tbody tr'), function (tr) {
+      return flat(tr).indexOf('C-1') >= 0;
+    })[0];
+    report('该行「缺」列写「缺汇率」、且不写「缺收入」',
+      !!fxRow && flat(fxRow).indexOf('缺汇率') >= 0 && flat(fxRow).indexOf('缺收入') < 0,
+      fxRow ? flat(fxRow) : '(采集行不存在)');
+    report('缺汇率的行金额格给「—」（不是 0.00 —— "算不出来"与"收入为零"不能混）',
+      !!fxRow && flat(fxRow.querySelector('[data-act="revenue"]')) === '—',
+      fxRow ? flat(fxRow.querySelector('[data-act="revenue"]')) : '(采集行不存在)');
+    window.__rateMissing = false;
+
     var taxSel = document.querySelector('[data-act="tax-default"]');
     taxSel.value = 'unknown';
     taxSel.dispatchEvent(new Event('change'));
@@ -748,43 +798,91 @@ async function main() {
     await waitFor(function () { return flat(document.querySelector('[data-act="weight"]')) === '275'; }, 8000);
 
     step('cost-rates');
-    // C9 收编：成本表浏览 + 汇率维护搬进「算钱」。**出现"缺成本"的行时该区自动摊开** ——
-    // 它就是用户此刻要补的东西（上一行的采集行正好缺成本）。
+    // C9 收编 + 2026-10-14 整合：本区整体**只读化**；2026-10-22 起维护入口只剩产品编辑抽屉。
+    // 这里只回答"现在产品当前进价是多少、为什么这行毛利是空的"。出现"缺成本"的行时该区自动摊开
+    // （collected-merge 步打开的采集行正好缺成本）。
     await waitFor(function () { return document.querySelector('[data-act="cost-table"] tbody tr'); }, 8000);
     var cRow = document.querySelector('[data-act="cost-table"] tbody tr');
     var crCells = Array.prototype.map.call(cRow.querySelectorAll('td'), flat).join(' | ');
-    report('缺成本时「成本与汇率」自动展开，并列出款级成本（S1 / 10.00 元 / 手工来源）',
-      crCells.indexOf('S1') >= 0 && crCells.indexOf('10.00') >= 0 && crCells.indexOf('手工') >= 0, crCells);
-    report('成本表的读取确实发生了（aeCostMapList）', calls('aeCostMapList').length >= 2,
-      'calls=' + calls('aeCostMapList').length);
+    report('缺成本时「数据基础」自动展开，并列出产品当前进价（S1 / 10.00 元）',
+      crCells.indexOf('S1') >= 0 && crCells.indexOf('10.00') >= 0, crCells);
 
+    // 2026-10-22 B'：汇率整块退役（「基础数据 › 进价」页撤掉时一并退场）。
+    // 依据是三条事实，不是"看着没人用"：① 金额本来就按人民币分存（oi_orders 没有 currency 列）；
+    // ② 实时引擎 orderCost.ts 从不读 ae_rates（非人民币报价的运费直接拒算）；
+    // ③ 唯一读那张表的是老采集库的一次性迁移。所以这里守三件事：**表不画**、**不取**、**不写**。
     var rateTable = document.querySelector('[data-act="rate-table"]');
-    report('汇率表列出既有币种（USD → 7.1）',
-      !!rateTable && flat(rateTable).indexOf('USD') >= 0 &&
-        document.querySelector('[data-act="rate-input-USD"]').value === '7.1',
-      flat(rateTable || document.createElement('div')));
+    report('汇率表整块退役（本页不再画币种，rate-* 锚点一个不剩）',
+      !rateTable && !document.querySelector('[data-act="rate-value-USD"]') &&
+        !document.querySelector('.cr__table--rates'),
+      'rateTable=' + !!rateTable);
+    // 反向守卫：录入控件整批不许回来（曾经从这边搬走过一次，别哪天又搬回来 ——
+    // 同一能力两个入口，用户得猜哪个才是"真的"）
+    report('汇率录入控件不在本页（输入 / 保存 / 新增一律没有）',
+      !document.querySelector('[data-act="rate-input-USD"]') &&
+        !document.querySelector('[data-act="rate-save-USD"]') &&
+        !document.querySelector('[data-act="rate-add"]') &&
+        !document.querySelector('[data-act="rate-new-cur"]') &&
+        !document.querySelector('[data-act="rate-new-value"]'),
+      'rateInputs=' + document.querySelectorAll('.cr__table--rates input').length);
+    // 连取都不取：退役得彻底，别留着"读了不用"的空转调用（那种残留最容易在下一次改造时复活成 UI）
+    report('本页连汇率都不取了（不请求 ae_rates，也不写）',
+      calls('aeRateList').length === 0 && calls('aeRateUpsert').length === 0,
+      'list=' + calls('aeRateList').length + ' upsert=' + calls('aeRateUpsert').length);
 
-    var usdInput = document.querySelector('[data-act="rate-input-USD"]');
-    usdInput.value = '7.3';
-    usdInput.dispatchEvent(new Event('input'));
-    await waitFor(function () { return document.querySelector('[data-act="rate-save-USD"]'); }, 4000);
-    document.querySelector('[data-act="rate-save-USD"]').click();
-    await waitFor(function () { return calls('aeRateUpsert').length >= 1; }, 6000);
-    report('改既有币种汇率 → 真发出 upsert（USD → 7.3）',
-      calls('aeRateUpsert').some(function (p) { return p && p.fromCurrency === 'USD' && p.rateToCny === 7.3; }),
-      JSON.stringify(calls('aeRateUpsert')));
+    // 撤掉的「去维护」不许回来：它指向的「基础数据 › 进价」页已整页退役，
+    // 按钮留着 = 点下去一片空白（比没有按钮更糟）。
+    report('区头不再有「去维护」按钮（进价在生产品管理，成本页已退役）',
+      !document.querySelector('[data-act="cr-goto"]'),
+      'cr-goto=' + !!document.querySelector('[data-act="cr-goto"]'));
+    // 本页不再被跳走，刷新键应当早已可用；仍等一次防重挂载竞态（后面几步都要点它）
+    await waitFor(function () {
+      var b = document.querySelector('[data-act="refresh"]');
+      return !!b && !b.disabled;
+    }, 10000);
 
-    var curInput = document.querySelector('[data-act="rate-new-cur"]');
-    var valInput = document.querySelector('[data-act="rate-new-value"]');
-    curInput.value = 'eur';
-    curInput.dispatchEvent(new Event('input'));
-    valInput.value = '7.9';
-    valInput.dispatchEvent(new Event('input'));
-    document.querySelector('[data-act="rate-add"]').click();
-    await waitFor(function () { return calls('aeRateUpsert').length >= 2; }, 6000);
-    report('新增币种 → 币种码归一为大写后 upsert（EUR → 7.9）',
-      calls('aeRateUpsert').some(function (p) { return p && p.fromCurrency === 'EUR' && p.rateToCny === 7.9; }),
-      JSON.stringify(calls('aeRateUpsert')));
+    step('parcel');
+    // 阶段 C1：已拆包的单，运费 = 包裹实付合计（真值），不再按运价表估算。
+    // 用**不同的两个数**（运价表 30.00 → 包裹 45.00）：同值会让"走了哪条链"的断言空转。
+    var parcelCallsBefore = calls('orderParcelTotals').length;
+    window.__parcelOn = true;
+    document.querySelector('[data-act="refresh"]').click();
+    await waitFor(function () {
+      var c = document.querySelector('[data-act="detail-table"] [data-act="shipping"]');
+      return c && flat(c) === '45.00';
+    }, 8000);
+    var parcelCalls = calls('orderParcelTotals');
+    var lastParcel = parcelCalls[parcelCalls.length - 1];
+    report('包裹运费按订单号**批量**取（刷新一次调用，带上全部订单号）',
+      parcelCalls.length === parcelCallsBefore + 1 && !!lastParcel &&
+        lastParcel.orderNos.indexOf('SMOKE-1') >= 0,
+      JSON.stringify(lastParcel));
+    var shipP = document.querySelector('[data-act="detail-table"] [data-act="shipping"]');
+    report('已拆包单的运费 = 包裹实付 45.00（不是运价表算的 30.00），悬停写明来源与维护处',
+      flat(shipP) === '45.00' && (shipP.title || '').indexOf('包裹') >= 0 &&
+        (shipP.title || '').indexOf('拆包') >= 0,
+      'v=' + flat(shipP) + ' title=' + (shipP ? shipP.title : ''));
+
+    // 已拆包但缺运费：给「—」并标缺 ——**不**回落运价表估算（否则真值被估算盖掉、行上无痕）
+    window.__parcelMissing = true;
+    document.querySelector('[data-act="refresh"]').click();
+    await waitFor(function () {
+      var c = document.querySelector('[data-act="detail-table"] [data-act="shipping"]');
+      return c && flat(c) === '—';
+    }, 8000);
+    var shipM = document.querySelector('[data-act="detail-table"] [data-act="shipping"]');
+    var smokeRowM = Array.prototype.filter.call(detailTable().querySelectorAll('tbody tr'), function (tr) {
+      return flat(tr).indexOf('SMOKE-1') >= 0;
+    })[0];
+    report('已拆包但缺运费 → 运费「—」、行标「缺包裹运费」、chip 计数 1，且不按运价表估算',
+      flat(shipM) === '—' && (shipM.title || '').indexOf('不按运价表估算') >= 0 &&
+        !!smokeRowM && flat(smokeRowM).indexOf('缺包裹运费') >= 0 &&
+        !!document.querySelector('[data-act="gap-parcel"]') &&
+        flat(document.querySelector('[data-act="gap-parcel"]')).indexOf('缺包裹运费 1') >= 0,
+      'v=' + flat(shipM) + ' title=' + (shipM ? shipM.title : '') +
+        ' row=' + (smokeRowM ? flat(smokeRowM) : '(missing)'));
+    window.__parcelOn = false;
+    window.__parcelMissing = false;
 
     step('empty-state');
     // 空态必须给**可点的下一步**（UX 审查 A1/P0-3）：旧文案让用户"先去「订单归类」导入"，
@@ -804,8 +902,11 @@ async function main() {
         emptyText.indexOf('宿主') < 0 && emptyText.indexOf('插件') < 0, emptyText);
     document.querySelector('[data-act="empty-import"]').click();
     await waitFor(function () { return (window.__navs || []).length >= 1; }, 4000);
+    // 取**最后一条** nav：本步之前若还有别的跳转（历史上有过「去维护」那条），
+    // 用 navs[0] 会读到旧的。
+    var emptyNav = window.__navs[window.__navs.length - 1];
     report('空态按钮派发 switch-module → today',
-      window.__navs[0] && window.__navs[0].moduleId === 'today', JSON.stringify(window.__navs));
+      !!emptyNav && emptyNav.moduleId === 'today', JSON.stringify(window.__navs));
 
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0,

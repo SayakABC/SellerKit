@@ -104,7 +104,7 @@ HANDLED_URLS [ 'sk-mail://body/7', 'sk-mail://att/7/2' ]
 ```
 ~/Library/Application Support/seller-kit/plugins/shop-accounts/   ← 2026-09-27 的产物
   dist/assets/index-CRYcNu2-.js        （grep sk-mail://body → 0 命中，仍是 srcdoc 版）
-仓库 ui-plugins/shop-accounts/dist/    ← 2026-10-04 20:35 的新产物
+仓库工程岛 dist（该岛已于 2026-10-14 内迁删除，留档 `/tmp/sellerkit-retire/`）    ← 2026-10-04 20:35 的新产物
   dist/assets/index-BmM99qNk.js        （grep sk-mail://body → 1 命中）
 ```
 
@@ -132,7 +132,7 @@ Failed to load URL: sk-mail://body/396?remote=1 with error: ERR_BLOCKED_BY_CSP
 | 层 | 位置 | 当时的状态 |
 | --- | --- | --- |
 | ① 响应头 | `electron/plugin-ui-protocol.ts` 的 `UI_CSP` | 已加 `frame-src sk-mail:` ✅ |
-| ② **岛自己的 meta** | `ui-plugins/shop-accounts/index.html` 的 `<meta http-equiv="Content-Security-Policy">` | `default-src 'self'`，**没有 `frame-src`** ⇒ 回落到 `default-src` ❌ |
+| ② **岛自己的 meta** | 岛根 index.html 的 `<meta http-equiv="Content-Security-Policy">`（该岛已内迁删除；宿主侧对应层现为 `index.html`） | `default-src 'self'`，**没有 `frame-src`** ⇒ 回落到 `default-src` ❌ |
 
 CSP 的多重策略是**交集**，任一层缺这条就整个 frame 被拒。① 是我上一步特意放开的，② 完全没注意到 ——
 **岛作者写 meta CSP 时只想着"能不能引 JS/图片"，不会想到 `frame-src`**。已给 ② 补上并加了守卫。
@@ -171,7 +171,7 @@ sk_mail_attachments: 0 行
 `?remote=1` 与默认态的差异已由 `npm run mail:body:smoke` 第 4 节双向锁住（默认零请求 / 放行真取到 200）。
 
 > ⚠️ 本条是**产品默认值**改动，不是 bug 修复：如果以后要改回默认拦截，改
-> `ui-plugins/shop-accounts/src/components/MailInboxView.vue` 的 `showRemote` 初值即可，
+> `src/modules/mail/MailInboxView.vue`（2026-10-14 内迁为基础数据页、2026-10-17 随「邮件」独立成一级模块搬到现路径）的 `showRemote` 初值即可，
 > 冒烟与守卫都不依赖这个初值。
 
 ---

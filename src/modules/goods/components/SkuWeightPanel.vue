@@ -40,7 +40,7 @@
           </tr>
           <tr v-if="product && !variants.length">
             <td colspan="3" class="gd-fix__empty">
-              这款还没有 SKU —— 点右边「编辑」，用颜色 × 尺码批量生成
+              这款还没有 SKU —— 点右边「编辑」，在 SKU 矩阵里加颜色和尺码，矩阵里的每个格就是一条 SKU
             </td>
           </tr>
           <tr v-if="!product">

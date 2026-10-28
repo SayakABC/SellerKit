@@ -61,6 +61,8 @@ export interface CompanyUpsertInput {
   contactName?: string;
   /** 联系电话 */
   contactPhone?: string;
+  /** 扣运费的支付宝账号（一企业一份，店铺侧只读） */
+  alipayAccount?: string;
   /** 联系邮箱 */
   contactEmail?: string;
   /** VAT 税号 */
@@ -125,6 +127,7 @@ export interface CompanyItem {
   legalPerson: string;
   contactName: string;
   contactPhone: string;
+  alipayAccount: string;
   contactEmail: string;
   vatNo: string;
   eoriNo: string;
@@ -160,6 +163,7 @@ interface CompanyRow {
   legal_person: string;
   contact_name: string;
   contact_phone: string;
+  alipay_account: string;
   contact_email: string;
   vat_no: string;
   eori_no: string;
@@ -200,6 +204,7 @@ export function ensureCompanySchema(): void {
       legal_person TEXT NOT NULL DEFAULT '',
       contact_name TEXT NOT NULL DEFAULT '',
       contact_phone TEXT NOT NULL DEFAULT '',
+      alipay_account TEXT NOT NULL DEFAULT '',
       contact_email TEXT NOT NULL DEFAULT '',
       vat_no TEXT NOT NULL DEFAULT '',
       eori_no TEXT NOT NULL DEFAULT '',
@@ -231,6 +236,13 @@ export function ensureCompanySchema(): void {
     `CREATE INDEX IF NOT EXISTS idx_sk_company_profiles_company ON sk_company_profiles(company_id)`,
     `CREATE INDEX IF NOT EXISTS idx_sk_company_profiles_type ON sk_company_profiles(type)`,
   ]);
+  // 老库追列：`CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改（AGENTS §1.4）
+  const companyCols = new Set(
+    dbQuery<{ name: string }>(`PRAGMA table_info(sk_companies)`).map((r) => String(r.name ?? '')),
+  );
+  if (!companyCols.has('alipay_account')) {
+    dbMigrate([`ALTER TABLE sk_companies ADD COLUMN alipay_account TEXT NOT NULL DEFAULT ''`]);
+  }
 }
 
 /** 状态白名单收敛（非法值兜底 active） */
@@ -322,6 +334,7 @@ export function listCompanies(filter: { search?: string; status?: string } = {})
       legalPerson: row.legal_person,
       contactName: row.contact_name,
       contactPhone: row.contact_phone,
+      alipayAccount: row.alipay_account,
       contactEmail: row.contact_email,
       vatNo: row.vat_no,
       eoriNo: row.eori_no,
@@ -343,6 +356,7 @@ export function listCompanies(filter: { search?: string; status?: string } = {})
           item.legalPerson,
           item.contactName,
           item.contactPhone,
+          item.alipayAccount,
           item.contactEmail,
           item.vatNo,
           item.eoriNo,
@@ -372,6 +386,7 @@ export function getCompany(id: number): CompanyDetail | undefined {
     legalPerson: row.legal_person,
     contactName: row.contact_name,
     contactPhone: row.contact_phone,
+    alipayAccount: row.alipay_account,
     contactEmail: row.contact_email,
     vatNo: row.vat_no,
     eoriNo: row.eori_no,
@@ -416,6 +431,7 @@ export function upsertCompany(input: CompanyUpsertInput): number {
     pick(input.legalPerson, existing?.legal_person ?? ''),
     pick(input.contactName, existing?.contact_name ?? ''),
     pick(input.contactPhone, existing?.contact_phone ?? ''),
+    pick(input.alipayAccount, existing?.alipay_account ?? ''),
     pick(input.contactEmail, existing?.contact_email ?? ''),
     pick(input.vatNo, existing?.vat_no ?? ''),
     pick(input.eoriNo, existing?.eori_no ?? ''),
@@ -427,8 +443,8 @@ export function upsertCompany(input: CompanyUpsertInput): number {
     dbRun(
       `UPDATE sk_companies SET
          name = ?, unified_code = ?, country = ?, address = ?, legal_person = ?,
-         contact_name = ?, contact_phone = ?, contact_email = ?, vat_no = ?, eori_no = ?,
-         status = ?, note = ?, updated_at = ?
+         contact_name = ?, contact_phone = ?, alipay_account = ?, contact_email = ?,
+         vat_no = ?, eori_no = ?, status = ?, note = ?, updated_at = ?
        WHERE id = ?`,
       [...values, now, id],
     );
@@ -438,8 +454,8 @@ export function upsertCompany(input: CompanyUpsertInput): number {
   const result = dbRun(
     `INSERT INTO sk_companies
        (name, unified_code, country, address, legal_person, contact_name, contact_phone,
-        contact_email, vat_no, eori_no, status, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        alipay_account, contact_email, vat_no, eori_no, status, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [...values, now, now],
   );
   return result.lastInsertRowid;

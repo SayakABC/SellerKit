@@ -330,9 +330,15 @@ check('upsert 模式下同一编码重复出现：先建后更，total 不翻倍
 });
 
 // ---- SKU 子表（pl_variants）与产品图片（pl_images / pl_item_images）----
-// 最小同构表：订单域的 oi_orders / oi_images（itemImagePool 的第②层回落要扫它们）
+// 最小同构表：订单域的 oi_orders（主表）/ oi_order_items（明细）/ oi_images
+// （itemImagePool 的第②层回落扫 oi_order_items.image_id + raw_fields）
 dbRun(`CREATE TABLE IF NOT EXISTS oi_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no TEXT NOT NULL UNIQUE
+)`);
+dbRun(`CREATE TABLE IF NOT EXISTS oi_order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER,
   image_id INTEGER,
   raw_fields TEXT
 )`);
@@ -517,8 +523,9 @@ check('itemImagePool 三层回落：覆盖图 > 订单图 > 款主图，逐 item
 
   // 订单域图（oi_images 表）：一条带商品ID 的订单，挂订单图 id=77
   dbRun(`INSERT INTO oi_images (id, fingerprint, local_path) VALUES (77, 'fp-77', '/cache/o77.jpg')`);
+  dbRun(`INSERT INTO oi_orders (order_no) VALUES ('FIX-100')`);
   dbRun(
-    `INSERT INTO oi_orders (image_id, raw_fields) VALUES (77, ?)`,
+    `INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (1, 77, ?)`,
     [JSON.stringify({ 商品ID: ' IT-100 ' })], // 故意带空白 → 应归一成 IT-100
   );
   // 款主图：商品ID → 产品 → 主图
@@ -687,6 +694,56 @@ check('这行没图 ⇒ 不动已有主图；imageId 指向不存在的图 ⇒ �
   const out = pdb.importProducts([iRow({ code: 'I-2', imageId: 999999 })], 'upsert');
   assert.strictEqual(out.imagesAttached, 0);
   assert.strictEqual(pdb.getProduct(pid).imageId, img);
+});
+
+console.log('\n[P] 产品「当前进价」（阶段 A1：pl_products.cost_cents）');
+
+const costOf = (code) => Number(byCode(code)?.costCents ?? -1);
+
+check('写入进价：拿到的是分（不是元），列表行也带回来', () => {
+  const r = pdb.upsertProduct(input({ code: 'P-COST', costCents: 1234 }));
+  assert.strictEqual(costOf('P-COST'), 1234);
+  assert.strictEqual(pdb.getProduct(r.id).costCents, 1234);
+});
+
+check('⭐ 不传 costCents = 保留（改名不会把价清成 0 —— 全量提交唯一破例）', () => {
+  const hit = byCode('P-COST');
+  pdb.upsertProduct(input({ id: hit.id, code: 'P-COST', name: '改个名' })); // 无 costCents
+  assert.strictEqual(costOf('P-COST'), 1234, '没传进价却被清零：改名即丢价');
+});
+
+check('显式传 0 = 清零（"没填"是一个明确的动作，不能被当成"没传"）', () => {
+  const hit = byCode('P-COST');
+  pdb.upsertProduct(input({ id: hit.id, code: 'P-COST', costCents: 0 }));
+  assert.strictEqual(costOf('P-COST'), 0);
+});
+
+check('非法进价抛错不猜（负数是错，不是 0）', () => {
+  assert.throws(() => pdb.upsertProduct(input({ code: 'P-COST', costCents: -1 })), /进价/);
+  assert.throws(() => pdb.upsertProduct(input({ code: 'P-COST', costCents: NaN })), /进价/);
+});
+
+check('新增时缺省进价 = 0（不是 null：列是 NOT NULL）', () => {
+  pdb.upsertProduct(input({ code: 'P-NOCOST' }));
+  assert.strictEqual(costOf('P-NOCOST'), 0);
+});
+
+check('导入带进价 → 落到产品表；不带 → 不覆盖既有价（与克重 0 同一条纪律）', () => {
+  pdb.upsertProduct(input({ code: 'I-COST', costCents: 888 }));
+  pdb.importProducts([iRow({ code: 'I-COST', costCents: 999 })], 'upsert');
+  assert.strictEqual(costOf('I-COST'), 999);
+  pdb.importProducts([iRow({ code: 'I-COST' })], 'upsert'); // 这行没写进价
+  assert.strictEqual(costOf('I-COST'), 999, '导入没带价就把已有价抹了');
+});
+
+check('setProductCostByCode：有该款 → found=true 且落库；同值再写 updated=false；没该款 → found=false 不新增行', () => {
+  pdb.upsertProduct(input({ code: 'S-COST' }));
+  assert.deepStrictEqual(pdb.setProductCostByCode('S-COST', 2500), { found: true, updated: true });
+  assert.strictEqual(costOf('S-COST'), 2500);
+  // 同价再写一次：界面靠 updated 区分「已保存」与「与当前进价相同」—— 两种回执必须可辨
+  assert.deepStrictEqual(pdb.setProductCostByCode('S-COST', 2500), { found: true, updated: false });
+  assert.deepStrictEqual(pdb.setProductCostByCode('NO-SUCH', 2500), { found: false, updated: false });
+  assert.ok(!byCode('NO-SUCH'), '不该为了写价凭空建产品行');
 });
 
 // ---- 收尾 ----

@@ -128,6 +128,10 @@ export function createBuiltinPluginManager(): BuiltinPluginManager {
         icon: c.spec.icon,
         order: c.spec.order,
         navHidden: c.spec.navHidden,
+        // ⚠️ 过路字段的另一半（见 `managerDiscover.ts` 同名字段的注释）。
+        // 这是一处**白名单式**映射：这里没列出的字段会在 meta → spec → meta 的往返里丢失，
+        // 而 TypeScript 不会提醒（`ModuleMeta` 是可选字段）。新增模块级开关时两处都要抄。
+        subNav: c.spec.subNav,
       }))
       .sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
   }

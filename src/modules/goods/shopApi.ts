@@ -7,7 +7,7 @@
 //   "这一页到底碰几张表、哪张是权威"就读不出来了。
 //
 // 这一域原先只由市场分发的 UI 岛「店铺账号管家」驱动（渲染层是岛，数据层一直在宿主）。
-// 2026-10-08 起「店铺登记」收进内建（见 `docs/plans/GOODS_UX_REFACTOR_PLAN.md` R1 / UX-G6），
+// 2026-10-08 起「店名归一」收进内建（见 `docs/plans/GOODS_UX_REFACTOR_PLAN.md` R1 / UX-G6），
 // 于是宿主渲染层也要能调 —— 本文件就是那个消费面。**数据层一行未动**。
 import * as ipc from '@/core/services/ipc';
 import { unwrapAsync } from './unwrapApi';
@@ -40,10 +40,10 @@ export const list = (payload?: {
   limit?: number;
 }): Promise<{ rows: ShopListItem[]; total: number }> => unwrap(ipc.shopList(payload));
 
-/** 汇总：店铺侧（家数 / 按平台 / 按状态）+ 三处历史文本的归一进度 */
+/** 汇总：店铺侧（家数 / 按平台 / 按状态）+ 两处历史文本的归一进度 */
 export const summary = (): Promise<ShopSummary> => unwrap(ipc.shopSummary());
 
-/** 未归一的历史店铺名（**实时聚合**三处文本，不是缓存名单） */
+/** 未归一的历史店铺名（**实时聚合**两处文本，不是缓存名单） */
 export const unmapped = (): Promise<UnmappedShopRow[]> => unwrap(ipc.shopUnmapped());
 
 /* ============================================================================
@@ -51,11 +51,11 @@ export const unmapped = (): Promise<UnmappedShopRow[]> => unwrap(ipc.shopUnmappe
    ============================================================================ */
 
 /**
- * 新增 / 更新店铺（**全量提交**：缺省即空）。
+ * 新增 / 更新店铺（**局部更新**语义：`undefined = 保持`，`'' = 清空`）。
  *
- * ⭐ 调用方必须把整行字段送回来，**不能只送改过的那个** —— 否则编辑一次就把
- * `platformShopId` / `site` / `shopSetId` / `openedAt` 静默清空（这条坑岛时代已经踩过，
- * 见 `ui-plugins/shop-accounts/src/components/ShopRegistryView.vue` 的 `form` 注释）。
+ * 2026-10-22 物理合并后店铺行上还有邮箱 / 企业 / 工具 / 凭证，全量提交会把它们静默清空 ——
+ * 故这里只收店铺自身字段，且缺的字段一律保持原值。调用方是店铺选择器等只改店铺属性的入口；
+ * 账号 / 企业 / 工具关联的修改走 `shopAccountUpsert`（合并编辑器）。
  */
 export const upsert = (payload: ShopUpsertInput): Promise<{ id: number; created: boolean }> =>
   unwrap(ipc.shopUpsert(payload));
@@ -77,7 +77,7 @@ export const map = (payload: {
  * 店铺平台取值 —— 与 `ui-plugins/shop-accounts/src/store.ts` 的 `SHOP_PLATFORM_OPTIONS`
  * **逐字同源**（那套小写代码是 `sk_shops` 建表以来的存量值，不能换成展示名）。
  *
- * ⚠️ 为什么不能从历史数据里推：订单 / 采购 / 利润三处文本**都没有平台字段** ⇒ 平台无法推导，
+ * ⚠️ 为什么不能从历史数据里推：订单 / 采购两处文本**都没有平台字段** ⇒ 平台无法推导，
  * 只能在登记店铺时由人指定。"同名店铺可以合法地同时存在于不同平台"，猜一个就等于把两家店并掉。
  */
 export const SHOP_PLATFORM_OPTIONS: { value: string; label: string }[] = [

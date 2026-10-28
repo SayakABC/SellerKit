@@ -13,9 +13,7 @@
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import * as api from './api';
-import { exportProducts, todayKey } from './productIo';
-import { pickUnitCost } from '@/lib/orderCost';
-import type { CostInterval } from '@/lib/orderCost';
+import { exportProducts } from './productIo';
 import { toast } from '@/core/services/toast';
 import type { ProductListItem, VariantRow } from '@/types';
 
@@ -23,7 +21,7 @@ import type { ProductListItem, VariantRow } from '@/types';
  * 「问题件」快捷筛选：一眼只看"有问题的那几款"。
  * `''` = 不筛；另两个值与「状态 / 供应商」两个筛选**互斥**（与服务端 `listProducts` 的优先级一致）。
  */
-export type ProductIssueFilter = '' | 'missingWeight' | 'noSupplier';
+export type ProductIssueFilter = '' | 'missingWeight' | 'noSupplier' | 'missingCost';
 
 export const PRODUCT_PAGE_SIZE = 50;
 
@@ -75,6 +73,7 @@ export function useProductList(opts: ProductListOptions) {
   const issueFilter = ref<ProductIssueFilter>('');
   const onlyMissingWeight = computed(() => issueFilter.value === 'missingWeight');
   const withoutSupplier = computed(() => issueFilter.value === 'noSupplier');
+  const onlyMissingCost = computed(() => issueFilter.value === 'missingCost');
 
   const editorOpen = ref(false);
   const editing = ref<ProductListItem | null>(null);
@@ -85,7 +84,7 @@ export function useProductList(opts: ProductListOptions) {
   const variants = ref<Record<number, VariantRow[]>>({});
   /**
    * 款编码 → **当前生效进价**（分）；`null` = 还没价。列表「进价」列读它。
-   * 口径与算钱 / 拣货一致（`pickUnitCost` 按今天取；见 `loadCosts`）。
+   * 口径 = 产品表「当前进价」（`pl_products.cost_cents`，见 `loadCosts`）；订单行的历史价是另一列。
    */
   const costCentsByCode = ref(new Map<string, number | null>());
   const selectedId = ref(0);
@@ -106,7 +105,8 @@ export function useProductList(opts: ProductListOptions) {
       !!statusFilter.value ||
       !!supplierFilter.value ||
       onlyMissingWeight.value ||
-      withoutSupplier.value
+      withoutSupplier.value ||
+      onlyMissingCost.value
   );
   const allChecked = computed(
     () => rows.value.length > 0 && rows.value.every((p) => selectedIds.value.has(p.id))
@@ -129,9 +129,12 @@ export function useProductList(opts: ProductListOptions) {
         search: searchApplied.value,
         status: statusFilter.value as '' | 'active' | 'archived',
         supplierId:
-          onlyMissingWeight.value || withoutSupplier.value ? 0 : Number(supplierFilter.value) || 0,
+          onlyMissingWeight.value || withoutSupplier.value || onlyMissingCost.value
+            ? 0
+            : Number(supplierFilter.value) || 0,
         onlyMissingWeight: onlyMissingWeight.value,
         withoutSupplier: withoutSupplier.value,
+        onlyMissingCost: onlyMissingCost.value,
       });
       rows.value = res?.rows ?? [];
       total.value = res?.total ?? 0;
@@ -174,36 +177,17 @@ export function useProductList(opts: ProductListOptions) {
   }
 
   /**
-   * 拉**本页**每款的「当前生效进价」（分）。
+   * 拉**本页**每款的「当前进价」（分）。
    *
-   * 口径与算钱 / 拣货两页一致：一次读全 `ae_cost_map`，用 `pickUnitCost` 按**今天**取该款
-   * 当时生效的那条（同一天 manual 优先）。列表只要这一页的款 —— 导出那条路是全量补价
-   * （`productIo.fillExportCosts`），两处共用同一份取价实现。
-   *
-   * 读不到成本（ae 库还没建等）**不挡列表**：进价列显示「—」，其余照常。
+   * 唯一来源 = 产品表 `pl_products.cost_cents`（C2 起成本表已退役）：`0` = 还没维护 ⇒ 列表显示「—」。
+   * 与利润页的「进价预估」是同一个数：新单在归类确认时把它拷进 `oi_order_items.cost_cents`。
    */
   async function loadCosts(): Promise<void> {
-    const codes = rows.value.map((p) => p.code).filter(Boolean);
     const map = new Map<string, number | null>();
-    if (!codes.length) {
-      costCentsByCode.value = map;
-      return;
-    }
-    try {
-      const list = await api.costMapList();
-      const costs: CostInterval[] = list.map((x) => ({
-        styleCode: String(x.styleCode ?? ''),
-        effectiveFrom: String(x.effectiveFrom ?? ''),
-        unitPrice: (Number(x.unitPriceCents) || 0) / 100,
-        source: String(x.source ?? ''),
-      }));
-      const today = todayKey();
-      for (const code of codes) {
-        const unit = pickUnitCost(costs, code, today);
-        map.set(code, unit === null ? null : Math.round(unit * 100));
-      }
-    } catch {
-      // 读不到 → 全部 null（列显示「—」），不挡列表
+    for (const p of rows.value) {
+      if (!p.code) continue;
+      const cents = Number(p.costCents) || 0;
+      map.set(p.code, cents > 0 ? cents : null);
     }
     costCentsByCode.value = map;
   }
@@ -316,7 +300,9 @@ export function useProductList(opts: ProductListOptions) {
    * 撤掉**单个**筛选条件（活跃筛选 chip 上的 ×）。
    * 用 key 分派而不是每个 chip 写一个函数：以后加筛选条件时只改这一处，不会漏。
    */
-  function clearOne(key: 'search' | 'status' | 'supplier' | 'missingWeight' | 'noSupplier'): void {
+  function clearOne(
+    key: 'search' | 'status' | 'supplier' | 'missingWeight' | 'noSupplier' | 'missingCost',
+  ): void {
     if (key === 'search') {
       searchInput.value = '';
       searchApplied.value = '';
@@ -519,7 +505,7 @@ export function useProductList(opts: ProductListOptions) {
       // 导出**当前筛选下的全部行**（不只这一页）—— 筛选条件一并带给导出
       const r = await exportProducts({
         search: searchApplied.value,
-        status: (onlyMissingWeight.value || withoutSupplier.value
+        status: (onlyMissingWeight.value || withoutSupplier.value || onlyMissingCost.value
           ? ''
           : statusFilter.value) as '' | 'active' | 'archived',
         supplierId: Number(supplierFilter.value) || 0,
@@ -558,6 +544,7 @@ export function useProductList(opts: ProductListOptions) {
     issueFilter,
     onlyMissingWeight,
     withoutSupplier,
+    onlyMissingCost,
     editorOpen,
     editing,
     importOpen,

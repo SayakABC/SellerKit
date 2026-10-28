@@ -8,9 +8,13 @@
 //      逐行标 `gaps`，**不静默按 0 算** —— 按 0 算出来的"利润"比没有更危险；
 //   3. 纯函数（不碰 DB / IPC）→ 可被 vitest 直接覆盖（DB 层受 Electron ABI 限制测不了）。
 //
-// 成本取数口径**与 `ae-engine` 的 `costAt` 一致**（别造第二套）：
-//   `effective_from <= 订单日` 的最近一条；同生效日 `manual` 优先；无命中**回落最早一条**
-//   （订单日早于该款最早成本行时用"当时已知的最早成本"，而不是判成缺成本）。
+// 成本取数口径（C2，2026-10-21；本层为**唯一实现**，别再造第二套）：
+//   订单行两个字段，**实际 > 预估 > 缺**：
+//   · `actualCostCents`（`oi_order_items.actual_cost_cents`）= 拿货落账回写的实付真值；
+//   · `costCents`（`oi_order_items.cost_cents`）= 归类核对「确认无误」时按产品当时价钉的**预估**；
+//   · 两者都没有 → `productCost = null` + 标 `cost` 缺口（**不按 0 算**）。
+//   产品表的当前价（`pl_products.cost_cents`）只用于给**新订单**钉预估，本层不回查 ——
+//   否则改一次价，历史利润全跟着变（预测不可复算）。
 //
 // 数量口径（2026-09-29，P2 落地）：
 //   件数**逐行取真值**，两个来源按优先级：① 结算明细的商品行（平台口径，仅当该 (订单,商品) 在结算表里
@@ -30,17 +34,6 @@ import {
   type OrderShippingRow,
 } from './shipRateOrders';
 
-/** 成本生效区间行（来自 `ae_cost_map`：一款可多行，一行 = 一个生效区间） */
-export interface CostInterval {
-  styleCode: string;
-  /** 生效日，yyyy-mm-dd */
-  effectiveFrom: string;
-  /** 单价（元） */
-  unitPrice: number;
-  /** `'manual'` | `'purchase'` —— 同一生效日并存时 manual 优先（读取侧定优先级） */
-  source: string;
-}
-
 /** 运价表快照（一次导入 = 一条；`effectiveFrom` = 导入当日） */
 export interface RateSnapshot {
   effectiveFrom: string;
@@ -48,7 +41,19 @@ export interface RateSnapshot {
 }
 
 /**
- * 按订单日期取"**当时生效的那份**"运价表（口径同 `ae_cost_map` 的生效区间）：
+ * 一单的包裹汇总（宿主 `parcelTotals(order_no)` 的形状；利润页按单号批量取）。
+ * **任一个包缺运费 ⇒ `shipCents` 为 null** —— "已知部分之和"不能冒充总运费。
+ */
+export interface OrderParcelTotals {
+  count: number;
+  shipCents: number | null;
+  weightG: number | null;
+  shipMissing: number;
+  weightMissing: number;
+}
+
+/**
+ * 按订单日期取"**当时生效的那份**"运价表（运价快照自身的生效区间）：
  *   · `effectiveFrom <= 订单日` 的**最近一份**；
  *   · 订单日早于所有快照 → **回落最早一份**（宁可用"当时已知的最早那份"，也不判成缺运价表）；
  *   · 订单日认不出（''）→ 取**最新一份**；
@@ -77,16 +82,23 @@ export function pickRateSnapshot(
 /** 缺口标识（逐行给，界面按它提示"去哪儿补"） */
 export type OrderCostGap =
   | 'revenue'
+  /** 采集单**缺汇率**：外币帧在 `ae_rates` 里查不到 → 整单金额落 NULL。
+   *  单列一档是因为**补法不同**：`revenue`（导入报表里没有金额）无处可补，
+   *  而它只要去「成本与汇率」加一条汇率、重推一次就有钱（见 `fx` 与 `revenue` 的拆分）。 */
+  | 'fx'
   | 'country'
   | 'weight'
   | 'rate'
+  /** 这一单**已拆包**，但还有包裹没填运费 —— 运费按包裹真值算，**不回落运价表估算**。
+   *  补法明确：去「归类核对 › 拆包」把每个包的运费填上。 */
+  | 'parcel'
   | 'style'
   | 'cost'
   | 'tax'
   | 'qty';
 
 /** 这一行是从哪条**摄取通道**来的（C1 合并后两条链进同一模型）：
- *  `import` = Excel 报表导入（`oi_orders`）· `collect` = 浏览器采集（`ae_orders`） */
+ *  `import` = Excel 报表导入（`oi_orders`）· `collect` = 浏览器采集（`oi_orders`, source=collect） */
 export type OrderSource = 'import' | 'collect';
 
 /** 件数的来源：`settle` = 结算明细商品行（平台真值）；`order` = 订单侧真值（报表块 `商品数量` / 采集行数量）；`assumed` = 都没有 → 按 1 件 */
@@ -142,39 +154,142 @@ export function skuKey(row: { styleCode?: unknown; color?: unknown; size?: unkno
 }
 
 /**
+ * 尺码**比较用**归一（只用于建查表键，**不改任何展示/落库值**）。
+ *
+ * 2026-10-19 真库取证：产品 SKU 的码是 `3XL/4XL/5XL`，同一批订单的码是 `XXXL` ——
+ * 两边其实是一个码，但 `skuWeightKey` 逐字节比 ⇒ 一条也命中不了（症状是"补了克重还是缺克重"）。
+ *
+ * 只做两件**可判定等价**的事：全角→半角（`ＸＬ`→`XL`）、重复 X 与数字写法统一到数字写法
+ * （`XXL`/`xxl`→`2XL`，`XXXL`→`3XL`）。**不碰** `S/M/L/XL/XS`（XS 与 S 是不同码），
+ * 也不猜 `均码`/`70B` 之类 —— 认不出就原样返回，宁可查不到也不把两个码并成一格。
+ */
+export function canonSizeKey(size?: unknown): string {
+  const src = String(size ?? '').trim();
+  if (!src) return '';
+  const s = src
+    .replace(/[\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xfee0),
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+  const many = /^(X{2,})L$/.exec(s); // XXL / XXXL / XXXXL → 2XL / 3XL / 4XL
+  if (many) return `${many[1].length}XL`;
+  return s;
+}
+
+/**
  * **产品库 SKU 克重**的查表键（款编码 × 颜色 × 尺码）—— 建表与查表两端共用同一份，别各写一遍。
  *
  * 存在理由（2026-10-01 用户实报）：算钱的运费只认「商品ID 克重」（`pl_item_weights`，来自商品信息 Excel），
- * 而用户在「货与成本」里补的是**产品库 SKU 克重**（`pl_variants.weight_g`）—— 补完算钱毫无变化。
+ * 而用户在「货品档案」里补的是**产品库 SKU 克重**（`pl_variants.weight_g`）—— 补完利润毫无变化。
  * 两张表粒度不同（商品ID vs 款×色×码），但**订单行能识别出款色码时，SKU 克重是更准的那份**，故回落。
  *
- * 归一：款编码 `trim + toUpperCase`（与 `ae_cost_map` 的款编码口径一致）；色/码只 `trim`。
+ * 归一：款编码 `trim + toUpperCase`（与产品库 / 采购单的款编码口径一致）；色只 `trim`；
+ * 码过 `canonSizeKey`（`XXXL` 与 `3XL` 必须同键，否则订单永远查不到产品那边填的克重）。
  * **不猜**：款编码为空、或色码全空 → 返回空串（调用方据此放弃回落，老老实实标缺克重）。
  */
 export function skuWeightKey(styleCode?: unknown, color?: unknown, size?: unknown): string {
   const code = String(styleCode ?? '').trim().toUpperCase();
   const c = String(color ?? '').trim();
-  const sz = String(size ?? '').trim();
+  const sz = canonSizeKey(size);
   if (!code || (!c && !sz)) return '';
   return `${code}\u0001${c}\u0001${sz}`;
 }
 
 /**
+ * **同款同码**键（不带颜色）：`skuWeightKey` 把颜色留空的那一形态。
+ * 由 `loadSkuWeights` **只在"各色同重"确实成立时**才写入，故它代表"这一码的重量唯一"，
+ * 不是"随手拿某个颜色顶上"。
+ */
+export function skuSizeWeightKey(styleCode?: unknown, size?: unknown): string {
+  return skuWeightKey(styleCode, '', size);
+}
+
+/**
  * 逐行定克重（**单源**：算钱引擎、宿主给运费岛的只读 op、以及各页面的缺口计数都调它，
  * 避免同一批订单在不同页面上给出两个数字）：
- *   · 按**款色码**（`skuWeightKey`：款 × 色 × 码）查产品库 SKU 克重（`pl_variants.weight_g`）；
- *   · 认不出款色码、或该 SKU 没维护克重 → `null`（调用方如实标「缺克重」，**不猜、不套别的款**）。
+ *   ① 按**款色码**（`skuWeightKey`：款 × 色 × 码）查产品库 SKU 克重（`pl_variants.weight_g`）；
+ *   ② ① 未命中时按**款码**（`skuSizeWeightKey`）查 —— 该键只在"这款这码各色同重"时存在。
+ *   两级都没有 → `null`（调用方如实标「缺克重」，**不猜、不套别的款**）。
+ *
+ * ② 的理由（2026-10-19 真库取证）：订单上的颜色是**平台色名**（`7` / `Khaki` / `Photo color`），
+ * 产品库里是用户自己的色名（`黑色` / `白色`），两者**没有可计算的对应关系**（数字色名连猜都无从猜起）。
+ * 而实测量里 83/83 个「款×码」都是各色同重 ⇒ 让颜色退出克重的判定条件，
+ * 比逼人去给平台色配一次"我的色名"更省事、也不会因为配错而算错运费。
+ * 注意 ② **不会**掩盖"各色确实不同重"：那种款码不会产出该键，仍旧如实缺克重。
  *
  * 2026-10-01 变更（用户领域裁定）：克重是 **SKU 属性**，商品ID 上没有克重 ——
- * 原先"先查商品ID 克重（`pl_item_weights`）再回落"的两级取数已删成一级（表也一并 DROP）。
+ * 原先"先查商品ID 克重（`pl_item_weights`）再回落"的两级取数已删（表也一并 DROP）。
  */
 export function resolveWeightG(
   row: { styleCode?: unknown; color?: unknown; size?: unknown } | null | undefined,
   skuWeights?: Record<string, number> | null,
 ): number | null {
-  const key = skuWeightKey(row?.styleCode, row?.color, row?.size);
-  const hit = key ? Number((skuWeights ?? {})[key]) : Number.NaN;
-  return Number.isFinite(hit) && hit > 0 ? hit : null;
+  const table = skuWeights ?? {};
+  const pick = (key: string): number | null => {
+    const v = key ? Number(table[key]) : Number.NaN;
+    return Number.isFinite(v) && v > 0 ? v : null;
+  };
+  const exact = pick(skuWeightKey(row?.styleCode, row?.color, row?.size));
+  if (exact !== null) return exact;
+  return pick(skuSizeWeightKey(row?.styleCode, row?.size));
+}
+
+/** 建克重索引的入参：产品库 SKU 行（`pl_variants` 的最小子集） */
+export interface WeightVariantRow {
+  productId?: unknown;
+  color?: unknown;
+  size?: unknown;
+  weightG?: unknown;
+  status?: unknown;
+}
+
+/**
+ * 由产品库 SKU 行建 `克重查表`（`resolveWeightG` 直接消费）。
+ *
+ * 两个键族：
+ *   · 精确 `skuWeightKey(款, 色, 码)` —— 该行自己维护了克重（>0）就写，颜色为空的行**不写**
+ *     （它建出来就是"同款同码"键，会让"各色不同重"被绕过）；
+ *   · 折叠 `skuSizeWeightKey(款, 码)` —— **只在"这款这码各色确实同重"时**写：该款该码的
+ *     **在售**变体全部填了克重、且值完全一致。有一条没填、或有一个色不同重 → 不写。
+ *
+ * 纪律：少算（缺克重，人看得见、会去补）优于错算（发错货）。所以宁可让这份表小一点。
+ */
+export function buildSkuWeightIndex(
+  variants: WeightVariantRow[] | null | undefined,
+  codeOf: Map<number, string>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  type Group = { total: number; filled: number; weight: number };
+  const groups = new Map<string, Group>();
+
+  for (const v of Array.isArray(variants) ? variants : []) {
+    const code = String(codeOf.get(Number(v?.productId)) ?? '');
+    if (!code.trim()) continue; // 没款编码 → 连料号都对不上，别建任何键
+    const g = Number(v?.weightG) || 0;
+    const color = String(v?.color ?? '').trim();
+    const key = color ? skuWeightKey(code, color, v?.size) : '';
+    if (key && g > 0) out[key] = g;
+
+    // 已归档的变体不发货，不该挡住折叠（但它的精确键照样生效，上面已经写了）
+    if (String(v?.status ?? '') === 'archived') continue;
+    const sizeKey = skuSizeWeightKey(code, v?.size);
+    if (!sizeKey) continue;
+    const grp = groups.get(sizeKey) ?? { total: 0, filled: 0, weight: 0 };
+    grp.total += 1;
+    if (g > 0) {
+      if (grp.filled === 0) grp.weight = g;
+      else if (grp.weight !== g) grp.weight = -1; // 出现不同值 → 永久不可折叠
+      grp.filled += 1;
+    }
+    groups.set(sizeKey, grp);
+  }
+
+  for (const [key, grp] of groups) {
+    if (grp.total > 0 && grp.filled === grp.total && grp.weight > 0) out[key] = grp.weight;
+  }
+  return out;
 }
 
 /**
@@ -224,6 +339,8 @@ export interface OrderCostRow {
   /** 摄取通道（界面按它标来源；两条链的数字在同一张表里可比） */
   source: OrderSource;
   shop: string;
+  /** 店名归一键（主进程 `shopName.toNameKey`）—— 按店铺身份聚合营收时用它，名字只作展示 */
+  shopKey: string;
   orderTime: string;
   styleCode: string;
   styleColor: string;
@@ -240,14 +357,33 @@ export interface OrderCostRow {
   qtySource: QtySource;
   country: string;
   weightG: number | null;
+  /**
+   * 克重是从哪来的（决定这个数"可信到什么程度"，界面用 tooltip 说清楚）：
+   * `snapshot` = 订单行上钉过的值（`oi_order_items.weight_g`，归类核对那刻的 SKU 克重）；
+   * `lookup` = 现查产品库 SKU；`none` = 都没有。
+   */
+  weightSource: 'snapshot' | 'lookup' | 'none';
   /** 运费（元）；null = 这一环缺（见 gaps） */
   shipping: number | null;
-  /** 运费的拒算分类（`quoteOrders` 的 `reasonClass`）；'' = 算出来了 */
+  /**
+   * 运费来自哪：
+   * `parcel` = 该单包裹运费合计（按件数摊到各行，真值；见 `parcelTotals` 入参）；
+   * `rate` = 按运价表估算（该单还没拆包）；`none` = 没包裹且运价表也算不出。
+   */
+  shippingSource: 'parcel' | 'rate' | 'none';
+  /** 运费的拒算分类（`quoteOrders` 的 `reasonClass`）；'' = 算出来了；`parcelShipMissing` = 包裹缺运费 */
   shippingReason: string;
   /** 这一行用的是**哪份运价表**（快照生效日，yyyy-mm-dd）；'' = 用的是"当前那份"或没表 */
   rateVersion: string;
   /** 产品成本（元）；null = 缺成本 */
   productCost: number | null;
+  /**
+   * 成本来自哪（C2 两字段，2026-10-21）：
+   * `snapshot` = 订单行**实际进价**（`oi_order_items.actual_cost_cents`，拿货落账回写的那笔钱）；
+   * `estimate` = 订单行**进价预估**（`oi_order_items.cost_cents`，归类确认时按产品当时价钉的快照）；
+   * `none` = 两处都没有（标 `cost` 缺口，**不按 0 算**）。
+   */
+  costSource: 'snapshot' | 'estimate' | 'none';
   /** 合计成本（元）= 运费 + 产品成本；任一分项为 null 则 null */
   total: number | null;
   /** 经营状态分桶（关闭单单独一桶） */
@@ -319,6 +455,8 @@ export interface OrderCostInput {
     id: number;
     orderNo: string;
     shop?: string;
+    /** 店名归一键（宿主 `shippingRows` 已算好）；缺省时按 `shop` 原文兜底，见 `computeOrderCosts` */
+    shopKey?: string;
     orderTime?: string;
     styleCode?: string;
     styleColor?: string;
@@ -329,6 +467,12 @@ export interface OrderCostInput {
     supplierName?: string;
     /** 件数真值（采集行有；导入侧没有，由渲染层解析"商品信息"块） */
     qty?: number | null;
+    /** 行级克重**快照**（`oi_order_items.weight_g`）；给了就用，认不出（null/<=0）才回落 SKU 查表 */
+    weightG?: number | null;
+    /** 行级**进价预估**快照（`oi_order_items.cost_cents`，单位：分）；0/null = 没钉过 */
+    costCents?: number | null;
+    /** 行级**实际进价**快照（`oi_order_items.actual_cost_cents`，单位：分）；0/null = 还没拿货落账 */
+    actualCostCents?: number | null;
     rawFields: Record<string, string>;
     /** 摄取通道（缺省按 `import` 处理：老调用方不用改） */
     source?: OrderSource;
@@ -352,8 +496,14 @@ export interface OrderCostInput {
    * （各按所选快照分组计价，口径仍是同一个 `quoteOrders`）；不给则退回 `rateTable` 单表口径。
    */
   rateSnapshots?: RateSnapshot[] | null;
-  /** 款级成本区间（`ae_cost_map`） */
-  costs: CostInterval[];
+  /**
+   * **按订单号索引的包裹运费/重量汇总**（宿主 `parcelTotalsByOrders`）。
+   * 给了且该单 `count > 0` ⇒ 这一单的运费用**包裹合计**（真值，按件数摊到各行），
+   * **不再按运价表估算**；包裹缺运费时标 `parcel` 缺口，**不回落估算**
+   * （回落会让"用户已经在按包记运费"的数字被估算覆盖，且看不出来）。
+   * 不传 / 该单不在表里 = 还没拆包，走原运价表链路。
+   */
+  parcelTotals?: Record<string, OrderParcelTotals> | null;
   /** 进位方式，默认四舍五入（与运费岛一致） */
   rounding?: Rounding;
   /**
@@ -391,7 +541,7 @@ export interface OrderCostInput {
   platformFeeRatePercent?: number;
 }
 
-const GAP_KEYS: OrderCostGap[] = ['revenue', 'country', 'weight', 'rate', 'style', 'cost', 'tax', 'qty'];
+const GAP_KEYS: OrderCostGap[] = ['revenue', 'fx', 'country', 'weight', 'rate', 'parcel', 'style', 'cost', 'tax', 'qty'];
 
 /** 金额保留两位（分位四舍五入）。
  *  导出给 `picking.ts` 用同一份 —— 拣货单的「预估金额」与利润页的金额必须同一种进位，
@@ -403,6 +553,13 @@ export function round2(n: number): number {
 /** 分 → 元；null / 非数 → null（**不要**折成 0：0 与"报表里没有"是两回事） */
 function centsToYuan(cents: unknown): number | null {
   return typeof cents === 'number' && Number.isFinite(cents) ? round2(cents / 100) : null;
+}
+
+/** 成本字段（分）→ 正数；0 / 空 / 非数一律 null（0 是"没维护"，不是"零成本"）。
+ *  导出给 `picking.ts` 共用 —— 两页对"这个数算不算有值"必须是同一套判据。 */
+export function positiveCents(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -420,56 +577,6 @@ export function dateKey(raw: unknown): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
     d.getDate(),
   ).padStart(2, '0')}`;
-}
-
-/**
- * 取「该款在 `bizDate` 生效的那条成本区间」。
- *
- * 为什么要有这个函数（而不是让调用方自己挑）：`pickUnitCost`（算钱 / 拣货）与**成本维护界面**
- * （要显示"当前生效的是哪条、来源是手工还是拿货"）必须挑出**同一条**。挑法里有排序 + 回落
- * 两条规则，各写一份必然漂开 —— 页面上写着"当前价 12.34（手工）"，利润里算的却是 10.00（拿货对账）。
- *
- * 规则：生效日升序，同日 `manual` 优先；取 ≤ `bizDate` 的最后一条；一条都没有（或日期认不出）→ 取最早那条。
- */
-export function pickCostInterval(
-  costs: CostInterval[],
-  styleCode: string,
-  bizDate: string,
-): CostInterval | null {
-  if (!styleCode) return null;
-  const rows = (Array.isArray(costs) ? costs : []).filter(
-    (c) => c && c.styleCode === styleCode && c.effectiveFrom,
-  );
-  if (!rows.length) return null;
-  // 生效日升序；同日 manual 排在后面（循环里"后写覆盖"，于是 manual 天然胜出）
-  const rank = (c: CostInterval): number => (c.source === 'manual' ? 1 : 0);
-  const sorted = [...rows].sort((a, b) =>
-    a.effectiveFrom === b.effectiveFrom
-      ? rank(a) - rank(b)
-      : a.effectiveFrom < b.effectiveFrom
-        ? -1
-        : 1,
-  );
-  if (!bizDate) return sorted[0]; // 日期认不出 → 区间无从判定，取最早
-  let hit: CostInterval | undefined;
-  for (const r of sorted) {
-    if (r.effectiveFrom <= bizDate) hit = r;
-    else break;
-  }
-  return hit ?? sorted[0];
-}
-
-/**
- * 取「该款在 `bizDate` 生效的单价」（元）。
- *
- * @returns `null` = 该款在那一刻没有任何可用成本（**不是 0** —— 0 会被读成"零成本"）
- */
-export function pickUnitCost(
-  costs: CostInterval[],
-  styleCode: string,
-  bizDate: string,
-): number | null {
-  return pickCostInterval(costs, styleCode, bizDate)?.unitPrice ?? null;
 }
 
 /** 统计维度：款（成本口径的天然维度）/ 目的国（运费口径的天然维度）/ 经营状态桶 */
@@ -562,6 +669,60 @@ export function summarizeOrderCosts(
   return [...agg.values()].sort((a, b) => b.gross - a.gross || b.rows - a.rows);
 }
 
+/**
+ * 按店铺汇总**营收**（记账的「按营收占比分摊」用它，RK-06：不新写一套收入 SQL）。
+ *
+ * 口径完全由 `computeOrderCosts` 决定（收入 = 订单金额；关闭/取消单不计入），
+ * 本函数只做「按 `shopKey` 累加」这一件事 —— 统计页按店营收与记账分摊的权重因此天然一致。
+ * 单位是**整数分**：权重直接进 `src/lib/ledger.ts` 的分摊引擎，避免再经元/分换算。
+ *
+ * `shopKey` 由宿主 `shippingRows` 用 `toNameKey` 算好（渲染层不做第二份归一）；
+ * 空键 = 订单没写店铺，金额无法归属，单列 `missingShopCents` 交给调用方显式提示。
+ */
+export interface RevenueByShop {
+  byShopKey: Record<string, number>;
+  /** Σ 全部可计入营收的金额（= Σ byShopKey + missingShopCents） */
+  totalCents: number;
+  missingShopCents: number;
+  /** 关闭/取消单被排除的行数（营收口径不含它们） */
+  excludedClosedRows: number;
+  /** 金额缺失、无法计入营收的行数（报表没金额 / 采集缺汇率） */
+  missingRevenueRows: number;
+}
+
+export function summarizeRevenueByShop(
+  orders: OrderCostInput['orders'] | null | undefined,
+): RevenueByShop {
+  const summary = computeOrderCosts({
+    orders: Array.isArray(orders) ? orders : [],
+    // 营收与运费/成本无关：不传运价表，逐行运费会标缺，但不进本函数的任何合计。
+    rateTable: null,
+  });
+  const byShopKey: Record<string, number> = {};
+  let totalCents = 0;
+  let missingShopCents = 0;
+  let excludedClosedRows = 0;
+  let missingRevenueRows = 0;
+  for (const r of summary.rows) {
+    if (r.bucket === 'closed') {
+      excludedClosedRows++;
+      continue;
+    }
+    if (r.revenue === null) {
+      missingRevenueRows++;
+      continue;
+    }
+    const cents = Math.round(r.revenue * 100);
+    totalCents += cents;
+    if (!r.shopKey) {
+      missingShopCents += cents;
+      continue;
+    }
+    byShopKey[r.shopKey] = (byShopKey[r.shopKey] ?? 0) + cents;
+  }
+  return { byShopKey, totalCents, missingShopCents, excludedClosedRows, missingRevenueRows };
+}
+
 export interface CostTrendPoint {
   /** `yyyy-mm`（按月）或 `yyyy-mm-dd`（按日） */
   bucket: string;
@@ -629,13 +790,17 @@ function gapOfReason(reason: string): OrderCostGap | null {
 /** 订单行 × 成本 → 逐行运费/产品成本/合计 + 缺口；并给汇总 */
 export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
   const orders = Array.isArray(input?.orders) ? input.orders : [];
-  const costs = Array.isArray(input?.costs) ? input.costs : [];
   const table = input?.rateTable ?? null;
 
   const skuWeights = input?.skuWeights ?? {};
+  /** 快照克重只在**是正数**时采用：0/NULL 都是"还没钉过"，不能当成"零克重"（那会把运费算成 0） */
+  const snapshotWeight = (o: OrderCostInput['orders'][number] | null): number | null => {
+    const v = Number(o?.weightG);
+    return Number.isFinite(v) && v > 0 ? Math.round(v) : null;
+  };
   const shippingRows: OrderShippingRow[] = orders.map((o) => {
     const ex = extractShipping(o?.rawFields ?? {});
-    const weightG = resolveWeightG(o, skuWeights);
+    const weightG = snapshotWeight(o) ?? resolveWeightG(o, skuWeights);
     return {
       id: Number(o?.id) || 0,
       orderNo: String(o?.orderNo ?? ''),
@@ -645,8 +810,50 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
     };
   });
 
+  /** 件数先算一遍：包裹运费按件数摊到行，行循环里复用同一份（两处各解析一次必然漂开） */
+  const qtyInfos = orders.map((o, i) => {
+    const sr = shippingRows[i];
+    return resolveQty(
+      { orderNo: sr.orderNo, itemId: sr.itemId, rawFields: o?.rawFields, qty: o?.qty },
+      input?.settleQty,
+    );
+  });
+
+  const parcelTotalsInput = input?.parcelTotals ?? {};
+  /** 有包裹的行 → 该行应摊到的运费（元；null = 该单还有包没填运费） */
+  const parcelShipByIndex = new Map<number, number | null>();
+  const indexesByOrder = new Map<string, number[]>();
+  orders.forEach((o, i) => {
+    const no = String(o?.orderNo ?? '');
+    const pt = parcelTotalsInput[no];
+    if (!no || !pt || !(Number(pt.count) > 0)) return;
+    const arr = indexesByOrder.get(no) ?? [];
+    arr.push(i);
+    indexesByOrder.set(no, arr);
+  });
+  for (const [no, idxs] of indexesByOrder) {
+    const totalCents = parcelTotalsInput[no]?.shipCents;
+    if (totalCents === null || totalCents === undefined || !Number.isFinite(Number(totalCents))) {
+      // 整单合计为 null：每一行都如实缺，**不拿部分和、也不回落估算**
+      for (const i of idxs) parcelShipByIndex.set(i, null);
+      continue;
+    }
+    const totalYuan = round2(Number(totalCents) / 100);
+    const qtySum = idxs.reduce((s, i) => s + Math.max(1, qtyInfos[i].qty), 0);
+    let acc = 0;
+    idxs.forEach((i, k) => {
+      // 末行吃残差（分位四舍五入后各行之和必须 == 整单合计，否则汇总对不上包裹总额）
+      const share =
+        k === idxs.length - 1
+          ? round2(totalYuan - acc)
+          : round2((totalYuan * Math.max(1, qtyInfos[i].qty)) / qtySum);
+      acc = round2(acc + share);
+      parcelShipByIndex.set(i, share === 0 ? 0 : share);
+    });
+  }
+
   // 运价表：优先**按订单日期逐行挑快照**（报价单会更新，历史订单的预测运费不能跟着变）；
-  // 没有快照才退回"当前那一份"单表口径。
+  // 没有快照才退回"当前那一份"单表口径。**有包裹的单不参与** —— 运费已由包裹真值决定。
   const snaps = (Array.isArray(input?.rateSnapshots) ? input.rateSnapshots : []).filter(
     (s): s is RateSnapshot => !!s && !!s.table && !!s.effectiveFrom,
   );
@@ -664,23 +871,27 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
     return (hit ?? (d ? sorted[0] : sorted[sorted.length - 1])).effectiveFrom;
   };
 
+  /** 需要按运价表算的行（没有包裹的那些） */
+  const rateIndexes = orders.map((_, i) => i).filter((i) => !parcelShipByIndex.has(i));
+
   const byId = new Map<number, OrderQuoteRow>();
   if (snaps.length) {
     // 按"选中的那份快照"分组，各组各调一次 quoteOrders —— 口径仍是同一份实现，不重算运费
     const groups = new Map<RateTable, number[]>();
-    orders.forEach((o, i) => {
-      const t = tableFor(o);
-      if (!t) return;
+    for (const i of rateIndexes) {
+      const t = tableFor(orders[i]);
+      if (!t) continue;
       const arr = groups.get(t) ?? [];
       arr.push(i);
       groups.set(t, arr);
-    });
+    }
     for (const [t, idxs] of groups) {
       const sub = idxs.map((i) => shippingRows[i]);
       for (const q of quoteOrders(t, sub, { rounding: input?.rounding }).rows) byId.set(q.id, q);
     }
   } else if (singleUsable) {
-    for (const q of quoteOrders(table as RateTable, shippingRows, { rounding: input?.rounding }).rows) {
+    const sub = rateIndexes.map((i) => shippingRows[i]);
+    for (const q of quoteOrders(table as RateTable, sub, { rounding: input?.rounding }).rows) {
       byId.set(q.id, q);
     }
   }
@@ -711,31 +922,59 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
     const styleCode = String(o?.styleCode ?? '');
     const gaps = new Set<OrderCostGap>();
 
-    // 运费侧：算不出/为何算不出，一律由 quoteOrders 的结论决定
-    const rowTable = tableFor(o);
-    if (!rowTable) gaps.add('rate');
-    const shipping = q && q.ok ? q.fee : null;
-    if (q && !q.ok) {
-      const g = gapOfReason(q.reasonClass);
-      if (g) gaps.add(g);
+    // 运费侧：**有包裹 = 用包裹真值**（按件数摊到行），否则由 quoteOrders 的结论决定。
+    // 包裹缺运费时**不回落运价表**：用户已经在按包记账，拿估算盖上去会让"填没填"看不出来。
+    const hasParcel = parcelShipByIndex.has(i);
+    let shipping: number | null;
+    let shippingSource: OrderCostRow['shippingSource'];
+    let shippingReason = '';
+    let rateVersion = '';
+    if (hasParcel) {
+      shipping = parcelShipByIndex.get(i) ?? null;
+      shippingSource = 'parcel';
+      if (shipping === null) {
+        shippingReason = 'parcelShipMissing';
+        gaps.add('parcel');
+      }
+    } else {
+      const rowTable = tableFor(o);
+      if (!rowTable) gaps.add('rate');
+      shipping = q && q.ok ? q.fee : null;
+      shippingSource = shipping !== null ? 'rate' : 'none';
+      if (q && !q.ok) {
+        shippingReason = q.reasonClass;
+        const g = gapOfReason(q.reasonClass);
+        if (g) gaps.add(g);
+      }
+      rateVersion = versionFor(o);
     }
 
-    // 成本侧：款识别 → 款级成本
+    // 成本侧（C2 两字段）：**实付真值 > 进价预估 > 缺**。次序不能反：
+    // actual 是"这单实际付了多少"，estimate 是"归类时这款大概多少"——真值必须赢。
+    // 0 一律当"没维护/还没落账"（按零成本算会让利润凭空变大）。
     if (!styleCode) gaps.add('style');
-    const unit = pickUnitCost(costs, styleCode, dateKey(o?.orderTime));
-    const productCost = unit === null ? null : round2(unit);
+    const actualCents = positiveCents(o?.actualCostCents);
+    const estimateCents = positiveCents(o?.costCents);
+    const usedCents = actualCents ?? estimateCents;
+    const costSource: OrderCostRow['costSource'] =
+      actualCents !== null ? 'snapshot' : estimateCents !== null ? 'estimate' : 'none';
+    const productCost = usedCents === null ? null : round2(usedCents / 100);
     if (productCost === null) gaps.add('cost');
 
     // 件数：口径单源在 `resolveQty`（结算商品行真值 → 报表块内 `商品数量` → 按 1 件并标缺）
-    const { qty, qtySource } = resolveQty(
-      { orderNo: sr.orderNo, itemId: sr.itemId, rawFields: o?.rawFields, qty: o?.qty },
-      input?.settleQty,
-    );
+    const { qty, qtySource } = qtyInfos[i];
     if (qtySource === 'assumed') gaps.add('qty');
 
     // 收入侧：订单金额（买家视角总额，含买家付的运费）
     const revenue = centsToYuan(o?.amountCents);
-    if (revenue === null) gaps.add('revenue');
+    if (revenue === null) {
+      // **拆分两种成因**（补法不同，见 `OrderCostGap` 上 `fx` 的说明）：
+      //   · `collect` 通道的金额只有一个来源（`upsertOrderBatch`：`rate ? 折算 : null`），
+      //     本币恒 1:1、外币有汇率即非 null ⇒ 金额为 null **必然**是缺汇率；
+      //   · `import` 通道的金额来自报表本身，null = 报表里就没有这一列值（无处可补）。
+      // ⚠️ 判据必须挂在 `source` 上（不是"猜"）：导入单没有汇率概念，误判成缺汇率会指错方向。
+      gaps.add(o?.source === 'collect' ? 'fx' : 'revenue');
+    }
 
     // 税：平台代征代缴时是**确定的 0**（平台已代收代缴，不是我们的成本）；
     //     明确自缴时 = 增值税 + DDP；**不知道谁承担 → null 并标缺**（不按 0 算）。
@@ -795,6 +1034,7 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
       orderNo: sr.orderNo,
       source: o?.source === 'collect' ? 'collect' : 'import',
       shop: String(o?.shop ?? ''),
+      shopKey: String(o?.shopKey ?? o?.shop ?? ''),
       orderTime: String(o?.orderTime ?? ''),
       styleCode,
       styleColor: String(o?.styleColor ?? ''),
@@ -807,10 +1047,13 @@ export function computeOrderCosts(input: OrderCostInput): OrderCostSummary {
       qtySource,
       country: sr.country,
       weightG: sr.weightG,
+      weightSource: snapshotWeight(o) !== null ? 'snapshot' : sr.weightG !== null ? 'lookup' : 'none',
       shipping,
-      shippingReason: q && !q.ok ? q.reasonClass : '',
-      rateVersion: versionFor(o),
+      shippingSource,
+      shippingReason,
+      rateVersion,
       productCost,
+      costSource,
       total,
       platformFee,
       tier,

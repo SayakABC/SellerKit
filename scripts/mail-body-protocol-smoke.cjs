@@ -38,15 +38,54 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'sk-host', privileges: { standar
 const { UI_CSP: HOST_CSP } = require(path.join(ROOT, 'dist', 'electron', 'plugin-ui-protocol.js'));
 
 /**
- * 岛自带的那层 CSP（第二层）：直接读岛的真实 `index.html`，不抄副本 ——
+ * 岛自带的那层 CSP（第二层）：读**真的在嵌正文的那个岛**的真实 `index.html`，不抄副本 ——
  * 抄一份的话，岛那边把 `frame-src sk-mail:` 删了，本冒烟会因为用的是副本而恒绿（真事故就发生在这一层）。
  * ⚠️ content 取值必须按**引号配对**：CSP 内容里全是单引号（'self'），写成 `[^"']*` 会在第一个 `'` 处截断。
+ *
+ * 2026-10-22 改扫描：原先写死 `ui-plugins/shop-accounts/index.html`，那个岛已于 2026-10-14 回收为内建
+ * 模块、目录不复存在。而**该读取发生在 `app.whenReady()` 之前** —— Electron 遇 load 期异常只打印
+ * `App threw an error during load` 就挂着不退，症状是"跑起来没有任何输出、一直卡住"（本轮就是这么卡的）。
+ * 现在按事实来源判定：
+ *   · 有岛嵌正文（其源码里出现 `sk-mail://`）→ 用它的 meta CSP 跑两层交集断言；
+ *   · 没有（当前如此：正文由内建 `src/modules/mail/MailInboxView.vue` 嵌，宿主 `index.html` 无 CSP meta，
+ *     即不存在第二层）→ 显式打印"不适用"并跳过该节，**不拿副本凑数**。
+ * "宿主 index.html 一旦被人加了 CSP meta 就要回来补 frame-src" 这条前提由
+ * `tests/islandMailFrameCsp.spec.ts` 钉住（与静态扫描同判据）。
  */
-const ISLAND_META_CSP = (() => {
-  const html = fs.readFileSync(path.join(ROOT, 'ui-plugins', 'shop-accounts', 'index.html'), 'utf8');
-  const m = html.match(/http-equiv=["']Content-Security-Policy["'][^>]*content=(?:"([^"]*)"|'([^']*)')/i);
-  return m ? m[1] ?? m[2] ?? '' : '';
-})();
+let islandMetaCsp = null; // { id, csp } | null（在 app.whenReady 的 try 里解析，失败即 app.exit(2)）
+
+/** 递归判断目录下源码里是否出现 `sk-mail://`（跳 node_modules / dist / 隐藏目录） */
+function dirUsesMail(dir) {
+  if (!fs.existsSync(dir)) return false;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'dist') continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (dirUsesMail(p)) return true;
+    } else if (/\.(ts|vue|js|mts|cts)$/.test(e.name) && fs.readFileSync(p, 'utf8').includes('sk-mail://')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveIslandMetaCsp() {
+  const pluginsDir = path.join(ROOT, 'ui-plugins');
+  if (!fs.existsSync(pluginsDir)) return null;
+  for (const e of fs.readdirSync(pluginsDir, { withFileTypes: true })) {
+    if (!e.isDirectory() || !dirUsesMail(path.join(pluginsDir, e.name))) continue;
+    const htmlPath = path.join(pluginsDir, e.name, 'index.html');
+    if (!fs.existsSync(htmlPath)) {
+      throw new Error(`岛 ${e.name} 引用了 sk-mail:// 却没有 index.html（正文 iframe 不可能挂得上）`);
+    }
+    const html = fs.readFileSync(htmlPath, 'utf8');
+    const m = html.match(
+      /http-equiv=["']Content-Security-Policy["'][^>]*content=(?:"([^"]*)"|'([^']*)')/i,
+    );
+    return { id: e.name, csp: m ? m[1] ?? m[2] ?? '' : '' };
+  }
+  return null;
+}
 
 /** 1×1 透明 PNG：内容比对用，字节数固定（70） */
 const PNG_1PX = Buffer.from(
@@ -66,11 +105,15 @@ function section(text) {
 app.whenReady().then(async () => {
   let remoteServer;
   try {
+    // 第二层 CSP 的来源先解析（放在 try 内 ⇒ 文件缺失/结构变了会走 catch 打堆栈并 app.exit(2)，
+    // 而不是在 load 期抛错把进程挂住）
+    islandMetaCsp = resolveIslandMetaCsp();
     const { initDb, dbRun, dbQuery, dbGet } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
     const mailDb = require(path.join(ROOT, 'dist', 'electron', 'mail-db.js'));
     const mailCache = require(path.join(ROOT, 'dist', 'electron', 'mail-cache.js'));
     initDb(path.join(tmpDir, 'mail-body-smoke.db'));
-    // 临时库里没有 sk_shop_sets（那是别的域的表）→ 关外键校验以便直接插账号行
+    // 临时库里没有 sk_shops（那是别的域的表）→ 关外键校验以便直接插账号行
+    // ⚠️ 账号行的外键列名 2026-10-22 起是 `shop_id`（原 `shop_set_id` 随物理合并一起改名并改指 `sk_shops`）
     dbRun(`PRAGMA foreign_keys = OFF`);
     mailDb.ensureMailSchema();
 
@@ -98,7 +141,7 @@ app.whenReady().then(async () => {
     check('本机存在非 loopback IPv4（"http 图真的能加载"这条判据的前提）', !!lanIp, lanIp || '(无，后面的远程图断言会失去意义)');
 
     section('准备夹具（不联网）');
-    dbRun(`INSERT INTO sk_mail_accounts (shop_set_id, email) VALUES (1, 'probe@example.com')`);
+    dbRun(`INSERT INTO sk_mail_accounts (shop_id, email) VALUES (1, 'probe@example.com')`);
     dbRun(
       `INSERT INTO sk_mail_messages (account_id, folder, uid, subject, body_cached, preview)
        VALUES (1, 'INBOX', 42, 'probe', 1, 'probe')`,
@@ -164,9 +207,10 @@ app.whenReady().then(async () => {
       const src = `${bodyUrl}${u.searchParams.get('remote') === '1' ? '?remote=1' : ''}`;
       // `/page/island.html` = 复刻"岛页面"（头 CSP + 岛自带 meta CSP 两层）；
       // `/page/index.html` = 只有头 CSP 的裸宿主页（前几节用）
-      const meta = u.pathname.includes('island')
-        ? `<meta http-equiv="Content-Security-Policy" content="${ISLAND_META_CSP}">`
-        : '';
+      const meta =
+        u.pathname.includes('island') && islandMetaCsp
+          ? `<meta http-equiv="Content-Security-Policy" content="${islandMetaCsp.csp}">`
+          : '';
       // 只嵌正文 iframe：宿主页自身的 img 取 sk-mail:// 会被 UI_CSP 的 img-src 拦（那是刻意的边界），
       // 图片能力只属于正文文档，故这里不掺宿主取图
       return new Response(
@@ -232,31 +276,45 @@ app.whenReady().then(async () => {
     // 正文 iframe 照样 ERR_BLOCKED_BY_CSP —— 2026-10-04 的真实事故就是这样：宿主侧全绿、
     // 真机正文全白，第 3 轮才在真机上抓到。这里读**岛的真实文件**（不抄副本），
     // 把它放进父页（sk-host://page/island.html 那条分支），于是"岛删掉那条指令"会立刻在本冒烟里变红。
+    //
+    // 2026-10-22：这一层**只在有岛嵌正文时才存在**。原先写死的 `shop-accounts` 岛已回收为内建模块，
+    // 现在正文由 `src/modules/mail/MailInboxView.vue` 嵌在宿主渲染进程里，而宿主 `index.html` 没有
+    // CSP meta ⇒ 无第二层（该前提由 tests/islandMailFrameCsp.spec.ts 钉着）。跳过时**显式打印理由**，
+    // 不让它变成"看起来跑过了"的静默空转。
     section('岛自带 meta CSP（第二层，取交集）');
-    check('读到了岛的 meta CSP（读不到 ⇒ 后面的断言失去意义，先修 index.html 结构）',
-      !!ISLAND_META_CSP, ISLAND_META_CSP.slice(0, 60));
-    check('岛的 meta CSP 放行 frame-src sk-mail:', /frame-src[^;]*sk-mail:/.test(ISLAND_META_CSP));
-    check('岛的 meta CSP 没夹带明显越权项（script-src 通配 / unsafe-eval）',
-      !/unsafe-eval/.test(ISLAND_META_CSP) && !/script-src[^;]*\*/.test(ISLAND_META_CSP), ISLAND_META_CSP);
+    if (!islandMetaCsp) {
+      console.log(
+        '  — 不适用：ui-plugins/ 下没有任何岛引用 sk-mail://（当前嵌正文的是内建模块，宿主页无 CSP meta）。\n' +
+          '    将来若有岛要嵌邮件正文，其 index.html 的 meta CSP 必须放行 frame-src sk-mail:，' +
+          '届时本节会自动开始跑真断言。',
+      );
+    } else {
+      const cspOf = islandMetaCsp.csp;
+      check(`读到岛 ${islandMetaCsp.id} 的 meta CSP（读不到 ⇒ 后面的断言失去意义，先修 index.html 结构）`,
+        !!cspOf, cspOf.slice(0, 60));
+      check('岛的 meta CSP 放行 frame-src sk-mail:', /frame-src[^;]*sk-mail:/.test(cspOf));
+      check('岛的 meta CSP 没夹带明显越权项（script-src 通配 / unsafe-eval）',
+        !/unsafe-eval/.test(cspOf) && !/script-src[^;]*\*/.test(cspOf), cspOf);
 
-    const seen5 = [];
-    session.defaultSession.webRequest.onCompleted({ urls: ['sk-mail://*/*'] }, (d) =>
-      seen5.push(`${d.statusCode} ${d.url}`),
-    );
-    // 复用同一个窗口：本环境（--no-sandbox --disable-gpu）下销毁再新建窗口会把进程带崩，
-    // 上一版就是这么崩的（日志停在创建第二个窗口处，最后的汇总行都没打出来）。
-    const diag = [];
-    win.webContents.on('console-message', (_e, _lvl, message) => diag.push(`console: ${message}`));
-    win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) =>
-      diag.push(`fail-load: ${code} ${desc} ${url} main=${isMainFrame}`),
-    );
-    await win
-      .loadURL('sk-host://page/island.html')
-      .catch((e) => diag.push(`loadURL 抛错: ${e.message}`));
-    await new Promise((r) => setTimeout(r, 1800));
-    check('带岛 meta CSP 的页面里正文 iframe 仍加载成功（两层交集放行）',
-      seen5.some((s) => s.startsWith('200 ') && s.includes('/body/')),
-      (seen5.join(' | ') || '(无 sk-mail 请求)') + (diag.length ? `  ${diag.join(' ⏐ ').slice(0, 400)}` : ''));
+      const seen5 = [];
+      session.defaultSession.webRequest.onCompleted({ urls: ['sk-mail://*/*'] }, (d) =>
+        seen5.push(`${d.statusCode} ${d.url}`),
+      );
+      // 复用同一个窗口：本环境（--no-sandbox --disable-gpu）下销毁再新建窗口会把进程带崩，
+      // 上一版就是这么崩的（日志停在创建第二个窗口处，最后的汇总行都没打出来）。
+      const diag = [];
+      win.webContents.on('console-message', (_e, _lvl, message) => diag.push(`console: ${message}`));
+      win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) =>
+        diag.push(`fail-load: ${code} ${desc} ${url} main=${isMainFrame}`),
+      );
+      await win
+        .loadURL('sk-host://page/island.html')
+        .catch((e) => diag.push(`loadURL 抛错: ${e.message}`));
+      await new Promise((r) => setTimeout(r, 1800));
+      check('带岛 meta CSP 的页面里正文 iframe 仍加载成功（两层交集放行）',
+        seen5.some((s) => s.startsWith('200 ') && s.includes('/body/')),
+        (seen5.join(' | ') || '(无 sk-mail 请求)') + (diag.length ? `  ${diag.join(' ⏐ ').slice(0, 400)}` : ''));
+    }
     win.destroy();
 
     const failed = results.filter((r) => !r).length;

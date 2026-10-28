@@ -71,7 +71,7 @@
 | **1.3.0** | **SKU 改服装「颜色+尺码」组合**（尺码拖选批量生成；`pl_variants` 补列 color/size）          | ✅ 2026-09-27 | 见 §3.1 注记与 CHANGELOG；门禁全绿                                                                              |
 | **1.4.0** | **供应商维护自「拿货对账」迁移入岛（新页签）+ 产品批量编辑（部分 patch）**                   | ✅ 2026-09-27 | 新域 `product-supplier` 4 op（复用 purchase-supplier-\* 通道）+ `product-admin` +`batchUpdate`（9→10 满额）+ `product-batch-update` 通道 |
 | **1.5.0** | **新增「商品清单」页签**：Excel 导入店铺商品池（按 `item_id` 去重）+ 一件商品一对多关联产品（套装） | ✅ 2026-09-29 | 新域 `shop-products` 6 op（复用 `shop-product-*` 通道，零新通道）+ 岛 1.5.0 重发市场。**起因是 1.4.0 同版本号重发布导致本机永远拿不到该页签**（见 §7.5） |
-| P4      | 成本维护界面（读写 `ae_cost_map`，显示 `source`）                                             | ✅ 2026-10-09 | `src/modules/goods/components/CostPane.vue`（页签「**进价**」）+ `electron/manual-costs.ts`（写入口径，与导入共用）+ `ae-cost-map-upsert-manual` / `-delete-manual`；逐条见 CHANGELOG 续十七 与 `docs/notes/2026-10-09-cost-maintenance-pane.md` |
+| P4      | 成本维护界面（读写 `ae_cost_map`，显示 `source`）                                             | ✅ 2026-10-09<br>**⛔ 2026-10-22 退役** | 当时：`CostPane.vue`（2026-10-14 整合后住「**基础数据 › 成本与费率**」，经 `CostRatesPane.vue` 拼装）+ `electron/manual-costs.ts` + `ae-cost-map-upsert-manual` / `-delete-manual`；逐条见 CHANGELOG 续十七 与 `docs/notes/2026-10-09-cost-maintenance-pane.md`。**现状**：`ae_cost_map` 已于 C2（2026-10-21）退役，界面在 B'（2026-10-22）整页删除 —— 进价只在**产品编辑抽屉的「进价（元）」栏**（`ed-cost`）维护、产品列表内联展示（`p-cost`）并支持「只看缺进价」服务端筛选；汇率面板一并退场（实时利润引擎从不读 `ae_rates`） |
 | P5      | 拣货（按产品/色码聚合）—— **变体表在本阶段才建**                                              | ⬜ 依赖 P3    | —                                                                                                               |
 
 **四处以代码为准、与下文计划不同**：
@@ -158,7 +158,7 @@ v4 的 §3.3「P4a 动作清单」是**纸上推演**，真开工后有 4 条与
 | ------------ | ------------------------------------------------------------------------------------ |
 | 产品维护     | 产品（款式）主数据：编码、名称、厂家、类目、备注                                     |
 | 变体维护     | 颜色 / 尺码 / 规格 —— **拣货依赖它**。⚠️ **D3 冻结：不在 P2，推迟到 P5**（拣货阶段） |
-| 成本维护     | 采购价、运费、包装、佣金率、汇率，**带生效日期**（落在 `ae_cost_map`，见 §3.3）      |
+| 成本维护     | 采购价、运费、包装、佣金率、汇率，**带生效日期**（落在 `ae_cost_map`，见 §3.3）〔⚠️ C2 后改为 `pl_products.cost_cents`，旧表已删〕 |
 | 店铺商品映射 | 店铺 × 商品ID（× 规格）→ 产品（变体到 P5 才有）                                      |
 | 待关联队列   | 未命中的订单行不丢、可批量人工确认、回写映射                                         |
 | Excel 进出   | 产品/成本批量导入（含失败行隔离）、映射表导入导出                                    |
@@ -288,6 +288,9 @@ ae_order_lines.style_code ──────────┘└──► pl_shop_
 ae_cost_map.style_code ─────────────────────┘（成本，见 §3.3）
 ```
 
+> ⚠️ **2026-10-21（C2）**：上图里的 `ae_cost_map` 已删除，成本改由 `pl_products.code` 自身的
+> `cost_cents`（当前进价）+ 订单明细行两字段承接 —— 锚点仍是 `pl_products.code`，图保留作历史形状。
+
 `style_code` 已贯通 `oi_styles`（UNIQUE）→ `purchase_items.style_code` → `ae_cost_map.style_code`（主键）→ `ae_order_lines.style_code`。产品库以 `pl_products.code` 承接**同一口径**：
 
 - 不改动任何既有表；
@@ -299,6 +302,13 @@ ae_cost_map.style_code ───────────────────
 **编码归一**：`sk_name_map`（ADR-002 S1 新建）的 `kind` 已预留 `product` 值 —— 历史文本形态的款式名经该表归一到 `pl_products.code`，**不改写历史文本列**（G2 裁定）。产品库不自建第二套名称映射。
 
 ### 3.3 成本口径（D5 已拍板：**现在就改造 `ae_cost_map`**，阶段 = P4a）
+
+> ⚠️ **2026-10-21 更新（阶段 C2）：本节结论已被推翻，勿按它实施。** 成本不再以 `ae_cost_map` 为落点：
+> 当前进价 = `pl_products.cost_cents`（产品页维护），历史价 = 订单明细行 `cost_cents`（归类确认时钉的预估）
+> 与 `actual_cost_cents`（拿货实付）；利润取数 `实际 > 预估 > 缺`。**`ae_cost_map` 表已于同日由
+> `order.main` v10 删除**（回填在 v9，删表排在它之后）。本节保留为当时的决策记录。
+> 现状见 `docs/baseline/PROJECT_BASELINE.md` §6（`order.main` v10）与
+> [`2026-10-21-cost-two-fields-c2.md`](../notes/2026-10-21-cost-two-fields-c2.md)。
 
 **ADR-002 Q2 已裁定：成本历史的落点是改 `ae_cost_map` 自身，不新增第二套成本表。** 因此：
 
@@ -460,7 +470,7 @@ v2 主张"随宿主分发"，四条理由经核对后**三条被削弱或推翻*
 修正后的结论 —— 选岛的三条正面理由：
 
 1. **与项目惯例一致**。`excel-copy` / `order-insight` / `shop-accounts` / `ae-profit` / `shipping-rate` 五个业务功能**全部**是市场岛；`modules.config.json` 的注释也写明"2026-09-22 起全部业务功能已下记为市场分发的 UI 岛"。
-2. **产品库与 `shop-accounts` 同构** —— 都是"主数据维护台"。`shop-accounts` 维护 `sk_companies` / `sk_shop_sets`，产品库维护 `pl_products` / `pl_shop_sku`，形态应当一致。
+2. **产品库与 `shop-accounts` 同构** —— 都是"主数据维护台"。`shop-accounts` 维护 `sk_companies` / `sk_shop_sets`（⚠️ **2026-10-22 已变**：`sk_shop_sets` 随 `shop.main` v1 删除，账号与店铺合成一张 `sk_shops`，工具登录另存 `sk_tool_accounts`；本条论证不受影响，它说的是"两个维护台同构"，见 `docs/decisions/ADR-003-shop-account-physical-merge.md`），产品库维护 `pl_products` / `pl_shop_sku`，形态应当一致。
 3. **它会长期演进**。店铺商品ID 的匹配规则随平台变化（新增平台、规格字段差异），独立发版避免每次都发整个宿主。
 
 **代价（必须知道）**：
@@ -745,6 +755,8 @@ P4a 提前，是因为 D5 裁定"现在就改造 `ae_cost_map`"—— 它是 P4 
 > 那是含凭据的账号套装，不是店铺）。P3 的店铺定位键 `(platform, shop_id, item_id)` 没有合法落点，
 > 且三处历史店铺文本（`oi_orders.shop` / `purchase_sources.shop` / `ae_orders.shop_name`）需要
 > `sk_name_map` 归一 —— 两者都在 S1。
+> 〔2026-10-15 补注：第三处 `ae_orders.shop_name` 已随 C1 弃表一并删除，现存**两处**
+>  （`oi_orders.shop` / `purchase_sources.shop`）；本段其余内容是 2026-09-27 当时的记录，照原样保留。〕
 > 故执行顺序改为 **S1 → P3**（S1 已于 2026-09-27 落地，见 `docs/plans/DOMAIN_INTEGRATION_PLAN.md` §4.3）。
 >
 > 📌 **这条注记原先夹在表格中间**（P3 行与 P4 行之间）—— markdown 表格被引用块劈成两半，

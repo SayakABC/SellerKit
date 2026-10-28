@@ -45,7 +45,7 @@ const API_WITHOUT_CHANNEL = new Set(['platform']);
 
 /** ② 主进程 → 渲染层的广播事件：由 webContents.send 发出，preload 用 on 订阅，
  *    不走 invoke，故不参与"通道有主"校验，单独做双向对称校验 */
-const BROADCAST_EVENTS = new Set(['mail-sync-event', 'updater-event']);
+const BROADCAST_EVENTS = new Set(['mail-sync-event', 'updater-event', 'ae-items-ingested']);
 
 /** ③ 有意复用的通道：多个 API 键映射到同一通道（一对一校验需排除） */
 const SHARED_CHANNELS = new Map([['read-file', ['importExcelByPath', 'readFile']]]);

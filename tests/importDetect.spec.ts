@@ -67,7 +67,9 @@ describe('detectImportKind：三类文件的判据', () => {
     // 体检串里必须写明"这类文件不用再导入 + 克重去哪维护"，否则用户会以为是自己文件坏了
     const hint = (d.kind === null ? d.scanned : []).join('；');
     expect(hint).toContain('不用再导入');
-    expect(hint).toContain('货与成本');
+    // 2026-10-17：「货与成本」并入「基础数据」的左导航项 ⇒ 指路名跟着改；
+    // 同日深夜该组按用户口径改名「产品管理」。
+    expect(hint).toContain('产品管理');
   });
 
   it('报价单（真实夹具：21 张表里认出运价表那张）', () => {

@@ -60,19 +60,20 @@
     <!-- ── 待关联队列 ─────────────────────────────────────────────── -->
     <template v-if="sub === 'queue'">
       <div v-if="hasQueueHints" class="gd-hints">
-        <!-- 与两栏形态的右栏**同一处改动**（2026-10-08 D1）：出口是内建的「店铺登记」页签，
-             按钮直接跳过去，不再是一句"请先到「店铺账号管家」…"（那个岛不在默认包里）。 -->
+        <!-- 与两栏形态的右栏**同一处改动**（2026-10-08 D1）：出口是真按钮，不再是一句
+             "请先到「店铺账号管家」…"（那个岛不在默认包里）。
+             2026-10-14 整合：目的地改为**跨模块**跳去「基础数据」的「店名归一」项。 -->
         <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn gd-hint-shops">
           <span>
             <b>{{ unresolvedShops.length }}</b> 家店铺还没登记，它们的商品<b>无法</b>写映射
             （订单里没有平台，平台只能从店铺实体取）：
-            <b>{{ unresolvedShops.join('、') }}</b>。到「店铺登记」把它们认下来，这几行才能关联。
+            <b>{{ unresolvedShops.join('、') }}</b>。到「店名归一」把它们认下来，这几行才能关联。
           </span>
           <button
             class="wb-btn wb-btn--sm gd-hint-shops__act"
             type="button"
             data-act="open-registry"
-            @click="navigate(GOODS_TAB_REGISTRY)"
+            @click="goRegistry()"
           >
             现在登记
           </button>
@@ -234,7 +235,7 @@
                       type="button"
                       data-act="row-open-registry"
                       :disabled="busy"
-                      @click="navigate(GOODS_TAB_REGISTRY)"
+                      @click="goRegistry()"
                     >
                       去登记
                     </button>
@@ -525,7 +526,7 @@
 //   1. 队列是**实时聚合** `oi_orders` 的商品ID 再减去已生效映射，不是缓存表 ——
 //      所以每次写入完成后都要重新拉队列，「关联完就从队列里消失」才是真实状态。
 //   2. `店铺未归一` 的行**不给**关联按钮：订单里没有平台字段，平台只能从店铺实体取，
-//      拿空平台硬塞会把不同平台的两家店并到同一个键上。这类行只能先去店铺登记。
+//      拿空平台硬塞会把不同平台的两家店并到同一个键上。这类行只能先去店名归一。
 //   3. 批量关联**一次提交整批**（主进程单事务 + 行级失败逐行回来），不做逐条调用 ——
 //      首次导入 500 行未命中是常态，逐条会把 IPC 往返变成瓶颈。
 //
@@ -544,16 +545,16 @@ import ProductPicker from './ProductPicker.vue';
 import PoolMetrics from './PoolMetrics.vue';
 import CompareModal from './CompareModal.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
-import { GOODS_TAB_REGISTRY, type GoodsTabId } from '../tabs';
 
 const props = defineProps<{
   /** 页级「刷新」信号（值变化即重拉） */
   refreshNonce?: number;
   /**
-   * 请求切到本页另一个页签 —— 「店铺登记」那一支。见 `PoolPane.vue` 里同一条 prop 的说明：
+   * 请求跳去「基础数据」的「店名归一」。见 `PoolPane.vue` 里同一条 prop 的说明：
    * 回退形态与两栏形态必须走**同一个**出口，否则"改一个常量回退"会退到一个死胡同里去。
+   * 2026-10-14 整合前它是"切到本页另一个页签"的回调（`navigate(tab)`）。
    */
-  navigate: (tab: GoodsTabId) => void;
+  goRegistry: () => void;
 }>();
 
 // ⚠️ 2026-10-08：原先这里还 emit `changed`（把「待关联数」报给外壳的页签徽标）。

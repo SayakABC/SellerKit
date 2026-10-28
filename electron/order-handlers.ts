@@ -1,21 +1,23 @@
 // electron/order-handlers.ts
 // 订单归类模块 IPC handler（electron/main.ts require 后自动生效）。
 // 语义化通道 + 入参二次校验；不向渲染层透传 SQL（安全边界见 AGENTS.md §1.7 / 红线 3）。
-// 职责：指纹查重 / 识别结果落库 / 订单入库 / 分组统计 / 主图下载与读取。
+// 职责：图片指纹查重 / 款色归属落库 / 订单入库 / 分组统计 / 主图下载与读取 / 包裹。
 
 export {};
 
-const { ipcMain, app, nativeImage, safeStorage } = require('electron');
+// 只借类型（擦除后不留运行时依赖）：包裹入参（`ParcelInput`）的白名单字段形状只有数据层那一份。
+import type { ParcelInput } from './order-db';
+
+const { ipcMain, app, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const { downloadFile } = require('./http-client');
-const orderDb = require('./order-db');
+// ⚠️ `as typeof import(...)` 不是装饰：不加它这里是 `any`，`orderDb` 的签名怎么变都不报错
+// （跨文件 require 没进过类型检查）。见 `scripts/check-cross-domain-edges.mjs` 规则 A。
+const orderDb = require('./order-db') as typeof import('./order-db');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
 const { isUserFileAllowed } = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
-/** 主图缓存目录：userData/order-images/ */
-const IMAGE_DIR = () => path.join(app.getPath('userData'), 'order-images');
+// 主图缓存目录 `IMAGE_DIR` 由 ./order-image-land 提供（见下方 require，避免两处各定义一份）。
 
 /**
  * 「导入日」过滤参数（`yyyy-mm-dd`，本地时区）—— **只放行这个形状**，其余一律当"不筛"。
@@ -29,59 +31,32 @@ function sanitizeImportDate(v: unknown): string | undefined {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
 }
 
-// ---- 识别引擎 API Key 安全存储（P2）----
-// 目标：API Key 是敏感凭据，不应随 config 以明文落 electron-store。
-// 方案：主进程 safeStorage（macOS Keychain / Windows DPAPI）加密后写入 userData/secure/oi-api-key.bin；
-//       safeStorage 不可用（如部分 Linux 无钥匙串服务）时降级为本地文件（Electron 官方建议降级策略），
-//       保证跨平台可运行。渲染层仅经 IPC 读写，不落任何明文存储。
-const API_KEY_FILE = () => path.join(app.getPath('userData'), 'secure', 'oi-api-key.bin');
-
-function storeApiKey(key: string): boolean {
-  try {
-    const dir = path.dirname(API_KEY_FILE());
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const data = safeStorage.isEncryptionAvailable()
-      ? safeStorage.encryptString(key)
-      : Buffer.from(key, 'utf8');
-    fs.writeFileSync(API_KEY_FILE(), data);
-    return true;
-  } catch (e) {
-    console.error('[order-handlers] store api key failed:', e);
-    return false;
-  }
+/** 订单发生月（`yyyy-mm`）；形状不对 → 不筛（与 `importDate` 同策略：宁可全库，不给假筛选） */
+function sanitizePeriod(v: unknown): string | undefined {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return /^\d{4}-\d{2}$/.test(s) ? s : undefined;
 }
 
-function loadApiKey(): string {
-  try {
-    if (!fs.existsSync(API_KEY_FILE())) return '';
-    const buf = fs.readFileSync(API_KEY_FILE());
-    return safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8');
-  } catch {
-    return ''; // 解密失败（钥匙串迁移/不可用等）视为未配置，由用户重新填写
-  }
-}
+// ---- 识别引擎 API Key 安全存储（P2）已于 2026-10-28 删除 ----
+// 原实现在 userData/secure/oi-api-key.bin 存云端 VLM 的 API Key。识别链（`readEngine` /
+// `recognizeOrder` / `src/core/ai` / 「设置 › 识别」）同一轮一起删掉（用户决定不接云端模型），
+// 单独留一个"能存 Key 但没人用"的通道只会让人以为还有识别功能。判断见
+// `docs/notes/2026-10-28-classify-local-vision-direction.md`。
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
-/** URL 规范化指纹：仅保留协议+host+path（忽略 query/hash，同一张图不同参数签名视为同图） */
-function fingerprintUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return crypto.createHash('sha256').update(u.origin + u.pathname).digest('hex');
-  } catch {
-    return crypto.createHash('sha256').update(url).digest('hex');
-  }
-}
-
-/** 文件内容指纹 SHA-256（字节级去重） */
-function sha256File(filePath: string): string {
-  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-}
-
 // 图片格式魔数嗅探 sniffImageFormat / IMG_EXT_BY_FORMAT 已收敛到 ./ipc-util（order/product 两域共用）。
-const { sniffImageFormat, IMG_EXT_BY_FORMAT } = require('./ipc-util') as typeof import('./ipc-util');
+const { sniffImageFormat } = require('./ipc-util') as typeof import('./ipc-util');
+
+// 「远程图 → oi_images」的落库实现收敛到 ./order-image-land（订单主图 / 采集色图共用一份）：
+// 色图要靠**内容指纹命中**才能在订单导入后被"按图找到颜色"，两份实现迟早分叉（P0-1 的教训）。
+// 本文件不再自带 fingerprintUrl / sha256File / 落盘去重，一律走它。
+const {
+  ORDER_IMAGE_DIR: IMAGE_DIR,
+  landOrderImageByUrl,
+} = require('./order-image-land') as typeof import('./order-image-land');
 
 // 幂等建表（模块首次使用时调用）
 register('order-db-ensure', async () => {
@@ -121,16 +96,29 @@ register('order-image-save', async (payload) => {
 
 // 插入订单：payload 见 src/types.ts OrderRecord（结构白名单字段）
 // 幂等：同 订单号+图片 重复插入直接返回已有 id（避免重复导入产生重复行）
+//
+// `imageId` 允许 **null**（S2-b 订单报表免图导入）：订单报表没有主图列，识别链只对有图的订单有意义；
+// 无图订单一律落 `image_id IS NULL`。
+//
+// ⚠️ 用**类型谓词**判，不要写 `const ok = v === null || typeof v === 'number'` 再 `if (!ok) return`：
+// `payload.imageId` 是 `unknown`（`isPlainObject` 把它收窄成 `Record<string, unknown>`），而 TS **不能**
+// 用排除法把 `unknown` 收窄（`!(v === null || typeof v === 'number')` 走完仍是 `unknown`）——
+// 赋给 `OrderRecord.imageId`（`number | null`）就报 TS2345。谓词是正向收窄，能收干净，也不用 `as`。
+function isOrderImageId(v: unknown): v is number | null {
+  return v === null || typeof v === 'number';
+}
+
 register('order-insert', async (payload) => {
   orderDb.ensureOrderSchema();
-  // `imageId` 允许 **null**（S2-b 订单报表免图导入）：订单报表没有主图列，
-  // 识别链只对有图的订单有意义；无图订单一律落 `image_id IS NULL`。
-  const hasImage = payload.imageId === null || typeof payload.imageId === 'number';
-  if (!isPlainObject(payload) || !hasImage) {
+  if (!isPlainObject(payload)) {
+    return { success: false, error: 'invalid payload' };
+  }
+  const imageId = payload.imageId;
+  if (!isOrderImageId(imageId)) {
     return { success: false, error: 'invalid payload' };
   }
   const rec = {
-    imageId: payload.imageId,
+    imageId,
     orderNo: typeof payload.orderNo === 'string' ? payload.orderNo : '',
     shop: typeof payload.shop === 'string' ? payload.shop : '',
     size: typeof payload.size === 'string' ? payload.size : '',
@@ -194,140 +182,118 @@ register('order-shipping-rows', async (payload) => {
   const src = payload?.source === 'import' || payload?.source === 'collect' ? payload.source : 'all';
   return {
     success: true,
-    data: orderDb.shippingRows(limit, { source: src, importDate: sanitizeImportDate(payload?.importDate) }),
+    data: orderDb.shippingRows(limit, {
+      source: src,
+      importDate: sanitizeImportDate(payload?.importDate),
+      period: sanitizePeriod(payload?.period),
+    }),
   };
 });
 
-// ---- 待识别队列（oi_queue）：导入行整批落库；失败/缺图重启不丢、可增量重试 ----
+// ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----
+//
+// 通道一律「一单一取、一写一返回」：拆包面板开着的时候，别人（另一个窗口）也可能在改同一单，
+// 所以每次写成功都把**整单**最新状态返回，界面直接用返回值重绘，不自己拼"我以为的结果"。
+// 校验（跨单/超拆）只在数据层做（`order-db.setParcelLineQty`），这里只收窄入参形状。
 
-register('order-queue-enqueue', async (payload) => {
+// 列表页的小徽标「拆包 ×N」：一次问一批单号，避免每行一个 IPC 往返
+register('order-parcel-counts', async (payload) => {
   orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.batchNo !== 'string' || !Array.isArray(payload.rows)) {
+  if (!isPlainObject(payload) || !Array.isArray(payload.orderNos)) {
     return { success: false, error: 'invalid payload' };
   }
-  const batchNo = payload.batchNo.slice(0, 64);
-  const rows = payload.rows
-    .slice(0, 50000)
-    .map((r: unknown) => {
-      const rec = isPlainObject(r) ? r : {};
-      return {
-        rawFields: isPlainObject(rec.rawFields) ? (rec.rawFields as Record<string, string>) : {},
-        url: typeof rec.url === 'string' ? rec.url.slice(0, 8192) : '',
-        orderNo: typeof rec.orderNo === 'string' ? rec.orderNo.slice(0, 128) : '',
-        info: typeof rec.info === 'string' ? rec.info.slice(0, 500) : '',
-      };
-    })
-    .filter((r: any) => typeof r.rawFields === 'object' && r.rawFields !== null);
-  const count = orderDb.enqueueQueueRows(batchNo, rows);
-  return { success: true, data: { count } };
+  const orderNos = payload.orderNos
+    .filter((v: unknown): v is string => typeof v === 'string' && v.length > 0)
+    .slice(0, 2000);
+  return { success: true, data: orderDb.parcelCountByOrders(orderNos) };
 });
 
-register('order-queue-stats', async (payload) => {
+// 利润页：一批订单的**包裹运费/重量合计**（有包裹时运费以它为准，不再按运价表估算）。
+// 与 `order-parcel-counts` 同一套形状收缩：只收单号数组，SQL 在数据层。
+register('order-parcel-totals', async (payload) => {
   orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.batchNo !== 'string') {
+  if (!isPlainObject(payload) || !Array.isArray(payload.orderNos)) {
     return { success: false, error: 'invalid payload' };
   }
-  return { success: true, data: orderDb.queueStats(payload.batchNo) };
+  const orderNos = payload.orderNos
+    .filter((v: unknown): v is string => typeof v === 'string' && v.length > 0)
+    .slice(0, 2000);
+  return { success: true, data: orderDb.parcelTotalsByOrders(orderNos) };
 });
 
-// 队列行分页：payload { batchNo, offset?, limit?, status?, missingOnly? } → { rows, total }
-// 失败清单用 { status:'error' }，缺图清单用 { missingOnly:true }，不再整批过 IPC。
-register('order-queue-list', async (payload) => {
+register('order-parcel-detail', async (payload) => {
   orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.batchNo !== 'string') {
+  if (!isPlainObject(payload) || typeof payload.orderNo !== 'string') {
     return { success: false, error: 'invalid payload' };
   }
-  const offset = typeof payload.offset === 'number' ? Math.max(Math.round(payload.offset), 0) : 0;
-  const limit = typeof payload.limit === 'number' ? Math.min(Math.max(Math.round(payload.limit), 0), 2000) : 0;
-  const status =
-    typeof payload.status === 'string' && ['pending', 'error', 'missing', 'done', 'all'].includes(payload.status)
-      ? payload.status
-      : undefined;
-  const missingOnly = payload.missingOnly === true;
-  return {
-    success: true,
-    data: orderDb.listQueueRowsPage(payload.batchNo, { offset, limit, status, missingOnly }),
-  };
+  const orderNo = payload.orderNo.slice(0, 128);
+  return { success: true, data: orderDb.parcelDetail(orderNo) };
 });
 
-// 单行队列行（含 raw_fields）：补图/查看原始信息按需取，避免列表全量携带大字段
-register('order-queue-get', async (payload) => {
+register('order-parcel-create', async (payload) => {
+  orderDb.ensureOrderSchema();
+  if (!isPlainObject(payload) || typeof payload.orderNo !== 'string') {
+    return { success: false, error: 'invalid payload' };
+  }
+  const r = orderDb.createParcel(parcelInputOf(payload));
+  if (!r.ok) return { success: false, error: r.error || '新建包裹失败' };
+  return { success: true, data: { id: r.id, ...orderDb.parcelDetail(String(payload.orderNo)) } };
+});
+
+register('order-parcel-update', async (payload) => {
   orderDb.ensureOrderSchema();
   if (!isPlainObject(payload) || typeof payload.id !== 'number') {
     return { success: false, error: 'invalid payload' };
   }
-  const row = orderDb.getQueueRow(Math.round(payload.id));
-  if (!row) return { success: false, error: 'row not found' };
-  return { success: true, data: row };
+  const r = orderDb.updateParcel(parcelInputOf(payload));
+  if (!r.ok) return { success: false, error: r.error || '保存包裹失败' };
+  const orderNo = typeof payload.orderNo === 'string' ? payload.orderNo : '';
+  return { success: true, data: orderNo ? orderDb.parcelDetail(orderNo) : null };
 });
 
-register('order-queue-next-pending', async (payload) => {
+register('order-parcel-delete', async (payload) => {
+  orderDb.ensureOrderSchema();
+  if (!isPlainObject(payload) || typeof payload.id !== 'number') {
+    return { success: false, error: 'invalid payload' };
+  }
+  const ok = orderDb.deleteParcel(payload.id);
+  if (!ok) return { success: false, error: '包裹不存在（可能已被删除）' };
+  const orderNo = typeof payload.orderNo === 'string' ? payload.orderNo : '';
+  return { success: true, data: orderNo ? orderDb.parcelDetail(orderNo) : null };
+});
+
+// 设置「某行在这个包装几件」；`qty <= 0` = 从该包移除这一行
+register('order-parcel-set-line', async (payload) => {
   orderDb.ensureOrderSchema();
   if (
     !isPlainObject(payload) ||
-    typeof payload.batchNo !== 'string' ||
-    typeof payload.afterId !== 'number' ||
-    typeof payload.limit !== 'number'
+    typeof payload.parcelId !== 'number' ||
+    typeof payload.orderItemId !== 'number' ||
+    typeof payload.qty !== 'number'
   ) {
     return { success: false, error: 'invalid payload' };
   }
-  const afterId = Math.max(0, Math.floor(payload.afterId));
-  const limit = Math.min(200, Math.max(1, Math.floor(payload.limit)));
-  return { success: true, data: orderDb.nextPendingQueueRows(payload.batchNo, afterId, limit) };
+  const r = orderDb.setParcelLineQty(payload.parcelId, payload.orderItemId, payload.qty);
+  if (!r.ok) return { success: false, error: r.error || '拆包失败' };
+  const orderNo = typeof payload.orderNo === 'string' ? payload.orderNo : '';
+  return { success: true, data: orderNo ? orderDb.parcelDetail(orderNo) : null };
 });
 
-register('order-queue-set-result', async (payload) => {
-  orderDb.ensureOrderSchema();
-  if (
-    !isPlainObject(payload) ||
-    typeof payload.id !== 'number' ||
-    typeof payload.status !== 'string' ||
-    !['done', 'error', 'missing'].includes(payload.status)
-  ) {
-    return { success: false, error: 'invalid payload' };
-  }
-  const error = typeof payload.error === 'string' ? payload.error.slice(0, 2000) : '';
-  orderDb.setQueueRowResult(Math.floor(payload.id), payload.status as 'done' | 'error' | 'missing', error);
-  return { success: true };
-});
-
-register('order-queue-patch', async (payload) => {
-  orderDb.ensureOrderSchema();
-  if (
-    !isPlainObject(payload) ||
-    typeof payload.id !== 'number' ||
-    typeof payload.url !== 'string' ||
-    !isPlainObject(payload.rawFields)
-  ) {
-    return { success: false, error: 'invalid payload' };
-  }
-  orderDb.patchQueueRow(Math.floor(payload.id), payload.url.slice(0, 8192), payload.rawFields as Record<string, string>);
-  return { success: true };
-});
-
-register('order-queue-retry-errors', async (payload) => {
-  orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.batchNo !== 'string') {
-    return { success: false, error: 'invalid payload' };
-  }
-  const count = orderDb.retryQueueErrors(payload.batchNo);
-  return { success: true, data: { count } };
-});
-
-register('order-queue-purge-done', async (payload) => {
-  orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.batchNo !== 'string') {
-    return { success: false, error: 'invalid payload' };
-  }
-  const count = orderDb.purgeDoneQueueRows(payload.batchNo);
-  return { success: true, data: { count } };
-});
-
-register('order-queue-last-active', async () => {
-  orderDb.ensureOrderSchema();
-  const active = orderDb.lastActiveQueueBatch();
-  return { success: true, data: active };
-});
+/** 包裹入参收窄：只接白名单字段，字符串截断（长度上限与数据层一致，避免"界面能填、落库被截"）。 */
+function parcelInputOf(p: Record<string, unknown>): ParcelInput {
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+  const num = (v: unknown) => (v === null ? null : typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : undefined);
+  return {
+    id: typeof p.id === 'number' ? p.id : undefined,
+    orderNo: str(p.orderNo, 128),
+    label: str(p.label, 40),
+    trackingNo: str(p.trackingNo, 80),
+    carrier: str(p.carrier, 40),
+    note: str(p.note, 500),
+    shipCents: num(p.shipCents),
+    weightG: num(p.weightG),
+  };
+}
 
 // 款式匹配/落库：payload { imageId, fingerprint, category, features[], color }
 // fingerprint 由渲染层 src/lib/styleMatcher.ts 生成（归一化 品类+特征），主进程只做查/建
@@ -405,8 +371,61 @@ register('order-style-assign', async (payload) => {
     // 否则用户会把"没记住商品"读成"没保存"（见 `SkuBackfillOutcome` 的边界说明）。
     return {
       success: true,
-      data: { styleCode: res.styleCode, styleColorCode: res.styleColorCode, skuBackfill: res.skuBackfill },
+      data: {
+        styleCode: res.styleCode,
+        styleColorCode: res.styleColorCode,
+        skuBackfill: res.skuBackfill,
+        // `colorAlias` = 这次顺带记住的「平台色名 → 我的色名」（`null` = 没记）。
+        // 与 `skuBackfill` 同性质：归属已经改成功了，界面要说的是"额外记住了什么"。
+        colorAlias: res.colorAlias,
+      },
     };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 款色**改名**（产品侧改了色名 ⇒ 订单侧跟着改标签；款色 id / 编码 / 绑定的图不动）。
+//
+// 为什么要这条通道（2026-10-23 用户实报「并入矩阵后改颜色，图片就没了」）：款色图按
+// 「款编码 + 色名」查，产品编辑抽屉里的色名却是随手可改的标签 —— 只改产品侧的名字，
+// 库里那张图仍挂在旧色名的色行上，重开抽屉就查不到（显示为空）。
+// 为什么由产品侧发起：改名的**用户动作发生在产品页**（SKU 矩阵），保存那一刻才知道"从什么改成了什么"；
+// 订单域只提供"按款编码把色行改名"这一条最小写口，不反向依赖产品库（`productId` 只用于记色名对照）。
+// payload { productId, styleCode, from, to }
+register('style-color-rename', async (payload) => {
+  if (!isPlainObject(payload)) return { success: false, error: 'invalid payload' };
+  const styleCode = typeof payload.styleCode === 'string' ? payload.styleCode.trim().slice(0, 64) : '';
+  const from = typeof payload.from === 'string' ? payload.from.trim().slice(0, 50) : '';
+  const to = typeof payload.to === 'string' ? payload.to.trim().slice(0, 50) : '';
+  const productId = Number(payload.productId) || 0;
+  if (!styleCode || !from || !to) return { success: false, error: 'invalid color rename' };
+  if (from === to) return { success: true, data: { renamed: false, reason: 'noop' } };
+  orderDb.ensureOrderSchema();
+  try {
+    const res = orderDb.renameStyleColorByCode(styleCode, from, to);
+    // 记一对「旧名 → 新名」的色名对照（**附加产物**，不影响改名结果）：
+    // 以后平台再发旧色名的订单，归色时能翻成用户现在用的名字，不至于又长出一个没有图的空色行。
+    // 与改名分开报：改名成功而对照没记（例如同键）不该让人以为改名失败。
+    const alias = res.renamed ? orderDb.rememberColorAlias(productId, from, to) : null;
+    return { success: true, data: { ...res, colorAlias: alias } };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// 全库重放已确认映射：把「映射在、订单没吃到」的历史行补上（见 order-db `replaySkuMappings`）。
+//
+// 为什么单开一个通道：单商品回填只在「人工核对那一下」触发，而这类漏网的成因恰恰是
+// **没人再碰过那个商品** —— 没有全局入口，它们在界面上和"没配过映射"永远同形。
+//
+// payload { dryRun? }：`dryRun` 只报数、不写库（按钮要先显示"有几行能补"，
+// 报数不能以改库为代价）。边界与单商品回填同一份实现：只碰未归款 / 占位色的行。
+register('order-replay-mappings', async (payload) => {
+  const dryRun = isPlainObject(payload) ? payload.dryRun === true : false;
+  orderDb.ensureOrderSchema();
+  try {
+    return { success: true, data: orderDb.replaySkuMappings({ dryRun }) };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -550,48 +569,15 @@ register('order-download-image', async (payload) => {
     return { success: false, error: 'invalid url' };
   }
   orderDb.ensureOrderSchema();
-  const url = payload.url;
-  const urlFp = fingerprintUrl(url);
-  const existing = orderDb.findImageByUrlFingerprint(urlFp);
-  if (existing) {
-    let result: any = undefined;
-    if (existing.resultJson) {
-      try { result = JSON.parse(existing.resultJson); } catch { /* ignore */ }
-    }
-    return { success: true, data: { ...existing, result } };
+  // 落盘 + 两级去重 + 登记 oi_images 全在 `order-image-land` 里（与采集色图共用同一份实现）：
+  // 「同图不同 URL 复用既有记录（连带 styleColorId）」正是**按图找色**的命入口，口径只能有一处。
+  const landed = await landOrderImageByUrl(payload.url);
+  if (!landed.ok) return { success: false, error: landed.error };
+  let result: any = undefined;
+  if (landed.image.row.resultJson) {
+    try { result = JSON.parse(landed.image.row.resultJson); } catch { /* ignore */ }
   }
-
-  const dir = IMAGE_DIR();
-  fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = path.join(dir, urlFp + '.img');
-  const r = await downloadFile(url, tmpPath);
-  if (!r.ok) return { success: false, error: r.error || 'download failed' };
-  const fingerprint = sha256File(tmpPath);
-  const buf = fs.readFileSync(tmpPath);
-  const fmt = sniffImageFormat(buf);
-  if (!fmt) {
-    // 下载内容不是受支持的图片（或下载到了错误页/防盗链占位），不落盘避免垃圾入库
-    fs.unlinkSync(tmpPath);
-    return { success: false, error: 'unsupported image format' };
-  }
-  const finalPath = path.join(dir, fingerprint + IMG_EXT_BY_FORMAT[fmt]);
-  if (fs.existsSync(finalPath)) {
-    fs.unlinkSync(tmpPath); // 同图不同 URL：内容已存在，丢弃临时文件
-  } else {
-    fs.renameSync(tmpPath, finalPath);
-  }
-
-  const byContent = orderDb.findImageByFingerprint(fingerprint);
-  if (byContent) {
-    // 同图不同 URL：复用既有记录（含识别状态 / 款色归属 styleColorId / 识别结果），不再落新行
-    let result: any = undefined;
-    if (byContent.resultJson) {
-      try { result = JSON.parse(byContent.resultJson); } catch { /* ignore */ }
-    }
-    return { success: true, data: { ...byContent, result } };
-  }
-  const id = orderDb.insertImage({ fingerprint, urlFingerprint: urlFp, sourceUrl: url, localPath: finalPath, status: 'pending' });
-  return { success: true, data: { id, fingerprint, urlFingerprint: urlFp, sourceUrl: url, localPath: finalPath, status: 'pending' as const } };
+  return { success: true, data: { ...landed.image.row, result } };
 });
 
 // 导出 Excel：渲染层用 xlsx 生成 buffer，经保存对话框落盘
@@ -765,22 +751,7 @@ register('order-image-thumb-batch', async (payload) => {
   return { success: true, data: { dataUrls } };
 });
 
-// ---- API Key 安全存取（P2）：渲染层只传明文、只收明文，加密落盘全部在主进程 ----
-register('order-api-key-set', async (payload) => {
-  if (!isPlainObject(payload) || typeof payload.apiKey !== 'string' || payload.apiKey.length > 1024) {
-    return { success: false, error: 'invalid apiKey' };
-  }
-  const key = payload.apiKey.trim();
-  return storeApiKey(key)
-    ? { success: true, data: { stored: key.length > 0 } }
-    : { success: false, error: 'store api key failed' };
-});
-
-register('order-api-key-get', async () => {
-  return { success: true, data: { apiKey: loadApiKey() } };
-});
-
-// 孤图清理（P2）：扫描 order-images 目录，删除不被 oi_images / oi_queue 引用的图片文件
+// 孤图清理（P2）：扫描 order-images 目录，删除不被 oi_images 引用的图片文件
 // （重置数据/批次覆盖/换图等会留下已入库但行被删的文件；正常下载的图均有 DB 引用，不会误删）。
 register('order-cleanup-orphan-images', async () => {
   try {

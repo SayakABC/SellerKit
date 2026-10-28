@@ -21,10 +21,11 @@
           <p class="gd-firstrun__t">{{ s.title }}</p>
           <p class="wb-muted gd-firstrun__d">{{ s.desc }}</p>
         </div>
-        <!-- 前两步的按钮指向**真的在别处**的东西（另一个模块 / 同一页的另一个页签）——
+        <!-- 前两步的按钮指向**真的在别处**的东西（另一个模块）——
              这正是本仓"提示不是入口"那条结论要求的形态。
              第 3 步**刻意不给按钮**：它的动作就是"回到这一页点开左边一款"，而用户此刻
-             已经在这一页 —— 给一个"去认款"的按钮只能是把当前页再切一次（假动作）。 -->
+             已经在这一页 —— 给一个"去认款"的按钮只能是把当前页再切一次（假动作）。
+             2026-10-14：「打开店铺登记」从"同页另一个页签"改为**跨模块**跳「基础数据」。 -->
         <button
           v-if="s.id === 'orders'"
           class="wb-btn wb-btn--primary gd-firstrun__act"
@@ -41,7 +42,7 @@
           data-act="fr-open-registry"
           @click="emit('open-registry')"
         >
-          打开「店铺登记」
+          打开「店名归一」
         </button>
         <span v-else class="wb-muted gd-firstrun__here" data-act="fr-step-here">就在这一页</span>
       </li>
@@ -60,7 +61,7 @@ const steps = FIRST_RUN_STEPS;
 const emit = defineEmits<{
   /** 去「发货台」导入订单（跨模块跳转由外壳执行 —— 本组件不认识模块表） */
   'import-orders': [];
-  /** 打开同一页的「店铺登记」页签（导航回调由外壳转手，同 `PoolPane` 的 `navigate`） */
+  /** 跳去「基础数据」的「店名归一」项（跨模块跳转由外壳执行，2026-10-14 前是同页页签） */
   'open-registry': [];
 }>();
 </script>

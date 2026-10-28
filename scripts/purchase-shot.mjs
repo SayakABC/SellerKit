@@ -68,9 +68,9 @@ async function waitFor(fn, ms) {
 (async function () {
   await waitFor(function () { return !!q('.td-view') && !!q('[data-act="tab-purchase"]'); }, 20000);
   q('[data-act="tab-purchase"]').click();
-  await waitFor(function () { return !!q('[data-act="pu-sub-orders"]'); }, 10000);
-  q('[data-act="pu-sub-orders"]').click();
-  await waitFor(function () { return !!q('[data-act="pu-order-table"]'); }, 10000);
+  // 2026-10-17 第三轮：「按订单」页签已撤 —— 单子（含 #3）就在厂家卡的"已开单"行上，
+  // 唯一视图（厂家宫格）就绪即算导航完成。
+  await waitFor(function () { return !!q('[data-act="pu-grid"]') && !!q('[data-act="pu-edit-3"]'); }, 10000);
   await new Promise(function (r) { setTimeout(r, 400); });
   log('orders view ready');
   window.__shotReady = true;

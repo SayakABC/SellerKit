@@ -17,7 +17,7 @@
 //   5. **模板定义行要跳掉**：同类导出（如商品信息）首行可能是列定义（`{"dataSourceValidate":…}`）。
 //      判据：订单号不像订单号（非 8 位以上纯数字）→ 记 issue 并跳过。
 //
-// 金额一律**存分**（与 `ae_cost_map.unit_price_cents` / `oi_orders.amount_cents` 同口径）；
+// 金额一律**存分**（与 `pl_products.cost_cents` / `oi_orders.amount_cents` 同口径）；
 // 空单元格 → 0（本文件实测 412/412 全填；异常靠上面的等式兜）。
 
 /** 八类费用科目（和它们的"退回"）——实测该导出固定这八项；科目名若变，这里加一条即可 */

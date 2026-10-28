@@ -22,17 +22,15 @@
     <FirstRunCard
       v-if="showFirstRun"
       @import-orders="goImportOrders"
-      @open-registry="navigate(GOODS_TAB_REGISTRY)"
+      @open-registry="goRegistry"
     />
 
     <div class="gd-wb" data-act="goods-workbench">
       <section class="gd-wb__pane gd-wb__pane--products" data-act="pane-products">
         <ProductPane
           :refresh-nonce="refreshNonce"
-          :relate-count="relateCount"
           :queue-empty="queueEmpty"
           @select-product="currentProduct = $event"
-          @relate-request="relateNonce += 1"
           @import-orders="goImportOrders"
           @styles-total="stylesTotal = $event"
         />
@@ -46,9 +44,7 @@
         <PoolPane
           :refresh-nonce="refreshNonce"
           :product="currentProduct"
-          :navigate="navigate"
-          :relate-nonce="relateNonce"
-          @selection-changed="relateCount = $event"
+          :go-registry="goRegistry"
           @queue-groups="queueGroups = $event"
         />
       </section>
@@ -71,7 +67,6 @@ import ProductPane from './ProductPane.vue';
 import PoolPane from './PoolPane.vue';
 import FirstRunCard from './FirstRunCard.vue';
 import { shouldShowFirstRunCard } from '../firstRun';
-import { GOODS_TAB_REGISTRY, type GoodsTabId } from '../tabs';
 import { switchModule } from '@/core/services/shell';
 
 // `refreshNonce` 直接暴露给模板（`defineProps` 的绑定自动进模板作用域），无需解构。
@@ -79,14 +74,17 @@ defineProps<{
   /** 页级「刷新」信号，原样透传给两栏（值变化即重拉） */
   refreshNonce: number;
   /**
-   * 请求切到本页的另一个页签（由 `GoodsView` 的 `goTab` 提供）。
+   * 请求跳去「基础数据」的「店名归一」（由 `GoodsView` 的 `goRegistry` 提供）。
    *
-   * 为什么是"外壳转手的回调"而不是右栏直接 import 页签枚举：**外壳不该知道有哪几个页签**
+   * 为什么是"外壳转手的回调"而不是右栏自己跳：**外壳不该知道目标模块与 action 字符串**
    * （那是 `GoodsView` 的事，同 `refreshNonce` 的边界）。右栏需要它是因为"店铺未归一"那几行
-   * 的出口在「店铺登记」页签上 —— 没有这个回调，右栏只能写一句"请自己去别处登记"，
+   * 的出口在「基础数据」里 —— 没有这个回调，右栏只能写一句"请自己去别处登记"，
    * 那正是 2026-10-08 走查里的死胡同。
+   *
+   * 2026-10-14 整合前它是"切到本页另一个页签"的回调（`navigate(tab)`）—— 登记功能搬进
+   * 「基础数据」模块后，同一条动线改成跨模块跳转（TitleBar「返回」送人回来），回调随之改名。
    */
-  navigate: (tab: GoodsTabId) => void;
+  goRegistry: () => void;
 }>();
 
 /**
@@ -99,24 +97,6 @@ defineProps<{
  * 不参与任何计算（"只有一个数据源"的纪律不变）。
  */
 const currentProduct = ref<{ id: number; code: string; name: string } | null>(null);
-
-/**
- * 右栏**已勾选**的待关联商品数（左栏展开区「认到本款」的亮/灭由它决定）。
- *
- * 和 `currentProduct` 同一个道理：这个数字住在右栏的 `useSkuPool` 里，左栏拿不到也不该拿到 ——
- * 外壳只做**原样转手**，不参与任何计算（"只有一个数据源"的纪律不变）。
- * 它必须过外壳这一手，因为两个子组件互不认识。
- */
-const relateCount = ref(0);
-
-/**
- * 「认到本款」的信号（自增 nonce，同 `refreshNonce` 的写法）。
- *
- * 方向与 `relateCount` 相反（左 → 右）：左栏只发信号，**写库的路径仍只有右栏那一条**
- * （`relateToSelected` → `commitMap`：单事务、行级失败回传、写完重拉队列）。
- * 外壳不替任何一方写库，只负责把信号递过去。
- */
-const relateNonce = ref(0);
 
 /**
  * 首次动线的两个输入（都来自子栏的**原样转手**，外壳自己不取数）。
@@ -147,7 +127,7 @@ const queueEmpty = computed<boolean | null>(() =>
  * 第 1 步的出口：跨模块跳到「发货台」导订单。
  *
  * 判据同 `useSkuPool.goToday`：订单导入不在这一页，也不该在这一页再做一个 —— 跳过去是诚实的。
- * 外壳自己 import 而不是让卡片 import：卡片不认识模块表（同 `navigate` 的分工）。
+ * 外壳自己 import 而不是让卡片 import：卡片不认识模块表（同 `goRegistry` 的分工）。
  */
 function goImportOrders(): void {
   switchModule('today');
@@ -166,17 +146,37 @@ function goImportOrders(): void {
 
 /* 网格：恒左右两栏（S4 起）。
    左栏给一个下限（420px）：再窄就放不下列（S1/S2 已裁列，这里保底 + 允许内部横向滚动）。
-   左栏 40% / 右栏占余下 —— 右栏是队列（列更多、要装商品标题），宽一点更合适。 */
+   左栏 40% / 右栏占余下 —— 右栏是队列（列更多、要装商品标题），宽一点更合适；
+   右栏也留一个 360 的下限：它承载的是「图 / 商品ID / 操作」，认款动线本身就在这三列上。
+
+   ── 断点为什么是 1180（2026-10-17 一天之内改过两次，读这段别被别处的旧注释带跑）──
+   这天上午本页并进「基础数据」时，页面内多出一条 200px 左导航：它加页内边距 36 + 栏间距 12
+   一共吃掉 248px，默认 1200 窗口的可用宽度从 1200 掉到 **736**，而两栏下限之和是 836。
+   736 里硬排的实测后果：右栏只剩 300px ⇒ 队列「商品ID」列被挤到 42px（16 位 ID 折成六行、
+   行高 92 → 305）、图列被顶出视口（缩略图中心 y=889 > 视口 713）—— 认款唯一靠得住的依据点不到。
+   当时只能把断点抬到 1280，代价是**默认窗口落进堆叠分支**：本该只改布局，却改掉了主形态。
+
+   当天下午那条左导航搬到主侧栏（`docs/notes/2026-10-17-sub-nav-to-sidebar.md`），212px 回来了：
+   默认 1200 窗口可用宽度 = 1200 − 侧栏 208 − 页内边距 36 = **956**（左 420 / 右 520，两栏都能干活）。
+   侧排需要容器 ≥ 420 + 360 + 16 = 796 ⇒ 窗口 ≥ 796 + 208 + 36 = 1040；取 1180 是留余量，
+   断点回到整合前的位置。
+
+   守卫：`scripts/goods-ui-smoke.mjs` 的 reach 那一遍 —— 默认窗口那档断言的是**并排**（不是堆叠），
+   外加「ID 列 ≥ 120px / 行高 ≤ 120px」两条几何断言。
+   ⚠️ 只留"缩略图可达"抓不住"被挤扁"：reach 判据放宽成"滚到再点"之后，
+   42px 的 ID 列和 305px 的行高**照样绿**（滚动能救回来）—— 所以必须有几何断言。 */
 .gd-wb {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(420px, 40%) minmax(0, 1fr);
+  grid-template-columns: minmax(420px, 40%) minmax(360px, 1fr);
   gap: 16px;
 }
 /* 窄窗口：两栏改为**上下堆叠**（左在上），而不是让某一栏被挤没。
-   ⚠️ 判据是"两栏都在"，不是"有一个消失"—— 守卫在 `scripts/goods-ui-smoke.mjs`（方案 §9-1）。 */
-@media (max-width: 1180px) {
+   ⚠️ 判据是"两栏都在"，不是"有一个消失"—— 守卫在 `scripts/goods-ui-smoke.mjs`（方案 §9-1）。
+   ⚠️ 2026-10-17 这条断点被改过两次：1180 → 1280（左导航挤占内容宽）→ **回到 1180**
+   （左导航搬到主侧栏，挤占消失）。理由见上面 `.gd-wb` 那段最后两小节。 */
+@media (max-width: 1179px) {
   .gd-wb {
     grid-template-columns: minmax(0, 1fr);
     /* ⚠️ 行必须**按内容定高**，多出来的高度交给容器自己滚。

@@ -80,17 +80,17 @@ async function waitSyncDone(timeoutMs = 120000) {
 (async () => {
   initDb(path.join(tmpDir, 'smoke.db'));
 
-  title('1. 建店铺套 + 写入 IMAP 授权码');
+  title('1. 建店铺 + 账号行（2026-10-22 物理合并后同一行）+ 写入 IMAP 授权码');
   const setId = shopDb.upsertShopAccount({ email: user });
   shopDb.setShopAccountSecret(setId, 'mailAuthPwd', pass);
   const keys = shopDb.getShopAccount(setId)?.secretKeys || [];
-  console.log('shopSetId =', setId, '| secretKeys =', JSON.stringify(keys));
+  console.log('shopId =', setId, '| secretKeys =', JSON.stringify(keys));
   console.log('授权码可解密 =', shopDb.revealShopAccountSecret(setId, 'mailAuthPwd') === pass);
 
   title('2. 接入邮箱账号');
   mailDb.ensureMailSchema();
   const accountId = mailDb.upsertMailAccount({
-    shopSetId: setId,
+    shopId: setId,
     email: user,
     providerId: 'netease-163',
     syncDays: 30,

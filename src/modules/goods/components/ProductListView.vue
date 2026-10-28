@@ -40,6 +40,7 @@
         <option value="">全部款式</option>
         <option value="missingWeight">缺克重</option>
         <option value="noSupplier">未关联供应商</option>
+        <option value="missingCost">缺进价</option>
       </select>
 
       <span v-if="loading" class="wb-muted gd-toolbar__hint">读取中…</span>
@@ -111,6 +112,15 @@
         @click="clearOne('noSupplier')"
       >
         只看未关联供应商<span aria-hidden="true">×</span>
+      </button>
+      <button
+        v-if="onlyMissingCost"
+        class="gd-chip gd-chip--warn"
+        type="button"
+        data-act="chip-missing-cost"
+        @click="clearOne('missingCost')"
+      >
+        只看缺进价<span aria-hidden="true">×</span>
       </button>
       <button
         class="wb-btn wb-btn--sm wb-btn--ghost"
@@ -444,6 +454,7 @@ const {
   issueFilter,
   onlyMissingWeight,
   withoutSupplier,
+  onlyMissingCost,
   editorOpen,
   editing,
   importOpen,

@@ -58,7 +58,7 @@ export const FIRST_RUN_STEPS: readonly FirstRunStep[] = [
   {
     id: 'shops',
     title: '确认店铺',
-    desc: '订单里只有店名文本、没有平台，所以先在「店铺登记」把店名认成店铺实体，那些商品才能认款。',
+    desc: '订单里只有店名文本、没有平台，所以先在「店名归一」把店名认成店铺实体，那些商品才能认款。',
   },
   {
     id: 'relate',

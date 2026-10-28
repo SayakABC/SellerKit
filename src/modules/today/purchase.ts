@@ -13,6 +13,7 @@ import { ipc, type ApiResult } from '@/core/services/ipc';
 import { localDayKey } from '@/lib/localDay';
 import type {
   IgnoreRow,
+  OrderCoveragePayload,
   OutstandingRow,
   Payment,
   PurchaseItem,
@@ -20,6 +21,7 @@ import type {
   ReconciliationRow,
   ShopAllocationDetailRow,
   ShopAllocationRow,
+  StyleColorOptionRow,
   Supplier,
 } from '@/types';
 
@@ -76,14 +78,11 @@ export function getOrder(id: number): Promise<PurchaseOrder> {
 export function createOrder(payload: {
   supplierId: number;
   bizDate: string;
-  mode?: 'detail' | 'package';
-  totalCents?: number;
   items?: PurchaseItemInput[];
 }): Promise<{ id: number }> {
   const { items, ...rest } = payload;
   return need(
     ipc.purchaseOrderCreate({
-      mode: 'detail',
       ...rest,
       ...(items ? { items: toWireItems(items) } : {}),
     })
@@ -93,7 +92,6 @@ export function createOrder(payload: {
 export function updateOrder(payload: {
   id: number;
   bizDate?: string;
-  totalCents?: number;
   items?: PurchaseItemInput[];
 }): Promise<unknown> {
   const { items, ...rest } = payload;
@@ -162,6 +160,22 @@ export function outstanding(): Promise<OutstandingRow[]> {
   return rows(ipc.purchaseOutstanding());
 }
 
+/**
+ * **逐行覆盖度**（2026-10-22）：未发货订单每一行「要几件 / 已被拿货单覆盖几件」+ 无归属台账。
+ *
+ * 与 `outstanding()` 的分工，别混：
+ *   · `outstanding()` = 「还缺什么」（**缺为 0 的行不返回**）—— 用来开拿货单；
+ *   · 本函数 = 「这一行的货到了没有」（**齐了照样返回**）—— 用来判"哪张单可以发货"。
+ * 拿 `outstanding()` 判"齐了"就是 2026-10-17 那次事故的同一个坑：拿齐的行整个消失，
+ * 于是"齐了"永远无从确认（见 `TakenRow` 的注释）。
+ *
+ * 失败抛错：这是「按单核对」整块的数据源，取不到就该让那一块说"取数失败"，
+ * 而不是显示"0 单可以发货"（那是**假结论**，用户会以为货真的没齐）。
+ */
+export function coverage(): Promise<OrderCoveragePayload> {
+  return need(ipc.purchaseOrderCoverage());
+}
+
 export function listIgnores(): Promise<IgnoreRow[]> {
   return rows(ipc.purchaseIgnoreList());
 }
@@ -200,14 +214,26 @@ export async function exportOrderXlsx(payload: {
  * `size` 是取图键的一部分 —— 同一款下每个订单商品各有各的图，漏传它会让同款所有行显示成同一张。
  */
 export async function styleImages(payload: {
-  items: { styleCode: string; color: string; size?: string }[];
+  items: { styleCode: string; color: string; size?: string; styleColorId?: number }[];
 }): Promise<(string | null)[]> {
   const d = await need(ipc.purchaseStyleImages(payload));
   return d?.paths ?? [];
 }
 
-// ---- 纯函数：元 ↔ 分 与时间窗 ----
+/**
+ * 按款编码批量取该款**真实存在**的色行（`{ [款编码大写]: 色行[] }`）。
+ *
+ * 用途：历史拿货明细只存了色名快照（且是占位「未分类」），色行改名后两边对不上 ——
+ * 修的时候只能在"该款真实有的色"里选一个，界面上现编名字只会再造一批对不上的标签。
+ */
+export async function styleColorOptions(
+  styleCodes: string[]
+): Promise<Record<string, StyleColorOptionRow[]>> {
+  const d = await need(ipc.purchaseStyleColors({ styleCodes }));
+  return d ?? {};
+}
 
+// ---- 纯函数：元 ↔ 分 与时间窗 ----
 /** 元 → 分（非有限数按 0，负数归零）——与主进程 `num()` 同口径 */
 export function yuanToCents(v: unknown): number {
   const n = Number(v);
@@ -303,7 +329,7 @@ export interface PurchaseCounts {
   /**
    * 全部窗口的欠款合计（分）= Σ 各厂家「拿货 −（已付 − 退款)」。
    * **保留符号不改判**：负数说明付多了，那是真信息，不是 0。
-   * 它只用于"第 5 步做完没有"这一个判断；对账页里的四个金额由对账页自己按当前窗口取。
+   * 它只用于"对账那一步做完没有"这一个判断；对账页里的四个金额由对账页自己按当前窗口取。
    */
   balance: number;
 }
@@ -312,9 +338,30 @@ export interface PurchaseCounts {
  * 汇总取数：**失败按 0 处理**，不抛。
  *
  * 为什么与上面的 `listXxx()` 不同：那几条是面板自己那一屏的数据，取不到就该报错；
- * 而这是"页签上挂个徽标 + 流程卡判第 5 步做没做完"用的 —— 为它让整页汇总挂掉
+ * 而这是"页签上挂个徽标 + 流程卡判对账那一步做没做完"用的 —— 为它让整页汇总挂掉
  * （连带总览卡全空）不值得。拿不到就显示 0，用户点进页签自然会看到真正的错误。
  */
+/**
+ * 待拿**款色**数（与卡片同一粒度）。
+ *
+ * 入参是 `purchase-outstanding` 的款色码行（`missing > 0` 才返回、忽略的整款色不返）。
+ * 两件事必须在这里做掉，否则徽标与卡片说的不是一回事：
+ *   · **按 (款编码, 款色) 去重** —— 卡片把同一款色的多码折成一行；
+ *   · **未识别款不计** —— 它没有款色身份，卡片上也不单列（卡片算进"款色数"的只有能拿的）。
+ *
+ * ⚠️ 残留差异（已知，不在这里藏）：清单（卡片）还有 30 天窗与"已终结订单不拣"两层过滤，
+ *    `outstanding()` 是全库订单 ⇒ 有很旧/已发货但状态没终结的订单时徽标会偏大。
+ *    彻底同源要共享清单取数（跨组件重构），代价远大于这个徽标的价值 —— 先对齐粒度与术语。
+ */
+function countColors(rows: OutstandingRow[]): number {
+  const set = new Set<string>();
+  for (const r of rows) {
+    if (!r.styleCode) continue;
+    set.add(`${r.styleCode}|${r.color}`);
+  }
+  return set.size;
+}
+
 export async function purchaseCounts(): Promise<PurchaseCounts> {
   const [po, og, ig, rc] = await Promise.all([
     ipc.purchaseOrderList(),
@@ -327,7 +374,10 @@ export async function purchaseCounts(): Promise<PurchaseCounts> {
   return {
     orders: orders.length,
     draft: orders.filter((o) => o.status !== 'submitted').length,
-    gap: og.success ? (og.data ?? []).length : 0,
+    // ⚠️ 按**款色**去重计数（2026-10-17 评审 P1）：`outstanding()` 返的是款色**码**行 ——
+    //    同款同色两个码是两行，拿行数当"款色数" ⇒ 徽标说 2 款色、卡片（按款色折叠）说 1 款色。
+    //    同一个词不能指两个东西：徽标与卡片必须同一粒度。
+    gap: og.success ? countColors(og.data ?? []) : 0,
     ignored: ig.success ? (ig.data ?? []).length : 0,
     balance: recon.reduce((a, r) => a + (Number(r.balanceCents) || 0), 0),
   };

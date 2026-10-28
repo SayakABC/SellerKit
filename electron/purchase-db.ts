@@ -13,6 +13,7 @@ import {
   dbRun,
   dbTransaction,
   migrate,
+  tableExists,
   type MigrationStep,
 } from './db';
 import { productSchemaReady } from './product-db';
@@ -54,9 +55,36 @@ export interface PurchaseItem {
   amountCents: number;
   /** 生成草稿时的建议数量（仅展示，不参与待拿货计算） */
   suggestionQty: number;
+  /**
+   * 款色 id（**身份**：已拿 ↔ 需求的匹配键）。0 / 缺省 = 老数据或未归色
+   * ⇒ 回落 (款,色,码) 文本匹配（见 `outstanding` 注释）。
+   *
+   * 为什么必须有（2026-10-20 用户实报"全待拿"）：拿货明细原先只存**色名文本**，
+   * 而归色链路会把色名从「未分类」改写成平台色名 ⇒ 10 行台账键命中 0 ⇒ 每张卡都待拿。
+   * 色名是可变标签，不能当身份；开单那一刻把它背后的款色 id 一起存下来。
+   */
+  styleColorId?: number;
 }
 
-/** 拿货单的来源订单快照行（生成时锁定的订单明细，含店铺/尺码，用于按店铺拆分成本） */
+/**
+ * 明细行**写入侧**入参：`id` 由库自增、`amountCents` 由 `qty × priceCents` 现算
+ * （见 `insertItems` / `computeTotal`）—— 两个都不是调用方能决定的，故写侧类型里没有它们。
+ *
+ * ⚠️ 与渲染层 `src/modules/today/purchase.ts` 的 `PurchaseItemInput`（同一条 Omit）同义：
+ * 一边改另一边要跟着改。**读侧**（`loadItems` / `PurchaseOrder.items`）仍是完整 `PurchaseItem`。
+ */
+export type PurchaseItemInput = Omit<PurchaseItem, 'id' | 'amountCents'>;
+
+/**
+ * 拿货单的来源订单快照行（生成时锁定的订单明细，含店铺/尺码）。
+ *
+ * 两个用途（2026-10-22 起）：
+ *   1. 按店铺拆分拿货成本（`allocateToShops`，2026-10 初就有）；
+ *   2. **哪张订单的货齐了** —— 靠 `orderItemId` 指回 `oi_order_items.id`。
+ *
+ * ⚠️ `orderItemId = 0` 是**合法且必须保留**的取值：历史单（加这一列之前生成的）没有归属，
+ *    以及"需求订单行不够、这次拿多了"的尾巴。它不参与逐单判定，只进「无归属台账」。
+ */
 export interface PurchaseSourceRow {
   shop: string;
   styleCode: string;
@@ -64,6 +92,8 @@ export interface PurchaseSourceRow {
   color: string;
   size: string;
   qty: number;
+  /** 指向 `oi_order_items.id`；0 = 无归属（历史单 / 订单行不够） */
+  orderItemId?: number;
 }
 
 /** 店铺对账汇总行（拿货成本按来源订单拆分到店铺） */
@@ -94,7 +124,8 @@ export interface PurchaseOrder {
   supplierId: number;
   supplierName: string;
   bizDate: string;
-  mode: 'detail' | 'package';
+  /** 恒 'detail'（包价单 2026-10-20 删除；列保留只为兼容老库） */
+  mode: 'detail';
   status: 'draft' | 'submitted';
   totalCents: number;
   editedAt: string | null;
@@ -130,17 +161,81 @@ export interface ReconciliationRow {
   paymentCount: number;
 }
 
+/**
+ * **已拿台账**（一行 = 一个款色码，来自**已提交**拿货单的 qty 合计）。
+ *
+ * ⚠️ 为什么必须有它、而不从 `outstanding()` 上扒 `taken` 字段（2026-10-17 实测事故）：
+ *    `outstanding()` 是「**还缺什么**」，末尾有 `if (missing <= 0) continue;`
+ *    —— **拿完的行会被它自己过滤掉**。拿它当台账用，结果正好反了：
+ *    拿得越多越看不见，一旦拿齐（`missing = 0`）该款色从台账里消失
+ *    ⇒ 清单按"已拿 0"算 ⇒ `remaining = pieces` ⇒ 卡**永远停在待拿**（用户实报）。
+ *    这里只做**台账**（不碰需求、不算缺口），拿完了照样在。
+ */
+export interface TakenRow {
+  /** 款色 id（身份键）。0 = 老明细（只有文本） */
+  styleColorId: number;
+  styleCode: string;
+  color: string;
+  size: string;
+  /** 已拿件数（所有已提交拿货单合计） */
+  taken: number;
+}
+
 export interface OutstandingRow {
   styleCode: string;
   styleName: string;
+  /** 身份的匹配键（0 = 未归类）；`taken` 与 `missing` 都按它算 */
+  styleColorId: number;
   color: string;
   size: string;
-  /** 订单需求（按款色码聚合的订单行数） */
+  /** 订单需求件数 = SUM(COALESCE(qty,1))（不是行数：一单买 2 件就是 2） */
   demand: number;
-  /** 已拿（所有已提交拿货单合计，按款色码） */
+  /** 已拿（所有已提交拿货单合计，按款色 id；老数据按文本兜底） */
   taken: number;
   /** 缺口 = max(0, demand − taken) */
   missing: number;
+  /** 这组订单行**没有款色归属**（`style_color_id=0`）—— 界面必须标出来，不许静默排除 */
+  unclassified: boolean;
+  /** 未归类组的线索：涉及的平台商品ID（按商品ID 聚合成修复入口） */
+  itemIds: string[];
+  /** 未归类组的线索：订单原文色名（平台写法，不翻译） */
+  colorRaw: string;
+  /** 需求行数（件数与行数不同：一单多件时 demand > orders） */
+  orders: number;
+}
+
+/**
+ * 一行订单明细的覆盖情况（`orderCoverage()` 的 `rows` 元素）。
+ *
+ * `qty` 是**明细真值**（`oi_order_items.qty`；`null` = 不知道，导入行由渲染层从报表回落），
+ * `covered` 只统计**已提交**拿货单 —— 草稿单不算"已经拿了"（与 `takenLedger()` 同一口径）。
+ */
+export interface OrderCoverageRow {
+  /** `oi_order_items.id` —— 与 `purchase_sources.order_item_id` 同一空间 */
+  orderItemId: number;
+  orderNo: string;
+  shop: string;
+  orderTime: string;
+  styleCode: string;
+  styleName: string;
+  styleColorId: number;
+  /** 款色（识别结论） */
+  styleColor: string;
+  /** 订单原文色（平台写法；`unclassified` 时的线索） */
+  colorRaw: string;
+  size: string;
+  qty: number | null;
+  rawFields: Record<string, string>;
+  /** 已提交拿货单里指向本行的件数合计 */
+  covered: number;
+  /** 没有款色归属（`style_color_id = 0`）—— 界面要标出来，不许静默当成"已齐" */
+  unclassified: boolean;
+}
+
+export interface OrderCoveragePayload {
+  rows: OrderCoverageRow[];
+  /** 无归属的已拿台账（形状同 `TakenRow`）：按款色码当池子用，与 `covered` 互斥不重复 */
+  unattributed: TakenRow[];
 }
 
 // ---- 建表 ----
@@ -174,6 +269,7 @@ const SCHEMA = [
     price_cents INTEGER NOT NULL DEFAULT 0,
     amount_cents INTEGER NOT NULL DEFAULT 0,
     suggestion_qty INTEGER NOT NULL DEFAULT 0,
+    style_color_id INTEGER NOT NULL DEFAULT 0,
     UNIQUE(purchase_id, style_code, color, size)
   )`,
   `CREATE TABLE IF NOT EXISTS purchase_sources (
@@ -184,9 +280,11 @@ const SCHEMA = [
     style_name TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '',
     size TEXT NOT NULL DEFAULT '',
-    qty INTEGER NOT NULL DEFAULT 1
+    qty INTEGER NOT NULL DEFAULT 1,
+    order_item_id INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE INDEX IF NOT EXISTS idx_purchase_sources_purchase ON purchase_sources(purchase_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_purchase_sources_item ON purchase_sources(order_item_id)`,
   `CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
@@ -225,7 +323,146 @@ export function ensurePurchaseSchema(): void {
 function purchaseMigrationSteps(): MigrationStep[] {
   return [
     { version: 1, name: 'purchase_orders 删 note（零读者列：不进导出/对账/成本）', up: dropOrderNote },
+    { version: 2, name: 'purchase_items += style_color_id（已拿的身份键）· 存量按唯一色回填', up: addItemStyleColor },
+    {
+      version: 3,
+      name: 'purchase_sources += order_item_id（哪张订单的哪一行被这批货覆盖）· 存量只补唯一确定的',
+      up: addSourceOrderItem,
+    },
   ];
+}
+
+/**
+ * **v3：给来源快照补订单行 id**（2026-10-22）。
+ *
+ * 为什么加这一列：`autoSourceRows()` 从 2026-10 初就在生成拿货单时**逐条订单行做 FIFO 分配**
+ * （"这 N 件对应哪几条订单行"当时就算出来了），但只把 `shop` 写进库、把 `oi.id` 扔了
+ * ⇒ 拿货与订单之间没有一条可查的边，「哪张单的货齐了」只能靠款色码总量猜。
+ * 列加上之后，源快照才真的是"一条订单行 × 覆盖件数"。
+ *
+ * **存量回填只补"能由事实唯一确定"的行**（同 v2 补色的纪律，绝不猜）：
+ *   该（拿货单, 款色码）组里**只有一条**来源行、且该款色码在未发货订单里**只有一条**候选行、
+ *   且那条来源只覆盖 1 件 —— 三者同时成立才认。其余一律留 0（= 无归属），
+ *   由 `orderCoverage()` 归进「无归属台账」，界面明说"这批历史拿货没有订单归属"。
+ *   猜错的代价是**把别的单宣布成已齐**，比显示"历史单查不到归属"贵得多。
+ *
+ * ⚠️ 与所有迁移步骤同一条纪律：迁移跑在表可能存在之前 —— 表不存在时 PRAGMA 返回空，直接跳过。
+ */
+function addSourceOrderItem(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(purchase_sources)`);
+  if (cols.length === 0) return; // 新库：SCHEMA 建表即带该列
+  if (cols.some((c) => c.name === 'order_item_id')) return;
+  dbRun(`ALTER TABLE purchase_sources ADD COLUMN order_item_id INTEGER NOT NULL DEFAULT 0`);
+  dbRun(`CREATE INDEX IF NOT EXISTS idx_purchase_sources_item ON purchase_sources(order_item_id)`);
+  // 订单域表可能还没建（本模块可先跑）→ 缺表就跳过回填，列留着，等下次进页由重放补
+  if (!tableExists('oi_order_items') || !tableExists('oi_orders')) return;
+
+  // 候选订单行：**未发货 + 非终结**，与 `outstanding()` 同一范围（口径见该函数注释）。
+  // 两套索引：`#款色id|码`（身份，抗改名）与 `款|色|码`（老明细只有文本时才用）。
+  const candidates = dbQuery<{
+    oid: number;
+    style_color_id: number;
+    style_code: string;
+    color: string;
+    size: string;
+  }>(
+    `SELECT oi.id AS oid, COALESCE(sc.id, 0) AS style_color_id, COALESCE(s.code, '') AS style_code,
+            COALESCE(sc.color, '') AS color, oi.size AS size
+       FROM oi_order_items oi
+       JOIN oi_orders o ON o.id = oi.order_id
+       LEFT JOIN oi_images i ON oi.image_id = i.id
+       LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_styles s ON sc.style_id = s.id
+      WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
+      ORDER BY oi.id`,
+  );
+  const byId = new Map<string, number[]>();
+  const byText = new Map<string, number[]>();
+  const push = (m: Map<string, number[]>, k: string, oid: number): void => {
+    const arr = m.get(k);
+    if (arr) arr.push(oid);
+    else m.set(k, [oid]);
+  };
+  for (const c of candidates) {
+    const id = Number(c.style_color_id) || 0;
+    if (id > 0) push(byId, `#${id}|${c.size}`, Number(c.oid));
+    push(byText, `${c.style_code}\u0000${c.color}\u0000${c.size}`, Number(c.oid));
+  }
+
+  // 拿货明细的款色身份（v2 补的）：来源行本身没有色 id，只能经"同一张单的同一款色码"取。
+  // 取不到（`0`）时才退回文本匹配 —— 文本是开单那一刻的副本，色名改过就对不上（真库里
+  // 「未分类 → 1/2/3」那批全是这种情况），所以身份优先不是洁癖。
+  const itemIds = new Map<string, number>();
+  for (const it of dbQuery<{ purchase_id: number; style_code: string; color: string; size: string; style_color_id: number }>(
+    `SELECT purchase_id, style_code, color, size, MAX(COALESCE(style_color_id, 0)) AS style_color_id
+       FROM purchase_items GROUP BY purchase_id, style_code, color, size`,
+  )) {
+    itemIds.set(
+      `${Number(it.purchase_id)}\u0000${it.style_code}\u0000${it.color}\u0000${it.size}`,
+      Number(it.style_color_id) || 0,
+    );
+  }
+
+  const groups = dbQuery<{ id: number; purchase_id: number; style_code: string; color: string; size: string; qty: number }>(
+    `SELECT id, purchase_id, style_code, color, size, qty FROM purchase_sources ORDER BY id`,
+  );
+  const seen = new Map<string, number>();
+  for (const g of groups) {
+    const k = `${g.purchase_id}\u0000${g.style_code}\u0000${g.color}\u0000${g.size}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+
+  let filled = 0;
+  for (const g of groups) {
+    if (Number(g.qty) !== 1) continue;
+    const gk = `${g.purchase_id}\u0000${g.style_code}\u0000${g.color}\u0000${g.size}`;
+    if ((seen.get(gk) ?? 0) !== 1) continue; // 组内多条来源 ⇒ 分不清对应哪一行
+    const scId = itemIds.get(gk) ?? 0;
+    const cands = scId > 0
+      ? byId.get(`#${scId}|${g.size}`) ?? []
+      : byText.get(`${g.style_code}\u0000${g.color}\u0000${g.size}`) ?? [];
+    if (cands.length !== 1) continue; // 候选不唯一 ⇒ 不猜
+    dbRun(`UPDATE purchase_sources SET order_item_id = ? WHERE id = ?`, [cands[0], g.id]);
+    filled += 1;
+  }
+  if (filled > 0) {
+    console.log(`[migrate] purchase.main v3：${filled} 行来源快照按"款色码只有唯一候选订单行"补上了 order_item_id（其余留 0，归无归属台账）`);
+  }
+}
+
+
+/**
+ * **v2：给拿货明细补身份列**（2026-10-20）。
+ *
+ * 只补"**能由事实唯一确定**"的那些行：该款在款色表里只有**一个**真实色（排除占位「未分类」）
+ * ⇒ 这行的色就是它。其余留 0，由界面标「色未定」并给就地修复入口 —— **绝不猜色**
+ * （真库 10 行里只有 1 行符合条件；猜错 = 发错货，比显示"未定"贵得多）。
+ *
+ * 回填放在"列刚被加上"的分支内 ⇒ 只做一次；此后由开单路径直接写入。
+ */
+function addItemStyleColor(): void {
+  const cols = dbQuery<{ name: string }>(`PRAGMA table_info(purchase_items)`);
+  if (cols.length === 0) return; // 新库：SCHEMA 建表即带该列
+  if (cols.some((c) => c.name === 'style_color_id')) return;
+  dbRun(`ALTER TABLE purchase_items ADD COLUMN style_color_id INTEGER NOT NULL DEFAULT 0`);
+  dbRun(`CREATE INDEX IF NOT EXISTS idx_purchase_items_sc ON purchase_items(style_color_id)`);
+  // 订单域表可能还没建（本模块可先跑）→ 缺表就跳过回填，列留着，等下次进页由重放补
+  if (!tableExists('oi_style_colors') || !tableExists('oi_styles')) return;
+  // 唯一色回填：款编码 → 款色表里唯一的真实色行
+  const filled = dbRun(
+    `UPDATE purchase_items
+        SET style_color_id = (
+          SELECT sc.id FROM oi_style_colors sc JOIN oi_styles s ON s.id = sc.style_id
+           WHERE s.code = purchase_items.style_code
+             AND TRIM(COALESCE(sc.color, '')) NOT IN ('', '未分类'))
+      WHERE COALESCE(style_color_id, 0) = 0
+        AND (SELECT COUNT(*) FROM oi_style_colors sc JOIN oi_styles s ON s.id = sc.style_id
+              WHERE s.code = purchase_items.style_code
+                AND TRIM(COALESCE(sc.color, '')) NOT IN ('', '未分类')) = 1`,
+  );
+  if (Number(filled.changes) > 0) {
+    console.log(`[migrate] purchase.main v2：${filled.changes} 行拿货明细按"该款唯一色"补上了款色 id（其余留 0 待人工认色）`);
+  }
 }
 
 /**
@@ -403,35 +640,30 @@ export function getPurchaseOrder(id: number): PurchaseOrder | undefined {
 export function createPurchaseOrder(input: {
   supplierId: number;
   bizDate: string;
-  mode: 'detail' | 'package';
-  totalCents?: number;
-  items?: PurchaseItem[];
+  items?: PurchaseItemInput[];
   sources?: PurchaseSourceRow[];
 }): number {
   const supplier = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [input.supplierId]);
   if (!supplier) throw new Error(`厂商不存在: id=${input.supplierId}`);
-  const mode = input.mode === 'package' ? 'package' : 'detail';
   const date = String(input.bizDate ?? '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式不正确');
 
   return dbTransaction(() => {
-    const total = mode === 'package'
-      ? Math.max(0, Math.round(Number(input.totalCents ?? 0)))
-      : computeTotal(input.items ?? []);
+    const items = input.items ?? [];
+    // `mode` 列保留并恒写 'detail'（包价单分支 2026-10-20 按用户决定删除：
+    // 真库 `mode='package'` 0 条、也没有创建入口，留着只是第四套金额口径）。
+    // 列不删：SQLite 删列要重建表，收益为零；判据是"还有没有分支"，不是"列在不在"。
     const id = dbRun(
       `INSERT INTO purchase_orders (supplier_id, biz_date, mode, status, total_cents)
-       VALUES (?, ?, ?, 'draft', ?)`,
-      [input.supplierId, date, mode, total],
+       VALUES (?, ?, 'detail', 'draft', ?)`,
+      [input.supplierId, date, computeTotal(items)],
     ).lastInsertRowid;
-    if (mode === 'detail') {
-      const items = input.items ?? [];
-      insertItems(id, items);
-      // 锁定来源订单（店铺归属）；未显式提供时按订单缺口自动推导
-      const sources = input.sources?.length
-        ? sanitizeSources(input.sources)
-        : autoSourceRows(items);
-      if (sources.length) insertSources(id, sources);
-    }
+    insertItems(id, items);
+    // 锁定来源订单（店铺归属）；未显式提供时按订单缺口自动推导
+    const sources = input.sources?.length
+      ? sanitizeSources(input.sources)
+      : autoSourceRows(items);
+    if (sources.length) insertSources(id, sources);
     return id;
   });
 }
@@ -450,17 +682,30 @@ function sanitizeSources(sources: PurchaseSourceRow[]): PurchaseSourceRow[] {
       color: String(s.color ?? '').slice(0, 50),
       size: String(s.size ?? '').slice(0, 50),
       qty,
+      orderItemId: Math.max(0, Math.round(Number(s.orderItemId ?? 0)) || 0),
     });
   }
   return out;
 }
 
 /**
- * 按缺口自动推导来源订单行：对拿货单每个款色码，从 oi_orders 中取最靠前的
- * 未满足订单行（已拿 = 其它已提交拿货单合计）作为来源，件数不足需求的部分不补。
- * 无订单数据（未导入）时返回空数组，该单不参与店铺拆分。
+ * 按缺口自动推导来源订单行：对拿货单每个款色码，从 `oi_order_items` 中取**最靠前的未满足订单行**
+ * 作为来源，**按件数**逐行分配，并记下 `order_item_id`（哪一行被覆盖）。
+ *
+ * 就是这张表让「哪张订单的货齐了」成为事实（2026-10-22）。三条口径：
+ *
+ *   1. **范围 = 未发货 + 非终结**（与 `outstanding()` 同一把尺子）。原来一条过滤都没有，
+ *      会把这次拿货记到**已发货、甚至已取消**的订单上 —— 对店铺分摊只是少记，
+ *      对"哪单齐了"就是**把别的单宣布成已齐**。
+ *   2. **跳过按件、不按行**。`taken` 是件数、需求也按件（`SUM(COALESCE(NULLIF(qty,0),1))`），
+ *      而原来 `skip -= 1` 每行只算 1 件 ⇒ 一单买 2 件时会多跳一行。
+ *   3. **一条来源 = 一条订单行 × 覆盖件数**（`qty` 可以是 2），不再"每覆盖 1 件插一条 1 件的行"
+ *      —— 同一行的件数必须是同一个数，否则店铺分摊按行数近似、逐单判定按件数精确，两套会打架。
+ *
+ * 需求行不够（拿多了）时，多出来的件**不记来源**（没有订单行可指），由 `orderCoverage()`
+ * 归进「无归属台账」。无订单数据（未导入）时返回空数组，该单不参与店铺拆分。
  */
-function autoSourceRows(items: PurchaseItem[]): PurchaseSourceRow[] {
+function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): PurchaseSourceRow[] {
   const out: PurchaseSourceRow[] = [];
   const seen = new Set<string>();
   for (const it of items) {
@@ -473,45 +718,55 @@ function autoSourceRows(items: PurchaseItem[]): PurchaseSourceRow[] {
     seen.add(key);
     const need = Math.max(0, Math.round(Number(it.qty ?? 0)));
     if (need <= 0) continue;
-    // 该款色码已拿（其它已提交拿货单）
+    // 该款色码已拿（**别的**已提交拿货单）：编辑一张已提交单时必须把自己排除掉，
+    // 否则"自己已经拿的件数"会被当成别人拿的、再跳一遍 ⇒ 来源整体后移。
     const takenRow = dbGet<{ t: number }>(
       `SELECT COALESCE(SUM(pi.qty), 0) AS t
        FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
-       WHERE po.status = 'submitted' AND pi.style_code = ? AND pi.color = ? AND pi.size = ?`,
-      [code, color, size],
+       WHERE po.status = 'submitted' AND pi.purchase_id <> ? AND pi.style_code = ? AND pi.color = ? AND pi.size = ?`,
+      [excludePurchaseId, code, color, size],
     );
-    const taken = Number(takenRow?.t ?? 0);
-    // 需求订单行（按导入顺序 FIFO）
+    let skipLeft = Number(takenRow?.t ?? 0);
+    // 需求订单行（按导入顺序 FIFO；范围与 outstanding() 一致）
     const n = styleNameJoin();
     const rows = dbQuery<Record<string, unknown>>(
-      `SELECT o.id AS oid, o.shop, s.code AS style_code, ${n.name} AS style_name,
-              sc.color AS style_color, o.size
-       FROM oi_orders o
-       JOIN oi_images i ON o.image_id = i.id
+      `SELECT oi.id AS oid, o.shop, s.code AS style_code, ${n.name} AS style_name,
+              sc.color AS style_color, oi.size AS size,
+              COALESCE(NULLIF(oi.qty, 0), 1) AS qty
+       FROM oi_order_items oi
+       JOIN oi_orders o ON o.id = oi.order_id
+       JOIN oi_images i ON oi.image_id = i.id
        JOIN oi_style_colors sc ON i.style_color_id = sc.id
        JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
-       WHERE s.code = ? AND sc.color = ? AND o.size = ?
-       ORDER BY o.id`,
+       WHERE s.code = ? AND sc.color = ? AND oi.size = ?
+         AND o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
+       ORDER BY oi.id`,
       [code, color, size],
     );
-    let skip = taken;
     let pushed = 0;
     for (const row of rows) {
-      if (skip > 0) {
-        skip -= 1;
-        continue;
-      }
       if (pushed >= need || out.length >= 5000) break;
+      let avail = Math.max(1, Math.round(Number(row.qty ?? 1)));
+      // 先按**件**跳过已被别的拿货单覆盖的部分（可能只吃掉这一行的一部分）
+      if (skipLeft > 0) {
+        const skipped = Math.min(skipLeft, avail);
+        skipLeft -= skipped;
+        avail -= skipped;
+      }
+      if (avail <= 0) continue;
+      const take = Math.min(avail, need - pushed);
+      if (take <= 0) continue;
       out.push({
         shop: String(row.shop ?? ''),
         styleCode: String(row.style_code ?? ''),
         styleName: String(row.style_name ?? ''),
         color: String(row.style_color ?? ''),
         size: String(row.size ?? ''),
-        qty: 1,
+        qty: take,
+        orderItemId: Number(row.oid ?? 0) || 0,
       });
-      pushed += 1;
+      pushed += take;
     }
   }
   return out;
@@ -520,9 +775,9 @@ function autoSourceRows(items: PurchaseItem[]): PurchaseSourceRow[] {
 function insertSources(purchaseId: number, sources: PurchaseSourceRow[]): void {
   for (const s of sources) {
     dbRun(
-      `INSERT INTO purchase_sources (purchase_id, shop, style_code, style_name, color, size, qty)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [purchaseId, s.shop, s.styleCode, s.styleName ?? '', s.color, s.size, s.qty],
+      `INSERT INTO purchase_sources (purchase_id, shop, style_code, style_name, color, size, qty, order_item_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [purchaseId, s.shop, s.styleCode, s.styleName ?? '', s.color, s.size, s.qty, s.orderItemId ?? 0],
     );
   }
 }
@@ -534,7 +789,7 @@ function insertSources(purchaseId: number, sources: PurchaseSourceRow[]): void {
 export function updatePurchaseOrder(id: number, input: {
   bizDate?: string;
   totalCents?: number;
-  items?: PurchaseItem[];
+  items?: PurchaseItemInput[];
 }): void {
   const order = dbGet<Record<string, unknown>>(`SELECT * FROM purchase_orders WHERE id = ?`, [id]);
   if (!order) throw new Error(`拿货单不存在: id=${id}`);
@@ -547,13 +802,15 @@ export function updatePurchaseOrder(id: number, input: {
       sets.push('biz_date = ?');
       params.push(date);
     }
-    if (order.mode === 'package' && input.totalCents !== undefined) {
-      sets.push('total_cents = ?');
-      params.push(Math.max(0, Math.round(Number(input.totalCents ?? 0))));
-    }
-    if (order.mode === 'detail' && input.items !== undefined) {
+    if (input.items !== undefined) {
       dbRun(`DELETE FROM purchase_items WHERE purchase_id = ?`, [id]);
       insertItems(id, input.items);
+      // 来源快照跟着明细重算（2026-10-22）：原来只重算明细、sources 留在开单那一刻，
+      // 改了件数也不动 ⇒ 店铺分摊与"哪单齐了"都按旧数量说话。重算时把自己排除，
+      // 否则已提交单的"自己拿的件数"会被当成别人拿的再跳一遍。
+      dbRun(`DELETE FROM purchase_sources WHERE purchase_id = ?`, [id]);
+      const sources = autoSourceRows(input.items, id);
+      if (sources.length) insertSources(id, sources);
       sets.push('total_cents = ?');
       params.push(computeTotal(input.items));
     }
@@ -583,7 +840,7 @@ export function deletePurchaseOrder(id: number): void {
 
 function loadItems(purchaseId: number): PurchaseItem[] {
   return dbQuery<Record<string, unknown>>(
-    `SELECT id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty
+    `SELECT id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty, style_color_id
      FROM purchase_items WHERE purchase_id = ? ORDER BY id`,
     [purchaseId],
   ).map((r) => ({
@@ -596,10 +853,11 @@ function loadItems(purchaseId: number): PurchaseItem[] {
     priceCents: Number(r.price_cents ?? 0),
     amountCents: Number(r.amount_cents ?? 0),
     suggestionQty: Number(r.suggestion_qty ?? 0),
+    styleColorId: Number(r.style_color_id ?? 0) || 0,
   }));
 }
 
-function insertItems(purchaseId: number, items: PurchaseItem[]): void {
+function insertItems(purchaseId: number, items: PurchaseItemInput[]): void {
   for (const it of items) {
     const qty = Math.max(0, Math.round(Number(it.qty ?? 0)));
     const price = Math.max(0, Math.round(Number(it.priceCents ?? 0)));
@@ -607,8 +865,8 @@ function insertItems(purchaseId: number, items: PurchaseItem[]): void {
     if (!code) continue;
     dbRun(
       `INSERT INTO purchase_items
-         (purchase_id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (purchase_id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty, style_color_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchaseId,
         code,
@@ -619,12 +877,14 @@ function insertItems(purchaseId: number, items: PurchaseItem[]): void {
         price,
         qty * price,
         Math.max(0, Math.round(Number(it.suggestionQty ?? 0))),
+        // 身份由调用方在开单那一刻带上（来自缺口行）；不带就 0，靠文本兜底，绝不现猜
+        Math.max(0, Math.round(Number(it.styleColorId ?? 0))) || 0,
       ],
     );
   }
 }
 
-function computeTotal(items: PurchaseItem[]): number {
+function computeTotal(items: PurchaseItemInput[]): number {
   return items.reduce((sum, it) => {
     const qty = Math.max(0, Math.round(Number(it.qty ?? 0)));
     const price = Math.max(0, Math.round(Number(it.priceCents ?? 0)));
@@ -638,7 +898,8 @@ function mapOrderRow(r: Record<string, unknown>): Omit<PurchaseOrder, 'items'> {
     supplierId: Number(r.supplier_id),
     supplierName: String(r.supplier_name ?? ''),
     bizDate: String(r.biz_date ?? ''),
-    mode: (r.mode === 'package' ? 'package' : 'detail') as 'detail' | 'package',
+    // 包价单已删（2026-10-20）：老库里万一还有 package 行，一律按明细读（列还在，但不再有分支）
+    mode: 'detail' as const,
     status: (r.status === 'submitted' ? 'submitted' : 'draft') as 'draft' | 'submitted',
     totalCents: Number(r.total_cents ?? 0),
     editedAt: r.edited_at ? String(r.edited_at) : null,
@@ -775,60 +1036,244 @@ export function reconciliation(from?: string, to?: string): ReconciliationRow[] 
 // ---- 待拿货缺口（实时差量） ----
 
 /**
+ * **已拿台账**：所有**已提交**拿货单的明细 qty 合计，按款色码。
+ *
+ * ⚠️ 与 `outstanding()` 的分工（2026-10-17）：它是**台账**（拿过多少，拿齐了照样在），
+ *    而 `outstanding()` 是**缺口**（还缺什么，缺为 0 的行不返回）—— 拿后者当台账用，
+ *    "刚拿完"的那一行会被过滤掉 ⇒ 清单按已拿 0 算 ⇒ 卡永远停在待拿（用户实报，见 `TakenRow` 注释）。
+ *    两者的"已拿"都从下面这条 SQL 来，口径只留一份。
+ */
+export function takenLedger(): TakenRow[] {
+  return dbQuery<Record<string, unknown>>(
+    `SELECT pi.style_color_id AS style_color_id, pi.style_code AS style_code, pi.color AS color,
+            pi.size AS size, SUM(pi.qty) AS taken
+     FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
+     WHERE po.status = 'submitted'
+     GROUP BY pi.style_color_id, pi.style_code, pi.color, pi.size`,
+  ).map((r) => ({
+    styleColorId: Number(r.style_color_id ?? 0) || 0,
+    styleCode: String(r.style_code ?? ''),
+    color: String(r.color ?? ''),
+    size: String(r.size ?? ''),
+    taken: Number(r.taken ?? 0),
+  }));
+}
+
+/**
+ * 台账的两套键（2026-10-20）。
+ *
+ * **身份优先**：`style_color_id` 是拿货那一刻记下的款色行 id，改名/换色名都不会失联；
+ * **文本兜底**：老明细（`style_color_id = 0`）只有文本，按 `款|色|码` 匹配。
+ *
+ * ⚠️ 两套必须**互斥**：带 id 的行只进 idMap，没 id 的行才进 textMap。
+ * 否则同一行会被两边同时命中 → 已拿算两遍 → `missing` 提前变 0 → **漏货**。
+ */
+function takenMaps(): { byId: Map<string, number>; byText: Map<string, number> } {
+  const byId = new Map<string, number>();
+  const byText = new Map<string, number>();
+  for (const r of takenLedger()) {
+    if (r.styleColorId > 0) {
+      const k = `${r.styleColorId}|${r.size}`;
+      byId.set(k, (byId.get(k) ?? 0) + r.taken);
+    } else {
+      const k = `${r.styleCode}|${r.color}|${r.size}`;
+      byText.set(k, (byText.get(k) ?? 0) + r.taken);
+    }
+  }
+  return { byId, byText };
+}
+
+/**
+ * 「不该再要求拿货」的状态原文（与渲染层 `bucketOfStatus` 的 closed/completed 同一口径）。
+ *
+ * 为什么在 SQL 里也写一份：需求必须与**拣货清单**同一范围，否则页签徽标与卡面永远对不上。
+ * 清单的判定在渲染层（`src/lib/orderCost.bucketOfStatus`），主进程拿不到 → 这里用等价的
+ * LIKE 条件表达，并由 `tests/orderStatusParity.spec.ts` 逐值比对两个实现（改一处就红）。
+ * `biz_status` 为空 ⇒ 不属任何一类（照收）。
+ */
+const TERMINAL_BIZ_STATUS_SQL = `(
+  o.biz_status LIKE '%关闭%' OR o.biz_status LIKE '%取消%' OR o.biz_status LIKE '%撤销%'
+  OR LOWER(o.biz_status) LIKE '%cancel%' OR LOWER(o.biz_status) LIKE '%closed%'
+  OR o.biz_status LIKE '%完成%' OR o.biz_status LIKE '%已收货%' OR o.biz_status LIKE '%交易成功%'
+  OR LOWER(o.biz_status) LIKE '%complete%'
+)`;
+
+/**
  * 待拿货缺口 = max(0, 订单需求 − 已拿) − 已忽略。
- * 需求   = 订单库按款色码聚合的行数（经 oi_orders → oi_images → oi_style_colors → oi_styles）；
- * 已拿   = 所有已提交拿货单明细 qty 合计（按款色码）；
- * 已忽略 = purchase_ignore 标记的整款色（含全部尺码）。
- * 实时反映：新订单 / 删除订单 / 拿货单增删改 / 标记无需补货。
+ *
+ * 需求 = `oi_orders` 未发货 + 非终结的行，按 **`style_color_id`（身份）+ 尺码** 求和件数；
+ *        未归类（id=0）的行**照样参与**，按 (商品ID, 订单原文色, 码) 单列成组并标 `unclassified`
+ *        —— 排除它们 = 悄悄少算一批真实要拿的货（真库 51 行里 9 行，18%）。
+ * 已拿 = 已提交拿货单明细，**身份优先、文本兜底**（见 `takenMaps`）。
+ * 已忽略 = `purchase_ignore` 标记的整款色。
+ *
+ * 三条口径修正（2026-10-20，简化审查 F1/F2/F4）：
+ *   · 件数用 `SUM(COALESCE(qty,1))`，不再 `COUNT(*)`（一单买 2 件时按行数算会 `missing=-1` ⇒ 整行丢出缺口）；
+ *   · 过滤未发货 + 非终结，与拣货清单同一范围（原来一条过滤都没有，已发货/关闭单永久挂在待拿）；
+ *   · 需求侧改 LEFT JOIN（原来 INNER JOIN 把未归类行整批吞掉，与清单是两套事实）。
  */
 export function outstanding(): OutstandingRow[] {
   const n = styleNameJoin();
-  const demands = dbQuery<Record<string, unknown>>(
-    `SELECT s.code AS style_code, ${n.name} AS style_name, sc.color AS style_color, o.size AS size,
-            COUNT(*) AS demand
-     FROM oi_orders o
-     JOIN oi_images i ON o.image_id = i.id
-     JOIN oi_style_colors sc ON i.style_color_id = sc.id
-     JOIN oi_styles s ON sc.style_id = s.id
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT COALESCE(s.code, '') AS style_code, ${n.name} AS style_name,
+            COALESCE(sc.id, 0) AS style_color_id, COALESCE(sc.color, '') AS style_color,
+            COALESCE(oi.color, '') AS color_raw, oi.size AS size,
+            COALESCE(json_extract(oi.raw_fields, '$."产品ID"'), '') AS item_id,
+            SUM(COALESCE(NULLIF(oi.qty, 0), 1)) AS demand, COUNT(*) AS orders
+     FROM oi_order_items oi
+     JOIN oi_orders o ON o.id = oi.order_id
+     LEFT JOIN oi_images i ON oi.image_id = i.id
+     LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+     LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${n.join}
-     GROUP BY sc.id, o.size`,
+     WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
+     GROUP BY COALESCE(sc.id, 0), oi.size,
+              CASE WHEN COALESCE(sc.id, 0) = 0 THEN COALESCE(json_extract(oi.raw_fields, '$."产品ID"'), '') ELSE '' END,
+              CASE WHEN COALESCE(sc.id, 0) = 0 THEN COALESCE(oi.color, '') ELSE '' END`,
   );
-  const takenRows = dbQuery<Record<string, unknown>>(
-    `SELECT pi.style_code, pi.color, pi.size, SUM(pi.qty) AS taken
-     FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
-     WHERE po.status = 'submitted'
-     GROUP BY pi.style_code, pi.color, pi.size`,
-  );
+  const { byId, byText } = takenMaps();
   const ignored = new Set(
     dbQuery<{ style_code: string; color: string }>(
       `SELECT style_code, color FROM purchase_ignore`,
     ).map((r) => `${r.style_code}|${r.color}`),
   );
-  const taken = new Map(
-    takenRows.map((r) => [`${r.style_code}|${r.color}|${r.size}`, Number(r.taken ?? 0)]),
-  );
 
   const result: OutstandingRow[] = [];
-  for (const d of demands) {
-    const ignoredKey = `${d.style_code}|${d.style_color}`;
-    if (ignored.has(ignoredKey)) continue;
-    const key = `${d.style_code}|${d.style_color}|${d.size}`;
+  for (const d of rows) {
+    const styleColorId = Number(d.style_color_id ?? 0) || 0;
+    const styleCode = String(d.style_code ?? '');
+    const color = String(d.style_color ?? '');
+    const size = String(d.size ?? '');
+    const unclassified = styleColorId <= 0;
+    if (!unclassified && ignored.has(`${styleCode}|${color}`)) continue;
     const demand = Number(d.demand ?? 0);
-    const have = taken.get(key) ?? 0;
+    // 身份优先；老明细（id=0）按文本兜底（只在"该款该色该码"完全相等时算数）
+    const have = unclassified
+      ? 0
+      : (byId.get(`${styleColorId}|${size}`) ?? 0) + (byText.get(`${styleCode}|${color}|${size}`) ?? 0);
     const missing = demand - have;
-    if (missing <= 0) continue;
+    // 未归类组**永远返回**：它就是"还不准"的那部分，藏起来等于谎报已拿全
+    if (!unclassified && missing <= 0) continue;
     result.push({
-      styleCode: String(d.style_code ?? ''),
+      styleCode,
       styleName: String(d.style_name ?? ''),
-      color: String(d.style_color ?? ''),
-      size: String(d.size ?? ''),
+      styleColorId,
+      color,
+      size,
       demand,
       taken: have,
-      missing,
+      missing: Math.max(0, missing),
+      unclassified,
+      itemIds: unclassified && d.item_id ? [String(d.item_id)] : [],
+      colorRaw: unclassified ? String(d.color_raw ?? '') : '',
+      orders: Number(d.orders ?? 0),
     });
   }
-  result.sort((a, b) => b.missing - a.missing);
+  result.sort((a, b) => Number(b.unclassified) - Number(a.unclassified) || b.missing - a.missing);
   return result;
+}
+
+/**
+ * **逐行覆盖度**（2026-10-22）：这是「哪张订单的货齐了」的唯一事实来源。
+ *
+ * 返回两样东西：
+ *   · `rows`：**未发货 + 非终结**订单的每一行明细，带上「已提交拿货单里指向本行的件数合计」
+ *     （`covered`）。行的 id 是 `oi_order_items.id` —— 与 `purchase_sources.order_item_id` 同一空间。
+ *   · `unattributed`：**无归属的已拿台账**（形状同 `takenLedger()`）。来源是那些
+ *     `order_item_id = 0` 的拿货明细（加列之前的历史单 / 需求订单行不够、这次拿多了的尾巴）。
+ *     它不能凭空丢掉（会让"已拿"变小、界面谎报还差），也不能硬摊到某一行（那是编造事实）
+ *     ⇒ 交回渲染层，按款色码当"池子"用，并与 `covered` **相加时不重复**（两边互斥：
+ *     一件货要么有订单行归属，进了 `covered`；要么没有，进了 `unattributed`）。
+ *
+ * 为什么不用 `outstanding()`：那个是「还缺什么」，缺为 0 的行会被它自己过滤掉
+ * ⇒ 拿齐的行根本不返回，没法回答"这张单齐了"（`TakenRow` 注释里记的那次事故同一个坑）。
+ * 为什么不用 `shippingRows()`：那个带 `limit` 且按导入日筛，这里是**全部未发货**、只要最小列。
+ */
+export function orderCoverage(): OrderCoveragePayload {
+  const n = styleNameJoin();
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT oi.id AS order_item_id, o.order_no AS order_no, o.shop AS shop, o.order_time AS order_time,
+            oi.raw_fields AS raw_fields, oi.qty AS qty, oi.size AS size,
+            COALESCE(sc.id, 0) AS style_color_id, COALESCE(sc.color, '') AS style_color,
+            COALESCE(oi.color, '') AS color_raw, COALESCE(s.code, '') AS style_code,
+            ${n.name} AS style_name, COALESCE(oc.covered, 0) AS covered
+       FROM oi_order_items oi
+       JOIN oi_orders o ON o.id = oi.order_id
+       LEFT JOIN oi_images i ON oi.image_id = i.id
+       LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
+       LEFT JOIN oi_styles s ON sc.style_id = s.id
+       ${n.join}
+       LEFT JOIN (
+         SELECT ps.order_item_id AS oid, SUM(ps.qty) AS covered
+           FROM purchase_sources ps JOIN purchase_orders po ON po.id = ps.purchase_id
+          WHERE po.status = 'submitted' AND ps.order_item_id > 0
+          GROUP BY ps.order_item_id
+       ) oc ON oc.oid = oi.id
+      WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
+      ORDER BY oi.id`,
+  );
+
+  // 无归属台账：已提交拿货明细的件数，减去**同一张单里已经指到订单行**的那部分。
+  // 差额按款色码聚合 —— 有归属的不进这里，保证与 `covered` 相加不重复。
+  const unattributed = dbQuery<Record<string, unknown>>(
+    `WITH it AS (
+       SELECT pi.purchase_id AS purchase_id, COALESCE(pi.style_color_id, 0) AS style_color_id,
+              pi.style_code AS style_code, pi.color AS color, pi.size AS size, SUM(pi.qty) AS q
+         FROM purchase_items pi JOIN purchase_orders po ON po.id = pi.purchase_id
+        WHERE po.status = 'submitted'
+        GROUP BY pi.purchase_id, COALESCE(pi.style_color_id, 0), pi.style_code, pi.color, pi.size
+     ), at AS (
+       SELECT ps.purchase_id AS purchase_id, ps.style_code AS style_code,
+              ps.color AS color, ps.size AS size,
+              SUM(CASE WHEN ps.order_item_id > 0 THEN ps.qty ELSE 0 END) AS attributed
+         FROM purchase_sources ps
+        GROUP BY ps.purchase_id, ps.style_code, ps.color, ps.size
+     )
+     SELECT it.style_color_id AS style_color_id, it.style_code AS style_code,
+            it.color AS color, it.size AS size,
+            SUM(MAX(0, it.q - COALESCE(at.attributed, 0))) AS taken
+       FROM it LEFT JOIN at
+         ON at.purchase_id = it.purchase_id AND at.style_code = it.style_code
+        AND at.color = it.color AND at.size = it.size
+      GROUP BY it.style_color_id, it.style_code, it.color, it.size
+     HAVING SUM(MAX(0, it.q - COALESCE(at.attributed, 0))) > 0`,
+  ).map((r) => ({
+    styleColorId: Number(r.style_color_id ?? 0) || 0,
+    styleCode: String(r.style_code ?? ''),
+    color: String(r.color ?? ''),
+    size: String(r.size ?? ''),
+    taken: Number(r.taken ?? 0),
+  }));
+
+  return {
+    rows: rows.map((r) => {
+      let rawFields: Record<string, string> = {};
+      try {
+        const v = JSON.parse(String(r.raw_fields ?? '{}'));
+        if (v && typeof v === 'object') rawFields = v as Record<string, string>;
+      } catch {
+        rawFields = {}; // 一条脏 raw_fields 只让这一行的件数走兜底，不该毁掉整张清单
+      }
+      const styleColorId = Number(r.style_color_id ?? 0) || 0;
+      return {
+        orderItemId: Number(r.order_item_id ?? 0) || 0,
+        orderNo: String(r.order_no ?? ''),
+        shop: String(r.shop ?? ''),
+        orderTime: String(r.order_time ?? ''),
+        styleCode: String(r.style_code ?? ''),
+        styleName: String(r.style_name ?? ''),
+        styleColorId,
+        styleColor: String(r.style_color ?? ''),
+        colorRaw: String(r.color_raw ?? ''),
+        size: String(r.size ?? ''),
+        qty: r.qty === null || r.qty === undefined ? null : Number(r.qty),
+        rawFields,
+        covered: Math.max(0, Number(r.covered ?? 0)),
+        unclassified: styleColorId <= 0,
+      };
+    }),
+    unattributed,
+  };
 }
 
 /** 标记某款色无需补货（已线下拿/放弃/退单），缺口不再提示；同款色新需求差额会重新出现 */
@@ -976,7 +1421,7 @@ export function shopAllocationDetail(shop: string, from?: string, to?: string): 
     .sort((a, b) => a.bizDate.localeCompare(b.bizDate) || a.purchaseId - b.purchaseId);
 }
 
-// ---- 成本快照（M1 利润追踪 D3：只读导出，供 ae-profit 导入 ae_cost_map，不向渲染层透传本模块） ----
+// ---- 成本快照（只读导出：拿货明细按 款 × 拿货日 加权；不向渲染层透传本模块） ----
 
 /** 快照项：款编码 × 拿货日期 → 加权均价（分/件，按已提交拿货单明细数量加权） */
 export interface CostSnapshotItem {
@@ -990,20 +1435,18 @@ export interface CostSnapshotItem {
    * 该行的拿货日期（yyyy-mm-dd，无则空串）。
    *
    * ⚠️ 语义在 P4a 变了：改造前是「该款**最近一次**拿货日期」（`MAX(biz_date)`，一款一行），
-   * 现在是「**本行**的拿货日期」（一款可多行，一行 = 一个成本生效区间）。
-   * 消费方（`ae-profit` 成本衔接）把它当作 `ae_cost_map.effective_from` 落库，故必须是本行日期。
+   * 现在是「**本行**的拿货日期」（一款可多行，一行 = 一个成本区间）。
    */
   lastBizDate: string;
 }
 
 /**
- * 成本快照（D3 单向快照）：从「已提交」拿货单明细按 **款编码 × 拿货日期** 聚合，
- * 输出款编码 → 多行加权均价（分）。成本衔接只允许这个只读出口（ae-profit 侧导入），
- * 不暴露本模块任何写能力；口径 = 按次拿货加权均价（M1 简化，不计颜色/尺码差异）。
+ * 成本快照（单向只读）：从「已提交」拿货单明细按 **款编码 × 拿货日期** 聚合，
+ * 输出款编码 → 多行加权均价（分）。不暴露本模块任何写能力；
+ * 口径 = 按次拿货加权均价（M1 简化，不计颜色/尺码差异）。
  *
  * ⚠️ P4a 之前是 `GROUP BY pi.style_code` + `MAX(biz_date)`：一款只导出一行、且生效日取最新，
- * 于是「同一款跨两次进货」在成本表里仍只有一条区间 —— 利润引擎即便按区间取数也复算不出历史毛利。
- * 故此处必须与 `ae_cost_map` 的多行结构同步改造（同 `po.biz_date` 的多张单一并加权为一行）。
+ * 于是「同一款跨两次进货」只剩一条区间 —— 历史毛利复算不出来。现按拿货日分组保留多行。
  */
 export function costSnapshot(): CostSnapshotItem[] {
   const rows = dbQuery<Record<string, unknown>>(

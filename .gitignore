@@ -6,16 +6,17 @@ release/
 *.log
 
 # ---- 例外：无构建步骤的岛，dist/ 即手写源码 ----
-# excel-copy / shipping-rate 没有 package.json 与 vite.config，源码直接写在 dist/ 下
+# excel-copy 没有 package.json 与 vite.config，源码直接写在 dist/ 下
 # （manifest.entry = ./dist/index.html）。若不放开例外，`git add -A` 只会收录
 # manifest.json + README.md，仓库里会存下一个 entry 指向不存在文件的坏岛。
 # 新增此类岛时要同法补一行；有 src/ + 构建脚本的岛（ae-profit / shop-accounts）
 # 保持忽略，它们提交的是 src/。（原样例岛 sk-ui-starter 已于 2026-09-24 删除，见
 # docs/plans/PLUGIN_TRIAGE_PLAN.md §7-4；product-library 岛已于 2026-10-01 整体下架，
 # 见 docs/features/PRODUCT_LIBRARY.md §0-A；order-insight 岛已于 2026-10-05 整体下架，
-# 见 docs/notes/2026-10-01-ui-island-retirement.md §6。脚手架仍在 scripts/ui-plugin-template。）
+# 见 docs/notes/2026-10-01-ui-island-retirement.md §6；shipping-rate 岛已于 2026-10-15
+# 回收为内建「基础数据 › 物流运费」，其反忽略行随之删除 —— 留着会让 tests/pluginTriage.spec.ts
+# 的「dist/ 未被忽略」守卫读到一条指向已删目录的规则。脚手架仍在 scripts/ui-plugin-template。）
 !ui-plugins/excel-copy/dist/
-!ui-plugins/shipping-rate/dist/
 
 # ============ 系统文件 ============
 .DS_Store

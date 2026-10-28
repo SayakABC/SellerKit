@@ -1,6 +1,6 @@
 /**
  * 主题服务 —— 统一管理「外观」设置（浅色 / 深色 / 跟随系统）
- * 通过 <html data-theme> 切换 CSS 令牌，持久化到 app-shell 命名空间。
+ * 通过 <html data-theme> 切换 CSS 令牌，持久化到 appearance 命名空间。
  */
 import { ref } from 'vue';
 import { useModuleStorage } from './storage';

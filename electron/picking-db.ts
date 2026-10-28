@@ -19,7 +19,7 @@ export {};
 
 import { initDb, dbQuery, tableExists } from './db';
 import { itemImagePool } from './product-db';
-import { extractSkuFields } from './shopSku';
+import { extractSkuFields, toSkuKey } from './shopSku';
 
 /** 拣货投影行（与 `src/lib/picking.ts` 的 `PickingRow` 对应，两端各自声明） */
 export interface PickingRowProjection {
@@ -32,7 +32,9 @@ export interface PickingRowProjection {
   styleName: string;
   /** 款色（识别链 / 映射的**权威结论**；'' = 没结论）。仅作事实呈现，分组键用的是下面的 `color` */
   styleColor: string;
-  /** **有效颜色** —— 款色优先、回落订单原文色。
+  /** 款色 id（**身份**：分组与已拿匹配的键；0 = 未归类）。2026-10-20 起由订单行投影得出 */
+  styleColorId: number;
+  /** 有效颜色 —— 款色优先、回落订单原文色。
    *  为什么是这个顺序（2026-10-05 D4）：订单原文色在真实数据里几乎不可用（芒果待发货单该列恒空；
    *  采集帧里 39% 是 `Picture color` 这类"以图为准"的占位），而映射配的色正是写在款色上。
    *  不这样回落，配好的颜色会在拣货单上被丢掉 —— 症状是"我明明配了色，拣货单还是没色"。 */
@@ -93,6 +95,8 @@ export function pickingRows(
   const supplierSel = hasSupplier
     ? `COALESCE(p.supplier_id, 0) AS supplier_id, COALESCE(sup.name, '') AS supplier_name`
     : `0 AS supplier_id, '' AS supplier_name`;
+  // 产品当前进价（拣货金额的最后一档；前两档是订单行两字段）。产品域没建 → 0（渲染层读成"没价"）
+  const productCostSel = hasProduct ? `COALESCE(p.cost_cents, 0) AS product_cost_cents` : `0 AS product_cost_cents`;
   const domainJoin = hasProduct
     ? `LEFT JOIN pl_products p ON p.code = s.code` +
       (hasSupplier ? `\n       LEFT JOIN suppliers sup ON sup.id = p.supplier_id` : '')
@@ -102,7 +106,7 @@ export function pickingRows(
   const args: (string | number)[] = [];
   if (!includeShipped) {
     // "已发货"只认**机械事实**：平台给了发货时间，或域内标记已发货
-    conds.push(`o.ship_time = '' AND o.status <> 'shipped'`);
+    conds.push(`o.ship_time = '' AND oi.status <> 'shipped'`);
   }
   if (shop) {
     conds.push(`o.shop = ?`);
@@ -112,18 +116,20 @@ export function pickingRows(
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
   const rows = dbQuery<Record<string, unknown>>(
-    `SELECT o.id, o.order_no, o.shop, o.order_time, o.raw_fields, o.color, o.size,
-            o.ship_time, o.status, o.biz_status,
+    `SELECT oi.id, o.order_no, o.shop, o.order_time, oi.raw_fields, oi.color, oi.size,
+            o.ship_time, oi.status, o.biz_status, oi.cost_cents, oi.actual_cost_cents,
+            COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0) AS style_color_id,
             COALESCE(s.code, '') AS style_code, ${styleNameSel},
             COALESCE(sc.color, '') AS style_color,
-            ${supplierSel}
-     FROM oi_orders o
-     LEFT JOIN oi_images i ON o.image_id = i.id
+            ${supplierSel}, ${productCostSel}
+     FROM oi_order_items oi
+     JOIN oi_orders o ON o.id = oi.order_id
+     LEFT JOIN oi_images i ON oi.image_id = i.id
      LEFT JOIN oi_style_colors sc ON i.style_color_id = sc.id
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${domainJoin}
      ${where}
-     ORDER BY o.id DESC LIMIT ?`,
+     ORDER BY oi.id DESC LIMIT ?`,
     args,
   );
 
@@ -144,9 +150,16 @@ export function pickingRows(
 
   // 三层回落取图（`itemImagePool` 是唯一实现：覆盖图 → 订单图 → 款主图）—— 一次算好，逐 item 取首选
   const pool = itemIds.length ? itemImagePool(itemIds) : new Map();
+  /** 成本列（分）：0/空 一律 null（"没维护"≠"零成本"；判据与渲染层 `positiveCents` 同口径） */
+  const centsOrNull = (v: unknown): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
   const out: PickingRowProjection[] = parsed.map(({ r, rawFields, itemId }) => {
     const orderTime = String(r.order_time ?? '');
-    const entry = itemId ? pool.get(itemId) : undefined;
+    // ⚠️ 池的键是 **归一后** 的商品ID（`toSkuKey`，`itemImagePool` 内部归一的）。拿原文去取会
+    // 在带空格/不可见字符的行上静默取不到图（`shopSku.ts` 的注释已写明；这里曾漏改）。
+    const entry = itemId ? pool.get(toSkuKey(itemId)) : undefined;
     const imagePath = entry
       ? String(entry.override?.localPath ?? entry.order[0]?.localPath ?? entry.product?.localPath ?? '')
       : '';
@@ -160,6 +173,7 @@ export function pickingRows(
       styleCode: String(r.style_code ?? ''),
       styleName: String(r.style_name ?? ''),
       styleColor: String(r.style_color ?? ''),
+      styleColorId: Number(r.style_color_id ?? 0) || 0,
       // 有效颜色 = 款色（映射 / 识别结论）→ 订单原文（见 `PickingRowProjection.color` 的注释）
       color: String(r.style_color ?? '').trim() || String(r.color ?? ''),
       size: String(r.size ?? ''),
@@ -169,6 +183,9 @@ export function pickingRows(
       imagePath,
       shipped: shipTime !== '' || status === 'shipped',
       bizStatus: String(r.biz_status ?? ''),
+      actualCostCents: centsOrNull(r.actual_cost_cents),
+      costCents: centsOrNull(r.cost_cents),
+      productCostCents: centsOrNull(r.product_cost_cents),
       rawFields,
     };
   });

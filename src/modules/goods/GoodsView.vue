@@ -1,8 +1,11 @@
 <template>
-  <div class="wb-page gd-view">
+  <div class="wb-page gd-view" :class="{ 'is-embedded': embedded }">
     <header class="wb-head">
       <div class="wb-head__main">
-        <h1 class="wb-head__title">货与成本</h1>
+        <!-- 2026-10-17：本页并入「基础数据」左导航的「货品档案」一项。在那一层里
+             左导航已经是"我在哪"的答案，再画一个 h1 就是两个标题。所以 embedded 时不画标题，
+             但**保留说明 + 全部动作**（帮助 / 简洁模式 / 刷新）—— 它们不是标题的装饰。 -->
+        <h1 v-if="!embedded" class="wb-head__title">货与成本</h1>
         <!-- 说明随页签走：一句话回答"这页是干什么的、我什么时候该来这"。
              比原来那句固定枚举（"款式 · SKU · 克重 · 厂家 · 商品ID 映射"）有用 —— 那句话
              在切了页签之后就不成立了，而用户切页签时正是最需要一句解释的时刻。 -->
@@ -73,33 +76,14 @@
                   data-act="help-go-registry"
                   @click="goRegistry"
                 >
-                  打开「店铺登记」
+                  打开「店名归一」
                 </button>
               </div>
             </div>
           </div>
         </div>
-        <!-- ⭐ 简洁模式开关（2026-10-08 报告 P1-1 / 待拍板 UX-G2）。
-             默认**开**：不渲染左栏勾选框 + 批量条、右栏统计条（理由与边界写在 `./simple.ts` 顶部）。
-             ⚠️ 只在工作台形态下渲染 —— 回退形态那两个组件的契约是"与重构前逐字一致"，
-             给它一个按下去什么都不变的按钮就是本仓最反对的**假动作**（宁可不给）。
-             形态名挂在按钮上而不是藏在 title 里：用户要能一眼看出"我现在看到的是精简过的"。 -->
-        <button
-          v-if="GOODS_LAYOUT === 'workbench'"
-          class="wb-btn"
-          type="button"
-          data-act="simple-toggle"
-          :class="{ 'is-on': goodsSimple }"
-          :aria-pressed="goodsSimple"
-          :title="
-            goodsSimple
-              ? '当前是简洁模式：已收起勾选框、批量条与统计条 —— 点一下全部显示'
-              : '当前是完整模式：点一下收起勾选框、批量条与统计条'
-          "
-          @click="toggleSimple"
-        >
-          简洁模式
-        </button>
+        <!-- ⭐ 简洁模式开关已撤（2026-10-25 用户口径）：一个"默认藏起勾选框 / 批量条 / 统计条"
+             的开关让大多数用户永远见不到那些能力。完整形态从现在起是唯一形态。 -->
         <!-- 页级不再自己取数，所以这里没有"读取中…"可报（那是各视图自己的状态，
              它们在各自的工具栏里显示）。按钮只负责发一个刷新信号。 -->
         <button class="wb-btn" data-act="refresh" @click="refresh">刷新</button>
@@ -115,8 +99,8 @@
          汇总取数）；「缺克重 / 未关联供应商」这两个筛选的入口搬进了左栏工具栏（`filter-issue`）。
 
          ⚠️ 同日 S4：`'workbench'` 形态下**页签由 3 个收成 2 个** ——「产品」与「映射与关联」
-         合并为「建档与关联」（`data-act="tab-workbench"`）。页签表按形态分叉，理由见 `TABS` 上方的注释。 -->
-    <nav class="gd-tabs" role="tablist" aria-label="货与成本">
+         合并为「款与商品」（`data-act="tab-workbench"`）。页签表按形态分叉，理由见 `TABS` 上方的注释。 -->
+    <nav v-if="showTabs" class="gd-tabs" role="tablist" aria-label="货与成本">
       <button
         v-for="t in TABS"
         :key="t.id"
@@ -140,65 +124,75 @@
            于是 `pool` 这个懒挂载开关也一并撤掉（它的唯一理由是"首屏停在产品页签、池栏看不见"，
            合并后该前提消失）。判据与代价见 `GoodsWorkbenchView.vue` 顶部注释。
 
-           `@navigate` 是**页签级导航的回调**（右栏的「现在登记」要用）：外壳转手递给右栏，
-           免得右栏为了切到自己这一页的另一个页签去 import 外壳的页签枚举。
-           命名刻意不含任何具体页签名 —— 外壳不需要知道有哪几个页签，只知道"能请求导航"。 -->
+           `@go-registry` 是**跨模块跳转的回调**（右栏的「现在登记」要用）：外壳转手递给右栏，
+           免得右栏为了跳去「基础数据」去 import 模块表与 action 字符串。
+           命名刻意不含任何具体目标 —— 外壳不需要知道那边有哪几个资料项，只知道"能请求跳转"。
+           2026-10-14 整合前它是"切到本页另一个页签"的回调（`navigate(tab)`），目标模块化后改名。 -->
       <GoodsWorkbenchView
         v-if="GOODS_LAYOUT === 'workbench' && tab === 'workbench'"
         :refresh-nonce="refreshNonce"
-        :navigate="goTab"
+        :go-registry="goRegistry"
       />
-      <!-- 「店铺登记」：2026-10-08 从市场岛「店铺账号管家」收进内建（方案 R1 / UX-G6）。
-           判据不是"少一个岛更省事"，而是：待关联队列里"店铺未归一"的行**必须**先来这里登记才能动，
-           而那个岛**不在默认包里** —— 提示指着一个全新安装根本没有的目的地（真机走查 D1 死锁）。
-           它只是"原始店名 → 规范店名"的一条旁挂映射，做在需要它的这一页上，比引导人去装一个岛诚实。 -->
-      <ShopRegistryView v-else-if="tab === 'registry'" :refresh-nonce="refreshNonce" />
-      <SupplierView v-else-if="tab === 'suppliers'" />
       <!-- 「商品清单」页签当前**收起**（见 `SHOP_PRODUCTS_TAB_ENABLED`）：分支与组件保留在这里，
            是为了要放回来时只改那一个常量。`tab` 永远取不到这个值，所以这段是不渲染的死代码 ——
            别当成"多余的 else-if"清掉，那是恢复开关的另一半。 -->
       <ShopProductView v-else-if="tab === 'shop-products'" />
-      <!-- 「进价」（P4 成本维护）：款级成本的**唯一手工写入口**。
-           放在这一页而不是算钱页：成本是主数据，这一页是主数据的家。
-           ⚠️ 2026-10-10 起产品列表**不再有「进价」列**（用户口径：产品列表不展示 SKU 与进价）——
-           本页签因此是这个数字唯一的界面入口：切过来就能看「当前生效价」与「还没维护进价的款」
-           （后者比列表里一个「—」可操作）。算钱页那边的成本表仍是**只读诊断**。 -->
-      <CostPane v-else-if="tab === 'cost'" :refresh-nonce="refreshNonce" />
-      <!-- 以下两支是 `GOODS_LAYOUT === 'tabs'` 的**回退路径**（与重构前逐字一致），不是死代码。 -->
+      <!-- 以下两支是 `GOODS_LAYOUT === 'tabs'` 的**回退路径**（与重构前逐字一致），不是死代码。
+           ⚠️ 2026-10-14：回退形态同样**不再有**「店铺登记 / 供应商 / 进价」三个页签 ——
+           它们已搬进「基础数据」模块（见 `./tabs.ts` 头部）。回退只回"这一页的布局"，
+           不回"维护功能散在三个模块"——那正是这次整合要消除的东西。 -->
       <ProductListView v-else-if="tab === 'products'" :refresh-nonce="refreshNonce" />
-      <SkuMappingView v-else :refresh-nonce="refreshNonce" :navigate="goTab" />
+      <SkuMappingView v-else :refresh-nonce="refreshNonce" :go-registry="goRegistry" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 「货与成本」外壳：页头 + 三页签（「商品清单」已收起）。
+// 「货与成本」外壳：页头 + 页签（工作台形态 1 个 / 回退形态 3 个，「商品清单」已收起）。
 //
 // 这一页在 2026-10-01 之前是**薄内建**（只看产品/SKU/克重，重手段在「产品库」UI 岛）。
 // 岛与宿主共用同一批数据、同一批 IPC，却因为"岛要单独发布 + 三个版本坐标要同步"而维护成本很高，
 // 于是把岛的功能整体收回内建 —— 界面与交互按**单一工作台**重新组织（不再有"这功能在岛里"的心理负担）。
 //
 // 分工：
-//   · 外壳（本文件）只负责**页头、页签、跨页签跳转**；
+//   · 外壳（本文件）只负责**页头、页签、跨模块跳转**；
 //   · 各页签自己取自己那份数据，外壳**不再**汇总任何页级数字。
+//
+// ⚠️ 2026-10-14「基础数据」整合：本页只保留"货"本身（建档与认款）。
+//    店铺登记 / 供应商 / 进价三类主数据维护搬进「基础数据」模块，见 `./tabs.ts` 头部与 `goRegistry`。
 //
 // ⚠️ 2026-10-08 撤掉了两层页级 UI（指标条 + 起点引导条）和页签徽标（见模板中间那段注释）。
 //    连带把 `stats` / `loadStats` / `flow.ts` / 子视图→外壳的回报链整条移除：它们唯一的消费者
 //    就是那两层，留着只会是"每次刷新都多打几次 IPC、却没有任何人看"的页级空转。
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import * as api from './api';
 import ProductListView from './components/ProductListView.vue';
 import GoodsWorkbenchView from './components/GoodsWorkbenchView.vue';
 import ShopProductView from './components/ShopProductView.vue';
-import CostPane from './components/CostPane.vue';
-import ShopRegistryView from './components/ShopRegistryView.vue';
 import SkuMappingView from './components/SkuMappingView.vue';
-import SupplierView from './components/SupplierView.vue';
-import { GOODS_TAB_LABEL, GOODS_TAB_REGISTRY, type GoodsTabId } from './tabs';
-import { gloss } from './glossary';
+import { GOODS_TAB_LABEL, type GoodsTabId } from './tabs';
 import { FIRST_RUN_STEPS } from './firstRun';
-import { goodsSimple, setGoodsSimple } from './simple';
 import { switchModule } from '@/core/services/shell';
+
+/**
+ * 形态：
+ *   · `embedded = false`（默认，独立模块时期）—— 完整页头带 h1「货与成本」；
+ *   · `embedded = true` —— 被别人当**内嵌视图**渲染（2026-10-17 起由「基础数据 › 货品档案」用），
+ *     只去掉 h1，其余页头动作与页签一字不动。
+ *   · `hideTabs = true` —— 2026-10-17 收拢后由「货品档案」传：本页的页签条**交给外层画**
+ *     （外层把「款与商品 / 成本 / 供应商」并成一条）。不这么做会出现两条并排的页签条，
+ *     而它们说的是同一件事 —— 用户会以为其中一条是"别的层"。
+ *
+ * ⚠️ 只在**页签数 ≤ 1** 时才允许隐藏（`showTabs` 那个判据）：`GOODS_LAYOUT` 回退成 `'tabs'`
+ *    时页签是 2~3 个，隐藏它们等于把产品表与映射队列的入口抹掉，"改一个常量回退"就成了一句假话。
+ * ⚠️ 为什么不干脆删掉 h1、让它永远内嵌：本页仍可能被单独打开（`goods:ui` 冒烟直接挂 `.gd-view`，
+ *    以及将来"把这个资料项拎出去做独立页"的可能），一个恒缺标题的页面在那种场景下是残的。
+ */
+const props = withDefaults(defineProps<{ embedded?: boolean; hideTabs?: boolean }>(), {
+  embedded: false,
+  hideTabs: false,
+});
+const embedded = props.embedded;
 
 type TabId = GoodsTabId;
 
@@ -237,7 +231,7 @@ const SHOP_PRODUCTS_TAB_ENABLED = false;
 const GOODS_LAYOUT: 'workbench' | 'tabs' = 'workbench';
 
 /**
- * 页签表（2026-10-08 重构 S4：3 → 2；同日 R1 又新增「店铺登记」）。
+ * 页签表（2026-10-08 重构 S4：3 → 2；2026-10-14 整合：再 → 1 / 3）。
  *
  * **按页面形态分叉** —— 不是两套界面各自任性，而是两种形态的导航结构本就不同：
  *   · `'workbench'` 把「产品」与「映射与关联」**合并成一个左右分栏的工作台**。合并的判据不是
@@ -248,32 +242,22 @@ const GOODS_LAYOUT: 'workbench' | 'tabs' = 'workbench';
  *     回退时页签跟着一起回去，否则"改一个常量回退"就是假的（会退到一个只剩两个页签、
  *     却仍然单栏渲染的表上）。
  *
- * 「店铺登记」**两种形态都有**，且紧跟在建档页签后面：它不是"回退形态才有的东西"，
- * 而是右栏"店铺未归一"那几行的**唯一出口**（写在提示条上、也在行内）—— 摆得离它越远，
- * 那个出口就越像没有。
- *
- * ⚠️ `'workbench'` 那一支里没有「商品清单」：该页签的产出（`pl_shop_sku` 的池行）
- *    没有下游消费方，`SHOP_PRODUCTS_TAB_ENABLED` 的判据见下。
+ * ⚠️ 2026-10-14「基础数据」整合：原先跟在后面的「店铺登记 / 供应商 / 进价」三个页签
+ *    **整体搬进「基础数据」模块**（`src/modules/shop-accounts/MasterDataView.vue` 左导航）——
+ *    两类维护动作只有一个家，本页只管"货"本身（建档与认款）。搬运判据见 `./tabs.ts` 头部。
+ *    回退形态同样只有这三个：回退的是布局，不是"维护功能散在三个模块"。
  * ⚠️ 页签名一律从 `./tabs` 的 `GOODS_TAB_LABEL` 取，**别在这里写裸字符串** ——
  *    页签名是文案里会被点名的**入口名**，两处各写一遍必然有一天漂开。
  */
 const TABS: { id: TabId; label: string }[] =
   GOODS_LAYOUT === 'workbench'
-    ? [
-        { id: 'workbench', label: GOODS_TAB_LABEL.workbench },
-        { id: 'registry', label: GOODS_TAB_LABEL.registry },
-        { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
-        { id: 'cost', label: GOODS_TAB_LABEL.cost },
-      ]
+    ? [{ id: 'workbench', label: GOODS_TAB_LABEL.workbench }]
     : [
         { id: 'products', label: GOODS_TAB_LABEL.products },
         ...(SHOP_PRODUCTS_TAB_ENABLED
           ? [{ id: 'shop-products' as TabId, label: GOODS_TAB_LABEL['shop-products'] }]
           : []),
         { id: 'mappings', label: GOODS_TAB_LABEL.mappings },
-        { id: 'registry', label: GOODS_TAB_LABEL.registry },
-        { id: 'suppliers', label: GOODS_TAB_LABEL.suppliers },
-        { id: 'cost', label: GOODS_TAB_LABEL.cost },
       ];
 
 /**
@@ -283,21 +267,26 @@ const TABS: { id: TabId; label: string }[] =
  * 写法要求：一句人话 + 什么时候该来这（先有它 / 待办在左边 / 做完的在右边）。
  */
 const TAB_DESC: Record<TabId, string> = {
-  // 合并后的说明 = 原「产品」+「映射与关联」两句的**一句话版**：左边建档、右边认货，
-  // 并且点出分栏独有的那一步（左栏选一款 → 右栏直接关联过去）。
-  // ⭐ 2026-10-08 R2（UX-G1）：这是**首屏唯一那段说明**，所以三个最常出现、也最容易被新手
-  //    当成黑话的词（款 / SKU / 映射）在这里各补一句括号 —— 用 `./glossary` 的词表，不另写一遍。
-  //    除此之外全页照旧只用术语，不在别处重复解释（每处都写一遍括号反而成了噪音）。
-  workbench: `左边给${gloss('style')}和它的${gloss('sku')}建档，右边把店铺商品认到款上 —— 这就是${gloss('mapping')}。左栏选一款，右栏就能直接关联过去。`,
+  // 2026-10-25（随页签改名「款与商品」）：说明改成**只描述两侧各是什么**，
+  // 不再夹带"建档 / 映射"这类动作词 —— 动作由两侧自己的按钮回答，
+  // 说明只负责回答"我为什么来这一页"。同时去掉 SKU 一词（新手第一屏不需要它），
+  // 连带 `./glossary` 的导入一起撤掉（它在本文件已无消费者 —— 留着就是"引了但没人用"）。
+  // 历史：2026-10-08 R2（UX-G1）曾在这里给"款 / SKU / 映射"三个词各补一句括号，
+  //   理由当时成立（首屏唯一说明位）；改名后这三个词里只剩"款"还在，而它已由
+  //   左右两侧的列头（款编码 / 商品ID）自解释，再补括号反而是噪音。
+  workbench: `左边是你要卖的款，右边是店铺里卖出去、还没认到款上的商品`,
   products: '自己的款和 SKU 在这里建档 —— 先有它，订单 / 采购 / 成本才挂得上这行货。',
   'shop-products': '从订单里认出来的店铺商品，看它们各自认到了哪个款、卖了多少行。',
   mappings: '把店铺商品认到自己的款上。左边是待办队列，右边是已经认完的。',
-  // 这句要回答"我什么时候会来这"——答案是"队列里有一行写着「需先登记店铺」的时候"。
-  registry: '给订单里出现过的店名指定它是哪家店 —— 队列里写着「需先登记店铺」的商品，先在登记完才能认款。',
-  suppliers: '拿货的供应商（厂）主数据 —— 产品建档与采购单据都引它。',
-  // 这句要回答"我什么时候会来这"：算钱 / 拣货说"无进价"的时候，就是来这补。
-  cost: '给款维护进价 —— 算钱与拣货里写着「无进价」的款，来这里补。改价只影响之后的订单，历史订单按各自下单时生效的价算。',
 };
+
+/**
+ * 是否画本页自己的页签条。
+ *
+ * 只有一条页签时（工作台形态），内嵌方可要求把这条交给它画（见 `hideTabs` 的注释）；
+ * 页签多于一条时**永远自己画** —— 那时它是唯一的导航，藏掉等于入口消失。
+ */
+const showTabs = computed(() => !props.hideTabs || TABS.length > 1);
 
 const error = ref('');
 // 默认页签跟着形态走：工作台形态下 `'products'` 这个值根本不在 TABS 里（渲染出来会是
@@ -316,8 +305,9 @@ function goTab(id: TabId): void {
 /**
  * 页头「?」的开关。
  *
- * 状态放在外壳而不是子组件里：面板**横跨**页签（三个页签下说的都是同一句"这页怎么用"），
- * 而且它的两个按钮一个要切页签、一个要跳模块 —— 两件事都只有外壳做得了。
+ * 状态放在外壳而不是子组件里：面板**横跨**页签（各形态下说的都是同一句"这页怎么用"），
+ * 而且它的两个按钮都指向**别的模块**（去「发货台」导订单 / 去「基础数据」登记店铺）——
+ * 两件事都只有外壳做得了。
  */
 const helpOpen = ref(false);
 /** 三步与首次动线引导卡**共用同一份**（`./firstRun`）：同一件事不写两遍，也就不会漂成两种说法 */
@@ -326,22 +316,18 @@ const helpSteps = FIRST_RUN_STEPS;
 function goImportOrders(): void {
   switchModule('today');
 }
+/**
+ * 「店名归一」的出口：**跨模块跳到「基础数据」的「店名归一」项**（2026-10-14 整合后）。
+ *
+ * 为什么是跳模块而不是本页页签：登记功能已搬进「基础数据」—— 它和「邮件 / 企业 / 供应商 /
+ * 成本与费率」一样是**主数据维护**，全应用的维护动作只应该有一个家（判据见 `./tabs.ts` 头部）。
+ * 队列里"店铺未归一"那几行的出口指向那里，TitleBar 的「返回」负责把人送回来（backId 机制）。
+ * ⚠️ action 字符串必须与 `MasterDataView` 左导航的 kind id 一致（`shop-accounts:registry`）——
+ *    写错不会报错，表现为"跳过去停在上次那个资料项"。
+ */
 function goRegistry(): void {
   helpOpen.value = false;
-  goTab(GOODS_TAB_REGISTRY);
-}
-
-/**
- * 简洁模式开关。**只有这一个控件**（刻意没在左栏再放一个「批量…」按钮）。
- *
- * 报告原文建议"批量操作收进一个「批量…」按钮里再展开"—— 这里不做，两个理由：
- *   ① 那会是**同一个布尔值的第二个控件**（本仓 2026-10-03 记过的"同一状态两套控件"：
- *      两处各能改、两处各能显，用户永远说不清"我现在到底在哪个模式"）；
- *   ② "点『批量…』其实是关掉简洁模式"本身就是个说不清的按钮 —— 它承诺的是展开一堆批量操作，
- *      实际做的是换一整套形态。按钮上写不清的事，就不该是一个按钮。
- */
-function toggleSimple(): void {
-  setGoodsSimple(!goodsSimple.value);
+  switchModule('shop-accounts', 'registry');
 }
 
 /**
@@ -369,6 +355,13 @@ onMounted(async () => {
 
 <style scoped>
 /* 页面外壳（内边距 / 栅格 / 滚动）由全局 .wb-page 提供。 */
+
+/* 内嵌进「基础数据 › 货品档案」（2026-10-17）：外层 `.md-view` 已经给了 16/18 的留白，
+   这里不再叠一层。**gap 必须保持 .wb-page 的 16px** —— 下面 `.gd-tabs` 用 -16px 吃掉它，
+   改 gap 会让页签与主体之间凭空多出一条缝。 */
+.gd-view.is-embedded {
+  padding: 0;
+}
 
 /* 页签：紧贴主体（`margin-bottom` 的负值把下面那层间隙吃掉）。 */
 .gd-tabs {

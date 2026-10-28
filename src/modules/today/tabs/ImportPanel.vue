@@ -54,20 +54,6 @@
       </ul>
     </div>
 
-    <!-- 库里现状：导完/刷新后一眼知道"今天导进来几行、这行从哪来、最近哪天"。
-         ⚠️ 口径 2026-10-11：这个数跟着**发货台**走（`summary.orders` 按导入日筛）⇒ 是
-            **今天**导进来的行数，不是全库。所以抬头从「库里现有」改成「今天导入」——
-            不改的话下面那个数字会被读成"库里一共这么多"（而全库的数这里看不到，
-            要问全库请去独立模块「算钱」）。空态也不回避：今天没导就明说「0 行订单」。 -->
-    <div class="ti-stock" data-act="import-stock">
-      <span class="ti-stock__lead">今天导入</span>
-      <span class="ti-stock__big">{{ orders.total }}<em>行订单</em></span>
-      <span class="ti-stock__sep" aria-hidden="true"></span>
-      <span class="ti-stock__kv">报表 <b>{{ orders.import }}</b></span>
-      <span class="ti-stock__kv">采集 <b>{{ orders.collect }}</b></span>
-      <span v-if="orders.lastTime" class="ti-stock__kv">最近下单 <b>{{ orders.lastTime }}</b></span>
-    </div>
-
     <!-- 上次导入的回执 = **结论卡**（2026-10-11 重做）。
          用户实报「导完记录不知道去哪了、反馈信息模糊、文字太多、完全看不懂」—— 病根是这一张卡
          把**结论 / 落点 / 按钮 / 判据**四样东西用同一档字号平铺，而最长的那段判据（识别凭什么、
@@ -136,7 +122,7 @@
           class="wb-btn"
           :class="{ 'wb-btn--primary': a.primary }"
           type="button"
-          :data-act="`import-next-${a.tab || a.moduleId}`"
+          :data-act="`import-next-${a.tab || a.action || a.moduleId}`"
           @click="nextGo(a)"
         >
           {{ a.label }}
@@ -151,13 +137,148 @@
       </details>
     </div>
 
+    <!-- ── 今天导入的订单（2026-10-22 新增）─────────────────────────────────────
+         用户实报：「导入后显示"已导入 16 行订单"，但不知道订单在哪」。
+         病根不是"没给入口"—— 回执里那句「存到「订单」—— 在 XX 能看到」指的是**页面名**，
+         用户听完还是得自己去找；而"16 行"是个**数字**，没有任何一处列出这 16 行长什么样。
+         结论：第 1 步的产物必须**当场可见**。这张表就是那 16 行本身。
+         ⚠️ 数据源与容器 `reload()` **同参同口径**（`orderShippingRows` + 导入日 = 今天）——
+            绝不能用另一种筛法，否则"上面说 16 行、下面列 15 行"立刻又是一个缝。
+            `importDate` 是**导入日**（`created_at`），不是下单日：早上下单、下午导的也算今天这批。
+         ⚠️ 列表放**回执之后**：导入后第一眼是结论卡（成了没有），第二眼才是明细。
+            放回执前面会把"这次成没成"挤到屏幕外。
+         ⚠️ 不做金额合计：`amountCents` 是**整单**金额（`oi_orders`），一单拆多行时每行都会
+            重复同一个数，加总等于把订单额翻倍 —— 表头已用 title 写明这一点。 -->
+    <section ref="rowsEl" class="wb-panel ti-rows" data-act="import-rows">
+      <!-- 表头**就是**原来那条"今天导入 N 行订单"现状条（2026-10-22 合并）。
+           为什么合并：两个块上下相邻、说的是同一件事（今天这批有几行），而那个数字下面
+           紧跟着的正是**这些行本身** —— 分开摆会让"16 行"和"16 行长什么样"之间隔着一张回执卡，
+           用户报的"不知道订单在哪"就是这么来的。
+           ⚠️ 计数只保留**一处**（`rows.length`，列表自己取的那一份），不再并列容器的
+              `summary.orders.total` —— 两个数并排时，任何一次刷新时差都会被读成"数字不对"。
+              页签徽标仍读容器那份（它与列表不同屏，且同一 IPC 参数）。
+           ⚠️ `data-act="import-stock"` 挂在表头上：这个数据块并没有消失，只是换了位置和形状。 -->
+      <div class="wb-panel__head ti-rows__head" data-act="import-stock">
+        <span>今天导入的订单</span>
+        <span class="ti-rows__count" data-act="import-rows-count">
+          <template v-if="keyword">匹配 {{ filtered.length }} / 共 {{ rows.length }} 行</template>
+          <template v-else>共 {{ rows.length }} 行</template>
+        </span>
+        <span class="ti-rows__kv">报表 <b>{{ importedCount }}</b> · 采集 <b>{{ collectCount }}</b></span>
+        <span v-if="lastTime" class="ti-rows__kv">最近下单 <b>{{ lastTime }}</b></span>
+        <input
+          v-model="q"
+          class="wb-input wb-input--sm ti-rows__search"
+          data-act="import-rows-search"
+          placeholder="搜订单号 / 店铺 / 款号 / 颜色"
+        />
+        <button
+          class="wb-btn wb-btn--sm"
+          type="button"
+          data-act="import-rows-refresh"
+          :disabled="rowsLoading"
+          @click="loadRows"
+        >
+          {{ rowsLoading ? '读取中…' : '刷新' }}
+        </button>
+      </div>
+
+      <p v-if="rowsError" class="wb-notice wb-notice--error ti-rows__err" data-act="import-rows-error">
+        {{ rowsError }}
+      </p>
+
+      <div v-else-if="shown.length" class="wb-panel__body ti-rows__body wb-table-wrap">
+        <table class="wb-table" data-act="import-rows-table">
+          <thead>
+            <tr>
+              <th>订单号</th>
+              <th>店铺</th>
+              <th>下单时间</th>
+              <th>款号</th>
+              <th>颜色</th>
+              <th>尺码</th>
+              <th class="wb-num">件数</th>
+              <th
+                class="wb-num"
+                title="整单金额（订单报表原值）。同一张单拆成多行时，每行显示的都是这张单的金额，请不要把它们相加"
+              >
+                金额(元)
+              </th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="o in shown" :key="o.id" :data-act="`import-row-${o.id}`">
+              <td class="wb-mono">
+                {{ o.orderNo || '—' }}
+                <span
+                  v-if="o.source === 'collect'"
+                  class="wb-tag"
+                  title="这一行是浏览器采集进来的，不是 Excel 导的"
+                  >采集</span
+                >
+              </td>
+              <td>{{ o.shop || '—' }}</td>
+              <td class="wb-mono">{{ timeText(o.orderTime) || '—' }}</td>
+              <td>
+                <span v-if="o.styleCode" class="wb-mono">{{ o.styleCode }}</span>
+                <span
+                  v-else
+                  class="wb-tag is-warn"
+                  title="还没归到款式：去「归类核对」页签点名款"
+                  >未归类</span
+                >
+              </td>
+              <td>{{ o.color || '—' }}</td>
+              <td>{{ o.size || '—' }}</td>
+              <td class="wb-num">
+                <span
+                  class="ti-rows__qty"
+                  :class="{ 'is-guess': qtyGuessed(o) }"
+                  :title="qtyGuessed(o) ? '报表里没有件数，按 1 件计' : '报表「商品信息」块里的商品数量'"
+                  >{{ qtyText(o) }}</span
+                >
+              </td>
+              <td class="wb-num">{{ amountText(o) }}</td>
+              <td class="ti-rows__status" :title="o.bizStatus">{{ o.bizStatus || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 两种"没有行"必须分开说：**今天还没导**（要去用上面的投放区）与
+           **搜不到**（数据在，是这串关键字没有）—— 合成一句会让第一种人以为自己导失败了。 -->
+      <div v-else class="ti-rows__empty" data-act="import-rows-empty">
+        <p v-if="keyword">没有匹配「{{ q.trim() }}」的订单</p>
+        <template v-else>
+          <p>今天还没有导入订单</p>
+          <p class="wb-muted">把订单 Excel 拖到上面的框里（或点「选择 Excel 文件」），导完这里就逐行列出来。</p>
+        </template>
+      </div>
+
+      <!-- 超过 100 行先截断：本页是"确认导进来了什么"，不是翻页浏览的地方。
+           要一行行过就点开，别默认把 2000 行渲染进 DOM。 -->
+      <div v-if="!showAll && filtered.length > shown.length" class="wb-panel__foot ti-rows__more">
+        <button
+          class="wb-btn wb-btn--sm"
+          type="button"
+          data-act="import-rows-more"
+          @click="showAll = true"
+        >
+          显示全部 {{ filtered.length }} 行（当前显示前 {{ ROW_CAP }} 行）
+        </button>
+      </div>
+    </section>
+
     <!-- ⚠️ 回执的下方**刻意什么都没有**（2026-10-11 二次收口）：
          这里原本挂着一张"预告卡"（`data-act="import-none"`，写着"导入后这里会留下一张回执"）——
          那是**一段解释自己的说明文字**：它占着位置、每次导入前都要读一遍，而它想说的那件事
          用户点一次就知道了。空态本来就该是**入口本身**（上面的投放区），而不是另一块文字。
          ⚠️ 连带的断言改动见 `scripts/today-ui-smoke.mjs` 的 `import-drop` 段：
             判据从"空态文案里有没有 Excel / 回执"改成"回执撤掉后入口还在、且仍可用"
-            （后者才是真会坏的东西 —— 空态文案少了不影响任何人，入口没了才致命）。 -->
+            （后者才是真会坏的东西 —— 空态文案少了不影响任何人，入口没了才致命）。
+         ⚠️ 2026-10-22：上面那条"回执下方刻意什么都没有"仍然成立 —— 现在那里有的是
+            **订单明细表**（第 1 步的产物本身），不是又一次说明文字。 -->
   </div>
 </template>
 
@@ -169,13 +290,17 @@
 //    本组件只负责**呈现与投放**（点/拖 → 交给容器的 `importExcel` / `importFile`）。
 //
 // 2026-10-11：整页重排 —— 单按钮 + 灰字提示 ⇒ 投放区（可点可拖）+ 类型标签 + 库内现状条 + 回执卡。
-import { computed, ref } from 'vue';
+// 2026-10-22：追加「今天导入的订单」明细表（用户："已导入 16 行订单，但不知道订单在哪"）。
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import * as ipc from '@/core/services/ipc';
 import type { ImportNextStep } from '@/core/services/importSheet';
+import { localDayKey } from '@/lib/localDay';
+import { resolveQty } from '@/lib/orderCost';
+import type { UnifiedOrderRow } from '@/types';
 import { useShipping } from '../flowCtx';
+import { money } from '../purchase';
 
-const { summary, go, openModule, receipt, importing, importExcel, importFile } = useShipping();
-
-const orders = computed(() => summary.value.orders);
+const { go, openModule, receipt, importing, importExcel, importFile, token } = useShipping();
 
 /** 能自动识别的四类（与 `core/services/importSheet` 的识别分支一致；「商品信息」表刻意不列 —— 它不该导） */
 const TYPES = ['订单报表', '待发货订单', '结算明细', '报价单'];
@@ -218,7 +343,9 @@ function onDrop(e: DragEvent): void {
  * 回执里的"下一步"动作。
  *
  * ⚠️ 2026-10-11 起这一步变简单了：**绝大多数落点就是本页的一个页签**，而 `ImportNextStep.tab`
- *    把它们写明了（`classify` / `purchase` / `cost`），直接 `go(tab)` 就地切。
+ *    把它们写明了（`classify` / `purchase`），直接 `go(tab)` 就地切。
+ *    2026-10-17：算钱撤出发货台后，「归店铺 / 看毛利 / 核对运价表」三处改用 `moduleId`
+ *    （`order-cost`，显示名「统计」）—— 那三处**必须真跳**，本页已经没有它们的页签。
  *
  * 原先这里挂着一张 `TAB_OF`（把模块 id 映到页签），因为它只能拿到 `moduleId`：
  * 于是回执要发 `moduleId: 'picking'`，再由本页偷偷换成「拿货」页签 —— 两处各写一半的映射。
@@ -230,13 +357,137 @@ function nextGo(a: ImportNextStep): void {
     go(a.tab);
     return;
   }
-  if (a.moduleId) openModule(a.moduleId);
+  // ⚠️ `action` 必须一起带：`shop-accounts` 有七类资料，只说模块 id 会落在用户上次停的那一类上。
+  if (a.moduleId) openModule(a.moduleId, a.action);
 }
 
 /** 关掉回执（写在容器那份 ref 上：总览的「待拣」卡靠它决定要不要点亮） */
 function dismiss(): void {
   receipt.value = null;
 }
+
+// ── 今天导入的订单（2026-10-22 新增）─────────────────────────────────────────
+//
+// **本页自己取数**（不是容器）：容器的 `summary.orders` 只留了"有几行"，而这张表要的是行本身 ——
+// 与 `ClassifyPanel` 同一个分工（容器管汇总，面板管自己那页的业务数据）。
+//
+// ⚠️ 参数必须与容器 `reload()` **逐字相同**（`orderShippingRows` + `importDate = 今天`）：
+//    同一个数字在两处出现时，用户一定会拿列表行数去核对"上面那个 16" ——
+//    换成另一种筛法（比如按下单日 / 不限日期），两个数立刻对不上，而**两边看起来都对**。
+//
+// ⚠️ 保活（`<KeepAlive>`）⇒ 切回来不会重新 `onMounted`：必须 `watch(token)`。
+//    导入成功后容器 `bump()` 会把 `token` +1，这张表因此**自动**跟着刷新 ——
+//    不需要在 `runImport` 里再手写一遍"刷列表"，那正是会漏掉拖放那条路的写法。
+
+/** 一次性渲染上限（超过就折叠成「显示全部」）：本页是确认"导进来了什么"，不是翻页浏览 */
+const ROW_CAP = 100;
+
+const rows = ref<UnifiedOrderRow[]>([]);
+const rowsLoading = ref(false);
+const rowsError = ref('');
+const q = ref('');
+const showAll = ref(false);
+
+async function loadRows(): Promise<void> {
+  rowsLoading.value = true;
+  rowsError.value = '';
+  try {
+    const r = await ipc.orderShippingRows({ limit: 2000, importDate: localDayKey() });
+    if (!r.success) {
+      // 读取失败要**说出来并清空**：留着上一轮的行会让人以为"库里就这些"
+      rows.value = [];
+      rowsError.value = `订单列表读取失败：${r.error ? String(r.error) : '未知原因'}`;
+      return;
+    }
+    rows.value = r.data ?? [];
+  } catch (e: unknown) {
+    rows.value = [];
+    rowsError.value = `订单列表读取失败：${e instanceof Error ? e.message : '未知错误'}`;
+  } finally {
+    rowsLoading.value = false;
+  }
+}
+
+const keyword = computed(() => q.value.trim().toLowerCase());
+
+/** 关键字过滤：**只筛展示**，不重新取数（库里那批不变，改一个字就变一次 IPC 是没必要的） */
+const filtered = computed(() => {
+  const k = keyword.value;
+  if (!k) return rows.value;
+  return rows.value.filter((o) =>
+    [o.orderNo, o.shop, o.styleCode, o.styleColor, o.color, o.size, o.bizStatus].some((v) =>
+      String(v ?? '').toLowerCase().includes(k)
+    )
+  );
+});
+
+const shown = computed(() => (showAll.value ? filtered.value : filtered.value.slice(0, ROW_CAP)));
+
+/** 表头"报表 / 采集"两个数：与列表**同一份数据**算，不另取一次（口径只能有一处） */
+const importedCount = computed(() => rows.value.filter((o) => o.source !== 'collect').length);
+const collectCount = computed(() => rows.value.length - importedCount.value);
+/** 这批里最晚的下单日（`yyyy-mm-dd`）—— 用来回答"这 16 行是哪段时间的单" */
+const lastTime = computed(() => {
+  const t = rows.value
+    .map((o) => String(o.orderTime ?? ''))
+    .filter(Boolean)
+    .sort();
+  return t.length ? String(t[t.length - 1]).slice(0, 10) : '';
+});
+
+/** 下单时间只显示到分钟（秒对"这单在哪"没有信息量，只会把列撑宽、逼出横向滚动） */
+function timeText(v: string): string {
+  return String(v ?? '').slice(0, 16);
+}
+
+/** 金额：`null` = 报表里没这一列 ⇒ 显示「—」，**不折成 0.00**（"没有"与"零"是两件事） */
+function amountText(o: UnifiedOrderRow): string {
+  const c = o.amountCents;
+  return c === null || c === undefined ? '—' : money(c);
+}
+
+/**
+ * 件数：判据单源 `resolveQty`（结算真值 → 源给的 `qty` → 报表块「商品数量」→ 按 1 件）。
+ * 本页不传结算表 —— 那是"算钱"的口径，这里要的是"报表自己写了几个"，按 1 件猜出来的
+ * 用灰字标出来（`is-guess`），不静默当成真值。
+ */
+function qtyText(o: UnifiedOrderRow): string {
+  return String(resolveQty(o).qty);
+}
+function qtyGuessed(o: UnifiedOrderRow): boolean {
+  return resolveQty(o).qtySource === 'assumed';
+}
+
+onMounted(() => void loadRows());
+watch(
+  () => token.value,
+  () => void loadRows()
+);
+
+/**
+ * 导入刚写完 ⇒ 把明细表滚进视野。
+ *
+ * 为什么需要：窄窗口（实测 1152×800）下，投放区 + 回执卡正好占满首屏，
+ * 表格标题被压在最底、行一个都看不见 —— 这正是用户报的那句
+ * 「显示『已导入 N 行订单』，但不知道订单在哪」。回执说完成之后，
+ * 紧接着该出现在眼前的**就是那些行**，不该再让用户自己往下滚去猜。
+ *
+ * ⚠️ 只认 `wrote === true`：没写库的文件不产生新行，滚过去只会看到一批无关的旧数据。
+ * ⚠️ `block: 'nearest'`：表格本来就在视野里时**不动**（别因为一次导入把页面莫名跳走）；
+ *    尊重"减少动效"偏好（`smooth` 会让前庭敏感的人不适）。
+ */
+const rowsEl = ref<HTMLElement | null>(null);
+watch(
+  () => receipt.value,
+  async (r) => {
+    if (!r?.wrote) return;
+    await nextTick();
+    rowsEl.value?.scrollIntoView({
+      block: 'nearest',
+      behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    });
+  }
+);
 </script>
 
 <style scoped>
@@ -346,47 +597,82 @@ function dismiss(): void {
   color: var(--wb-text-muted);
 }
 
-/* ══ 库内现状 ═════════════════════════════════════════════════════════════ */
-.ti-stock {
-  display: flex;
+/* ══ 今天导入的订单（2026-10-22）════════════════════════════════════════════════
+   `.wb-panel` 自带边框 / 圆角 / 卡阴影；这里只补"列表自己滚、页面不用跟着长"。
+   ⚠️ 原来那条独立的「今天导入 N 行订单」现状条已并进本表表头 —— 它的 `.ti-stock*`
+      样式随之删除（两处都留 = 同一个数据块两种长相，改一处忘另一处）。 */
+.ti-rows {
+  flex-shrink: 0;
+}
+
+/* 表头一行放下：标题 + 计数 + 报表/采集 + 最近下单 + 搜索 + 刷新。
+   窄窗口时换行（`flex-wrap`），但搜索永不缩成看不见的宽度。 */
+.ti-rows__head {
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 14px;
-  padding: 10px 14px;
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius-md);
-  background: var(--wb-surface);
-  font-size: 12.5px;
-  color: var(--wb-text-muted);
+  row-gap: 6px;
 }
-.ti-stock__lead {
-  font-weight: 600;
-  color: var(--wb-text);
-}
-.ti-stock__big {
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.1;
-  color: var(--wb-text);
-  font-variant-numeric: tabular-nums;
-}
-.ti-stock__big em {
-  margin-left: 4px;
-  font-size: 12px;
-  font-style: normal;
+/* 计数与"报表/采集"这些是**注释级**信息：压到 12px / 常色，别跟标题抢 */
+.ti-rows__count {
   font-weight: 400;
+  font-size: 12px;
   color: var(--wb-text-muted);
+  font-variant-numeric: tabular-nums;
 }
-.ti-stock__sep {
-  width: 1px;
-  height: 14px;
-  align-self: center;
-  background: var(--wb-border);
+.ti-rows__kv {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--wb-text-muted);
+  font-variant-numeric: tabular-nums;
 }
-.ti-stock__kv b {
+.ti-rows__kv b {
   font-weight: 600;
   color: var(--wb-text);
-  font-variant-numeric: tabular-nums;
+}
+
+/* 搜索框与刷新推到右侧（`.wb-panel__head` 是 flex，无"推右"工具类） */
+.ti-rows__search {
+  width: 220px;
+  max-width: 34vw;
+  margin-left: auto;
+}
+.ti-rows__err {
+  margin: 0 14px 12px;
+}
+
+/* 行多时表格**自己滚**（表头 sticky 是 `.wb-table th` 自带的）：页面继续往下长会顶走回执，
+   也会让"上面说 16 行"与"下面翻两屏还没完"产生矛盾感。46vh ≈ 半屏，够看十来行。 */
+.ti-rows__body {
+  max-height: 46vh;
+}
+
+/* 状态列（"等待买家收货"这类长文案）：截断 + title 全文，不让它把表撑到需要横滚 */
+.ti-rows__status {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 按 1 件猜出来的件数：灰一档 —— 别让"猜的"和"报表写的"长得一样 */
+.ti-rows__qty.is-guess {
+  color: var(--wb-text-muted);
+}
+
+.ti-rows__empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--wb-text);
+}
+.ti-rows__empty p {
+  margin: 0;
+}
+
+.ti-rows__more {
+  display: flex;
+  justify-content: center;
 }
 
 /* ══ 导入回执 ═════════════════════════════════════════════════════════════

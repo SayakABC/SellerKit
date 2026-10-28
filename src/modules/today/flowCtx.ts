@@ -1,12 +1,12 @@
 // src/modules/today/flowCtx.ts
 // 「发货台」各 tab 的共享上下文（容器 `provide`，面板 `inject`）。
 //
-// 为什么要有它：把五步收进一页多 tab 之后，"谁取数、谁刷谁"必须有**唯一答案**，
+// 为什么要有它：把四步收进一页多 tab 之后，"谁取数、谁刷谁"必须有**唯一答案**，
 // 否则每个面板各取一份 → 出现"导入 tab 说 9 行、拣货 tab 还说 0 行"这类缝。
 //
 // 分工（**口径唯一**）：
-//   · 容器负责**汇总指标**（订单 / 待拣 / 缺口）—— tab 徽标与总览卡都用这一份；
-//   · 各面板负责**自己那一页的业务数据**（拣货面板生成清单、算钱面板跑利润）——
+//   · 容器负责**汇总指标**（今天要发几单几件、已拿/还差、未识别款）—— tab 徽标与总览都用这一份；
+//   · 各面板负责**自己那一页的业务数据**（拣货面板生成清单、拿货面板取缺口）——
 //     算法仍在 `src/lib/*` 那一处，面板只调用；
 //   · 任何"让数据变了"的动作（导入 / 生成 / 提交）后调 `bump()`：`token` +1，
 //     各面板 `watch(token)` 重取 ⇒ 切回该 tab 看到的就是新数据（保活不再等于"看到旧的"）。
@@ -26,22 +26,39 @@ export interface FlowStep {
   act: string;
   /** 切到本页哪个 tab —— ⚠️ 不是模块 id：改造后点它**不跳页** */
   tab: string;
-  state: 'done' | 'now' | 'gap' | 'todo';
+  /** `now` = 现在该做这一步；`done` = 已完成；`todo` = 还没轮到（写明在等第几步） */
+  state: 'done' | 'now' | 'todo';
   /** 该 tab 尚未内建完（P2/P3 才落地）：只在流程卡上如实标注，不参与"当前步"评选 */
   pending?: boolean;
 }
 
 /** 容器统一维护的汇总指标（只含"有没有 / 多少"，不做计算） */
 export interface ShippingSummary {
+  /** 今天导入的订单行（页签徽标与「导入订单」页共用；`total` = 今天导入的行数） */
   orders: { total: number; collect: number; import: number; lastTime: string };
-  picking: { sku: number; pieces: number; orders: number; missing: number; days: number };
-  gaps: { weight: number; cost: number; style: number; rate: boolean };
-  gapTotal: number;
+  /**
+   * 「总览」那四个数（2026-10-22）：今天要发几单 / 共几件 / 已拿几件 / 还差几件。
+   *
+   * 口径与算法**只有一处**：`@/lib/dailyShip`（纯函数，vitest 覆盖）。这里只搬运结果 ——
+   * 面板自己再去算一遍就会出现"总览说 21 件、导入页说 16 行"这类只有用户能发现的缝。
+   * ⚠️ 已拿 = 逐行覆盖（`purchase_sources.order_item_id` 精确归属）+ 无归属台账按款色码回退；
+   *    `estimated` 为真表示后者参与了 ⇒ 界面要说明"含历史拿货，按总量估算"。
+   */
+  daily: { orders: number; pieces: number; taken: number; remaining: number; estimated: boolean };
+  /**
+   * 今天这批里还有多少行没识别出款（「归类核对」页签徽标 + 主线的第 2 步都读它）。
+   *
+   * ⚠️ 2026-10-22：**只留 style**。原来的缺克重 / 缺成本 / 运价表 / `gapTotal` 只服务
+   *    总览那张「钱算得准吗」卡；该卡随总览改版一起撤掉后，这四个数没有任何读者了 ——
+   *    留着它们意味着每次刷新白跑 3 次 IPC（产品库 + 价目 + 运价快照）去算没人看的数。
+   *    "钱算得准不准"现在只有一处入口：「统计」页（`order-cost`）。
+   */
+  gaps: { style: number };
   /**
    * 拿货 / 对账侧（2026-10-05 拿货、结算对账两个页签内建后加）。
    *
    * 前四个是**计数**：`orders` 拿货单张数 / `draft` 草稿 / `gap` 待拿货款色数 / `ignored` 已忽略款色数。
-   * `balance` 是**金额**（分）且**只此一个** —— 它是"第 5 步做完没有"的唯一判据（还欠着钱 = 对账没完）。
+   * `balance` 是**金额**（分）且**只此一个** —— 它是"对账那一步做完没有"的唯一判据（还欠着钱 = 对账没完）。
    * ⚠️ 其余金额一律不进这里：对账页自己的四个数（拿货/已付/已退/欠款）**必须同窗口同源**，
    *    从这里混一个"全部窗口的欠款"进去，就会和对账页切到"本月"时显示的欠款打架。
    */
@@ -50,9 +67,9 @@ export interface ShippingSummary {
 
 export interface ShippingCtx {
   summary: Ref<ShippingSummary>;
-  /** 五步主线（容器算、总览与 tab 标记都读这一份 —— 两处各自推导必然出现"卡上当前步 ≠ tab 上当前步"） */
+  /** 四步主线（容器算、总览与 tab 标记都读这一份 —— 两处各自推导必然出现"卡上当前步 ≠ tab 上当前步"） */
   flow: ComputedRef<FlowStep[]>;
-  /** 当前该做的那一步（`now`/`gap` 里第一个；都在 4 个可执行步里选，见容器注释） */
+  /** 当前该做的那一步（`now` 里第一个；都在可执行步里选，见容器注释） */
   flowNow: ComputedRef<FlowStep>;
   loading: Ref<boolean>;
   error: Ref<string>;
@@ -61,8 +78,10 @@ export interface ShippingCtx {
   bump(): void;
   /** 切到本页某个 tab —— **不跳页**。流程卡 / 回执里的"下一步"都走它 */
   go(tabId: string): void;
-  /** 打开**别的模块**（如「货与成本」这类主数据维护页，不属于本流程的某一步） */
-  openModule(moduleId: string): void;
+  /**
+   * 打开**别的模块**（可带 action 指定落在哪一屏，如 `shop-accounts` + `goods`）。
+   */
+  openModule(moduleId: string, action?: string): void;
   /** 重新取汇总（刷新按钮 / 导入成功后） */
   reload(): Promise<void>;
   /** 上次导入的回执 —— 写在导入 tab、总览卡要读（`freshOrders` 靠它点亮「待拣」卡） */
@@ -92,12 +111,14 @@ export interface ShippingCtx {
  * **不是改名而是这个页签没了** —— 留着它会让悬空名守卫把一个点不到的名字当成合法入口。
  * （拣货清单本身还在，见 `@/modules/picking/PickingView.vue`；它是「拿货」页里的一个视图，
  * 不是页签，所以不进这里。跨模块入口名由 `src/modules/picking/meta.ts` 的 `name` 兜。）
+ *
+ * 2026-10-17：`cost: '算钱'` 同理删掉 —— 算钱整步撤出本页（归拢到独立模块，并改名「统计」）。
+ * 它的入口名此后由 `src/modules/order-cost/meta.ts` 的 `name` 兜（与「货与成本」等真跳转同例）。
  */
 export const SHIPPING_TAB_NAMES = {
   overview: '总览',
   import: '导入订单',
   classify: '归类核对',
-  cost: '算钱',
   purchase: '拿货',
   recon: '结算对账',
 } as const;

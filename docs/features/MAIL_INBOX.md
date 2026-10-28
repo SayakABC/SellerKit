@@ -1,7 +1,7 @@
 # 集中邮件收件箱（Mail Inbox）— M1 / M2 / M3 + 正文渲染通道 已落地
 
-> 更新：2026-10-04
-> 代码入口：`electron/mail-*.ts`（主进程）、`ui-plugins/shop-accounts/dist/`（渲染层 UI 岛；内建版 `extensions/shop-accounts` 已于 2026-09-16 移除）
+> 更新：2026-10-15（收件箱所在模块 2026-10-14 更名「基础数据」并整页重设计，本页位置表述已同步）
+> 代码入口：`electron/mail-*.ts`（主进程）、`src/modules/shop-accounts/`（渲染层，内建模块；曾为 UI 岛，2026-10-14 迁回宿主，见 `docs/notes/2026-10-14-shop-accounts-intake.md`）
 > 相关文档：`AGENTS.md`（架构基线）、`docs/features/PROFIT_TRACKER.md`（ae 利润模块）、
 > `docs/notes/2026-10-04-mail-inline-images.md`（正文图片为什么坏 / `sk-mail://` 的两条实测取证）
 
@@ -9,8 +9,10 @@
 
 ## 1. 功能定位与范围
 
-「店铺账号管家」下的**集中收件箱**：把每个店铺套绑定的邮箱（163/126 为主）聚合到一个本地 inbox，
-支持按店铺套筛选、关键词搜索、未读过滤、时间窗口过滤。
+「基础数据 › 店铺账号」下的**集中收件箱**：把每家店铺绑定的邮箱（163/126 为主）聚合到一个本地 inbox，
+支持按店铺筛选、关键词搜索、未读过滤、时间窗口过滤。
+（⚠️ 2026-10-22 物理合并：账号不再叫"店铺套"，`sk_mail_accounts` 外键已由 `sk_shop_sets(id)` 改指
+`sk_shops(id) ON DELETE CASCADE`，见 `docs/decisions/ADR-003-shop-account-physical-merge.md`。）
 
 **边界（务必守住）**
 
@@ -18,6 +20,11 @@
   绝不改变用户邮箱里的已读状态——「已读」= 服务端 `seen` **或**本地 `read_at`（详见 §3 决策 6）。
 - **本地优先**：列表/搜索/详情全部查本地 SQLite，**列表渲染路径绝不触网**（秒开的前提）。
 - **凭据不出引擎**：授权码经 `shop-accounts-db` 解密后只在主进程引擎内使用，绝不回传渲染层。
+- **接入态谁读谁初始化**：账号清单由 `mailStore.ensureAccountState()` 提供（prefs + providers + accounts，
+  **不含**轮询与同步事件）；「基础数据」的账号行与「接入邮箱」抽屉自己 await 它，**不能假设收件箱先被打开过**
+  —— 否则冷启动直接进「基础数据」时每行恒显示「未接入」、抽屉是空表单（2026-10-25 修，见
+  `docs/notes/2026-10-25-mail-restore-and-cold-start-init.md`）。`ensureReady()` 负责收件箱自己
+  的轮询/事件订阅，内部复用同一个加载。
 
 ---
 
@@ -34,14 +41,14 @@
 | 主进程 | `electron/mail-body-protocol.ts` | 正文渲染协议 `sk-mail://`：把正文跑在自带 CSP 的独立来源文档里（内联图/远程图显示的**唯一**通路） |
 | 主进程 | `electron/mail-engine.ts` | IMAP 只读同步引擎：连接测试 / 增量同步 / 并发限流 / 进度广播 |
 | 主进程 | `electron/mail-handlers.ts` | IPC 通道定义（`mail-*`）与入参消毒 |
-| 渲染层 | `ui-plugins/shop-accounts/src/components/MailInboxView.vue` / `MailAccessDrawer.vue` / `src/mailStore.ts` | 收件箱视图 + 邮箱接入（岛内闭环：填授权码 → 测试连接 → 保存并同步）与收件箱 store（同步状态机 / 未读统计）。正文 iframe 指向 `sk-mail://body/<id>`；远程图**默认放行**（该收件箱的正文图全是远程图），横条可一键切回拦截 |
-| 岛工程 | `ui-plugins/shop-accounts/index.html` | ⚠️ 该文件的 **meta CSP 必须含 `frame-src sk-mail:`** —— CSP 取交集，宿主 `UI_CSP` 放行了这里没放行，正文 iframe 依旧 `ERR_BLOCKED_BY_CSP`（正文区整块空白、只在 Electron 日志里报）。守卫 `tests/islandMailFrameCsp.spec.ts` |
-| 渲染层 | `ui-plugins/shop-accounts/src/api.js` / `bridge.js` | 邮件 API 层与 `__sk` 桥封装（经 mail 能力域） |
+| 渲染层 | `src/modules/mail/MailInboxView.vue` / `src/modules/shop-accounts/components/MailAccessDrawer.vue` / `src/modules/mail/mailStore.ts` | 收件箱视图 + 邮箱接入（页内闭环：填授权码 → 测试连接 → 保存并同步）与收件箱 store（同步状态机 / 未读统计）。正文 iframe 指向 `sk-mail://body/<id>`；远程图**默认放行**（该收件箱的正文图全是远程图），横条可一键切回拦截 |
+| 嵌正文的 CSP | 宿主 `index.html`（内迁前是岛根 index.html 的 meta CSP） | ⚠️ **嵌正文的页面所处文档的 CSP 必须含 `frame-src sk-mail:`** —— CSP 取交集，任何一层缺这条正文 iframe 就 `ERR_BLOCKED_BY_CSP`（正文区整块空白、只在 Electron 日志里报）。守卫 `tests/islandMailFrameCsp.spec.ts`（2026-10-14 起改为钉宿主 `index.html` 与内建模块） |
+| 渲染层 | `src/core/services/ipc.ts`（mail 能力域包装） | 邮件 API 经宿主统一 IPC 服务调用（原岛内 `api.js`/`bridge.js` 桥桩已随岛删除） |
 
 ### 2.2 数据模型（`sk_mail_*`）
 
 ```
-sk_mail_accounts     id / shop_set_id(UNIQUE) / email / provider_id /
+sk_mail_accounts     id / shop_id(UNIQUE, FK → sk_shops(id) ON DELETE CASCADE) / email / provider_id /
                      imap_host / imap_port / imap_secure / proxy / folder /
                      sync_enabled / sync_days(默认30) / max_body_bytes(默认200KB) /
                      status / last_error / last_synced_at /

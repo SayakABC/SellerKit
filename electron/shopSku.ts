@@ -15,6 +15,8 @@
 //      故"店铺未归一"的行**不允许**写入映射（`status='shopUnresolved'`），而不是拿空平台硬塞。
 //   4. **人工决定优先**：只有 `sk_name_map` 里 `ref_id > 0` 的店铺算"已归一"；
 //      同名唯一精确命中只作为 `autoShopId` 建议（G6：自动命中永不自动落库）。
+//   5. **平台不参与映射身份**（2026-10-20）：身份 = `(店铺 id, 商品ID)`。`pl_shop_sku.platform`
+//      只是写入那一刻的副本（店铺行才是权威），副本一旦参与匹配，改一次平台就废掉该店全部映射。
 
 import { isBetterDisplayRaw, toNameKey } from './shopName';
 
@@ -29,13 +31,16 @@ export function toSkuKey(raw: unknown): string {
 const SEP = '\u0000';
 
 /**
- * 已有映射的查表键：`platform \0 shopId \0 itemId`（一期 spec 恒 '*'，故不进键 —— 见口径 2）。
+ * 已有映射的查表键：`shopId \0 itemId`（一期 spec 恒 '*'，故不进键 —— 见口径 2）。
  *
- * 平台与商品ID **都要归一**：平台的写入口在两处（店铺实体 `sk_shops.platform` 与映射表
- * `pl_shop_sku.platform`），只 trim 不折叠空白的一侧会与另一侧对不上，症状是"明明有关联却查不中"。
+ * ⭐ **平台不在键里**（2026-10-20 改）：映射行的 `platform` 是写映射那一刻从店铺行抄来的**副本**，
+ * 而店铺实体本身已经隐含唯一平台（`sk_shops` 一行一个 `platform`）。副本参与键的后果是
+ * 「店铺登记里把平台改一下（哪怕只是 `AE` → `ae`，`toNameKey` 不折叠大小写）⇒ 该店全部映射一条都不命中」，
+ * 用户只能全量重配，重配还会因四列键都不撞而**新增**一行、旧行留成幽灵关联。
+ * 映射的真实身份就是 `(店铺, 商品ID)`：店铺 id 全局唯一，跨平台同名店也各有各的 id。
  */
-export function mappingKey(platform: unknown, shopId: unknown, itemId: unknown): string {
-  return `${toNameKey(platform)}${SEP}${Number(shopId) || 0}${SEP}${toSkuKey(itemId)}`;
+export function bindingKey(shopId: unknown, itemId: unknown): string {
+  return `${Number(shopId) || 0}${SEP}${toSkuKey(itemId)}`;
 }
 
 // ─────────────────────────────────────────────────────────── raw_fields 字段提取
@@ -60,6 +65,61 @@ export function pickField(rawFields: Record<string, string> | null | undefined, 
   return { key: '', value: '' };
 }
 
+// ─────────────────────────────────────────────────────────── 按图定色（采集色图 ↔ 订单图）
+
+/**
+ * 图片 URL 归一键。
+ *
+ * 为什么要归一而不是直接比字符串：同一张图在 CDN 上有多种形态 —— 带签名/尺寸查询参数
+ * （`?x-oss-process=...`）、缩略图后缀（`...jpg_220x220.jpg`）。订单报表给的是哪一种，
+ * 采集详情页给的是哪一种，**不受我们控制** ⇒ 不归一就会出现"明明是同一张图却对不上"，
+ * 而这种失败是静默的（回落成"色未定"，看起来跟没采到过一样）。
+ *
+ * 只剥"确定不属于图本身"的部分（查询串/锚点/尺寸后缀），**不做**小写折叠 ——
+ * AE 图床的文件名大小写敏感，折叠会制造假命中。
+ */
+export function normImageUrl(raw: unknown): string {
+  let s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) return '';
+  const cut = s.search(/[?#]/);
+  if (cut >= 0) s = s.slice(0, cut);
+  // `xxx.jpg_220x220.jpg` → `xxx.jpg`（尺寸后缀是 CDN 生成的，不是图的身份）
+  return s.replace(/_\d{2,4}x\d{2,4}(\.[a-z0-9]+)?$/i, '');
+}
+
+/** 采集 SKU 行里与图片相关的两个字段（`sku_json[]` 的元素） */
+export interface SkuColorImageRow {
+  color?: string;
+  imageUrl?: string;
+}
+
+/**
+ * 用一张图反查「这个 SKU 图属于哪个颜色」—— 返回**所有**命中的颜色（去重、稳定排序）。
+ *
+ * 为什么返回数组而不是单个颜色：调用方（`skuColorByItemImage`）要把**多行采集快照**
+ * （同商品ID 可能在多家店各有一行）的答案合起来，只在**全局唯一**时才采信。
+ * 把"唯一性判定"留在调用方，是为了让"歧义"这件事在一个地方判、而不是每处各判一次。
+ *
+ * 歧义的真实来源：卖家没给每个颜色单独配图（多色共用一张图）⇒ 一张图对上多个颜色。
+ * 这种情况**必须返回多个**、由上游放弃，绝不能取第一个 —— 取第一个就是静默错色。
+ */
+export function skuColorsByImage(
+  rows: readonly SkuColorImageRow[] | null | undefined,
+  imageUrl: unknown,
+): string[] {
+  const target = normImageUrl(imageUrl);
+  if (!target) return [];
+  const hit = new Set<string>();
+  for (const r of rows ?? []) {
+    const color = String(r?.color ?? '').trim();
+    // `'*'` 是映射里"未指定色"的哨兵，不是采集侧的颜色值
+    if (!color || color === '*') continue;
+    if (normImageUrl(r?.imageUrl) !== target) continue;
+    hit.add(color);
+  }
+  return [...hit].sort();
+}
+
 /** 从一条订单的原始字段里取映射所需信息（商品ID + 展示用标题） */
 export function extractSkuFields(rawFields: Record<string, string> | null | undefined): {
   itemId: string;
@@ -77,7 +137,7 @@ export function extractSkuFields(rawFields: Record<string, string> | null | unde
 export interface SkuOrderRow {
   /** 店铺原文（`oi_orders.shop`） */
   shop: string;
-  /** `oi_orders.raw_fields`（已 JSON.parse） */
+  /** `oi_order_items.raw_fields`（已 JSON.parse） */
   rawFields: Record<string, string>;
 }
 
@@ -218,8 +278,17 @@ export interface BuildQueueInput {
   autoShopByKey: ReadonlyMap<string, { id: number; name: string; platform: string }>;
   /** `sk_shops.id` → 展示信息（把 manualShopId 还原成名字与平台） */
   shopsById: ReadonlyMap<number, { name: string; platform: string }>;
-  /** 已有生效映射的键（`mappingKey(...)` 的产物）—— 命中即"已关联"，不进队列 */
+  /** 已有生效映射的键（`bindingKey(...)` 的产物）—— 命中即"已关联"，不进队列 */
   mappedKeys: ReadonlySet<string>;
+  /**
+   * 可选的**末级认店**：店铺原文的归一键落空时，用商品ID 反查采集快照
+   * （`shop-item-db.shopIdByItemIds` 的同一份证据；实现方给一张按需加载的表即可）。
+   *
+   * 为什么放在这里而不是调用方事后修补：队列的「已关联剔除」要用 `shopId` 拼 bindingKey ——
+   * 事后修补会让"其实已配映射"的行仍然留在待办里，且统计口径要对两遍。
+   * 返回 0 = 认不出（未采到过 / 多店歧义），行为与不传完全一致。
+   */
+  resolveShopByItemId?: (itemId: string) => number;
   /** 单次返回上限 */
   limit?: number;
   maxRows?: number;
@@ -242,10 +311,16 @@ export function buildQueueView(input: BuildQueueInput): { rows: QueueRow[]; stat
   let mappedCount = 0;
 
   for (const g of agg.groups) {
-    const shopId = manual.get(g.shopKey) ?? 0;
+    // 认店顺序：人工归一 → （落空时）商品ID 反查采集快照。
+    // 后者是"这个商品当初归在哪家已登记店"的事实，不是同名相似建议，故与人工归一同样当**已认店**用；
+    // 它认不出（0）才落到 `autoShopByKey` 的建议与「店铺未归一」。
+    const manualId = manual.get(g.shopKey) ?? 0;
+    const byItem = manualId ? 0 : (input?.resolveShopByItemId?.(g.itemId) ?? 0);
+    const shopId = manualId || byItem;
     const shop = shopId ? byId.get(shopId) : undefined;
     const platform = shop?.platform ?? '';
-    if (shopId && mapped.has(mappingKey(platform, shopId, g.itemId))) {
+    // 只按 (店铺, 商品ID) 判定"已关联"：平台不参与（见 `bindingKey` 注释 —— 副本当键会让改平台废掉全部映射）
+    if (shopId && mapped.has(bindingKey(shopId, g.itemId))) {
       mappedCount += 1;
       continue; // 已关联：不进待办
     }

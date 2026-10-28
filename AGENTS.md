@@ -78,7 +78,7 @@ src/
 │   ├── ai/                     # OpenAI 兼容 AI 客户端（types / openaiCompatible / index）
 │   ├── layout/                 # SplitPane.vue（分栏布局）
 │   └── types.ts                # ModuleMeta / ModuleDefinition / ModuleCommand 等
-├── modules/<module-id>/        # 内建业务模块（快速迭代用；当前 today / quick-note / order-cost（显示名「算钱」）/ picking / goods（「货与成本」））
+├── modules/<module-id>/        # 内建业务模块（快速迭代用；当前 today / shop-accounts（显示名「基础数据」，2026-10-14 由 UI 岛回收并整合全部维护入口；2026-10-17 起「货品档案」= 原「货与成本」整页，其模块外壳已删；同日七项资料从页面内左导航搬到**主侧栏的二级菜单**（`meta.subNav` + `services/subNav.ts` 运行时上报），页面里不再有那条 200px 左导航；**同日晚间再收拢成三组**（店铺账号 = 账号库/店铺登记/企业、货品档案 = 款与商品/成本与费率/供应商、物流运费），组内资料页由页面顶部的页签条切换 —— 侧栏 `data-act="kind-<groupId>"`，组内页签 `data-act="kind-tab-<kindId>"`，`store.mainTab` 的七个值未变）/ mail（「邮件」，2026-10-17 由基础数据页签独立成一级模块；存储键仍沿用 shop-accounts-mail）/ order-cost（显示名「统计」，2026-10-17 由「算钱」改名）/ ledger（显示名「记账」，2026-10-25 新增：P0 数据层 + P1 明细页 / 记一笔〔专属 + 公共分摊〕/ 相关人与科目管理 + P2 营收占比基准与分摊方案 + P3 往来页签〔台账 / 结算 / 撤销〕+ P4 批量变更相关人三路 / 单店与汇总页签 / xlsx 导出；存的是**钱怎么进出**，与「统计」算订单利润是两件事）/ quick-note。⚠️ `picking/` 目录仍在，但**不是模块**（无 meta/index，2026-10-17 摘出左导航）：`PickingView.vue` 只作「今天 › 拿货 › 要拿什么」的 embedded 视图）
 │   ├── meta.ts                 # 模块元信息（必须）
 │   ├── index.ts                # ModuleDefinition（必须）
 │   ├── store.ts                # Pinia store（setup 语法）
@@ -139,7 +139,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 
 - 统一经 `src/core/services/storage.ts` 的 `useModuleStorage<T>(namespaceId)`，返回 `{ load, save, scheduleSave, clear }`。
 - 数据落在 electron-store 的 `modules.<namespaceId>` key 下，**模块之间互不污染**。
-- 已有命名空间：`app-shell`（外壳状态：lastActiveModuleId / collapsed）、`excel-copy`（业务状态）、`order-insight`（⚠️ **键名沿用已下架的岛 id，系有意保留**：引擎配置 + 列映射是已落盘的用户数据键，改名 = 用户配好的 Key 静默消失；现由宿主「设置 › 识别」与内建「今天 › 归类核对」读写）、`shop-accounts`（店铺账号 UI 态）、`ae-profit`（利润追踪 UI 态）、`shipping-rate`（运价表 + 报价配置）、`plugins`（插件停用集）、`order-cost`（订单利润页的 UI 态：平台费近似费率）。完整清单见 `docs/baseline/PROJECT_BASELINE.md` §6。
+- 已有命名空间：`app-shell`（外壳状态：lastActiveModuleId / collapsed）、`appearance`（主题偏好，`core/services/theme.ts`）、`excel-copy`（业务状态）、`order-insight`（⚠️ **键名沿用已下架的岛 id，系有意保留**：引擎配置 + 列映射是已落盘的用户数据键，改名 = 用户配好的 Key 静默消失；现由宿主「设置 › 识别」与内建「今天 › 归类核对」读写）、`shop-accounts`（店铺账号 UI 态）、`shop-accounts-mail`（邮件账号 / 同步游标 / 附件索引；「邮件」独立成模块时刻意沿用原键）、`quick-note`（便签内容）、`ledger`（记账页 UI 态：当前月份 / 明细筛选 / 上次选的相关人 / 当前页签〔明细 · 往来 · 单店 · 汇总〕/ 单店页上次看的那家店（**存 id，店没了取数明确报「店铺不存在」，不静默换店**）；⚠️ **账目本体不在此**，真源是宿主 `bk_*` 十张表）、`shipping-rate`（运费页查询偏好：克重 / 类别 / 变体 / 进位方式 + 上次文件与候选 sheet；⚠️ **运价表本体不在此**，真源是宿主表 `sr_rate_snapshots`）、`plugins`（插件停用集）、`order-cost`（订单利润页的 UI 态：平台费近似费率 / 店铺与来源筛选 / 税口径）、`ae-profit`（**已退场**，岛收编后不再声明，旧数据留在 config.json 里无人读写）。完整清单见 `docs/baseline/PROJECT_BASELINE.md` §6。
   > ⚠️ 本节只列**内建侧 + 已发布岛**；`product-library` **不占命名空间**（岛内无跨会话状态、不声明 `storage`）—— 该岛已于 **2026-10-01 整体下架**（功能收回内建「货与成本」），此注记保留作先例：**岛要跨会话存状态才占命名空间**。
   > 清单的权威来源是基线 §6 —— **新增一个用 storage 的岛 = 新增一个命名空间**，两处要一起改。
 - 写操作统一 `scheduleSave(data)`（500ms 防抖）；需要立即落盘用 `save(data)`。
@@ -206,7 +206,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
   | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
   | 界面配色（底色/边框/文字/语义色/阴影）                                                   | **必须令牌化**；缺令牌就先在两套主题各加一个                                      | `--wb-shadow`（R3-5 新增，抽屉投影）                                                                                        |
   | 业务数据颜色（色名 → 色值，表达现实世界的颜色）                                          | 集中到独立文件并注明"不参与主题切换"                                              | `src/lib/colorSwatch.ts`（款色色卡，17 个 hex；2026-09-22 由 `extensions/order-insight/src/lib/` 迁入，理由见该文件头注释） |
-  | 非 UI 像素（canvas 像素数据、图片生成探测等）                                            | 就地保留 + 注释说明"非界面配色"                                                   | `src/core/ai/openaiCompatible.ts`（视觉探针图 `#e05a3a`）                                                                   |
+  | 非 UI 像素（canvas 像素数据、图片生成探测等）                                            | 就地保留 + 注释说明"非界面配色"                                                   | **暂无在册实例**（唯一一处是已删除的云端视觉探针图；将来出现时在右列登记，别把 hex 塞进令牌体系） |
   | `var(--wb-x, #hex)` 的 fallback 值                                                       | **允许**：令牌缺失时的保险；但取值须与 `index.css` 的令牌定义一致，令牌改名时同步 | `src/core/components/UiIslandView.vue`                                                                                      |
   | 业务数据色若被"顺手令牌化"，深色主题下"白色"款色会变成深灰块——颜色识别失效，属反向破坏。 |
 - **`color-scheme` 不是令牌，须单独跟随**（2026-09-22）：UI 岛（iframe）里写死 `color-scheme: light`（或不声明）
@@ -219,7 +219,8 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
   `:root` 上保留 `color-scheme: light` 作为首帧兜底是允许的（宿主内联必盖过它）；**元素级写死 light 才致命**——
   元素自己的声明优先于 `<html>` 的内联值。同理：靠 `[data-theme='dark']` 选择器自我纠正**不可能生效**，
   宿主只注入内联令牌、不同步 `data-theme` 属性到 iframe。
-  存量反例已于 2026-09-22 收口：`ui-plugins/shop-accounts/src/components/AccountEditor.vue`（`.date-input` + 一条永不命中的 `data-theme` 死选择器）、
+  存量反例已于 2026-09-22 收口：`src/modules/shop-accounts/components/AccountEditor.vue`（当时位于
+  `ui-plugins/shop-accounts/` 岛内，2026-10-14 随岛回收为内建模块；`.date-input` + 一条永不命中的 `data-theme` 死选择器）、
   `ui-plugins/ae-profit/src/style.css`（`@layer components` 的日期/时间输入组）。
 
 > 与本节同族的一条纪律：**用户可见文案**（不是色值，而是"说给用户听的话"）见 **§1.10** ——
@@ -262,7 +263,7 @@ modules.config.json ──► vite.config.ts ──► src/registry.generated.ts
 | 数据访问 | 直接用自己的 store（Pinia + `useModuleStorage`）                                                                                                                                                 | 只能经 host 能力域（`storage` / `db` / `clipboard` / `dialog` / `secrets` / `mail`），受 `gatedHost` 权限门约束                                            |
 | 分发     | `npm run dist` 随包                                                                                                                                                                              | 打成 zip 走插件市场（`market-out/`）                                                                                                                       |
 | 注册登记 | 必须在 `modules.config.json` 的 profile 中登记                                                                                                                                                   | **禁止**登记进 profile（否则内建记录占用同名 id，市场安装的 UI 岛无法注册）                                                                                |
-| 当前实例 | **无，且目录不存在**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记；最后两个**留档源码包**已于 **2026-09-30（C3）删除** —— 机制保留，要用再建；脚手架在 `scripts/templates/`） | **4 个**：`shop-accounts` / `excel-copy` / `ae-profit` / `shipping-rate`（原样例岛 `sk-ui-starter` 已于 2026-09-24 删除；**`product-library` 已于 2026-10-01 整体下架** —— 功能收回内建「货与成本」，见 `docs/features/PRODUCT_LIBRARY.md` §0-A；**`order-insight` 已于 2026-10-05 整体下架** —— 功能收回内建「今天」发货台，见 `docs/notes/2026-10-01-ui-island-retirement.md` §6）。**这里不写版本号** —— 版本会随每次发版变，权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 |
+| 当前实例 | **无，且目录不存在**（`excel-copy` / `order-insight` / `shop-accounts` 已全部下记；最后两个**留档源码包**已于 **2026-09-30（C3）删除** —— 机制保留，要用再建；脚手架在 `scripts/templates/`） | **2 个**：`excel-copy` / `ae-profit`（原样例岛 `sk-ui-starter` 已于 2026-09-24 删除；**`product-library` 2026-10-01 下架** → 功能收回内建「货与成本」；**`order-insight` 2026-10-05 下架** → 功能收回内建「今天」发货台；**`shop-accounts` 2026-10-14 回收为内建模块**；**`shipping-rate` 2026-10-15 回收为内建「基础数据 › 物流运费」**。后两者的岛形态已撤，别再把它们算进"在架的岛"）。**这里不写版本号** —— 版本会随每次发版变，权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 |
 
 ⚠️ **脚手架已归位（2026-09-22，T4）**：`npm run plugins:create` 的**模板**与**示例**曾寄居在 `extensions/` 下（`_template` / `sk-hello`），
 现全部迁到 `scripts/templates/` —— L2 后台插件模板 `scripts/templates/l2-plugin/`、L2 演示插件 `scripts/templates/l2-demo/`。
@@ -457,20 +458,38 @@ npm run dist:select  # 交互式勾选模块 → 构建 → 出安装包（scrip
 npm run build:select # 交互式勾选模块 → 只构建
 npm run lint         # ESLint（eslint.config.mjs，flat config）：门禁标准是 **error 数 = 0**
 npm run lint:fix     # 自动修复可修复项
-npm run verify       # IPC 契约校验（preload 键 ↔ types 声明 ↔ 主进程注册通道）
+npm run verify       # 静态契约校验（三条，短路按序）：① IPC 契约（preload 键 ↔ types 声明 ↔ 主进程注册通道，
+                     #   scripts/check-ipc-contract.mjs）② 店铺写入点必填字段（check-shop-upsert-fields.mjs）
+                     #   ③ 跨域数据访问（`*-db` 的 require 必须带类型标注 + db→db 直连边在册，
+                     #   scripts/check-cross-domain-edges.mjs）
 npm run verify:docs  # 文档引用校验（Markdown 链接 + 反引号路径 + 代码注释里的文档引用）
 npm test             # 单元测试（vitest，src/lib 纯函数层）
 npm run test:watch   # 单元测试 watch 模式
 npm run schema:smoke # schema 迁移冒烟（改了 electron/db.ts 的 migrate 或任何域的表形状后必跑）
+                     # ⚠️ 例外：`shop.main`（`sk_shops` 重建 + `sk_mail_accounts` 重建）**不走 migrate() 步骤表**
+                     #   （PRAGMA foreign_keys=OFF 在事务内无效，事务外壳由 runShopMainMigration() 自管）⇒
+                     #   schema:smoke 对它一条都不覆盖；它的老库场景在 `npm run shop:smoke` 里。
 npm run mail:inline:smoke # 邮件内联图离线冒烟（改了 content_id 补列 / cid 改写 / 远程图 CSP 两态必跑；不需凭据）
 npm run mail:body:smoke   # 邮件正文渲染通道（sk-mail://）端到端冒烟（改了协议 / 岛 index.html 的 meta CSP 必跑；需真 Electron）
 npm run ipc:shape:smoke   # preload ↔ 主进程「图片 / 剪贴板通道」载荷形状端到端冒烟（改了 preload 的图片方法 / 批量缩略图包装 / 剪贴板通道必跑；⑧ 段真写系统剪贴板并读回；需真 Electron）
 npm run ae:settle:smoke # 结算明细冒烟（改了 ae_settle_lines 的落库 / 聚合 / 件数明细后必跑）
+npm run ledger:smoke  # 记账数据层冒烟（改了 electron/ledger-db.ts 的 bk_* 表形状 / 迁移 / 守恒断言 /
+                      #   分摊落库 / 结算唯一性 / 批量变更相关人三路 / 单店取数 / 四项体检后必跑；含 `ledger.main` v1 老库场景）
 npm run picking:smoke # 拣货投影冒烟（改了 electron/picking-db.ts 的筛选 / JOIN / 取图回落必跑）
-npm run picking:ui    # 拣货页假桥无头冒烟（改了拣货页接线 / 导出必跑；需本机 Chrome）
-npm run today:ui      # 「今天」首页假桥无头冒烟（改了首页卡片 / 跳转必跑；需本机 Chrome）
+npm run shop:smoke    # 店铺实体数据层冒烟（改了 sk_shops / sk_tool_accounts / sk_name_map 或 `shop.main` 迁移必跑；
+                      #   含 shop.main v1 的两条老库重建场景与「一行两态 / 部分唯一索引 / 局部更新不清账号列」）
+npm run db:inventory  # 稳态表清单与对象总数（真建一个临时库逐域 ensure 后数 sqlite_master；改了任何域的
+                      #   CREATE TABLE / 迁移收尾必跑 —— 基线 §6 的「共 N 个对象」只能用这条数，grep 推算已退役）
+npm run master-data:ui # 「基础数据」页假桥无头冒烟（宽 + 窄两遍：店铺列表与两种空态 / 五个下拉联动筛选 /
+                      #   合并编辑器 / 工具账号页 / 企业与支付宝 / 店名归一；改了 shop-accounts 模块接线必跑；需本机 Chrome）
+npm run today:ui      # 「今天」首页假桥无头冒烟（改了首页卡片 / 跳转必跑；含「拿货」里的拣货清单：自动生成 / 厂家筛选 / 复制给厂家 / 导出带图 xlsx / 天数窗重算 —— 拣货的独立页冒烟已于 2026-10-17 随菜单退役并入这一条；需本机 Chrome）
 npm run goods:ui      # 「货与成本」页假桥无头冒烟（改了该页接线必跑；需本机 Chrome）
 npm run shipping-rate:ui # 运费岛假桥无头冒烟（两个来回：冷启动空态 / 运价表迁移；改了岛的计价接线必跑；手写岛无构建，这是唯一可自动化的真点）
+npm run ledger:ui     # 「记账」页假桥无头冒烟（宽 + 窄两遍：明细页指标条只认月份 / 筛选 / 记一笔两种形态 /
+                      #   公共分摊预览与守恒 / 已结算与营收基准锁 / 相关人与科目管理 / 往来台账与全期间恒等式 /
+                      #   结算往返（请求不带金额）/ 重复结算被拒 / 撤销后恢复未结 /
+                      #   批量勾选与变更相关人三路（候选下拉、禁用理由、C 路连带披露、落库后的真实数据）/
+                      #   单店与汇总同源 / 导出载荷与屏幕一致且取消不算失败；改了 ledger 模块接线必跑；需本机 Chrome）
 npm run format       # Prettier 写入（.prettierrc；存量代码尚未全量格式化，慎用大面积 --write）
 npm run format:check # Prettier 只检查
 npx vue-tsc --noEmit # 渲染进程 + tests 类型检查（本地 devDependency 为 2.x；勿 npx 拉取最新 3.x，与项目 TS 5.4 不兼容）
@@ -484,6 +503,11 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
   `npm run verify` 只核**通道名**三方一致，看不见**载荷形状**；形状错了是**静默**失效
   （最刺眼的一例：`orderImageThumbBatch` 声明收裸数组、实现只读 `payload.items` ⇒ 4 个内置页面
   的缩略图全部空占位且 console 一条错都不报，2026-10-04 修）。
+- **改了 `electron/*-db.ts` 的导出签名、或让某域开始 import/require 另一个 `*-db` 时，看 `npm run verify` 的第③条** ——
+  两条判据：① 跨文件 `require('<路径>-db')` **必须**带 `as typeof import(...)`，不带就是 `any`，被调模块改了签名
+  **编译期一个错都不报**（2026-10-15 实测：`findStyleColorImagePath` 的参数 `string→number`，调用方照传 string，`tsc` 退 0）；
+  ② `db→db` 的静态 import 边要在 `scripts/check-cross-domain-edges.mjs` 的 `DB_EDGES` 里**逐条在册**（含取用的符号），
+  跨域面扩大（多拿一个符号）或新增未登记边都会红 —— 跨域要"有意识的决定"，能收进编排层（如 `purchase-cost-sync.ts`）就别直连。
 - **动了文档目录 / 删了任何 `.md` / 改了引用路径时，额外跑 `npm run verify:docs`**。它挡的是"读者点开一个不存在的文件"这类损伤——lint 与 tsc 都看不见。豁免表（脚本头部 `DELIBERATELY_MISSING`）只承接**文档正在陈述"该路径不存在"**的句子，每项必写理由，见 §6.2 的同类约定。同一命令还带 **④ 反向守卫**：查 `docs/notes/` 的笔记是否命名合规且已登记索引（见 §0），零条目时会显式打印"未验证任何内容"。
 - 改 CSS 令牌 / 纯样式时若构建受网络/审批影响，可用 lint + 逻辑审查兜底判断风险。
 - 无 CI（见 §6.4），以上命令**本地手动执行**是唯一门禁。
@@ -498,7 +522,7 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
   需要**上下文类型**的调用点（如 `net.request` 的 response 回调、`register/handle` 的 handler 回调）
   必须写成 `require('electron') as typeof import('electron')` 这类断言取回真实类型——
   R3-4 在 5 个 handler 文件 + http-client + plugins-market 已如此处理，新增文件沿用。
-- **不要一步开全 `strict`**：主进程 26 文件/11k+ 行，全开会产生大量 strictNullChecks 错误；
+- **不要一步开全 `strict`**：主进程 **55 文件 / 2.4 万行**（2026-10-22 基线），全开会产生大量 strictNullChecks 错误；
   后续按目录/文件渐进推进（新文件可从严，存量文件改造时顺带收紧）。
 - 渲染层（`tsconfig.json`）保持 `strict: true` 不动。
 
@@ -519,7 +543,7 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 **因此禁止在三元/`&&` 分支里写调色板类名——这是必须靠 code review 补位的残余缺口。**
 
 **Prettier 现状（重要）**：`.prettierrc` 已按现有代码的主导风格固化（单引号 / 分号 / 2 空格 / 100 列），
-但**存量 125 个文件尚未按该规则格式化**，故 `npm run format:check` 当前必然失败，**不纳入门禁**。
+但**存量文件尚未按该规则格式化** —— `npm run format:check` 当前在 **336 个文件**上失败（2026-10-22 实测，此前记 125），**不纳入门禁**。
 新写/新改的文件可按 Prettier 风格产出；仓库级一次性格式化需单独决策（会产生 125 文件的机械 diff）。
 
 ### 6.2 IPC 契约校验（R2-4 落地）
@@ -556,18 +580,22 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 
 `npm test` → vitest（`vitest.config.mts`，`environment: 'node'`，固定 `TZ=Asia/Shanghai` 以免日期断言随机器时区漂移）。
 
-- **覆盖范围**（当前 37 个文件；用例数随门禁输出为准，不在此写死）：
+- **覆盖范围**（当前 **49 个文件**；用例数随门禁输出为准，不在此写死）：
   ① `src/lib/` 纯函数层——`excelParser` / `fieldProcessor` / `importDetect`（统一导入的纯检测层）/
   `orderRowSplitter` / `orderImportRow`（一行订单→落库字段：店铺名/主图 URL 的口径）/
   `orderClassifier` / `styleMatcher` / `colorSwatch` /
   `orderCost`（订单利润口径）/ `settleImport`（结算明细解析：等式校验 + 行类型判定）/
   `picking` + `pickingExport`（拣货口径与导出）/ `productImport`（产品导入解析）/
+  `ledger`（记账分摊：守恒 / 公共分摊按权重 / 元→分 / 舍入余数落地）/ `partyLedger`（相关人台账与结转）/
   `shipRate` 族（运价表归一化 / 按订单 / 按产品试算）；
   ①' **主进程侧的纯函数层**同样单独成文件以便被 vitest 覆盖：`electron/shopName.ts` / `shopSku.ts`（零依赖），
   以及 `electron/orderMoney.ts`（订单金额/状态/时点解析）——`*-db.ts` 因 Electron ABI 进不了 vitest，故摘出来；
   ② `electron/ipc-util.ts` 的 IPC 注册契约（`tests/ipcUtil.spec.ts` 用 `vi.mock('electron')` 假 ipcMain，
-  钉住返回形状、异常兜底、两套 fallback 文案——**主进程现注册 187 个通道**都经它注册，改错即全盘失效。
+  钉住返回形状、异常兜底、两套 fallback 文案——**主进程现注册 225 个通道**都经它注册，改错即全盘失效。
   该数字随 handler 增减变化，以 `npm run verify` 输出为准）；
+  ②' **服务层取数范围**（`tests/skuWeights.spec.ts`，用 `vi.mock('@/core/services/ipc')` 让服务层可测）：
+  克重必须拉全 —— 产品按 500/页翻页、SKU 按 5000 id/批分批，**任一分页/分批失败返回空表**而不是半个表
+  （半表会把有重量的行误报成缺口；只取首页的实现会被 620 款 + 两页的夹具当场拦下）；
   ③ **插件体系静态守卫**——`pluginManifest`（manifest schema）/ `pluginSettingsIsland`（岛设置分类聚合）/
   `pluginTriage`（红线 23：预设不得占用岛 id；岛的 db 调用必须全在 manifest 声明内）/ `uiIslandThemeTokens`（岛主题令牌 =
   注入清单 ⊇ 宿主定义；**且岛内元素级不得写死 `color-scheme`、不得用 `[data-theme=...]` 选择器**——两者都会让
@@ -596,7 +624,7 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
   `aggregator.ts` 曾用 `PivotSpec` 把 `measures` 标为必填、实现里却有 count 兜底，覆盖该分支
   靠的就是用例里的 `withoutMeasures` 断言（该模块**及其用例**已随 2026-10-05 的孤儿代码清理删除，
   例子没了、纪律保留：新写纯函数不要再造这种"类型与运行时两套口径"）。
-- **版本配套**：vitest 固定 2.x（与 vite 5 同代）。升 vite 8 时须同步评估 vitest 版本（见 R3-1）。
+- **版本配套**：vitest 已随 vite 8 升到 **4.x**（`package.json` 写 `^4.1.11`；此前固定的 2.x 与 vite 5 同代，已随依赖大版本升级一起换代）。升 vite / vitest 时须同步评估另一侧版本（见 R3-1），并注意 `vitest.config.mts` 的 `environment: 'node'` 与 `TZ=Asia/Shanghai` 固定项不要丢。
 
 ### 6.4 尚无 CI（已知缺口）
 

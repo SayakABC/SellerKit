@@ -7,7 +7,7 @@
 //   本文件             订单侧的数据衔接：国家解析 / 字段提取 / 逐单批量计价
 //
 // 数据现状（SHIPPING_RATE_ISLAND_PLAN §8）：
-//   · 目的地在 oi_orders.raw_fields 的「收货国家」（速卖通导出为英文名），
+//   · 目的地在 oi_order_items.raw_fields 的「收货国家」（速卖通导出为英文名），
 //     而运价表的国家行自带 中文名/英文名/ISO code —— 所以**映射可以直接对运价表做**，
 //     不需要单独维护一张国名表；别名只补「同一国家的不同拼写」（USA/UK/Viet Nam…）。
 //   · 克重来自产品库 SKU 表（`pl_variants.weight_g`，按款×色×码取 —— **全应用唯一来源**，
@@ -17,7 +17,7 @@
 import type { CountryRate, RateTable, Rounding } from './shipRate';
 import { pickCard, quotableRefusal, computeFee, type QuoteOptions } from './shipRateQuote';
 
-/** 订单侧原始行（宿主 op 从 oi_orders.raw_fields 提取后传入） */
+/** 订单侧原始行（宿主 op 从 oi_order_items.raw_fields 提取后传入） */
 export interface OrderShippingRow {
   id: number;
   orderNo: string;

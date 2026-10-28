@@ -7,10 +7,6 @@ import type { NetRequestPayload, NetRequestResult } from '@/core/network/types';
 import type {
   OrderImageRecord,
   OrderRecord,
-  OrderQueueRow,
-  OrderQueueEnqueueRow,
-  OrderQueueStats,
-  OrderQueueStatus,
   GroupStat,
   ImageDataUrl,
   ExportExcelResult,
@@ -18,6 +14,7 @@ import type {
   OrderUpdateInput,
   OrderUpdateStatusInput,
   OrderStatus,
+  ColorAliasRemembered,
   PickingRowsResult,
   PickingExportRow,
   UnifiedOrderRow,
@@ -36,13 +33,7 @@ import type {
   ShopAllocationDetailRow,
   PluginScanResult,
   UpdaterEventPayload,
-  AeOrderListItem,
   AeReceiverStatus,
-  AeSummary,
-  AeProfitOverview,
-  AeCostMapImportItem,
-  AeCostMapItem,
-  ManualCostItemInput,
   AeRateItem,
   PurchaseCostSnapshotItem,
   ShopAccountItem,
@@ -97,6 +88,45 @@ import type {
   MailRemoteFolder,
   MailCacheStatus,
   MailFtsStatus,
+
+  // ---- 2026-10-28 重建 ipc.ts：签名取自 types.ts 的 ElectronAPI ----
+  AeItemsIngestedEvent,
+  LedgerBasis,
+  LedgerCategoryRow,
+  LedgerEligibleShops,
+  LedgerEntryDetail,
+  LedgerEntryFilter,
+  LedgerEntryInput,
+  LedgerEntryRow,
+  LedgerExportInput,
+  LedgerImportEntryInput,
+  LedgerKind,
+  LedgerNameResolveResult,
+  LedgerPartyKind,
+  LedgerPartyLedgerRow,
+  LedgerPartyRow,
+  LedgerRepatchMode,
+  LedgerRepatchPreview,
+  LedgerRepatchResult,
+  LedgerRuleRow,
+  LedgerSettlementRow,
+  LedgerShopBreakdown,
+  LedgerSummary,
+  LedgerTemplateSheetInput,
+  OrderCoveragePayload,
+  ParcelCountMap,
+  ParcelDetail,
+  ParcelTotalsMap,
+  ProductMoveSupplierInput,
+  ShopItemImageFetchResult,
+  ShopItemRow,
+  ShopItemSummaryRow,
+  SkuMappingReplayStats,
+  StyleColorOptionRow,
+  TakenRow,
+  ToolAccountItem,
+  ToolAccountKind,
+  ToolAccountUpsertInput,
 } from '@/types';
 import type { MarketCatalog, MarketPluginInfo } from '@/core/plugin/types';
 
@@ -176,6 +206,8 @@ export interface ElectronApi {
     source?: 'all' | 'import' | 'collect';
     /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
     importDate?: string;
+    /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库。记账的营收占比用 */
+    period?: string;
   }): Promise<ApiResult<UnifiedOrderRow[]>>;
   orderDownloadImage(url: string): Promise<ApiResult<OrderImageRecord>>;
   /** 拣货投影（只读；聚合在渲染层纯函数 `src/lib/picking.ts`） */
@@ -199,9 +231,6 @@ export interface ElectronApi {
   orderImageThumbBatch(
     items: { localPath: string; maxEdge?: number }[]
   ): Promise<ApiResult<{ dataUrls: (string | null)[] }>>;
-  /** 识别引擎 API Key：safeStorage 加密落盘（渲染层不落明文） */
-  orderApiKeySet(apiKey: string): Promise<ApiResult<{ stored: boolean }>>;
-  orderApiKeyGet(): Promise<ApiResult<{ apiKey: string }>>;
   /** 清理不被数据库引用的孤儿图片文件（返回释放数量与字节） */
   orderCleanupOrphanImages(): Promise<ApiResult<{ deleted: number; freedBytes: number }>>;
   // 产品库导入「图片」列：读取用户指定的本地图片（任意路径，仅图片扩展名，≤10MB）
@@ -210,41 +239,6 @@ export interface ElectronApi {
     buffer: ArrayBuffer,
     defaultName?: string
   ): Promise<ApiResult<ExportExcelResult>>;
-  // 待识别队列（订单归类：导入行整批落库，失败/缺图重启不丢、可增量重试）
-  orderQueueEnqueue(payload: {
-    batchNo: string;
-    rows: OrderQueueEnqueueRow[];
-  }): Promise<ApiResult<{ count: number }>>;
-  orderQueueStats(payload: { batchNo: string }): Promise<ApiResult<OrderQueueStats>>;
-  /** 队列行分页：失败清单用 { status:'error' }，缺图清单用 { missingOnly:true }；列表不含 raw_fields，返回 { rows, total } */
-  orderQueueList(payload: {
-    batchNo: string;
-    offset?: number;
-    limit?: number;
-    status?: OrderQueueStatus | 'all';
-    /** 缺图待补（status 为 pending/missing 且 url 为空） */
-    missingOnly?: boolean;
-  }): Promise<ApiResult<{ rows: OrderQueueRow[]; total: number }>>;
-  /** 单行队列行（含 raw_fields）：补图等按需取，避免列表全量携带大字段 */
-  orderQueueGet(id: number): Promise<ApiResult<OrderQueueRow>>;
-  orderQueueNextPending(payload: {
-    batchNo: string;
-    afterId: number;
-    limit: number;
-  }): Promise<ApiResult<OrderQueueRow[]>>;
-  orderQueueSetResult(payload: {
-    id: number;
-    status: 'done' | 'error' | 'missing';
-    error?: string;
-  }): Promise<ApiResult<unknown>>;
-  orderQueuePatch(payload: {
-    id: number;
-    url: string;
-    rawFields: Record<string, string>;
-  }): Promise<ApiResult<unknown>>;
-  orderQueueRetryErrors(payload: { batchNo: string }): Promise<ApiResult<{ count: number }>>;
-  orderQueuePurgeDone(payload: { batchNo: string }): Promise<ApiResult<{ count: number }>>;
-  orderQueueLastActive(): Promise<ApiResult<{ batchNo: string; stats: OrderQueueStats } | null>>;
   // 款编码/款色（产品库主数据）
   orderStyleResolve(payload: {
     imageId: number;
@@ -265,7 +259,15 @@ export interface ElectronApi {
     styleId?: number;
     color: string;
     fingerprint?: string;
-  }): Promise<ApiResult<{ styleCode: string; styleColorCode: string; skuBackfill?: SkuBackfillOutcome }>>;
+  }): Promise<
+    ApiResult<{
+      styleCode: string;
+      styleColorCode: string;
+      skuBackfill?: SkuBackfillOutcome;
+      /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
+      colorAlias?: ColorAliasRemembered | null;
+    }>
+  >;
   // 修改款式展示名（款编码级）
   orderStyleRename(payload: {
     code: string;
@@ -287,31 +289,7 @@ export interface ElectronApi {
   orderReopenCorrected(ids: number[]): Promise<ApiResult<{ updated: number }>>;
   // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
   aeDbEnsure(): Promise<ApiResult<unknown>>;
-  aeOrderList(payload?: {
-    offset?: number;
-    limit?: number;
-    search?: string;
-  }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>>;
-  aeSummary(): Promise<ApiResult<AeSummary>>;
   aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>>;
-  // M1：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
-  aeProfitStats(payload?: {
-    granularity?: 'day' | 'month';
-    rangeDays?: number;
-  }): Promise<ApiResult<AeProfitOverview>>;
-  aeCostMapImport(payload: {
-    items: AeCostMapImportItem[];
-  }): Promise<ApiResult<{ replaced: number }>>;
-  aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>>;
-  /** P4 成本维护：手工录入 / 修改进价（`source='manual'`；缺省生效日 = 当天） */
-  aeCostMapUpsertManual(payload: {
-    items: ManualCostItemInput[];
-    effectiveFrom?: string;
-  }): Promise<ApiResult<{ written: number; skipped: number }>>;
-  /** P4 成本维护：删除手工进价区间（只删 `manual`） */
-  aeCostMapDeleteManual(payload: {
-    keys: { styleCode: string; effectiveFrom: string }[];
-  }): Promise<ApiResult<{ deleted: number }>>;
   settleImport(payload: { rows: unknown[] }): Promise<
     ApiResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
   >;
@@ -368,9 +346,8 @@ export interface ElectronApi {
   purchaseOrderCreate(payload: {
     supplierId: number;
     bizDate: string;
-    mode: 'detail' | 'package';
-    totalCents?: number;
     items?: PurchaseItem[];
+    /** 来源订单快照（从数据统计跳转生成时锁定店铺归属；缺省时主进程按缺口自动推导） */
     sources?: PurchaseSourceRow[];
   }): Promise<ApiResult<{ id: number }>>;
   purchaseOrderUpdate(payload: {
@@ -702,6 +679,253 @@ export interface ElectronApi {
   quitAndInstallUpdate(): Promise<ApiResult<void>>;
   /** 订阅更新事件（主进程→渲染层单向）；返回退订函数 */
   onUpdaterEvent(cb: (event: UpdaterEventPayload) => void): () => void;
+
+  openExternal(url: string): Promise<ApiResult<void>>;
+
+  orderParcelDetail(payload: { orderNo: string }): Promise<ApiResult<ParcelDetail>>;
+
+  orderParcelCounts(payload: { orderNos: string[] }): Promise<ApiResult<ParcelCountMap>>;
+
+  orderParcelTotals(payload: { orderNos: string[] }): Promise<ApiResult<ParcelTotalsMap>>;
+
+  orderParcelCreate(payload: {
+    orderNo: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 分；`null`/缺省 = 还不知道（不是 0） */
+    shipCents?: number | null;
+    /** 克；`null`/缺省 = 还不知道 */
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail & { id: number }>>;
+
+  orderParcelUpdate(payload: {
+    id: number;
+    orderNo?: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 只传要改的字段：`undefined` = 不改，`null` = 清成"还不知道" */
+    shipCents?: number | null;
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderParcelDelete(payload: { id: number; orderNo?: string }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderParcelSetLine(payload: {
+    parcelId: number;
+    orderItemId: number;
+    qty: number;
+    orderNo?: string;
+  }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderReplayMappings(payload?: { dryRun?: boolean }): Promise<
+    ApiResult<SkuMappingReplayStats>
+  >;
+
+  onAeItemsIngested(cb: (event: AeItemsIngestedEvent) => void): () => void;
+
+  purchaseTaken(): Promise<ApiResult<TakenRow[]>>;
+
+  purchaseOrderCoverage(): Promise<ApiResult<OrderCoveragePayload>>;
+
+  purchaseStyleColors(payload: {
+    styleCodes: string[];
+  }): Promise<ApiResult<{ [styleCode: string]: StyleColorOptionRow[] }>>;
+
+  styleColorRename(payload: {
+    productId: number;
+    styleCode: string;
+    from: string;
+    to: string;
+  }): Promise<
+    ApiResult<{ renamed: boolean; styleColorId?: number; reason?: string; colorAlias?: unknown }>
+  >;
+
+  ledgerDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+
+  ledgerEligibleShops(payload: { period: string }): Promise<ApiResult<LedgerEligibleShops>>;
+
+  ledgerCategoryList(payload?: {
+    kind?: LedgerKind;
+    includeArchived?: boolean;
+  }): Promise<ApiResult<LedgerCategoryRow[]>>;
+
+  ledgerCategoryUpsert(payload: {
+    id?: number;
+    kind?: LedgerKind;
+    name?: string;
+    sort?: number;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerRuleList(): Promise<ApiResult<LedgerRuleRow[]>>;
+
+  ledgerRuleUpsert(payload: {
+    id?: number;
+    name?: string;
+    basis?: LedgerBasis;
+    shopIds?: number[];
+    ratios?: number[];
+    note?: string;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerEntryList(payload?: LedgerEntryFilter): Promise<ApiResult<LedgerEntryRow[]>>;
+
+  ledgerEntryGet(payload: { id: number }): Promise<ApiResult<LedgerEntryDetail | null>>;
+
+  ledgerEntryUpsert(payload: LedgerEntryInput): Promise<ApiResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>>;
+
+  ledgerEntryVoid(payload: { id: number; reason: string }): Promise<ApiResult<{ id: number; voided: boolean }>>;
+
+  ledgerEntryRestore(payload: { id: number }): Promise<ApiResult<{ id: number; restored: boolean }>>;
+
+  ledgerEntriesVoid(payload: {
+    ids: number[];
+    reason: string;
+  }): Promise<ApiResult<{ voided: number; ids: number[] }>>;
+
+  ledgerSummary(payload?: {
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerSummary>>;
+
+  ledgerPartyList(payload?: {
+    includeArchived?: boolean;
+    keyword?: string;
+  }): Promise<ApiResult<LedgerPartyRow[]>>;
+
+  ledgerPartyUpsert(payload: {
+    id?: number;
+    name?: string;
+    kind?: LedgerPartyKind;
+    phone?: string;
+    note?: string;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerPartyMerge(payload: {
+    fromId: number;
+    toId: number;
+    note?: string;
+  }): Promise<ApiResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>>;
+
+  ledgerPartyLedger(payload?: {
+    includeArchived?: boolean;
+    partyId?: number;
+  }): Promise<ApiResult<LedgerPartyLedgerRow[]>>;
+
+  ledgerSettleCreate(payload: {
+    partyId: number;
+    settleDate: string;
+    direction: 'pay' | 'receive' | 'offset';
+    entryIds: number[];
+    method?: string;
+    note?: string;
+  }): Promise<
+    ApiResult<{ id: number; amountCents: number; entryCount: number; cashCents: number }>
+  >;
+
+  ledgerSettleList(payload?: { partyId?: number }): Promise<ApiResult<LedgerSettlementRow[]>>;
+
+  ledgerSettleVoid(payload: {
+    id: number;
+    reason: string;
+  }): Promise<ApiResult<{ id: number; voided: boolean }>>;
+
+  ledgerEntryRepatchPreview(payload: {
+    entryIds: number[];
+  }): Promise<ApiResult<LedgerRepatchPreview>>;
+
+  ledgerEntryRepatch(payload: {
+    entryIds: number[];
+    toPartyId: number;
+    mode: LedgerRepatchMode;
+    reason?: string;
+  }): Promise<ApiResult<LedgerRepatchResult>>;
+
+  ledgerShopBreakdown(payload: {
+    shopId: number;
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerShopBreakdown>>;
+
+  ledgerExportExcel(payload: LedgerExportInput): Promise<ApiResult<{ filePath: string; rows: number }>>;
+
+  ledgerNameResolve(payload: {
+    party?: string[];
+    category?: string[];
+    shop?: string[];
+  }): Promise<ApiResult<LedgerNameResolveResult>>;
+
+  ledgerEntryBatchCreate(payload: {
+    entries: LedgerImportEntryInput[];
+  }): Promise<
+    ApiResult<{
+      created: number;
+      ids: number[];
+      allocations: number;
+      /** 本批自动新建的相关人 / 科目名字（界面要如实说出"多出了哪些名字"） */
+      createdParties: string[];
+      createdCategories: string[];
+    }>
+  >;
+
+  ledgerImportTemplate(payload: {
+    sheets: LedgerTemplateSheetInput[];
+    defaultName: string;
+  }): Promise<ApiResult<{ filePath: string; sheets: number }>>;
+
+  toolAccountList(payload?: {
+    kind?: ToolAccountKind | '';
+  }): Promise<ApiResult<ToolAccountItem[]>>;
+
+  toolAccountUpsert(payload: ToolAccountUpsertInput): Promise<ApiResult<{ id: number }>>;
+
+  toolAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+
+  toolAccountReveal(payload: { id: number }): Promise<ApiResult<{ value: string }>>;
+
+  productCostSet(payload: {
+    code: string;
+    costCents: number;
+  }): Promise<ApiResult<{ found: boolean; updated: boolean }>>;
+
+  productPricedCodes(): Promise<ApiResult<{ codes: string[] }>>;
+
+  productNextCode(): Promise<ApiResult<{ code: string }>>;
+
+  productMoveSupplier(payload: ProductMoveSupplierInput): Promise<ApiResult<{ changed: boolean }>>;
+
+  shopItemsList(payload?: {
+    shopId?: number;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    onlyUnconfirmed?: boolean;
+    productId?: number;
+  }): Promise<ApiResult<{ rows: ShopItemRow[]; total: number }>>;
+
+  shopItemsSummary(): Promise<ApiResult<ShopItemSummaryRow[]>>;
+
+  shopItemsImport(payload: {
+    shopId?: number;
+    ids?: string[];
+  }): Promise<ApiResult<{ received: number; inserted: number; updated: number; skipped: number }>>;
+
+  shopItemImageFetch(payload: {
+    id: number;
+    productId?: number;
+    adoptMain?: boolean;
+    colors?: { color: string; imageUrl: string }[];
+  }): Promise<ApiResult<ShopItemImageFetchResult>>;
+
+  shopItemsDelete(payload: { id: number }): Promise<ApiResult<{ removed: boolean }>>;
+
 }
 
 export const ipc: ElectronApi = (window as unknown as { electronAPI: ElectronApi }).electronAPI;
@@ -757,65 +981,9 @@ export function aeDbEnsure(): Promise<ApiResult<unknown>> {
   return ipc.aeDbEnsure();
 }
 
-/** 订单明细列表（分页 + 单号/店铺关键字） */
-export function aeOrderList(payload?: {
-  offset?: number;
-  limit?: number;
-  search?: string;
-}): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>> {
-  return ipc.aeOrderList(payload);
-}
-
-/** 汇总（分币种，收入/费用分列） */
-export function aeSummary(): Promise<ApiResult<AeSummary>> {
-  return ipc.aeSummary();
-}
-
 /** 接收端运行状态（端口 / 最近入库 / 错误） */
 export function aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>> {
   return ipc.aeReceiverStatus();
-}
-
-// ---- M1：利润引擎 / 成本衔接 / 汇率（语义化查询） ----
-/** 利润总览（CNY 基准分层利润 + 趋势 + TOP + 费用构成 + 成本覆盖率） */
-export function aeProfitStats(payload?: {
-  granularity?: 'day' | 'month';
-  rangeDays?: number;
-}): Promise<ApiResult<AeProfitOverview>> {
-  return ipc.aeProfitStats(payload);
-}
-
-/** 成本快照全量替换（items 来自 purchaseCostSnapshot 只读导出） */
-export function aeCostMapImport(
-  items: AeCostMapImportItem[]
-): Promise<ApiResult<{ replaced: number }>> {
-  return ipc.aeCostMapImport({ items });
-}
-
-/** 成本表全量（成本管理面板） */
-export function aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>> {
-  return ipc.aeCostMapList();
-}
-
-/**
- * 手工录入 / 修改进价（P4：成本维护界面）。写入口径与产品导入的「进价」列**同一份**
- * （`electron/manual-costs.ts`）—— 两边都不会重复写"值没变"的区间行。
- */
-export function aeCostMapUpsertManual(payload: {
-  items: ManualCostItemInput[];
-  effectiveFrom?: string;
-}): Promise<ApiResult<{ written: number; skipped: number }>> {
-  return ipc.aeCostMapUpsertManual(payload);
-}
-
-/**
- * 删除手工进价区间（只删 `manual`）。
- * 删掉后该区间不再生效，读取侧回落到**更早的区间** —— 界面负责把这句话说给用户。
- */
-export function aeCostMapDeleteManual(payload: {
-  keys: { styleCode: string; effectiveFrom: string }[];
-}): Promise<ApiResult<{ deleted: number }>> {
-  return ipc.aeCostMapDeleteManual(payload);
 }
 
 /** 汇率全量 */
@@ -1510,6 +1678,8 @@ export function orderShippingRows(payload?: {
   source?: 'all' | 'import' | 'collect';
   /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
   importDate?: string;
+  /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库 */
+  period?: string;
 }): Promise<ApiResult<UnifiedOrderRow[]>> {
   return ipc.orderShippingRows(payload);
 }
@@ -1601,4 +1771,360 @@ export function pickingExportExcel(payload: {
   defaultName?: string;
 }): Promise<ApiResult<ExportExcelResult & { rows: number }>> {
   return ipc.pickingExportExcel(payload);
+}
+
+/** 按款编码 + 款色取图路径（归类核对页的模式选择器与拿货单共用） */
+export function purchaseStyleImages(payload: {
+  items: { styleCode: string; color: string; size?: string; styleColorId?: number }[];
+}): Promise<ApiResult<{ paths: (string | null)[] }>> {
+  return ipc.purchaseStyleImages(payload);
+}
+
+// ---- 补齐的新通道封装（2026-10-28 重建；签名由 types.ts ElectronAPI 生成）----
+export function openExternal(url: string): Promise<ApiResult<void>> {
+  return ipc.openExternal(url);
+}
+
+export function orderParcelDetail(orderNo: string): Promise<ApiResult<ParcelDetail>> {
+  return ipc.orderParcelDetail({ orderNo });
+}
+
+export function orderParcelCounts(orderNos: string[]): Promise<ApiResult<ParcelCountMap>> {
+  return ipc.orderParcelCounts({ orderNos });
+}
+
+export function orderParcelTotals(orderNos: string[]): Promise<ApiResult<ParcelTotalsMap>> {
+  return ipc.orderParcelTotals({ orderNos });
+}
+
+export function orderParcelCreate(payload: {
+    orderNo: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 分；`null`/缺省 = 还不知道（不是 0） */
+    shipCents?: number | null;
+    /** 克；`null`/缺省 = 还不知道 */
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail & { id: number }>> {
+  return ipc.orderParcelCreate(payload);
+}
+
+export function orderParcelUpdate(payload: {
+    id: number;
+    orderNo?: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 只传要改的字段：`undefined` = 不改，`null` = 清成"还不知道" */
+    shipCents?: number | null;
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelUpdate(payload);
+}
+
+export function orderParcelDelete(payload: { id: number; orderNo?: string }): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelDelete(payload);
+}
+
+export function orderParcelSetLine(payload: {
+    parcelId: number;
+    orderItemId: number;
+    qty: number;
+    orderNo?: string;
+  }): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelSetLine(payload);
+}
+
+export function orderReplayMappings(payload?: { dryRun?: boolean }): Promise<
+    ApiResult<SkuMappingReplayStats>
+  > {
+  return ipc.orderReplayMappings(payload);
+}
+
+export function onAeItemsIngested(cb: (event: AeItemsIngestedEvent) => void): () => void {
+  return ipc.onAeItemsIngested(cb);
+}
+
+export function purchaseTaken(): Promise<ApiResult<TakenRow[]>> {
+  return ipc.purchaseTaken();
+}
+
+export function purchaseOrderCoverage(): Promise<ApiResult<OrderCoveragePayload>> {
+  return ipc.purchaseOrderCoverage();
+}
+
+export function purchaseStyleColors(payload: {
+    styleCodes: string[];
+  }): Promise<ApiResult<{ [styleCode: string]: StyleColorOptionRow[] }>> {
+  return ipc.purchaseStyleColors(payload);
+}
+
+export function styleColorRename(payload: {
+    productId: number;
+    styleCode: string;
+    from: string;
+    to: string;
+  }): Promise<
+    ApiResult<{ renamed: boolean; styleColorId?: number; reason?: string; colorAlias?: unknown }>
+  > {
+  return ipc.styleColorRename(payload);
+}
+
+export function ledgerDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.ledgerDbEnsure();
+}
+
+export function ledgerEligibleShops(period: string): Promise<ApiResult<LedgerEligibleShops>> {
+  return ipc.ledgerEligibleShops({ period });
+}
+
+export function ledgerCategoryList(payload?: {
+    kind?: LedgerKind;
+    includeArchived?: boolean;
+  }): Promise<ApiResult<LedgerCategoryRow[]>> {
+  return ipc.ledgerCategoryList(payload);
+}
+
+export function ledgerCategoryUpsert(payload: {
+    id?: number;
+    kind?: LedgerKind;
+    name?: string;
+    sort?: number;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerCategoryUpsert(payload);
+}
+
+export function ledgerRuleList(): Promise<ApiResult<LedgerRuleRow[]>> {
+  return ipc.ledgerRuleList();
+}
+
+export function ledgerRuleUpsert(payload: {
+    id?: number;
+    name?: string;
+    basis?: LedgerBasis;
+    shopIds?: number[];
+    ratios?: number[];
+    note?: string;
+  }): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerRuleUpsert(payload);
+}
+
+export function ledgerEntryList(payload?: LedgerEntryFilter): Promise<ApiResult<LedgerEntryRow[]>> {
+  return ipc.ledgerEntryList(payload);
+}
+
+export function ledgerEntryGet(id: number): Promise<ApiResult<LedgerEntryDetail | null>> {
+  return ipc.ledgerEntryGet({ id });
+}
+
+export function ledgerEntryUpsert(payload: LedgerEntryInput): Promise<ApiResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>> {
+  return ipc.ledgerEntryUpsert(payload);
+}
+
+export function ledgerEntryVoid(id: number, reason: string): Promise<ApiResult<{ id: number; voided: boolean }>> {
+  return ipc.ledgerEntryVoid({ id, reason });
+}
+
+export function ledgerEntryRestore(id: number): Promise<ApiResult<{ id: number; restored: boolean }>> {
+  return ipc.ledgerEntryRestore({ id });
+}
+
+export function ledgerEntriesVoid(ids: number[], reason: string): Promise<ApiResult<{ voided: number; ids: number[] }>> {
+  return ipc.ledgerEntriesVoid({ ids, reason });
+}
+
+export function ledgerSummary(payload?: {
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerSummary>> {
+  return ipc.ledgerSummary(payload);
+}
+
+export function ledgerPartyList(payload?: {
+    includeArchived?: boolean;
+    keyword?: string;
+  }): Promise<ApiResult<LedgerPartyRow[]>> {
+  return ipc.ledgerPartyList(payload);
+}
+
+export function ledgerPartyUpsert(payload: {
+    id?: number;
+    name?: string;
+    kind?: LedgerPartyKind;
+    phone?: string;
+    note?: string;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerPartyUpsert(payload);
+}
+
+export function ledgerPartyMerge(payload: {
+    fromId: number;
+    toId: number;
+    note?: string;
+  }): Promise<ApiResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>> {
+  return ipc.ledgerPartyMerge(payload);
+}
+
+export function ledgerPartyLedger(payload?: {
+    includeArchived?: boolean;
+    partyId?: number;
+  }): Promise<ApiResult<LedgerPartyLedgerRow[]>> {
+  return ipc.ledgerPartyLedger(payload);
+}
+
+export function ledgerSettleCreate(payload: {
+    partyId: number;
+    settleDate: string;
+    direction: 'pay' | 'receive' | 'offset';
+    entryIds: number[];
+    method?: string;
+    note?: string;
+  }): Promise<
+    ApiResult<{ id: number; amountCents: number; entryCount: number; cashCents: number }>
+  > {
+  return ipc.ledgerSettleCreate(payload);
+}
+
+export function ledgerSettleList(payload?: { partyId?: number }): Promise<ApiResult<LedgerSettlementRow[]>> {
+  return ipc.ledgerSettleList(payload);
+}
+
+export function ledgerSettleVoid(id: number, reason: string): Promise<ApiResult<{ id: number; voided: boolean }>> {
+  return ipc.ledgerSettleVoid({ id, reason });
+}
+
+export function ledgerEntryRepatchPreview(payload: {
+    entryIds: number[];
+  }): Promise<ApiResult<LedgerRepatchPreview>> {
+  return ipc.ledgerEntryRepatchPreview(payload);
+}
+
+export function ledgerEntryRepatch(payload: {
+    entryIds: number[];
+    toPartyId: number;
+    mode: LedgerRepatchMode;
+    reason?: string;
+  }): Promise<ApiResult<LedgerRepatchResult>> {
+  return ipc.ledgerEntryRepatch(payload);
+}
+
+export function ledgerShopBreakdown(payload: {
+    shopId: number;
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerShopBreakdown>> {
+  return ipc.ledgerShopBreakdown(payload);
+}
+
+export function ledgerExportExcel(payload: LedgerExportInput): Promise<ApiResult<{ filePath: string; rows: number }>> {
+  return ipc.ledgerExportExcel(payload);
+}
+
+export function ledgerNameResolve(payload: {
+    party?: string[];
+    category?: string[];
+    shop?: string[];
+  }): Promise<ApiResult<LedgerNameResolveResult>> {
+  return ipc.ledgerNameResolve(payload);
+}
+
+export function ledgerEntryBatchCreate(payload: {
+    entries: LedgerImportEntryInput[];
+  }): Promise<
+    ApiResult<{
+      created: number;
+      ids: number[];
+      allocations: number;
+      /** 本批自动新建的相关人 / 科目名字（界面要如实说出"多出了哪些名字"） */
+      createdParties: string[];
+      createdCategories: string[];
+    }>
+  > {
+  return ipc.ledgerEntryBatchCreate(payload);
+}
+
+export function ledgerImportTemplate(payload: {
+    sheets: LedgerTemplateSheetInput[];
+    defaultName: string;
+  }): Promise<ApiResult<{ filePath: string; sheets: number }>> {
+  return ipc.ledgerImportTemplate(payload);
+}
+
+export function toolAccountList(payload?: {
+    kind?: ToolAccountKind | '';
+  }): Promise<ApiResult<ToolAccountItem[]>> {
+  return ipc.toolAccountList(payload);
+}
+
+export function toolAccountUpsert(payload: ToolAccountUpsertInput): Promise<ApiResult<{ id: number }>> {
+  return ipc.toolAccountUpsert(payload);
+}
+
+export function toolAccountDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.toolAccountDelete({ id });
+}
+
+export function toolAccountReveal(id: number): Promise<ApiResult<{ value: string }>> {
+  return ipc.toolAccountReveal({ id });
+}
+
+export function productCostSet(payload: {
+    code: string;
+    costCents: number;
+  }): Promise<ApiResult<{ found: boolean; updated: boolean }>> {
+  return ipc.productCostSet(payload);
+}
+
+export function productPricedCodes(): Promise<ApiResult<{ codes: string[] }>> {
+  return ipc.productPricedCodes();
+}
+
+export function productNextCode(): Promise<ApiResult<{ code: string }>> {
+  return ipc.productNextCode();
+}
+
+export function productMoveSupplier(payload: ProductMoveSupplierInput): Promise<ApiResult<{ changed: boolean }>> {
+  return ipc.productMoveSupplier(payload);
+}
+
+export function shopItemsList(payload?: {
+    shopId?: number;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    onlyUnconfirmed?: boolean;
+    productId?: number;
+  }): Promise<ApiResult<{ rows: ShopItemRow[]; total: number }>> {
+  return ipc.shopItemsList(payload);
+}
+
+export function shopItemsSummary(): Promise<ApiResult<ShopItemSummaryRow[]>> {
+  return ipc.shopItemsSummary();
+}
+
+export function shopItemsImport(payload: {
+    shopId?: number;
+    ids?: string[];
+  }): Promise<ApiResult<{ received: number; inserted: number; updated: number; skipped: number }>> {
+  return ipc.shopItemsImport(payload);
+}
+
+export function shopItemImageFetch(payload: {
+    id: number;
+    productId?: number;
+    adoptMain?: boolean;
+    colors?: { color: string; imageUrl: string }[];
+  }): Promise<ApiResult<ShopItemImageFetchResult>> {
+  return ipc.shopItemImageFetch(payload);
+}
+
+export function shopItemsDelete(payload: { id: number }): Promise<ApiResult<{ removed: boolean }>> {
+  return ipc.shopItemsDelete(payload);
 }

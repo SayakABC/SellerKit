@@ -33,8 +33,8 @@ const { registerMailBodyScheme, initMailBodyProtocol } = require('./mail-body-pr
 registerMailBodyScheme();
 // 自动更新 IPC（GitHub Releases：checkForUpdates / quitAndInstall + updater-event 广播）
 const updater = require('./updater');
-// 速卖通利润追踪：localhost 接收端（应用就绪后自启）+ 语义化查询 IPC（ae-db-ensure / ae-order-list / ae-summary / ae-receiver-status）
-require('./ae-receiver');
+// 速卖通订单采集：localhost 接收端（应用就绪后自启）+ 语义化查询 IPC（ae-db-ensure / ae-receiver-status / settle-* / ae-cost-map-* / ae-rate-*）
+const aeReceiver = require('./ae-receiver');
 require('./ae-handlers');
 // 店铺账号管家 IPC（账号元数据 CRUD + safeStorage 加密的密码字段）
 require('./shop-accounts-handlers');
@@ -42,18 +42,26 @@ require('./shop-accounts-handlers');
 require('./company-handlers');
 // 产品库 IPC（产品主数据 CRUD + 汇总；pl_products 属主数据层，随宿主分发 —— ADR-002 C3）
 require('./product-handlers');
-// 店铺实体 IPC（sk_shops / sk_name_map：店铺登记 + 三处历史店铺名的归一）
+// 店铺实体 IPC（sk_shops / sk_name_map：店铺登记 + 两处历史店铺名的归一）
 // 同属主数据层，随宿主分发 —— 历史文本不改写，靠映射旁挂关联（DOMAIN_INTEGRATION_PLAN S1/G2）
 require('./shop-handlers');
+// 店铺商品快照 IPC（采集而来的商品清单：列表 / 汇总；落 pl_shop_items，与 pl_shop_sku 认款写路径解耦）
+require('./shop-item-handlers');
 // 店铺商品清单 IPC（商品清单导入/列表/删除 + 商品↔产品一对多关联；表结构由 product-db 建，见 pl_shop_sku）
 require('./shop-product-handlers');
 // 运价表快照 IPC（报价单导入时留档 + 算账按生效日取当时那份；运价表属主数据，挂宿主中立层 —— ADR-002 C3）
 require('./ship-rate-handlers');
 // 拣货 IPC（未发货订单行投影：款色码 + 三层回落图 + 供应商；**只回投影，聚合与口径在渲染层纯函数**）
 require('./picking-handlers');
+// 记账 IPC（店铺收支 + 公共费用分摊 + 资金相关人往来结算；分摊算法只在 src/lib/ledger.ts，本域只做守恒断言）
+require('./ledger-handlers');
 // 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
 const mailEngine = require('./mail-engine');
 require('./mail-handlers');
+// schema 启动编排（顺序有依赖，见 app.whenReady 内的注释）：企业 → 店铺（含迁移）→ 邮件
+const { ensureCompanySchema } = require('./company-db') as typeof import('./company-db');
+const { ensureShopSchema } = require('./shop-db') as typeof import('./shop-db');
+const { ensureMailSchema } = require('./mail-db') as typeof import('./mail-db');
 // 「用户显式选择过的文件」白名单：收紧 read-file / save-template / check-file-exists 的路径权限（H-02）
 const { initApprovedUserFiles, approveUserFile, isUserFileAllowed, MAX_TEMPLATE_CHARS } =
   require('./user-file-allowlist') as typeof import('./user-file-allowlist');
@@ -199,8 +207,10 @@ function createWindow() {
   });
 
   // —— 禁止 window.open() / target="_blank" 真的开出新窗口 ——
-  // 新窗口会继承同样的 preload 与 IPC 暴露面。当前无任何正当用途，故一律拒绝；
-  // 将来若需外链，应走 shell.openExternal 的显式白名单，而不是让渲染进程自己开窗。
+  // 新窗口会继承同样的 preload 与 IPC 暴露面，故一律拒绝。
+  // 外链有专门的出口：`open-external` 通道（clipboard-handlers.ts，只放行 http/https，
+  // 优先 Chrome、用不了回落系统默认浏览器，见 browser-open.ts）。渲染层想开网页一律走它 —— 直接写
+  // `<a target="_blank">` 在这里被静默拒绝，表现为"点了没反应"（2026-10-16 店铺登记页「打开」就是这么坏的）。
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
@@ -217,6 +227,24 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await initStore();
+  // ① 企业表 + 支付宝列 → ② 店铺主迁移（会重建 sk_shops / sk_mail_accounts，并把旧账号的
+  // 手机号/支付宝并进企业）→ ③ 邮件表幂等收尾（FTS / 补列）。
+  // 各 handler 里仍有懒 ensure；这里只为保证「第一次 IPC 之前」跑完，且顺序不靠碰巧。
+  // 失败必须显式停下：带着半旧半新的库继续跑，会把「查不到数据」伪装成「没有数据」。
+  try {
+    ensureCompanySchema();
+    ensureShopSchema();
+    ensureMailSchema();
+  } catch (err: any) {
+    const detail = String(err?.message || err || '未知错误');
+    dialog.showErrorBox(
+      '数据升级未完成',
+      `应用已停止启动，你的原始数据没有被改动。\n\n请把下面这句话发给开发者：\n${detail}\n\n` +
+        '如果数据目录里出现以 .bak-shop-merge-v1- 开头的备份文件，说明升级前已自动备份，可交给开发者恢复。',
+    );
+    app.quit();
+    return;
+  }
   // 注册 sk-plugin:// 请求处理（先于窗口创建，保证 iframe 首次导航即可命中）
   initPluginUiProtocol();
   // 注册 sk-mail:// 请求处理：邮件正文（含内联/远程图片）的渲染入口
@@ -226,6 +254,8 @@ app.whenReady().then(async () => {
   updater.initUpdater(() => mainWindow);
   // 邮件同步进度广播（mail-sync-event）同样需要窗口引用
   mailEngine.setMailEventWindow(() => mainWindow);
+  // 采集入库广播（ae-items-ingested）：扩展推帧落库后，已打开的页面据此重拉
+  aeReceiver.setAeEventWindow(() => mainWindow);
 });
 
 app.on('window-all-closed', () => {

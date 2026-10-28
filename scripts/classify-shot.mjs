@@ -275,6 +275,30 @@ await waitPage(`(function(){
 })()`, 8000, '切回待核对').catch(() => {});
 await sleep(300);
 
+// 阶段 4：归属款选择器（2026-10-28 起取代原生下拉）—— 左栏订单图 + 带图款列表 + 色卡。
+// 为什么必须留一张：它是这一步**唯一**的判断动线（"拿这张订单图去挑款"），
+// 而"图够不够大 / 列表挤不挤 / 色卡能不能看清"这些问题，DOM 断言一条都答不了。
+await evaluate(`(function(){ var b = document.querySelector('[data-act="cl-style-42"]'); if (b) b.click(); return !!b; })()`);
+await waitPage(`!!document.querySelector('[data-act="sp-list"]')`, 8000, '打开归属款选择器')
+  .catch(() => console.log('⚠ 归属款选择器没打开（截图继续）'));
+await sleep(600);
+await shot(`${tag}picker-${W}x${H}`);
+await evaluate(`(function(){ var b = document.querySelector('[data-act="sp-cancel"]'); if (b) b.click(); return !!b; })()`);
+await sleep(200);
+
+// 阶段 5/6：批量（2026-10-28）—— 勾选列 + 吸底动作条 + 批量定款弹层。
+// 为什么也要留图：批量这一层全是**版面**问题（勾选列会不会把图列挤窄、"已选 N 行"在
+// 1440 宽的窗口里会不会把按钮挤成两行、分组卡片在一组/多组两种形态下是否都成立），
+// DOM 断言只能答"元素在不在"，答不了"看不看得清、挤不挤"。
+await evaluate(`(function(){ var b = document.querySelector('[data-act="cl-select-all"]'); if (b) b.click(); return !!b; })()`);
+await sleep(350);
+await shot(`${tag}bulk-bar-${W}x${H}`);
+await evaluate(`(function(){ var b = document.querySelector('[data-act="cl-bulk-style"]'); if (b) b.click(); return !!b; })()`);
+await waitPage(`!!document.querySelector('[data-act="bp-mask"]')`, 8000, '打开批量定款')
+  .catch(() => console.log('⚠ 批量定款没打开（截图继续）'));
+await sleep(700);
+await shot(`${tag}bulk-picker-${W}x${H}`);
+
 if (process.env.PROBE === '1') {
   const probe = await evaluate(`(function(){
     function info(sel) {

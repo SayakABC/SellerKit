@@ -69,7 +69,7 @@ interface ColorSchemeDecl {
 
 /**
  * 递归收集目录下的 .css / .vue 文件。
- * 刻意**不跳过 dist/**：无构建步骤的岛（excel-copy / shipping-rate）源码就在
+ * 刻意**不跳过 dist/**：无构建步骤的岛（excel-copy；shipping-rate 已于 2026-10-15 回收为内建）源码就在
  * dist/ 下，跳过等于完全不检查它们；构建型岛的 dist 会与 src 重复扫描一份，代价可接受。
  * （原三例中的 order-insight 已于 2026-10-05 整体下架 —— 但这条规则要留着，
  *   它约束的是"手写岛"这一类，不是某一个岛。）

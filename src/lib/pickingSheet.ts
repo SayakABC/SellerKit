@@ -22,6 +22,18 @@ export function money(n: number): string {
 }
 
 /**
+ * 分 → 两位小数（拿货单的金额按**分**存：`PurchaseOrder.totalCents`）。
+ *
+ * 与 `money` 的分工：那个吃**元**（拣货清单口径：进价 × 件数累加出来的是元），这个吃**分**
+ * （单据口径：单子落库就是分）。两个单位域不同源，混用会出现「¥50000.00」这种把分当成元的错 ——
+ * 2026-10-17 合并视图实测踩到（灰条与"已开单"行两处），故单列一个函数并各自注释单位。
+ */
+export function centsMoney(cents: unknown): string {
+  const n = Number(cents);
+  return ((Number.isFinite(n) ? n : 0) / 100).toFixed(2);
+}
+
+/**
  * 「合计金额」怎么显示 —— 与 `noPriceNote` 是一对，凡是并列展示金额的地方都走这两个函数。
  * ⚠️ 一件价都没查到（缺价件数 ≥ 总件数）时**不写 `¥0.00`**：0 有两种含义
  * （"真的不要钱" / "没查到价"），写 0 会让"估算偏低"和"真的很便宜"长得一模一样。
@@ -41,9 +53,13 @@ export function noPriceNote(noPricePieces: number, pieces: number): string {
 
 /** 发厂清单图的一行（款色粒度，与卡片同一层折叠） */
 export interface SheetLine {
-  /** 款色键，如 `S1 · 黑` */
+  /** 款色键，如 `S1 · 黑`（**内部身份/排序用**；对外文案一律走 `label` —— 款编码不外发） */
   key: string;
+  /** 对外展示名：`款名 · 颜色`（缺款名只写颜色；两者都缺 = 未识别款）。款编码**不进**这里 */
+  label: string;
   styleName: string;
+  /** 颜色（图上与款名并排；缺名时它已在 label 里） */
+  color: string;
   /** 本地图片路径（渲染时由 `imageOf` 换成 dataUrl —— 模型不持有图片字节） */
   localPath: string;
   /** 「L×2  XL×1」= 各码**还要拿**的件数（`sizeQtyBadge` 与 xlsx 烧进图的角标同一实现） */
@@ -80,7 +96,9 @@ export function sheetModelOf(
   const t = pendingRollup(rows);
   const lines: SheetLine[] = rows.map((r) => ({
     key: r.key,
+    label: [r.styleName, r.color].filter(Boolean).join(' · ') || '未识别款',
     styleName: r.styleName,
+    color: r.color,
     localPath: r.imagePath,
     sizesText: r.sizes
       .filter((s) => s.remaining > 0)
@@ -96,6 +114,24 @@ export function sheetModelOf(
     lines,
     footer: `共 ${t.colors} 款色 · ${t.pieces} 件 · 预估 ${amountText(t.amount, t.noPricePieces, t.pieces)}${noPriceNote(t.noPricePieces, t.pieces)}`,
   };
+}
+
+/**
+ * 把发厂清单模型转成**纯文本**（「复制拿货清单」→ 粘进微信直接发给厂家）。
+ *
+ * 为什么图之外还要一份文字（2026-10-17 合并视图）：清单图信息全，但微信里对方常要
+ * **复制文字转发 / 存备忘录**；纯文字粘过去不丢结构（一行一款色），格式：
+ * 厂家名 + 日期（标题行）→ 每行「款名 · 颜色：尺码×件数 · 合计件数」→ 合计行。
+ * 数字一律来自 `sheetModelOf`（与屏上、清单图、xlsx 同一个模型）—— 再算一遍就会出现
+ * "复制出去的数与屏幕上不一样"这种查不出的悬案。
+ */
+export function sheetTextOf(model: SheetModel): string {
+  const out = [model.title];
+  for (const l of model.lines) {
+    out.push(`${l.label}：${l.sizesText} · ${l.pieces} 件`);
+  }
+  out.push(model.footer);
+  return out.join('\n');
 }
 
 // ─────────────────────────────── 画布渲染（浏览器实现） ───────────────────────────────
@@ -191,17 +227,14 @@ export async function renderSheetPng(
 
       await drawSheetImage(ctx, imageOf(ln.localPath), SHEET_PAD, y + (SHEET_ROW - SHEET_IMG) / 2);
 
-      // 左：款色（主） + 款名/尺码（次）
+      // 左：款名·颜色（主） + 尺码×件数（次）。⚠️ 款编码是内部身份（`key`），**不画进图** ——
+      // 这张图直接发给厂家，对外文案一律走 `label`。
       ctx.fillStyle = '#111111';
       ctx.font = `600 16px ${SHEET_FONT}`;
-      ctx.fillText(ln.key, SHEET_PAD + SHEET_IMG + 16, y + 34);
+      ctx.fillText(ln.label, SHEET_PAD + SHEET_IMG + 16, y + 34);
       ctx.fillStyle = '#444444';
       ctx.font = `14px ${SHEET_FONT}`;
-      ctx.fillText(
-        [ln.styleName, ln.sizesText].filter(Boolean).join(' · '),
-        SHEET_PAD + SHEET_IMG + 16,
-        y + 64,
-      );
+      ctx.fillText(ln.sizesText, SHEET_PAD + SHEET_IMG + 16, y + 64);
 
       // 右：小计（主） + 件数/单价（次）—— 右对齐在留白侧，扫一眼就能对到行
       ctx.textAlign = 'right';

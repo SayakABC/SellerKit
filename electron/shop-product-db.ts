@@ -58,7 +58,9 @@ function productLabelMap(): Map<number, { code: string; name: string }> {
  * `sk_shops.id` → (名称, 平台)；店铺域未初始化时返回空表（降级而非报错）。
  *
  * 店铺名是**展示列**，不进 `pl_shop_sku`：ADR-002 C2「关联用 ID，不用名字」——
- * 存文本快照会让改名后的历史行指着旧名，且与三处历史店铺文本的归一链分叉。
+ * 存文本快照会让改名后的历史行指着旧名，且与**两处**历史店铺文本
+ * （`oi_orders.shop` / `purchase_sources.shop`）的归一链分叉。
+ * （原来是三处，`ae_orders.shop_name` 已随弃表删除 —— 见 `docs/notes/2026-10-15-table-necessity-review.md`）
  */
 function shopLabelMap(): Map<number, { name: string; platform: string }> {
   const m = new Map<number, { name: string; platform: string }>();

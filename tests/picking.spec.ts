@@ -19,7 +19,7 @@ import {
   type PickingGroup,
   type PickingRow,
 } from '../src/lib/picking';
-import { settleQtyKey, skuKey, type CostInterval } from '../src/lib/orderCost';
+import { settleQtyKey, skuKey } from '../src/lib/orderCost';
 
 const infoBlock = (qty: number) => `【1】 某款 (产品属性:Color:黑、Size:L)\n(商品数量:${qty} piece)`;
 
@@ -32,6 +32,8 @@ function row(over: Partial<PickingRow> = {}): PickingRow {
     styleCode: 'S1',
     styleName: '', // 默认空（识别链降级时整组都可能为空）；款名口径由专门用例给
     styleColor: '红',
+    // 默认 0 = 老订单（无款色身份）⇒ 已拿按文本兜底；身份匹配的用例显式给 id
+    styleColorId: 0,
     color: '黑',
     size: 'L',
     itemId: 'ITEM1',
@@ -40,6 +42,11 @@ function row(over: Partial<PickingRow> = {}): PickingRow {
     imagePath: '/tmp/a.jpg',
     shipped: false,
     bizStatus: '等待发货',
+    // 成本三档默认全空（这样"取不到价"的用例不用一个个显式清空）；
+    // 成本相关用例按需给 `costCents` / `actualCostCents` / `productCostCents`。
+    actualCostCents: null,
+    costCents: null,
+    productCostCents: null,
     rawFields: { 商品信息: infoBlock(1) },
     ...over,
   };
@@ -277,23 +284,17 @@ describe('aggregatePicking：范围（未发货 · 近 30 天）', () => {
   });
 });
 
-// S3（2026-10-05）：进价 / 预估金额 + 按厂家分组。
+// S3（2026-10-05）/ C2（2026-10-21）：进价三档 + 预估金额 + 按厂家分组。
 //
 // 钉住的仍是**口径**：
-//   · 单价必须来自 `orderCost.pickUnitCost`（与「算钱」页同一份实现）——按**该行的下单日期**取当时生效的区间；
-//   · 金额 = Σ(件数 × 单价)，**逐行**累加（不是"件数合计 × 某一价"）——同款跨成本区间时后者会挑错价；
+//   · 单价按**行**取，三档次序 **实际进价 > 进价预估 > 产品当前价**（0/空一律当"没有"）；
+//     拣货是"要花多少钱"的经营估算，所以比利润页多一档产品当前价（利润页只认行上两个快照）；
+//   · 金额 = Σ(件数 × 单价)，**逐行**累加（不是"件数合计 × 某一价"）；
 //   · 取不到价 → 该行**不计入金额**并累到件数（`noPricePieces`），**绝不按 0 算**
 //     （按 0 算会让"估算偏低"和"真的便宜"长得一模一样，是查不出来的错）；
 //   · 按厂家分组：有厂家的在前（件数降序）、未指定的整组排最后；组里引用的是**同一个 group 对象**。
-const cost = (styleCode: string, effectiveFrom: string, unitPrice: number, source = 'purchase'): CostInterval => ({
-  styleCode,
-  effectiveFrom,
-  unitPrice,
-  source,
-});
-
 describe('aggregatePicking：进价与预估金额', () => {
-  it('取不到成本 → 单价 null、金额 0、件数进"无进价"（**不按 0 算**）', () => {
+  it('三档都没有 → 单价 null、金额 0、件数进"无进价"（**不按 0 算**）', () => {
     const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })]);
     expect(s.groups[0].unitPrice).toBeNull();
     expect(s.groups[0].amount).toBe(0);
@@ -304,11 +305,13 @@ describe('aggregatePicking：进价与预估金额', () => {
     expect(s.noPriceGroups).toBe(1);
   });
 
-  it('有成本 → 单价取当时生效的那条，金额 = 件数 × 单价', () => {
-    const s = aggregatePicking([row({ orderTime: '2026-09-20 10:00:00', rawFields: { 商品信息: infoBlock(3) } })], {
-      today: '2026-09-29',
-      costs: [cost('S1', '2026-09-01', 12.5)],
-    });
+  it('进价取行上的预估：金额 = 件数 × 单价', () => {
+    const s = aggregatePicking(
+      [
+        row({ orderTime: '2026-09-20 10:00:00', costCents: 1250, rawFields: { 商品信息: infoBlock(3) } }),
+      ],
+      { today: '2026-09-29' },
+    );
     const g = s.groups[0];
     expect(g.unitPrice).toBe(12.5);
     expect(g.amount).toBe(37.5); // 3 × 12.5
@@ -317,15 +320,38 @@ describe('aggregatePicking：进价与预估金额', () => {
     expect(s.amount).toBe(37.5);
   });
 
-  it('同款跨成本生效区间 → **逐行**取价后相加（不是"件数合计 × 一个价"）', () => {
-    // 9-10 的单价 10 元，9-20 的单价 12 元；两组各 2 件 → 20 + 24 = 44（若按均价或按最新价都不是 44）
-    const s = aggregatePicking(
-      [
-        row({ id: 1, orderNo: 'O1', orderTime: '2026-09-10 10:00:00', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 2, orderNo: 'O2', orderTime: '2026-09-20 10:00:00', rawFields: { 商品信息: infoBlock(2) } }),
-      ],
-      { today: '2026-09-29', costs: [cost('S1', '2026-09-01', 10), cost('S1', '2026-09-15', 12)] },
-    );
+  it('三档次序：实际进价 > 进价预估 > 产品当前价（三档都有 → 实际赢）', () => {
+    const s = aggregatePicking([
+      row({ actualCostCents: 2000, costCents: 1500, productCostCents: 900 }),
+    ]);
+    expect(s.groups[0].unitPrice).toBe(20);
+    expect(s.groups[0].noPricePieces).toBe(0);
+  });
+
+  it('没有实际进价 → 用预估（不被产品当前价顶掉）', () => {
+    const s = aggregatePicking([row({ costCents: 1500, productCostCents: 900 })]);
+    expect(s.groups[0].unitPrice).toBe(15);
+  });
+
+  it('行上两档都空 → 回落产品当前价（还没钉过预估的老行）', () => {
+    const s = aggregatePicking([row({ productCostCents: 900 })]);
+    expect(s.groups[0].unitPrice).toBe(9);
+    expect(s.groups[0].noPricePieces).toBe(0);
+  });
+
+  it('0 不算有值：实际 0 → 用预估；预估 0 → 用产品价（0 不是"免费"）', () => {
+    const a = aggregatePicking([row({ actualCostCents: 0, costCents: 1500, productCostCents: 900 })]);
+    expect(a.groups[0].unitPrice).toBe(15);
+    const b = aggregatePicking([row({ actualCostCents: 0, costCents: 0, productCostCents: 900 })]);
+    expect(b.groups[0].unitPrice).toBe(9);
+  });
+
+  it('同款不同行的价可以不同 → **逐行**取价后相加（不是"件数合计 × 一个价"）', () => {
+    // 两行各 2 件：一行 10 元、一行 12 元 → 20 + 24 = 44（按均价或按最新价都不是 44）
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+      row({ id: 2, orderNo: 'O2', costCents: 1200, rawFields: { 商品信息: infoBlock(2) } }),
+    ]);
     const g = s.groups[0];
     expect(g.pieces).toBe(4);
     expect(g.amount).toBe(44);
@@ -335,11 +361,11 @@ describe('aggregatePicking：进价与预估金额', () => {
   it('未被拣的行（关闭单 / 超窗）不进金额 —— 与件数同口径，否则"金额"和"件数"对不上', () => {
     const s = aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', orderTime: '2026-09-25 10:00:00', rawFields: { 商品信息: infoBlock(1) } }),
-        row({ id: 2, orderNo: 'O2', orderTime: '2026-09-25 10:00:00', bizStatus: '订单关闭', rawFields: { 商品信息: infoBlock(1) } }),
-        row({ id: 3, orderNo: 'O3', orderTime: '2026-07-01 10:00:00', rawFields: { 商品信息: infoBlock(1) } }),
+        row({ id: 1, orderNo: 'O1', orderTime: '2026-09-25 10:00:00', costCents: 1000, rawFields: { 商品信息: infoBlock(1) } }),
+        row({ id: 2, orderNo: 'O2', orderTime: '2026-09-25 10:00:00', bizStatus: '订单关闭', costCents: 1000, rawFields: { 商品信息: infoBlock(1) } }),
+        row({ id: 3, orderNo: 'O3', orderTime: '2026-07-01 10:00:00', costCents: 1000, rawFields: { 商品信息: infoBlock(1) } }),
       ],
-      { today: '2026-09-29', costs: [cost('S1', '2026-09-01', 10)] },
+      { today: '2026-09-29' },
     );
     expect(s.groups).toHaveLength(1);
     expect(s.groups[0].pieces).toBe(1);
@@ -347,23 +373,18 @@ describe('aggregatePicking：进价与预估金额', () => {
     expect(s.noPricePieces).toBe(0); // 被剔除的行**不该**被算成"无进价"
   });
 
-  it('未识别款（款编码为空）→ 取不到价，标"无进价"', () => {
-    const s = aggregatePicking([row({ styleCode: '', rawFields: { 商品信息: infoBlock(2) } })], {
-      costs: [cost('S1', '2026-09-01', 10)],
-    });
-    expect(s.groups[0].unitPrice).toBeNull();
-    expect(s.noPricePieces).toBe(2);
-    expect(s.noPriceGroups).toBe(1);
+  it('未识别款但行上有价 → 仍有价（价钉在行上，不看款识别）', () => {
+    const s = aggregatePicking([row({ styleCode: '', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } })]);
+    expect(s.groups[0].unitPrice).toBe(10);
+    expect(s.groups[0].noPricePieces).toBe(0);
+    expect(s.noPriceGroups).toBe(0);
   });
 
-  it('混合：一款有价一款无价 → 金额只含有价那款，缺价件数照报', () => {
-    const s = aggregatePicking(
-      [
-        row({ id: 1, orderNo: 'O1', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 2, orderNo: 'O2', styleCode: 'S2', color: '白', rawFields: { 商品信息: infoBlock(5) } }),
-      ],
-      { costs: [cost('S1', '2026-01-01', 10)] },
-    );
+  it('混合：一行有价一行无价 → 金额只含有价那行，缺价件数照报', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+      row({ id: 2, orderNo: 'O2', styleCode: 'S2', color: '白', rawFields: { 商品信息: infoBlock(5) } }),
+    ]);
     expect(s.amount).toBe(20); // 只含 S1 的 2 件
     expect(s.noPricePieces).toBe(5); // S2 的 5 件没价
     expect(s.noPriceGroups).toBe(1);
@@ -392,11 +413,10 @@ describe('aggregatePicking：按厂家分组', () => {
   it('分组的件数/金额/缺价件数合计 = 明细的合计（对不上就是分组的账算错了）', () => {
     const s = aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', supplierId: 7, supplierName: '厂A', rawFields: { 商品信息: infoBlock(2) } }),
-        row({ id: 2, orderNo: 'O2', supplierId: 7, supplierName: '厂A', color: '白', rawFields: { 商品信息: infoBlock(3) } }),
-        row({ id: 3, orderNo: 'O3', supplierId: 0, supplierName: '', styleCode: 'S2', rawFields: { 商品信息: infoBlock(5) } }),
+        row({ id: 1, orderNo: 'O1', supplierId: 7, supplierName: '厂A', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 2, orderNo: 'O2', supplierId: 7, supplierName: '厂A', color: '白', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 3, orderNo: 'O3', supplierId: 0, supplierName: '', styleCode: 'S2', costCents: 200, rawFields: { 商品信息: infoBlock(5) } }),
       ],
-      { costs: [cost('S1', '2026-01-01', 10), cost('S2', '2026-01-01', 2)] },
     );
     const sum = (k: 'pieces' | 'rows' | 'amount' | 'noPricePieces') =>
       s.suppliers.reduce((n, x) => n + x[k], 0);
@@ -492,6 +512,54 @@ describe('aggregatePicking：已拿 / 还差 / 已忽略', () => {
     expect(s.remainingGroups).toBe(0);
   });
 
+  // ⚠️ 2026-10-20 用户实报"已提交的拿货单在清单上全是待拿"：根因是拿**色名**当匹配键，
+  //    而色名被归色改写（`未分类` → `10`）。下面三条钉住"身份优先、文本兜底、互不双算"。
+  it('身份优先：色名改过（款色 id 相同）仍然算已拿 —— 拿色名当键的实现在这里必红', () => {
+    // 订单行：色行 id=12、当前色名 '10'；拿货明细记的是同一 id（开单时写下的身份）
+    const s = aggregatePicking([row({ styleColorId: 12, color: '10' })], { taken: { '#12|L': 3 } });
+    expect(s.groups[0].taken).toBe(3);
+    expect(s.groups[0].remaining).toBe(0);
+  });
+
+  it('文本兜底：老明细（id=0）按「款|色|码」仍能匹配上 —— 只看 id 的实现在这里必红', () => {
+    const s = aggregatePicking([row({ styleColorId: 12, color: '10' })], { taken: { 'S1|10|L': 2 } });
+    expect(s.groups[0].taken).toBe(2);
+  });
+
+  it('身份与文本**不双算**：两拨不同单据行才相加（同一行被两边命中就会漏货）', () => {
+    // 一个 id 键 2 件 + 一条老文本明细 3 件 = 5 件已拿（是两拨行，合计才对）
+    const s = aggregatePicking([row({ styleColorId: 12, color: '10', rawFields: { 商品信息: infoBlock(6) } })], {
+      taken: { '#12|L': 2, 'S1|10|L': 3 },
+    });
+    expect(s.groups[0].taken).toBe(5);
+    expect(s.groups[0].remaining).toBe(1);
+    // 未归类（id=0）的行只走文本键：id 键那 2 件不属于它
+    const u = aggregatePicking([row({ styleColorId: 0, color: '10' })], { taken: { '#12|L': 2 } });
+    expect(u.groups[0].taken).toBe(0);
+  });
+
+  it('未归类行按**商品ID** 聚合成 `unclassifiedItems`（件数照收，但要让界面能标出来并给修复入口）', () => {
+    const s = aggregatePicking([
+      // 同一个商品的两行（不同尺码）→ 合成一条，件数相加
+      row({ id: 1, orderNo: 'O1', itemId: 'ITEM9', styleCode: '', styleColorId: 0, color: 'Picture color', size: 'L' }),
+      row({ id: 2, orderNo: 'O2', itemId: 'ITEM9', styleCode: '', styleColorId: 0, color: 'Picture color', size: 'XL', rawFields: { 商品信息: infoBlock(2) } }),
+      // 另一个商品、另一家店
+      row({ id: 3, orderNo: 'O3', itemId: 'ITEM8', shop: '店B', styleCode: '', styleColorId: 0, size: 'M' }),
+      // 已归类的行不进这张表
+      row({ id: 4, orderNo: 'O4', itemId: 'ITEM7', styleColorId: 33 }),
+    ]);
+    expect(s.unclassifiedItems.map((x) => [x.itemId, x.pieces, x.rows])).toEqual([
+      ['ITEM9', 3, 2], // 1 + 2 件
+      ['ITEM8', 1, 1],
+    ]);
+    expect(s.unclassifiedItems[0].shops).toEqual(['店A']);
+    expect(s.unclassifiedItems[1].shops).toEqual(['店B']);
+    // 未归类照样进总件数（"漏货比脏数据贵"）：3 + 1，加上已归类的 1 件 = 5
+    expect(s.pieces).toBe(5);
+    // 没有未归类行时是空数组（不是 undefined —— 界面 `v-if` 才能直接判长度）
+    expect(aggregatePicking([row({ styleColorId: 33 })]).unclassifiedItems).toEqual([]);
+  });
+
   it('忽略按**款色**整组生效：同款同色的所有尺码一起被忽略', () => {
     const s = aggregatePicking(
       [
@@ -530,9 +598,8 @@ describe('aggregatePicking：已拿 / 还差 / 已忽略', () => {
   });
 
   it('已拿不影响件数 / 金额 / 缺价件数（金额是"这批货值多少"，不是"还剩多少没拿"）', () => {
-    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], {
+    const s = aggregatePicking([row({ costCents: 1000, rawFields: { 商品信息: infoBlock(3) } })], {
       taken: { 'S1|黑|L': 2 },
-      costs: [cost('S1', '2026-01-01', 10)],
     });
     expect(s.groups[0].pieces).toBe(3);
     expect(s.groups[0].amount).toBe(30);
@@ -626,6 +693,18 @@ describe('groupByColor：款色折叠', () => {
     expect(groupByColor(s.groups)[0].orders).toBe(1);
   });
 
+  it('orderNos：各码订单号的并集、升序去重（界面"涉及 N 个订单"展开后列的就是它）', () => {
+    const s = aggregatePicking([
+      row({ id: 1, orderNo: 'O2', size: 'L' }),
+      row({ id: 2, orderNo: 'O1', size: 'M' }),
+      row({ id: 3, orderNo: 'O1', size: 'M' }), // 同单同码再来一行 → 仍是一个号
+      row({ id: 4, orderNo: 'O3', size: 'L' }),
+    ]);
+    const r = groupByColor(s.groups)[0];
+    expect(r.orderNos).toEqual(['O1', 'O2', 'O3']);
+    expect(r.orders).toBe(3); // 两个数必须一致（一个是另一个的长度，分叉就是有一处算错了）
+  });
+
   it('缺口逐码求和（折叠不丢"缺"）；忽略整款色一致', () => {
     const s = aggregatePicking(
       [
@@ -642,14 +721,14 @@ describe('groupByColor：款色折叠', () => {
   });
 
   it('进价 = 有价需求件的加权均价；还差金额**只含有价的还差件**，缺价件另报（不按 0 蒙）', () => {
-    // 同款两码落在不同成本区间（L 走 1 月那条 10 元、M 走 6 月那条 12 元）——
+    // 同款两码的价可以不同（一行钉了 10 元、一行钉了 12 元）——
     // 这也是"同一款色的各码单价可以不同"的真实来源。
     const s = aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', size: 'L', orderTime: '2026-02-01', rawFields: { 商品信息: infoBlock(3) } }),
-        row({ id: 2, orderNo: 'O2', size: 'M', orderTime: '2026-07-01', rawFields: { 商品信息: infoBlock(2) } }),
+        row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1200, rawFields: { 商品信息: infoBlock(2) } }),
       ],
-      { days: 0, costs: [cost('S1', '2026-01-01', 10), cost('S1', '2026-06-01', 12)], taken: { 'S1|黑|L': 1 } },
+      { days: 0, taken: { 'S1|黑|L': 1 } },
     );
     const r = groupByColor(s.groups)[0];
     expect(r.unitPrice).toBe(10.8); // (3×10 + 2×12) / 5
@@ -658,7 +737,7 @@ describe('groupByColor：款色折叠', () => {
   });
 
   it('一件价都没有 → unitPrice null、还差金额 0 且件数全进 pendingNoPricePieces（0 元 ≠ 不知道多少钱）', () => {
-    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })], { costs: null });
+    const s = aggregatePicking([row({ rawFields: { 商品信息: infoBlock(3) } })]);
     const r = groupByColor(s.groups)[0];
     expect(r.unitPrice).toBeNull();
     expect(r.pendingAmount).toBe(0);
@@ -718,10 +797,10 @@ describe('pendingOf / pendingRollup：待拿口径（按钮件数与开单明细
   it('款色合计：款色数 / 件数 / 预估金额（只含有价的还差件）/ 缺价件数', () => {
     const s = aggregatePicking(
       [
-        row({ id: 1, orderNo: 'O1', size: 'L', rawFields: { 商品信息: infoBlock(3) } }),
+        row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
         row({ id: 2, orderNo: 'O2', styleCode: 'S2', color: '白', rawFields: { 商品信息: infoBlock(4) } }),
       ],
-      { costs: [cost('S1', '2026-01-01', 10)], taken: { 'S1|黑|L': 1 }, ignored: new Set(['S1|黑']) },
+      { taken: { 'S1|黑|L': 1 }, ignored: new Set(['S1|黑']) },
     );
     const rows = groupByColor(s.groups);
     // S1 被忽略 → 整行不进；S2 无价 → 件数照报、金额不含它

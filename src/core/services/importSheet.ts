@@ -9,7 +9,7 @@
 //   · 结算明细 → `ae_settle_lines`（算钱页的"精准轨"数据源）
 //   · 报价单   → 宿主运价表快照（算账按生效日取"当时那份"）
 //   · 订单报表 → 订单主干 `oi_orders`（多产品拆行；报表自带店铺名/主图链接时一并落店铺、下主图）
-//   · 「商品信息」表**不再是可导入类型**（克重是 SKU 属性，改在「货与成本」按 SKU 维护）
+//   · 「商品信息」表**不再是可导入类型**（克重是 SKU 属性，改在「基础数据 › 货品档案」按 SKU 维护）
 // 订单报表的**识别队列**（AI 款式识别、缺图补链接）仍在「订单归类」岛 —— 那是"识别"不是"导入"，
 // 本服务只负责把订单**落对表**（需要 AI 归类时由用户另装岛，入口在两处都已指路）。
 
@@ -287,13 +287,21 @@ export interface ImportNextStep {
   label: string;
   /**
    * 目标模块 id —— **必须是 `modules.config.json` 里 enabledModules 的成员**（写错 = 按钮点了没反应）。
-   * 与 `tab` **二选一**：目标在「发货台」页里就写 `tab`，真跳别的模块（如「货与成本」）才写它。
+   * 与 `tab` **二选一**：目标在「发货台」页里就写 `tab`，真跳别的模块（如 `shop-accounts`）才写它。
    */
   moduleId?: string;
   /**
-   * 目标是「发货台」页里的哪个页签（`flowCtx.SHIPPING_TAB_NAMES` 的**键**：`classify` / `purchase` / `cost`…）。
+   * 目标模块里的**哪一屏**（该模块自己消费的 `action`，如 `shop-accounts` 的 `goods` ⇒ 货品档案）。
+   * 2026-10-17 新增：目标不再是"一个模块 = 一个页面"之后（基础数据有七类资料），
+   * 只说模块 id 会把人丢在该模块**上次停留的那一类**上 —— 用户点了「维护 SKU 克重」却落在"店铺账号"，
+   * 这就是"点了没反应"的另一种形态。
+   */
+  action?: string;
+  /**
+   * 目标是「发货台」页里的哪个页签（`flowCtx.SHIPPING_TAB_NAMES` 的**键**：`classify` / `purchase` / `recon`）。
    * 有它就**就地切页签**（与流程卡、总览卡的"下一步"同一套机制），不跳模块、不丢当前页面。
    * ⚠️ 值必须是那里真有的键：写错 = 按钮点了没反应，而界面上看不出任何异常。
+   * ⚠️ 2026-10-17：算钱页签已撤（归拢到独立「统计」= `order-cost`）⇒ 与钱有关的三处改用 `moduleId`。
    */
   tab?: string;
   /** 主操作（一条回执最多一个；界面渲成 primary 按钮） */
@@ -367,22 +375,22 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
       landed: null,
       warnings: [],
       next: itemInfo
-        ? [{ label: '去「货与成本」维护 SKU 克重', moduleId: 'goods', primary: true }]
+        ? [{ label: '去「产品管理」维护 SKU 克重', moduleId: 'shop-accounts', action: 'goods', primary: true }]
         : [],
       message: itemInfo
         ? // 认出来了就说认出来了 —— 复用"没认出这个文件是什么"那句会让标题与明细自相矛盾
           // （界面截图里真看出来了：标题写「商品信息」表、正文却写"没认出"）
-          '这是「商品信息」表 —— 这类文件不用再导入：克重属于 SKU（一款不同颜色/尺码可能不同），请在「货与成本」里按 SKU 维护'
+          '这是「商品信息」表 —— 这类文件不用再导入：克重属于 SKU（一款不同颜色/尺码可能不同），请在「基础数据 › 产品管理」里按 SKU 维护'
         : `没认出这个文件是什么。逐张体检：${det.scanned.join('；') || '无工作表'}`,
     };
   }
 
   if (det.kind === 'orders') {
     const r = await importOrders(src);
-    // 店铺：报表带「店铺名」列（芒果店长式）→ 已直接落库；没有该列（AE 按店铺导出）→ 提示去「算钱」归一次
+    // 店铺：报表带「店铺名」列（芒果店长式）→ 已直接落库；没有该列（AE 按店铺导出）→ 提示去「统计」归一次
     const shopNote = r.shops.length
       ? `；店铺已归属：${r.shops.slice(0, 3).join('、')}${r.shops.length > 3 ? ` 等 ${r.shops.length} 家` : ''}`
-      : '；店铺未归属 —— 可在「算钱」页一次「归到该店」';
+      : '；店铺未归属 —— 可在「统计」页一次「归到该店」';
     /**
      * **异常行**（只有真的发生才写，界面上直接平铺）。
      *
@@ -403,32 +411,33 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
       headline: r.inserted > 0 ? `已导入 ${r.inserted} 行订单` : '没有新增订单',
       landed: {
         label: '订单',
-        // 三处都是用户真的点得到的页面（顺序 = 从"刚导完最该看"到"再往后"）。
-        // ⚠️ **不写「本页」前缀**：回执卡渲染时统一在前面补一个（`ImportPanel.vue`，三处
-        //    落点目前全在「发货台」页内）。将来若出现不在本页的落点，得把前缀收回每一条里。
+        // 三处都是用户真的看得到的地方（顺序 = 从"刚导完最该看"到"再往后"）。
         // ⚠️ 2026-10-05「发货台」改造后，拣货/算钱是**同一个「发货台」页里的页签**，
         //    不再是两个要跳过去的页面 —— 文案跟着改，否则用户会以为还要切走。
         // 2026-10-10：拣货清单并进「拿货」（第 3 步 → 第 4 步）⇒ 这里的去处名跟着改。
         // 2026-10-11：**第 2 步「归类核对」排在最前** —— 刚导完的行大概率还没归款，
         //    那才是"接着该看的那一屏"（这一改动同时修掉了回执主按钮与流程卡第 2 步的矛盾，见下）。
-        views: ['「归类核对」页签', '「拿货」页签', '「算钱」页签'],
+        // ⚠️ 2026-10-17：算钱整步撤出发货台（改名「统计」）⇒ 前两处仍是**本页页签**，
+        //    第三处变成**独立模块**（写「统计」页，不写页签 —— 用户不会在本页找到它）。
+        views: ['「归类核对」页签', '「拿货」页签', '「统计」页'],
       },
       warnings,
       // 「下一步」按场景给：主操作**永远是"去核对这些行"**（第 2 步），
-      // ⚠️ 这条在 2026-10-11 前是「去看要拿什么」（第 4 步）—— 与流程卡上"第 2 步才是当前步"
+      // ⚠️ 这条在 2026-10-11 前是「去「拿货」页签」（第 4 步）—— 与流程卡上"第 2 步才是当前步"
       //    自相矛盾：卡片让用户去归类，回执却把人直接送到拿货。现在两处一致。
-      // 第二格按场景分叉：店铺已归属 → 看要拿什么（第 4 步）；未归属（AE 按店铺导出）
-      //    → 先去「算钱」把店铺归了（那里才是归属动作所在，见 `message` 的 `shopNote`）。
-      // ⚠️ 用 `tab`（就地切页签）而不是 `moduleId`：这几步都在「发货台」本页里，
-      //    写 `moduleId` 会把人**跳出这个页面**（`picking` / `order-cost` 都是独立模块）。
+      // 第二格按场景分叉：店铺已归属 → 去「拿货」页签（第 3 步）；未归属（AE 按店铺导出）
+      //    → 先去「统计」把店铺归了（那里才是归属动作所在，见 `message` 的 `shopNote`）。
+      // ⚠️ 页签的用 `tab`（就地切页签）、模块的用 `moduleId`（真跳转）：前两格都在「发货台」
+      //    本页里，写 `moduleId` 会把人**跳出这个页面**；而「统计」（id `order-cost`）是独立
+      //    模块 —— 2026-10-17 算钱整步撤出发货台后，归属/利润那一格只能写 `moduleId`。
       next: r.shops.length
         ? [
             { label: '去核对这些行', tab: 'classify', primary: true },
-            { label: '去看要拿什么', tab: 'purchase' },
+            { label: '去「拿货」页签', tab: 'purchase' },
           ]
         : [
             { label: '去核对这些行', tab: 'classify', primary: true },
-            { label: '去「算钱」归店铺', tab: 'cost' },
+            { label: '去「统计」归店铺', moduleId: 'order-cost' },
           ],
       message:
         `识别为「订单报表」（${det.why}）→ 已导入 ${r.inserted} 行` +
@@ -448,12 +457,12 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
       detail: r,
       title: '结算明细',
       headline: `已导入结算明细 · 新增 ${r.created} / 更新 ${r.updated}`,
-      landed: { label: '结算明细', views: ['「算钱」页签（结算轨）'] },
+      landed: { label: '结算明细', views: ['「统计」页（结算轨）'] },
       warnings: [
         ...(r.failed.length ? [`${r.failed.length} 行没导进去（订单号对不上，详见技术明细）`] : []),
         ...(r.issues ? [`${r.issues} 行等式校验没通过（平台口径可能变了）`] : []),
       ],
-      next: [{ label: '去「算钱」看毛利', tab: 'cost', primary: true }],
+      next: [{ label: '去「统计」看毛利', moduleId: 'order-cost', primary: true }],
       message:
         `识别为「结算明细」（${det.why}）→ 已导入：新增 ${r.created} / 更新 ${r.updated}` +
         (r.failed.length ? `，失败 ${r.failed.length} 行` : '') +
@@ -470,9 +479,9 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
     title: '报价单（运价表）',
     headline: kept ? `运价表已留档（快照 #${r.snapshotId}）` : '没挑出一张能用的表',
     // 没挑出可用的表 = 这个字节都没留档 → **不给落点也不给下一步**（免得用户以为"已经进去了"）
-    landed: kept ? { label: '运价表', views: ['「算钱」页签（按生效日取用）'] } : null,
+    landed: kept ? { label: '运价表', views: ['「统计」页（按生效日取用）'] } : null,
     warnings: [],
-    next: kept ? [{ label: '去「算钱」核对', tab: 'cost', primary: true }] : [],
+    next: kept ? [{ label: '去「统计」核对', moduleId: 'order-cost', primary: true }] : [],
     message:
       `识别为「报价单」（${det.why}）→ 取表「${r.sheetName}」` +
       (kept ? `，已留档（快照 #${r.snapshotId}）` : '，但没挑出一张能用的表（请检查报价单格式）'),

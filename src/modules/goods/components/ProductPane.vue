@@ -54,12 +54,21 @@
         <option value="">全部款式</option>
         <option value="missingWeight">缺克重</option>
         <option value="noSupplier">未关联供应商</option>
+        <option value="missingCost">缺进价</option>
       </select>
 
       <span v-if="loading" class="wb-muted gd-toolbar__hint">读取中…</span>
 
       <div class="gd-toolbar__actions">
-        <button class="wb-btn" type="button" data-act="export-products" :disabled="busy" @click="doExport">导出</button>
+        <!-- 文案「新增产品」→「新增款」（2026-10-25）：页名叫「款与商品」，按钮却叫"产品"，
+             同一屏两个词说同一件事（本页正是靠"款 / 产品 / 商品"三个词的混用把用户绕晕的）。
+             ⚠️ 导出 / 导入**保持普通按钮**（不加 `--ghost`）：本工具栏原本就只有一个主操作
+             （新增款是 `--primary`），层级已经成立；把这两颗降成透明底会让"导入 Excel"
+             这个新用户第一步的入口看起来像纯文本 —— 本页的杂乱来自**控件数量**，不是缺少灰化。
+             `data-act` 一个没动（冒烟与脚本按它挂）。 -->
+        <button class="wb-btn" type="button" data-act="export-products" :disabled="busy" @click="doExport">
+          导出
+        </button>
         <button
           class="wb-btn"
           type="button"
@@ -76,7 +85,7 @@
           :disabled="busy"
           @click="openEditor(null)"
         >
-          新增产品
+          新增款
         </button>
       </div>
     </div>
@@ -130,6 +139,15 @@
         只看未关联供应商<span aria-hidden="true">×</span>
       </button>
       <button
+        v-if="onlyMissingCost"
+        class="gd-chip gd-chip--warn"
+        type="button"
+        data-act="chip-missing-cost"
+        @click="clearOne('missingCost')"
+      >
+        只看缺进价<span aria-hidden="true">×</span>
+      </button>
+      <button
         class="wb-btn wb-btn--sm wb-btn--ghost"
         type="button"
         data-act="clear-filters"
@@ -139,10 +157,9 @@
       </button>
     </div>
 
-    <!-- 批量条：简洁模式下整条不渲染（连同每行的勾选框一列）—— 判据与理由见 `../simple`。
-         ⚠️ 隐藏的是**整组**（勾选框列 + 批量条），不是只藏条子：留着勾选框而不给批量动作，
-         用户勾了半天找不到下一步，比没有勾选框更差。 -->
-    <div v-if="!goodsSimple && selectedIds.size" class="gd-selbar" data-act="selection-bar">
+    <!-- 批量条（⭐ 2026-10-25：简洁模式整个撤掉，勾选框列与批量条恒渲染 ——
+         一个"默认藏起来"的开关不值得留，收尾笔记见 docs/notes/2026-10-25-*） -->
+    <div v-if="selectedIds.size" class="gd-selbar" data-act="selection-bar">
       <span>已选 <b>{{ selectedIds.size }}</b> 个款</span>
       <button class="wb-btn wb-btn--sm" type="button" :disabled="busy" @click="openBatchEdit">
         批量编辑
@@ -173,10 +190,7 @@
         <table class="wb-table gd-pane__table" data-act="product-table">
           <thead>
             <tr>
-              <th class="gd-c-exp"><span class="wb-muted" aria-hidden="true">▸</span></th>
-              <!-- 勾选框这一列整体受简洁模式控制（连同下面的每行勾选框与批量条）——
-                   `colspan` 也跟着一起变，否则空态与展开行会少一格（见 `gdColspan`）。 -->
-              <th v-if="!goodsSimple" class="gd-c-check">
+              <th class="gd-c-check">
                 <input
                   type="checkbox"
                   :checked="allChecked"
@@ -189,29 +203,27 @@
               <th class="gd-c-code">款编码</th>
               <th class="gd-c-name">款式名</th>
               <th class="gd-c-status">状态</th>
+              <th class="gd-c-cost wb-num">进价</th>
+              <th class="gd-c-ops">操作</th>
             </tr>
           </thead>
           <tbody>
             <template v-for="p in rows" :key="p.id">
+              <!-- ⭐ 2026-10-25（P2 · S4）：一行只做**一件事** —— 单击 = 选中这一款。
+                   原来单击是"展开"，而展开区里塞着认款按钮 / 供应商标 / 类目 / 编辑删除 / 已关联反查
+                   五样东西（用户原话：点了不知道看哪儿）。现在：
+                     · 选中 → 右栏动作条的落点（唯一跨栏状态还是 `currentProduct`）
+                     · 档案 → 「编辑」抽屉（那里本来就有全部字段）
+                     · 已关联反查 → 右栏「已认」段的「只看当前款」
+                   上面三样各归一处，"点一行"这件事才有唯一答案。 -->
               <tr
                 class="is-clickable"
-                :class="{ 'is-on': p.id === expandedId }"
+                :class="{ 'is-on': p.id === currentId }"
                 :data-product-id="p.id"
-                @click="toggleExpand(p.id)"
+                data-act="p-select"
+                @click="selectRow(p.id)"
               >
-                <td class="gd-c-exp">
-                  <button
-                    class="gd-pane__caret"
-                    type="button"
-                    data-act="row-expand"
-                    :aria-expanded="p.id === expandedId"
-                    :aria-label="`展开 ${p.code}`"
-                    @click.stop="toggleExpand(p.id)"
-                  >
-                    {{ p.id === expandedId ? '▾' : '▸' }}
-                  </button>
-                </td>
-                <td v-if="!goodsSimple" class="gd-c-check" @click.stop>
+                <td class="gd-c-check" @click.stop>
                   <input
                     type="checkbox"
                     :checked="selectedIds.has(p.id)"
@@ -235,103 +247,25 @@
                     {{ p.status === 'archived' ? '停用' : '启用' }}
                   </span>
                 </td>
-              </tr>
-
-              <!-- 行展开：所有"选中之后才关心"的东西都在这里。
-                   ⚠️ 这一行**不带** `data-product-id` —— 它是那一行的附属信息，不是又一条产品；
-                   带上的话 `[data-act="product-table"] tbody tr[data-product-id]` 会把款数算多半行。 -->
-              <tr v-if="p.id === expandedId" class="gd-pane__drow" data-act="row-detail">
-                <td :colspan="gdColspan">
-                  <div class="gd-detail">
-                    <!-- ⭐ 认款入口（2026-10-08 R2 · W3）：「动线终点必须在视线焦点上」。
-                         右栏工具栏那个「关联到 S2」离"刚展开的这一行"隔了一个栏宽 ——
-                         用户点开款之后眼睛在左边，动作却在右边顶部。这里放**同一个动作的第二处入口**：
-                         展开区第一眼就能看到，勾选数直接写在按钮上。
-                         ⚠️ 本按钮**只发一个信号**（`relate-request`），真正写库的仍是右栏那一条
-                         `commitMap` —— 两处入口、一条写路径，不存在第二套失败语义。 -->
-                    <div class="gd-detail__relate">
-                      <button
-                        class="wb-btn wb-btn--sm wb-btn--primary"
-                        type="button"
-                        data-act="relate-from-expanded"
-                        :disabled="relateCount === 0"
-                        :title="`把右栏勾选的商品一次认到 ${p.code} 上`"
-                        @click="emit('relate-request')"
-                      >
-                        认到本款<template v-if="relateCount">（{{ relateCount }} 项）</template>
-                      </button>
-                      <span class="wb-muted gd-detail__relate-hint" data-act="relate-hint">
-                        {{
-                          relateCount
-                            ? `把右栏勾选的 ${relateCount} 个商品认到「${p.code}」`
-                            : '先在右栏勾选商品，这个按钮就会亮（认款见右栏队列）'
-                        }}
-                      </span>
-                    </div>
-
-                    <!-- 元信息带：供应商/类目/创建/备注 是"这款是谁"的档案，横排一行放在
-                         动作条之下、内容卡片之上；「编辑/删除」跟着档案走（操作的对象就是这份档案），
-                         不再单独沉底 —— 旧版元信息挤左下、按钮悬右下，两块互不相干还高低不齐。 -->
-                    <div class="gd-detail__meta">
-                      <p><span class="wb-muted">供应商</span><span :class="{ 'wb-muted': !p.supplierId }" data-act="p-supplier">{{ p.supplierName || '(未关联)' }}</span></p>
-                      <p><span class="wb-muted">类目</span><span :class="{ 'wb-muted': !p.category }" data-act="p-category">{{ p.category || '—' }}</span></p>
-                      <p v-if="p.note" class="gd-detail__meta-note"><span class="wb-muted">备注</span>{{ p.note }}</p>
-                      <p><span class="wb-muted">创建</span>{{ p.createdAt || '—' }}</p>
-                      <div class="gd-detail__ops">
-                        <button class="wb-btn wb-btn--sm" type="button" data-act="edit-product" @click="openEditor(p)">
-                          编辑
-                        </button>
-                        <button
-                          class="wb-btn wb-btn--sm wb-btn--danger"
-                          type="button"
-                          @click="pendingDelete = { ids: [p.id], one: p }"
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </div>
-
-                    <!-- 已关联商品：**只读反查**（数据层 `skuList({productId})`）。
-                         刻意没有「解除」按钮 —— 硬删会让"关联率"莫名回落，且查不出原因；
-                         失效的映射按"标失效"处理，这里只如实列出它已经不生效。 -->
-                    <div class="gd-detail__block">
-                      <div class="gd-detail__head">
-                        <span>已关联商品</span>
-                        <span class="wb-muted">
-                          {{ linksBusy(p.id) ? '读取中…' : `${linksOf(p.id).length} 个店铺商品` }}
-                        </span>
-                      </div>
-                      <!-- 一句"这里是只读的、要改去哪儿"。原先这句住在 SKU 块里（随那块一起撤了）——
-                           而它守的**不是** SKU 的事，是"这一块为什么没有按钮"。 -->
-                      <p class="wb-muted gd-detail__note">
-                        只读：列出这个款已认下的商品。认款在右栏做 —— 认了哪个，这里就多哪个
-                      </p>
-                      <ul class="gd-links" data-act="detail-links">
-                        <li
-                          v-for="l in linksOf(p.id)"
-                          :key="l.id"
-                          class="gd-links__row"
-                          data-act="detail-link"
-                        >
-                          <span class="wb-mono">{{ l.itemId }}</span>
-                          <span class="wb-muted">{{ l.shopName || `#${l.shopId}` }}</span>
-                          <span class="gd-links__plat">{{ l.platform }}</span>
-                        </li>
-                        <li v-if="!linksBusy(p.id) && !linksOf(p.id).length" class="wb-muted">
-                          还没有店铺商品关联到这个款 —— 到右栏把商品认到这个款上，这里就会列出来
-                        </li>
-                      </ul>
-                      <!-- 失效单列：**不能**混进上面那份"已关联"里（用户会以为那个商品还在用），
-                           也不能一声不吭地藏掉（"被裁掉"和"不存在"在界面上必须长得不一样）。 -->
-                      <p
-                        v-if="deadLinksOf(p.id).length"
-                        class="gd-links__dead"
-                        data-act="detail-links-invalid"
-                      >
-                        另有 {{ deadLinksOf(p.id).length }} 条已失效（店铺商品ID 变了，不再计入关联）
-                      </p>
-                    </div>
-                  </div>
+                <!-- 进价（当前价，分）：还没维护显示「—」。2026-10-22 进价页退役后，
+                     这一列是"产品列表展示进价"的落点（方案 B'）；与「只看缺进价」筛选配套。 -->
+                <td class="gd-c-cost wb-num" data-act="p-cost">
+                  <span v-if="costText(p.code) === '—'" class="wb-muted">—</span>
+                  <span v-else>{{ costText(p.code) }}</span>
+                </td>
+                <!-- 档案入口：编辑（含供应商 / 类目 / 备注 / 创建时间 / SKU / 删除）。
+                     `@click.stop`：点「编辑」不该顺带把这一行选成当前款 —— 那是两件事，
+                     而且"打开抽屉"这个动作本身已经说明了操作对象是谁。 -->
+                <td class="gd-c-ops" @click.stop>
+                  <button
+                    class="wb-link"
+                    type="button"
+                    data-act="row-edit"
+                    :title="`编辑 ${p.code} 的档案与 SKU`"
+                    @click="openEditor(p)"
+                  >
+                    编辑
+                  </button>
                 </td>
               </tr>
             </template>
@@ -388,7 +322,7 @@
                         type="button"
                         @click="openEditor(null)"
                       >
-                        新增产品
+                        新增款
                       </button>
                     </template>
                   </div>
@@ -397,14 +331,6 @@
             </tr>
           </tbody>
         </table>
-        <!-- ⭐ 「行可以点开」原先**只存在于行首那个 ▸ 小三角**（要鼠标悬停才发现，触屏根本没有）。
-             一行常显提示把它说出来 —— 展开区里装着供应商 / 类目 / 规格 / 已认的商品，
-             不知道有展开区的人等于看不到这些东西。
-             ⚠️ 只在**真有行**时渲染：空态时多这一行会把空态的按钮往下推，
-             而窄窗口下那正是 B3（按钮溢出容器、点不到）的成因。 -->
-        <p v-if="rows.length" class="wb-muted gd-list__hint" data-act="expand-hint">
-          点任意一行可展开，看它的规格与已认的商品
-        </p>
       </div>
 
       <div v-if="totalPages > 1" class="wb-panel__foot gd-list__foot">
@@ -430,6 +356,7 @@
       :suppliers="supplierOptions"
       @close="editorOpen = false"
       @saved="onEditorSaved"
+      @deleted="onEditorDeleted"
     />
 
     <ProductImportDialog
@@ -520,32 +447,21 @@
 <script setup lang="ts">
 // 两栏工作台左栏的渲染形态。逻辑见 `../useProductList`（与整宽形态共用）。
 //
-// 本组件自己只管三件**渲染专属**的事：
-//   ① `expandedId` —— 哪一行展开了。**它同时是"当前款"**：展开就是选中，避免"高亮一行、
-//      展开另一行"两套状态各说各话。S3 的「直连」与「对比」都落在这一款上；
-//   ② `detail-links` 的取数 —— 按款反查该款关联了哪些店铺商品（`skuList({productId})`），
-//      按需拉取 + 缓存（展开才拉；同一行反复展开不重复打）；
-//   ③ 把"当前款"报给外壳（`select-product`）—— 跨栏通信只能经外壳，两个子组件互不认识。
+// 本组件自己只管两件**渲染专属**的事：
+//   ① `currentId` —— 哪一行**被选中**（不再是"哪一行展开了"）。S4 之后一行只做一件事：
+//      单击 = 选中。原来的展开区（认款 / 供应商 / 类目 / 编辑删除 / 已关联反查）五合一，
+//      现在各归各位：档案进「编辑」抽屉、反查进右栏「已认」的「只看当前款」。
+//   ② 把"当前款"报给外壳（`select-product`）—— 跨栏通信只能经外壳，两个子组件互不认识。
 import { computed, reactive, ref, watch } from 'vue';
 import { useProductList } from '../useProductList';
 import * as api from '../api';
-import type { ShopSkuRow } from '@/types';
 import ProductEditorDrawer from './ProductEditorDrawer.vue';
-import { goodsSimple } from '../simple';
 import ProductImportDialog from './ProductImportDialog.vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 
 const props = defineProps<{
   /** 页级「刷新」信号：值一变就重拉（筛选入口已搬进本栏工具栏，不再由页级下传） */
   refreshNonce: number;
-  /**
-   * 右栏**已勾选**的待关联商品数（0 = 没勾）。
-   *
-   * 为什么要从外壳转一手：勾选状态住在右栏的 `useSkuPool` 里（本栏用不到那份数据，
-   * 也不该为了一个数字再拉一遍队列）。左栏只需要"有几个"，动作本身由右栏执行 ——
-   * 见展开区那个「认到本款」按钮上的注释。
-   */
-  relateCount: number;
   /**
    * 待关联队列是不是**已经拉过、而且真的是空的**（`null` = 还没拉过）。
    *
@@ -576,17 +492,10 @@ const emit = defineEmits<{
    */
   'styles-total': [total: number | null];
   /**
-   * 「把右栏勾选的商品认到本款」—— 只发信号，不做动作。
-   *
-   * ⚠️ 为什么不让本组件自己调：写映射只有一条路径（右栏的 `commitMap`：单事务、行级失败回传、
-   * 写完必须重拉队列）。本栏再写一条就多出一套失败语义，而且它连队列数据都没有。
-   */
-  'relate-request': [];
-  /**
    * 空态里那个「去「发货台」导入订单」按下了（只发信号）。
    *
    * 跨模块跳转由外壳做（`GoodsWorkbenchView.goImportOrders`）：本组件不认识模块表，
-   * 也不该认识 —— 同 `relate-request` 的分工。
+   * 也不该认识。
    */
   'import-orders': [];
 }>();
@@ -607,6 +516,7 @@ const {
   issueFilter,
   onlyMissingWeight,
   withoutSupplier,
+  onlyMissingCost,
   editorOpen,
   editing,
   importOpen,
@@ -618,6 +528,7 @@ const {
   allChecked,
   someChecked,
   supplierLabel,
+  costCentsOf,
   clearFilters,
   clearOne,
   selectProduct,
@@ -647,116 +558,81 @@ const {
 watch(() => stylesTotal.value, (n) => emit('styles-total', n), { immediate: true });
 
 /**
- * 表格的列数。**必须跟着「简洁模式」变** —— 空态与展开行都是跨全表的单元格，
- * 写死数字的话，简洁模式少一列时它们会各短一格（右边留一条空白，
- * 越宽的窗口越显眼，但**不会报错** —— 属于"看着就是不对、查起来没头绪"那一类）。
- *
- * 列数 = ▸ /（勾选框）/ 图 / 款编码 / 款式名 / 状态 ⇒ 简洁 5、完整 6。
- * （2026-10-10 撤掉 SKU / 缺克重 / 进价三列，两档各 −3；冒烟里那条断言是
- *  `colSpan === 表头 th 数` 的动态比法，所以撤列**不需要**改断言里的数字。）
+ * 进价（元，两位小数）；还没价显示「—」（**不写 0.00** —— 0 会被读成"零成本/免费"）。
+ * 唯一来源 = 产品表「当前进价」（`costCentsOf`，见 `useProductList`）。2026-10-22 进价页
+ * 退役后，这一列就是"产品列表展示进价"的落点（方案 B'）；与「只看缺进价」筛选配套。
  */
-const gdColspan = computed(() => (goodsSimple.value ? 5 : 6));
+function costText(code: string): string {
+  const cents = costCentsOf(code);
+  return cents === null ? '—' : (cents / 100).toFixed(2);
+}
 
 /**
- * 切成简洁模式时把"已选"清空。
- *
- * 不清的后果是一个**隐形状态**：勾选框那一列不渲染了，但 `selectedIds` 还留着，
- * 用户看不见自己勾了什么、也不知道下次切回来会重新冒出来。可见的操作配可见的状态。
+ * 空态那一格跨的列数 = 表头 th 数（勾选框 / 图 / 款编码 / 款式名 / 状态 / 进价 / 操作 = 7）。
+ * （2026-10-10 曾撤掉 SKU / 缺克重 / 进价三列，各 −3；2026-10-22 进价列随进价页退役
+ * 重新加回"展示"这一面。2026-10-25 S4 撤掉行首 ▸ 展开列、加回行尾「操作」列 —— 一撤一加。
+ * 同日简洁模式整个撤掉，勾选框列恒渲染 ⇒ 不再有 6/7 两档。冒烟仍是 `colSpan === th 数`
+ * 的动态比法，这里给常量只是注释性的。）
  */
-watch(goodsSimple, (on) => {
-  if (on) clearSelection();
-});
+const gdColspan = 7;
 
-/** 当前展开的款（同时是"当前款"—— 展开就是选中，避免"高亮一行、展开另一行"两套状态） */
-const expandedId = ref(0);
+/** 当前选中的款（也是右栏动作条的落点；**不再是"展开的那一行"**） */
+const currentId = ref(0);
 
-function toggleExpand(id: number): void {
-  if (expandedId.value === id) {
-    expandedId.value = 0;
-    emit('select-product', null);
-    return;
-  }
-  expandedId.value = id;
+/**
+ * 单击一行 = 选中它。
+ *
+ * ⚠️ 重复点同一行**不取消**（原 `toggleExpand` 会）：`currentId` 是右栏认款的**落点**，
+ * 取消选中会让动作条上的「认到 S2（3 项）」突然变成「先选一个款」——
+ * 用户在右栏勾了一堆商品之后回左栏点了一下同一个款，不该把落点清掉。
+ * "不选任何款"不需要出口：不认款就是不选，那件事用不着按钮。
+ */
+function selectRow(id: number): void {
+  if (currentId.value === id) return;
+  currentId.value = id;
   // 走同一个 `selectProduct`：它顺手清掉上一条保存回执（回执是"刚才那一行"的，
   // 换一行还挂着会让人以为新那行也保存过了）
   selectProduct(id);
-  void loadLinks(id);
   const p = rows.value.find((x) => x.id === id);
   emit('select-product', p ? { id: p.id, code: p.code, name: p.name } : null);
 }
 
 /**
- * 刷新 / 换筛选之后，展开的那一行可能**已经不在列表里**了 —— 必须把"当前款"撤回。
+ * 抽屉里把这个款删掉了（P2 · S4 —— 款级删除的新家）。
  *
- * 不撤的后果不是"多显示一个按钮"，而是**写错款**：右栏那个「关联到 S1」还挂着一个
+ * 两件事：
+ * - 关抽屉 + 刷列表：直接复用保存回执那条路（`onEditorSaved`），**不另写一份刷新逻辑**；
+ * - 若删的正是当前款：立刻撤回落点。不撤的话右栏动作条上还挂着「认到 S1（3 项）」，
+ *   而 S1 已经不存在了 —— 用户点下去就是一整批写向空款的映射。
+ *   （`watch(rows)` 也会兜这一下，但它要等列表重拉回来；删除是"马上就不该再挂着"的事。）
+ */
+function onEditorDeleted(id: number): void {
+  onEditorSaved(null);
+  if (currentId.value === id) {
+    currentId.value = 0;
+    emit('select-product', null);
+  }
+}
+
+/**
+ * 刷新 / 换筛选之后，选中的那一行可能**已经不在列表里**了 —— 必须把"当前款"撤回。
+ *
+ * 不撤的后果不是"多显示一个按钮"，而是**写错款**：右栏动作条还挂着一个
  * 屏幕上根本看不见的款，用户勾上商品点下去，映射就落到那个款上了。
- * （右栏的落点必须**始终是屏幕上看得见的那一行**，否则直连比开弹层选还危险。）
+ * （落点必须**始终是屏幕上看得见的那一行**，否则直连比开弹层选还危险。）
  */
 watch(rows, (list) => {
-  if (expandedId.value && !list.some((p) => p.id === expandedId.value)) {
-    expandedId.value = 0;
+  if (currentId.value && !list.some((p) => p.id === currentId.value)) {
+    currentId.value = 0;
     emit('select-product', null);
   }
 });
 
-/* ---- 已关联商品（按款反查，只读） ---- */
-
-/** productId → 该款关联的映射行；`undefined` = 还没拉过 */
-const links = reactive<Record<number, ShopSkuRow[] | undefined>>({});
-const linksLoading = reactive<Record<number, boolean>>({});
-
-function linksOf(id: number): ShopSkuRow[] {
-  // 只列 confirmed：失效的映射**指向的店铺商品已经不在了**，混进"已关联"会让用户
-  // 以为那个商品还在用（这是 `goods:ui` 与数据层两条断言一起钉的口径）。
-  return (links[id] ?? []).filter((r) => r.status === 'confirmed');
-}
-function deadLinksOf(id: number): ShopSkuRow[] {
-  return (links[id] ?? []).filter((r) => r.status !== 'confirmed');
-}
-function linksBusy(id: number): boolean {
-  return !!linksLoading[id];
-}
-
-/**
- * 按款反查：这个款关联了哪些店铺商品。
- *
- * ⚠️ **每次展开都重拉**，不做"拉过就缓存"（2026-10-08 真机走查修正的缺陷）。
- *
- * 缓存版本的实测症状：用户刚在右栏完成一次认款（右栏指标条立刻变「已关联 1」），左栏**同一屏**
- * 仍写着首次展开时那个旧数字 —— 点「刷新」、收起再展开都无效，只有重启应用才恢复。用户刚做完
- * 一件"大事"却立刻看到两个互相矛盾的数字；对不会电脑的人，这不叫 bug，叫"这软件靠不住"。
- *
- * 代价可忽略：`skuList({productId})` 回的是**单款**的映射条数（通常个位数）。
- * 收益是"同屏两栏不可能各说各话"——那比省一次 IPC 重要得多。
- */
-async function loadLinks(productId: number): Promise<void> {
-  if (linksLoading[productId]) return; // 只去重"同一次并发"，不拦"第二次展开"
-  linksLoading[productId] = true;
-  try {
-    // 一次把该款的全部映射拿回来（含失效的），再按状态分开渲染 ——
-    // 失效那几条也要能说出来（"被裁掉"和"不存在"在界面上必须长得不一样）。
-    const res = await api.skuList({ productId, limit: 100 });
-    links[productId] = res?.rows ?? [];
-  } catch {
-    // 取不到不该把展开区弄成一个错误红条：留空并允许下次再试
-    links[productId] = undefined;
-  } finally {
-    linksLoading[productId] = false;
-  }
-}
-
-/**
- * 页级「刷新」也刷新这一栏的展开区。
- *
- * 不刷的后果与上面那条缓存缺陷同源：页级刷新看起来"刷新了同屏每一栏"，而展开区里那块
- * 「已关联商品」纹丝不动 —— 又是"同一屏两个数字各说各话"。
- */
-watch(
-  () => props.refreshNonce,
-  () => {
-    if (expandedId.value) void loadLinks(expandedId.value);
-  }
-);
+/* ---- 已关联反查已搬到右栏「已认」段（P2 · S4）---------------------------
+   原来这里按款反查 `skuList({productId})` 并把结果列在行展开区里。展开区撤掉后，
+   同一件事挪到右栏「已认」段的「只看当前款」—— 那边本来就是**同一份数据**的全量视图，
+   再在左栏维护一份按款反查，等于给同一条映射做两个读数（P2 的原始问题之一正是"同屏重复"）。
+   ⚠️ 右栏那边必须真的带 `productId`：不带的话每选一款都显示全库映射，且**不报错**。 */
 </script>
 
 <style scoped>
@@ -862,14 +738,22 @@ watch(
 .gd-pane__table {
   width: 100%;
 }
-.gd-c-exp {
-  width: 30px;
-}
 .gd-c-check {
   width: 34px;
 }
 .gd-c-img {
   width: 48px;
+}
+/* 「操作」列（S4 新增）：只放一个文字链「编辑」，按内容定宽。
+   ⚠️ 它**确实比被它取代的那个 ▸ 列宽**（实测 56px vs 30px：文字链比小三角宽，且要留右内边距）。
+   这 26px 全部从款名那列扣 —— 而款名是这个栏里**唯一该吃剩余宽度**的弹性列，
+   实测刚好把 22 字的长款名从两行挤到三行（用户最初报的"款式名展示不完全"就是它）。
+   所以这一列的右内边距压到 4px（td 自带 10px 已经够），款名那列再让出 4px。 */
+.gd-c-ops {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+  padding-right: 4px;
 }
 /* 款编码 / 状态：按内容定宽（`width:1%` + nowrap 就是这个意思），**别跟款名抢宽度**。
    2026-10-10 撤掉 SKU / 缺克重 / 进价三列之后，款名是唯一该吃剩余宽度的列。 */
@@ -884,7 +768,7 @@ watch(
    上限两行：再长的名字截断，但 `title` 里仍有全文（不能裁了又查不到）。 */
 .gd-pane__name {
   overflow: hidden;
-  padding-right: 12px;
+  padding-right: 8px;
 }
 .gd-pane__name-text {
   display: -webkit-box;
@@ -895,154 +779,6 @@ watch(
   white-space: normal;
   overflow-wrap: anywhere;
   line-height: 1.35;
-}
-
-.gd-pane__caret {
-  border: none;
-  background: none;
-  padding: 2px 4px;
-  font: inherit;
-  color: var(--wb-text-muted);
-  cursor: pointer;
-}
-.gd-pane__caret:hover {
-  color: var(--wb-text);
-}
-
-/* 展开区所在行：不随 hover 高亮（它是详情不是可点行），底色与主行区分。
-   ⚠️ 必须恢复 white-space: normal —— 展开区住在 .wb-table 的 td 里，而基座给 td 定了
-   nowrap（styles/index.css），不恢复的话展开区里所有长文案（认款提示 / 说明 / 元信息）
-   一行顶出去，横穿网格列压住右边的内容（2026-10-09 实测：hint 325px 顶进 217px 的列）。 */
-.gd-pane__drow > td {
-  padding: 0;
-  background: var(--wb-surface-2);
-  white-space: normal;
-}
-/* ── 展开区（2026-10-10 定稿）──────────────────────────────────────
-   2026-10-09 那一版解决的是"分组"（四块平铺 → 主动作条 / 元信息带 / 双白卡）；
-   2026-10-10 用户口径再砍一刀：SKU 清单整块撤掉、元信息带并入卡片 —— 只剩三层：
-     ① 认款条（带主色浅底，展开区里唯一带色块 ⇒ 主动作一眼可见）；
-     ② 档案卡（供应商 / 类目 / 备注 / 创建 + 编辑·删除）；
-     ③ 「已关联商品」卡。
-   三层都是**满宽**、同一套圆角与间距 —— 一列到底，不再有"左一块右一块、高低还不齐"。 */
-.gd-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-}
-/* 认款动作条：满宽。挤在窄列里时提示语只能在 ~217px 里折行，
-   主动作和它自己的说明被拆成两行读；`wrap` 让窄栏下按钮与提示自然换行而不是溢出。 */
-.gd-detail__relate {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--wb-primary-soft);
-  border-radius: var(--wb-radius-md);
-  background: var(--wb-primary-soft);
-}
-.gd-detail__relate-hint {
-  font-size: 12px;
-  min-width: 0;
-}
-/* 卡片：从 surface-2 的井里浮起一级，块与块的边界不再靠猜 */
-.gd-detail__block {
-  min-width: 0;
-  padding: 10px 12px;
-  background: var(--wb-surface);
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius-md);
-}
-.gd-detail__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 6px;
-  margin-bottom: 8px;
-  border-bottom: 1px solid var(--wb-border);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--wb-text);
-}
-/* 说明是 <p>：不给 margin 的话浏览器默认 1em 上下距会在标题和内容之间撑出一截 */
-.gd-detail__note {
-  margin: 0 0 8px;
-  font-size: 12px;
-}
-
-/* 档案卡：label·值 一组一组横排。原先它是一条**裸露**的横排（无底色无边框），
-   跟旁边两张白卡混在同一层上，读起来像"卡片漏出来的一行" —— 现在同为一等卡片。
-   备注可能很长 —— 允许它占满一整行（flex-basis:100%），别的项保持紧凑。 */
-.gd-detail__meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 20px;
-  padding: 9px 12px;
-  background: var(--wb-surface);
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius-md);
-  font-size: 12px;
-}
-.gd-detail__meta p {
-  margin: 0;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-/* 标签统一占位宽（供应商 / 类目 / 创建 / 备注 两三个字）⇒ 值从左对齐，一眼能横着比 */
-.gd-detail__meta p > .wb-muted:first-child {
-  min-width: 3.2em;
-}
-.gd-detail__meta-note {
-  flex-basis: 100%;
-}
-.gd-detail__meta-note > .wb-muted:first-child {
-  flex-shrink: 0;
-}
-
-.gd-links {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 12px;
-  max-height: 200px;
-  overflow: auto;
-}
-.gd-links__row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 0;
-  border-bottom: 1px dashed var(--wb-border);
-}
-.gd-links__row:last-child {
-  border-bottom: none;
-}
-/* 平台名做成小标签靠右：原先它只是又一个灰字，跟店铺名挤在同一行分不出主次 */
-.gd-links__plat {
-  margin-left: auto;
-  padding: 1px 6px;
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius-sm);
-  background: var(--wb-surface-2);
-  font-size: 11px;
-}
-.gd-links__dead {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--wb-warning);
-}
-
-.gd-detail__ops {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
 }
 
 .gd-batch {

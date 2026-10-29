@@ -23,7 +23,7 @@
       <span class="sm-merge-head__toggle">{{ show ? '收起' : '展开' }}</span>
     </button>
 
-    <div v-if="show" class="wb-panel__body">
+    <div v-if="show" class="wb-panel__body sm-merge__body">
       <p class="sm-merge-note wb-muted" data-act="sm-merge-note">
         同一个厂家下挂着好几个款。如果其中几个其实是同一件货（同款开了多个链接），合并成 1 个款，
         拿货单就按 1 个款汇总。<b>合并随时可拆开</b>，不影响订单里的任何数字。
@@ -284,6 +284,19 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* ⚠️ 折叠态只有 41px，而它所在那一页是**定高弹性列** ⇒ 默认可缩的它会被压成 5px
+   （实测：命名板一进来，这一块就成了"谁矮谁让路"里最矮的那个，结果连标题都看不见）。
+   折叠态必须保住自己的高度；展开态由内容决定高度，但也要有上限（见 `.sm-merge__body`）。 */
+.sm-merge {
+  flex-shrink: 0;
+}
+/* 展开态限高 + 自己滚：厂家多、款多时这块能长出几百 px，而它**不是**这一页的主活
+   （默认折叠、可不碰）；不封顶就会把核对表挤出屏幕（命名板同款处理：44vh）。
+   与命名板取同一个比例，两块加起来的上限是能预期的。 */
+.sm-merge__body {
+  max-height: 44vh;
+  overflow: auto;
+}
 .sm-merge-head {
   display: flex;
   align-items: center;

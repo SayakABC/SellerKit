@@ -4362,6 +4362,55 @@ async function main() {
       'P-47=' + (flat(card('cl-table')).indexOf('P-47') >= 0 ? '在' : '不在（错）') +
         ' 待核对=' + JSON.stringify(flat(card('cl-count-pending'))));
 
+    // ---- 几何守卫（2026-10-28 用户报「归类核对页面展示不全」）----
+    // 病根：本页根（cl-view）是 height:100% 的**定高弹性列**，直接子项默认可缩。
+    //   命名板（P3）与款合并卡（P4）插进来之后，核对表成了唯一"可缩"的那一项 ——
+    //   实测被压到 55px、表格容器 0px，而页面 scrollHeight 与 clientHeight 相等
+    //   （**没有滚动条**）⇒ 表格整块消失、想滚也滚不到。
+    // ⚠️ 这是"DOM 都在、界面上什么都没有"的病：cl-table 存在、tr 有 7 行、
+    //    存在性断言一条都不会红 —— 只有几何抓得住（与 puTileGuard 同一种病）。
+    var clViewEl = document.querySelector('.cl-view');
+    var clListEl = document.querySelector('.cl-list');
+    var clTableWrap = clListEl ? clListEl.querySelector('.wb-table-wrap') : null;
+    var smMergeEl = document.querySelector('.sm-merge');
+    function clRows() { return queryAll('.cl-table tbody tr'); }
+    report('核对表有地板高度（不是被弹性列压成一条）',
+      !!clListEl && clListEl.clientHeight >= 300,
+      'clList=' + (clListEl ? clListEl.clientHeight + ' 可见 / ' + clListEl.scrollHeight + ' 内容' : '无'));
+    report('表格容器看得见（可见高度 > 一行，不是被压到 0）',
+      !!clTableWrap && clTableWrap.clientHeight >= 100,
+      'wrap=' + (clTableWrap ? clTableWrap.clientHeight + ' 可见 / ' + clTableWrap.scrollHeight + ' 内容' : '无'));
+    // 款合并卡折叠态只有 41px，是"谁矮谁让路"里最容易被压没的那一个（实测压到 5px）
+    report('款合并卡没被压成一条（折叠态也要保住自己的高度）',
+      !smMergeEl || smMergeEl.clientHeight >= 30,
+      'smMerge=' + (smMergeEl ? smMergeEl.clientHeight + ' 可见 / ' + smMergeEl.scrollHeight + ' 内容' : '无（夹具没给候选）'));
+    // 页面滚得动：内容比容器高时，滚到底必须真的移动 —— 压扁时两者相等，滚不动就是滚不动
+    var clScrollable = !!clViewEl && clViewEl.scrollHeight > clViewEl.clientHeight + 1;
+    var clTopAfter = -1;
+    if (clViewEl) {
+      clViewEl.scrollTop = 99999;
+      await new Promise(function (r) { setTimeout(r, 250); });
+      clTopAfter = clViewEl.scrollTop;
+    }
+    report('内容超出时页面**滚得动**（滚到底 scrollTop > 0；被压扁时内容与容器等高⇒滚不动）',
+      !clScrollable || clTopAfter > 0,
+      'overflow=' + clScrollable + ' scrollTop=' + clTopAfter +
+        ' (' + (clViewEl ? clViewEl.scrollHeight + '/' + clViewEl.clientHeight : '?') + ')');
+    // 最后一行**滚得到、点得到**：整页滚 + 表格内滚之后，它必须落在视口里
+    var lastRow = clRows()[clRows().length - 1];
+    if (lastRow) {
+      lastRow.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      await new Promise(function (r) { setTimeout(r, 250); });
+      var lr = lastRow.getBoundingClientRect();
+      var hitEl = document.elementFromPoint(lr.left + 20, lr.top + lr.height / 2);
+      report('表格最后一行滚得到、点得到（不被裁在看不见的地方）',
+        !!hitEl && (hitEl === lastRow || lastRow.contains(hitEl)),
+        'hit=' + (hitEl ? String(hitEl.getAttribute('data-act') || hitEl.className || hitEl.tagName).slice(0, 40) : 'null'));
+    } else {
+      report('表格最后一行滚得到、点得到（不被裁在看不见的地方）', false, 'no-row');
+    }
+    if (clViewEl) clViewEl.scrollTop = 0;
+
     // ~~产品维度（指标条那一格）的"显示 0 / 整格隐藏"两条断言~~
     // **已随指标条整条撤掉（2026-10-10）**：那一格连同它上面那排「待核对 / 未归类 / 识别库」
     // 一起被用户判为"看不懂"，取数通道 orderSkuRollup 也整条退场（handler / preload / types /

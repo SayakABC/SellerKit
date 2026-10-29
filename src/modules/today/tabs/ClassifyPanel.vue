@@ -1832,7 +1832,9 @@ watch(
    ⚠️ **不要**写成 `flex-shrink: 0`：那样高度变成"内容高"，30 行 × 115px ≈ 3500px，
       分页器被推到三千多像素以下，比被压扁更难用。 */
 .cl-list {
-  min-height: 0px; /* MUTATION-TEST：去掉地板 */
+  /* 地板：空间够就填满剩余（flex-grow 由默认伸展承担），不够就停在这条线上让页面滚。
+     值取"表头 + 约 3 行"的可见量 —— 再小表格就没法读了。 */
+  min-height: 320px;
 }
 .cl-bar {
   display: flex;

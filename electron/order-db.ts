@@ -59,7 +59,7 @@ import { extractOrderMoney } from './orderMoney';
 // 回填走**同一组**函数而不是另写一遍算式 —— 两份口径必然漂移（AGENTS §4.2）。
 import { orderIncomeCcy, parseOrderPropsColor, parseOrderQty, parseSkuProps, toCentsCny } from './aeMoney';
 import { extractSkuFields, productTitleOf } from './shopSku';
-import { provisionalStyleCode, splitVariantKey, variantKeyOf } from './variantKey';
+import { splitVariantKey, variantKeyOf } from './variantKey';
 // 「平台色名 → 我的色名」的查表/归一（纯函数；口径见其文件头）
 import { colorAliasKey, pickColorAlias, translateColor, type ColorAliasRow } from './colorAlias';
 // 店名归一（纯函数；与店铺主表 UNIQUE / 名称映射同一口径）。订单只存店名原文，
@@ -2483,103 +2483,6 @@ export interface VariantAssignStats {
   createdStyleColors: number;
 }
 
-/**
- * 键 → 款色：**取已存在的那条，没有就建一条 provisional**。
- *
- * 这是"同样的商品、同样的图片不用再人工设一次"的落点 —— 同键第二次进来直接命中，
- * 一条 `oi_style_colors` 都不会新增。
- *
- * 三条纪律：
- *   · **款编码由商品ID 推出**（`provisionalStyleCode`）而不是自增：自增只在"这次不撞"上成立，
- *     重导/换店会让同一件货拿到两个编码，款又裂成两个 —— 那正是这轮要消灭的东西；
- *   · **款色名留平台色原文**（`5` / `Khaki`），不猜标准色名：裸数字会让人警惕去看图，
- *     写成"黑色"就没人再核了（真库已有一批 `红色` 底下是黄/黑/黑/红）；
- *   · **产品库补一行空名占位**：供应商/成本/拿货都按款挂，没有这行就什么都挂不上。
- *     名字故意留空 —— 命名是要人给的判断，自动填一个"像名字"的东西只会让人不再去核。
- */
-function ensureStyleColorByVariant(
-  key: string,
-  itemKey: string,
-  colorLabel: string,
-  stats?: { createdStyleColors: number },
-): number {
-  const known = dbGet<{ style_color_id: number }>(
-    `SELECT style_color_id FROM oi_variant_keys WHERE variant_key = ?`,
-    [key],
-  );
-  const knownId = Number(known?.style_color_id ?? 0);
-  // 款色可能已被删（`ON DELETE CASCADE` 会把绑定行一起带走，但也可能被手工删过）⇒ 兜一次
-  if (knownId > 0 && dbGet<{ id: number }>(`SELECT id FROM oi_style_colors WHERE id = ?`, [knownId])) {
-    return knownId;
-  }
-  const code = provisionalStyleCode(itemKey);
-  // 没商品ID 就推不出款编码 ⇒ 放弃（调用方本来就只在键非空时才走到这里，这是最后一道）
-  if (!code) return 0;
-  return dbTransaction(() => {
-    const style = ensureStyleByCode(code);
-    const color = String(colorLabel ?? '').trim() || MAPPED_FALLBACK_COLOR;
-    const sc = ensureStyleColor(style.id, style.code, color);
-    if (productSchemaReady()) {
-      adoptProduct({ code: style.code, name: '' });
-    }
-    dbRun(
-      `INSERT INTO oi_variant_keys (variant_key, style_color_id, state)
-       VALUES (?, ?, 'auto')
-       ON CONFLICT(variant_key) DO UPDATE SET
-         style_color_id = excluded.style_color_id,
-         updated_at = datetime('now','localtime')`,
-      [key, sc.id],
-    );
-    if (stats) stats.createdStyleColors += 1;
-    return sc.id;
-  });
-}
-
-/**
- * 把一行的款色按**变体键**落定（行 + 图两处都写；图只补**还没有结论**的其它行）。
- *
- * 键**回读**库里那一列而不是现算：键只在导入时算一次，这里再算一遍就是第二份实现
- * （改了一处忘了另一处 ⇒ 同一行两个键，症状是"明明同款却分成两派"）。
- *
- * 只补空：行上已有款色（人工纠正 / 识别结论 / 上次归过）一律不动 —— 这条以前只是注释，
- * 实现却是经 `setImageStyleColor` 全量投影（把同图其它键的行也一起改判）。现在用
- * `{ onlyUnset: true }` 让它和注释一致。
- */
-function assignByVariantKey(
-  rowId: number,
-  rec: Pick<OrderRecord, 'imageId' | 'shop' | 'color' | 'rawFields'>,
-  itemId: string,
-  stats?: { createdStyleColors: number },
-): void {
-  const id = Number(rowId) || 0;
-  const stored =
-    id > 0
-      ? dbGet<{ variant_key: string; style_color_id: number; color: string }>(
-          `SELECT COALESCE(variant_key, '') AS variant_key,
-                  COALESCE(style_color_id, 0) AS style_color_id,
-                  COALESCE(color, '') AS color
-             FROM oi_order_items WHERE id = ?`,
-          [id],
-        )
-      : undefined;
-  if (stored && Number(stored.style_color_id) > 0) return; // 不覆盖已有的结论
-  const key =
-    String(stored?.variant_key ?? '') ||
-    variantKeyOf({ shopKey: rec.shop, itemKey: itemId, colorKey: rec.color });
-  if (!key) return;
-  const label = String(stored?.color ?? '').trim() || String(rec.color ?? '').trim();
-  const scId = ensureStyleColorByVariant(key, itemId, label, stats);
-  if (!scId) return;
-  // **只补空**（本函数上面那句"只补空"必须真的成立）：一张图可能被同商品的几个色共用，
-  // 全量投影会把别的键已经归好的行改判成这一行的色。
-  if (rec.imageId) setImageStyleColor(rec.imageId, scId, { onlyUnset: true });
-  if (id > 0) {
-    dbRun(
-      `UPDATE oi_order_items SET style_color_id = ? WHERE id = ? AND COALESCE(style_color_id, 0) <> ?`,
-      [scId, id, scId],
-    );
-  }
-}
 
 /**
  * **存量收口**：把「有键但未归款」的行按变体键归上（幂等；`ensureOrderSchema` 末尾自愈跑一次）。
@@ -2591,12 +2494,13 @@ function assignByVariantKey(
  * 返回的 `candidateRows` 与 `fixedRows` 不等，说明中途有行建不出款（无商品ID / 建表失败），
  * 这种情况要**报出来**而不是静默（回执里能看见）。
  */
-export function backfillVariantStyleColors(limit = 2000): VariantAssignStats {
+export function backfillVariantStyleColors(): VariantAssignStats {
   const stats: VariantAssignStats = { candidateRows: 0, fixedRows: 0, createdStyleColors: 0 };
   if (!tableExists('oi_variant_keys')) return stats;
-  // ① 先把**已经归类过**的行补记成绑定（存量那 65 行是人工归的，键表里一条都没有）。
-  //    不补的后果：一旦订单被清理重导，同一件货会新建一套 provisional 款色，
-  //    与人工那个款分裂成两个 —— 正是这轮要消灭的现象。`DO NOTHING` 保住已有记忆。
+  // 2026-10-29 回退「导入即归类」：本函数**不再**自动把「有键未归」的行认到款色
+  // （那会为每个未配映射的 listing 自动建款色 + 产品占位，且实测出现重复款）。
+  // 现在只做一件事：把**人工已归类**的行补记成 `oi_variant_keys` 绑定，
+  // 这样重导同一份报表时不会因「缺记忆」而长出第二套款色（与人工那个款分裂）。
   const needBind = dbGet<{ one: number }>(
     `SELECT 1 AS one FROM oi_order_items oi
       WHERE COALESCE(oi.variant_key, '') <> '' AND COALESCE(oi.style_color_id, 0) > 0
@@ -2612,46 +2516,6 @@ export function backfillVariantStyleColors(limit = 2000): VariantAssignStats {
         GROUP BY oi.variant_key
        ON CONFLICT(variant_key) DO NOTHING`,
     );
-  }
-  const rows = dbQuery<{
-    id: number;
-    image_id: number | null;
-    shop: string;
-    color: string;
-    raw_fields: string;
-  }>(
-    `SELECT oi.id AS id, oi.image_id AS image_id, COALESCE(o.shop, '') AS shop,
-            COALESCE(oi.color, '') AS color, COALESCE(oi.raw_fields, '') AS raw_fields
-       FROM oi_order_items oi
-       JOIN oi_orders o ON o.id = oi.order_id
-      WHERE COALESCE(oi.style_color_id, 0) = 0
-        AND COALESCE(oi.variant_key, '') <> ''
-      ORDER BY oi.id
-      LIMIT ?`,
-    [Math.max(1, Number(limit) || 2000)],
-  );
-  stats.candidateRows = rows.length;
-  for (const r of rows) {
-    let rf: Record<string, string> = {};
-    try {
-      const parsed: unknown = JSON.parse(r.raw_fields || '{}');
-      if (parsed && typeof parsed === 'object') rf = parsed as Record<string, string>;
-    } catch {
-      rf = {};
-    }
-    const { itemId } = extractSkuFields(rf);
-    if (!itemId) continue;
-    assignByVariantKey(
-      r.id,
-      { imageId: r.image_id, shop: r.shop, color: r.color, rawFields: rf },
-      itemId,
-      stats,
-    );
-    const after = dbGet<{ style_color_id: number }>(
-      `SELECT COALESCE(style_color_id, 0) AS style_color_id FROM oi_order_items WHERE id = ?`,
-      [r.id],
-    );
-    if (Number(after?.style_color_id ?? 0) > 0) stats.fixedRows += 1;
   }
   return stats;
 }
@@ -3467,8 +3331,10 @@ function autoAssignByMap(
   //    原来这里一上来就 `if (!productSchemaReady()) return`，那会让没建产品库的机器永远归不了类。
   const hit = productSchemaReady() ? resolveOrderSku({ shop: rec.shop, itemId }) : null;
   if (!hit) {
-    // 没有人工映射 ⇒ 按变体键自动建/复用款色。这就是"不用再人工设一次款和色"的那一步。
-    assignByVariantKey(rowId, rec, itemId);
+    // 2026-10-29 回退「导入即按变体键自动建款色/产品」：没有人工映射时**不自动建**，
+    // 订单行留在「待认款」（style_color_id = 0），由人工在认款界面认款。
+    // 原因：自动建会在导入时为每个未配映射的 listing 长出一套款色 + 产品占位，
+    // 且实际运行中出现了重复款；恢复为只认人工配过映射（hit）的行，其余行留待认款。
     return;
   }
   // 产品库里手工新建的款在识别池里没有行 ⇒ 补一行占位款（与「点名归款」共用同一个实现）

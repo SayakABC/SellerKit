@@ -1,5 +1,10 @@
 # 订单驱动的归类改造：结论与分期方案
 
+> ⚠️ **2026-10-29 回退**：本文"导入时自动归到款色/建占位产品"那部分**已撤销**
+> （重复款 + `AE-` 占位产品，见 `2026-10-29-revert-import-auto-classify.md` 与
+> `CHANGELOG.md` [Unreleased]）。键的设计、命名板、款合并仍然有效。
+> §217"去掉 `assignByVariantKey` 会变红"的描述已随回退失效。
+
 > **取代关系**：本文把同日三条归类笔记（`2026-10-28-classify-local-vision-direction.md` /
 > `2026-10-28-classify-style-picker.md` / `2026-10-28-classify-bulk-ops.md`）收拢成一条主线。
 > 那三条的**取证仍然有效**（尤其 vision 笔记 §8 的 82 张真图实测读数），但"以图判款"不再是主线，

@@ -189,12 +189,12 @@ check('免图订单**重导不重复插**（幂等判重用 `image_id IS ?`，`=
 });
 
 console.log('\n[3] shippingRows 投影（宽了但**不丢行**）');
-check('订单行仍在（LEFT JOIN 不是 INNER）—— 且改造后它们已被**自动归类**', () => {
+check('订单行仍在（LEFT JOIN 不是 INNER）—— 2026-10-29 回退后未认款的行也在投影里（款编码空串）', () => {
   const rows = odb.shippingRows(50);
   assert.strictEqual(rows.length, 2, '投影不许因为归类问题丢行');
-  // 2026-10-28 起这两行不再是"未识别"：RAW 带商品ID ⇒ 变体键直接归了款色（见 [13]）。
-  // 这条断言因此反了过来 —— 它现在守的是"自动归类真的落到了投影上"。
-  assert.ok(rows.every((r) => r.styleCode !== ''), `应带出款编码，实际 ${JSON.stringify(rows.map((r) => r.styleCode))}`);
+  // 2026-10-29 回退「导入即归类」：RAW 带商品ID 也**不再自动归**，行留待认款。
+  // 这条守的是"未认款的行照样出现在利润投影里"（LEFT JOIN），且款编码回落空串（不是报错）。
+  assert.ok(rows.every((r) => r.styleCode === ''), `未认款行的款编码应为空串，实际 ${JSON.stringify(rows.map((r) => r.styleCode))}`);
 });
 check('真正无法归类的行（无商品ID）也在投影里，款编码回落空串', () => {
   const id = odb.insertOrder({
@@ -1064,7 +1064,10 @@ function vtRaw(color, size) {
 }
 function vtInsert(color, size, over = {}) {
   return odb.insertOrder({
-    imageId: null, // 关键：**没有图**也能归类，否则"采集通道的单永远未归类"
+    // 回退后「导入不再自动归」；但人工认款（assignOrderStyle）经图片投影落行，
+    // 故认款夹具必须是有图的订单（无图行在 assignOrderStyle 里不会落到行上）。
+    // 同色共用一张图：认一次即把同图两行一起归（vtA1/vtA2 都是色 5）。
+    imageId: vtImageFor(color),
     orderNo: 'VT-' + color + '-' + size,
     shop: VT_SHOP,
     size,
@@ -1082,14 +1085,26 @@ check('订单行有 variant_key 列（键落库，不是查询时现算）', () 
   assert.ok(vtCols.includes('variant_key'), '缺 variant_key 列');
 });
 
+// 认款夹具用的图：同色共用一张，不同色各一张（与真实"一个商品多色共用主图"相反，
+// 这里故意一张图只挂一个色，避免 projectImageColorToOrders 把同图另一色也改判）。
+const vtImg = { '5': 505, '7': 507, '9': 509 };
+function vtImageFor(color) {
+  const id = vtImg[String(color)];
+  if (!id) return null;
+  if (!dbGet(`SELECT 1 FROM oi_images WHERE id = ?`, [id])) {
+    dbRun(`INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/vt')`, [id, 'fp-vt-' + id, 'ufp-vt-' + id, 'u-vt-' + id]);
+  }
+  return id;
+}
+
 const vtA1 = vtInsert('5', 'L');
 const vtA2 = vtInsert('5', 'XL');
 const vtB = vtInsert('7', 'L');
 
-check('无映射也自动归：三行都拿到了款色（style_color_id > 0）', () => {
+check('无映射不自动归：三行都留在待认款（style_color_id = 0，不建款色/产品）', () => {
   for (const id of [vtA1, vtA2, vtB]) {
     const r = dbGet(`SELECT COALESCE(style_color_id, 0) AS sc FROM oi_order_items WHERE id = ?`, [id]);
-    assert.ok(Number(r.sc) > 0, `行 ${id} 未归类`);
+    assert.strictEqual(Number(r.sc), 0, `行 ${id} 不应被自动归类，应留待认款`);
   }
 });
 
@@ -1099,30 +1114,16 @@ check('键已落库且是三段（店铺 / 商品ID / 色）', () => {
   assert.ok(k.includes(VT_ITEM), '键里应含商品ID');
 });
 
-check('同商品同色 → 同一个款色；同商品不同色 → 不同款色但**同一个款**', () => {
-  const scA1 = Number(dbGet(`SELECT style_color_id AS s FROM oi_order_items WHERE id = ?`, [vtA1]).s);
-  const scA2 = Number(dbGet(`SELECT style_color_id AS s FROM oi_order_items WHERE id = ?`, [vtA2]).s);
-  const scB = Number(dbGet(`SELECT style_color_id AS s FROM oi_order_items WHERE id = ?`, [vtB]).s);
-  assert.strictEqual(scA1, scA2, '同色同商品被拆成两个款色 ⇒ 每次导入都会长新款色');
-  assert.notStrictEqual(scA1, scB, '不同色并成一个款色 ⇒ 拿货会拿错货');
-  const st = dbGet(
-    `SELECT (SELECT style_id FROM oi_style_colors WHERE id = ?) AS a,
-            (SELECT style_id FROM oi_style_colors WHERE id = ?) AS b`,
-    [scA1, scB],
+check('导入不为这些行建任何款色 / 产品占位', () => {
+  // 不建款色：oi_style_colors 里没有 AE-<商品ID> 的款色
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_style_colors WHERE code LIKE ?`, [`AE-${VT_ITEM}%`]).n),
+    0,
+    '导入不应自动建 AE- 款色',
   );
-  assert.strictEqual(Number(st.a), Number(st.b), '同商品的两个色应挂在同一个款下');
-});
-
-check('自动建的款色名 = 平台色原文（不猜标准色名）', () => {
-  const sc = Number(dbGet(`SELECT style_color_id AS s FROM oi_order_items WHERE id = ?`, [vtA1]).s);
-  const color = String(dbGet(`SELECT color FROM oi_style_colors WHERE id = ?`, [sc]).color);
-  assert.strictEqual(color, '5', `色名被清洗成了 ${color}（应保留平台原文）`);
-});
-
-check('自动建了产品库占位款（否则供应商/成本/拿货挂不上）', () => {
-  const p = dbGet(`SELECT name FROM pl_products WHERE code = ?`, [`AE-${VT_ITEM}`]);
-  assert.ok(p, '缺占位款');
-  assert.strictEqual(String(p.name), '', '占位款名应留空 —— 命名是人的判断');
+  // 不建产品占位：pl_products 里没有 AE-<商品ID>
+  const p = dbGet(`SELECT name FROM pl_products WHERE code = ?`, ['VTSTYLE']);
+  assert.strictEqual(p, undefined, '导入不应自动建 AE- 产品占位');
 });
 
 // 幂等：这是"重导不涨"的判据。键表与款色表的行数在任何一次重导后都不许变。
@@ -1143,17 +1144,31 @@ check('重导同一批：键表 / 款色表 / 产品表 一行都不涨', () => 
   assert.deepStrictEqual(after, before, `重导后涨了：${JSON.stringify({ before, after })}`);
 });
 
+// 2026-10-29 回退：导入不再自动建款色/产品，行留待认款（见 order-db.ts autoAssignByMap）。
+// 下面用「人工认款」入口显式造数据，让命名板 / 投影 / 拿货这些依赖「已认款款色」的功能
+// 仍有可验证的数据源（模拟用户手动认款，而非导入自动建）。
+// assignOrderStyle 经图片把款色投影到行，并**自动**把行上的 variant_key 记进 oi_variant_keys
+// （state='auto'，见 rememberVariantBinding）—— 这正是"下次同款同色不用再设一遍"的记忆本体。
+// 所以人工认款只需调这一句，不必再手填键表。
+function vtReconcile(id, color) {
+  odb.assignOrderStyle({ orderId: id, styleCode: 'VTSTYLE', color });
+}
+// vtA1 与 vtA2 共用同一张图（同色 5），认一次即把两行一起归；
+// vtB（色 7）单独认到 VTSTYLE 的另一色。
+vtReconcile(vtA1, '5');
+vtReconcile(vtB, '7');
+
 check('存量收口幂等：再跑一次 backfill 不新建任何绑定', () => {
   const st = odb.backfillVariantStyleColors();
   assert.strictEqual(st.createdStyleColors, 0, `新建了 ${st.createdStyleColors} 条`);
 });
 
-check('拿货需求能按 款/色/码 统计到这两色（改造的终点）', () => {
+check('认款后拿货需求能按 款/色/码 统计到这两色（人工认款路径仍工作）', () => {
   const pur = require(path.join(ROOT, 'dist', 'electron', 'purchase-db.js'));
   pur.ensurePurchaseSchema();
   const rows = pur
     .outstanding()
-    .filter((r) => String(r.styleCode) === `AE-${VT_ITEM}`);
+    .filter((r) => String(r.styleCode) === 'VTSTYLE');
   // 维度是 款×色×**码** ⇒ 色5 的 L 与 XL 是两行，加色7 的 L 共 3 行。
   assert.strictEqual(rows.length, 3, `应恰好三行（5/L、5/XL、7/L），实际 ${rows.length}`);
   const byColor = {};
@@ -1162,7 +1177,7 @@ check('拿货需求能按 款/色/码 统计到这两色（改造的终点）', 
   assert.strictEqual(byColor['7'], 1, `色7 的需求应是 1 件，实际 ${byColor['7']}`);
   assert.ok(
     rows.every((r) => r.unclassified === false),
-    '自动归类的行不该落在「未归类」桶里',
+    '已认款的行不该落在「未归类」桶里',
   );
 });
 
@@ -1174,7 +1189,7 @@ check('投影层与归类口径同一份：**无图**的行在利润 / 核对 / 
   const ship = odb.shippingRows(200).filter((r) => String(r.orderNo).startsWith('VT-'));
   assert.strictEqual(ship.length, 3, `利润投影应有 3 行，实际 ${ship.length}`);
   for (const r of ship) {
-    assert.strictEqual(r.styleCode, `AE-${VT_ITEM}`, `利润投影漏了款编码：${r.orderNo}`);
+    assert.strictEqual(r.styleCode, 'VTSTYLE', `利润投影漏了款编码：${r.orderNo}`);
     assert.ok(
       String(r.styleColor) === '5' || String(r.styleColor) === '7',
       `利润投影漏了色名：${r.orderNo} => ${JSON.stringify(r.styleColor)}`,
@@ -1184,14 +1199,14 @@ check('投影层与归类口径同一份：**无图**的行在利润 / 核对 / 
   const page = odb.listOrdersPage({ limit: 500 }).rows.filter((r) => String(r.orderNo).startsWith('VT-'));
   assert.strictEqual(page.length, 3, `待核对列表应有 3 行，实际 ${page.length}`);
   for (const r of page) {
-    assert.strictEqual(String(r.styleCode), `AE-${VT_ITEM}`, `核对列表漏了款编码：${r.orderNo}`);
+    assert.strictEqual(String(r.styleCode), 'VTSTYLE', `核对列表漏了款编码：${r.orderNo}`);
   }
   // 拣货投影（拿货页的款色 / 供应商都从它来）
   const pick = require(path.join(ROOT, 'dist', 'electron', 'picking-db.js')).pickingRows({ limit: 2000 });
   const pr = pick.rows.filter((r) => String(r.orderNo).startsWith('VT-'));
   assert.strictEqual(pr.length, 3, `拣货投影应有 3 行，实际 ${pr.length}`);
   for (const r of pr) {
-    assert.strictEqual(String(r.styleCode), `AE-${VT_ITEM}`, `拣货投影漏了款编码：${r.orderNo}`);
+    assert.strictEqual(String(r.styleCode), 'VTSTYLE', `拣货投影漏了款编码：${r.orderNo}`);
     assert.strictEqual(String(r.styleName), '', '占位款名应留空（命名是人的判断）');
   }
 });
@@ -1371,7 +1386,7 @@ check('命名板的组带出款身份（款 id / 编码 / 款名 / 厂家）', (
   const g = basicsGroup();
   assert.ok(g, '找不到 VT_ITEM 那一组');
   assert.ok(g.styleId > 0, `款 id 没带出来：${g.styleId}`);
-  assert.strictEqual(g.styleCode, `AE-${VT_ITEM}`);
+  assert.strictEqual(g.styleCode, 'VTSTYLE');
   assert.strictEqual(g.styleCount, 1, `这组只该涉及 1 个款，实际 ${g.styleCount}`);
   assert.strictEqual(g.styleName, '', '占位款名应留空');
   assert.strictEqual(g.supplierId, 0, '还没指定厂家，应为 0');
@@ -1394,7 +1409,7 @@ check('改款名：落 `pl_products.name`，而且**厂家没被动**（只改�
   const r = odb.saveStyleBasics(g.styleId, { name: '测试连帽卫衣' });
   assert.strictEqual(r.ok, true, `改名失败：${r.error}`);
   assert.strictEqual(r.name, '测试连帽卫衣');
-  const p = dbGet(`SELECT name, supplier_id FROM pl_products WHERE code = ?`, [`AE-${VT_ITEM}`]);
+  const p = dbGet(`SELECT name, supplier_id FROM pl_products WHERE code = ?`, ['VTSTYLE']);
   assert.strictEqual(String(p.name), '测试连帽卫衣');
   assert.strictEqual(Number(p.supplier_id), basicsSupplier, '只改名却把厂家清掉了');
 });
@@ -1404,7 +1419,7 @@ check('改厂家：`pl_products.supplier_id` 跟着变，款名不动', () => {
   const r = odb.saveStyleBasics(g.styleId, { supplierId: 0 });
   assert.strictEqual(r.ok, true, `清空厂家失败：${r.error}`);
   assert.strictEqual(r.supplierId, 0, '回执要带保存后的实际值（界面拿它回显）');
-  const p = dbGet(`SELECT name, supplier_id FROM pl_products WHERE code = ?`, [`AE-${VT_ITEM}`]);
+  const p = dbGet(`SELECT name, supplier_id FROM pl_products WHERE code = ?`, ['VTSTYLE']);
   assert.strictEqual(Number(p.supplier_id), 0);
   assert.strictEqual(String(p.name), '测试连帽卫衣', '清厂家不该动款名');
   odb.saveStyleBasics(g.styleId, { supplierId: basicsSupplier });
@@ -1415,7 +1430,7 @@ check('厂家不存在 → 拒绝并给原话，且款名没被改（不是"先�
   const r = odb.saveStyleBasics(g.styleId, { name: '不该生效的名字', supplierId: 99999999 });
   assert.strictEqual(r.ok, false, '不存在的厂家应被拒绝');
   assert.ok(/厂家/.test(String(r.error)), `原话应提到厂家：${r.error}`);
-  const p = dbGet(`SELECT name FROM pl_products WHERE code = ?`, [`AE-${VT_ITEM}`]);
+  const p = dbGet(`SELECT name FROM pl_products WHERE code = ?`, ['VTSTYLE']);
   assert.strictEqual(String(p.name), '测试连帽卫衣', '被拒绝的那次不该把款名写进去');
 });
 
@@ -1474,9 +1489,16 @@ function mgRaw(item, color, size, no) {
     产品信息: `【1】Merge Fixture ${item}\n(产品属性:Color:${color},Size:${size})`,
   };
 }
+let mgImgSeq = 5000;
+function mgNextImage() {
+  const id = mgImgSeq++;
+  dbRun(`INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/mg')`, [id, 'fp-mg-' + id, 'ufp-mg-' + id, 'u-mg-' + id]);
+  return id;
+}
 function mgInsert(item, color, size, no) {
   return odb.insertOrder({
-    imageId: null,
+    // 回退后风格靠**人工认款**建出来（assignOrderStyle 经图片投影落行，并自动记键表绑定）。
+    imageId: mgNextImage(),
     orderNo: no,
     shop: '合并店',
     size,
@@ -1487,13 +1509,20 @@ function mgInsert(item, color, size, no) {
     rawFields: mgRaw(item, color, size, no),
   });
 }
+// 回退后「导入不自动建款色」：三个款必须由**人工认款**显式建出来（assignOrderStyle 按
+// `AE-<商品ID>` 落款 + 色），这正是生产里"导入只留待认款、人去认款台认"的形态。
+function mgReconcile(item, color, size, no) {
+  const id = mgInsert(item, color, size, no);
+  odb.assignOrderStyle({ orderId: id, styleCode: `AE-${item}`, color });
+  return id;
+}
 // A（目标候选）：色 5、7 · B：色 5、7、9（5/7 与 A 同名 ⇒ 改键，9 不同名 ⇒ 搬色）· C：色 5
-mgInsert(MG_A, '5', 'L', 'MG-A-5-L');
-mgInsert(MG_A, '7', 'M', 'MG-A-7-M');
-mgInsert(MG_B, '5', 'L', 'MG-B-5-L');
-mgInsert(MG_B, '7', 'L', 'MG-B-7-L');
-mgInsert(MG_B, '9', 'XL', 'MG-B-9-XL');
-mgInsert(MG_C, '5', 'S', 'MG-C-5-S');
+mgReconcile(MG_A, '5', 'L', 'MG-A-5-L');
+mgReconcile(MG_A, '7', 'M', 'MG-A-7-M');
+mgReconcile(MG_B, '5', 'L', 'MG-B-5-L');
+mgReconcile(MG_B, '7', 'L', 'MG-B-7-L');
+mgReconcile(MG_B, '9', 'XL', 'MG-B-9-XL');
+mgReconcile(MG_C, '5', 'S', 'MG-C-5-S');
 
 const mgStyleOf = (item) =>
   dbGet(`SELECT id, code FROM oi_styles WHERE code = ?`, [`AE-${item}`]);
@@ -1502,7 +1531,7 @@ const mgB = mgStyleOf(MG_B);
 const mgC = mgStyleOf(MG_C);
 
 check('夹具成立：三个 listing 各成一个款，且都挂在同一个厂家下', () => {
-  assert.ok(mgA && mgB && mgC, '三个款都应被自动建出来');
+  assert.ok(mgA && mgB && mgC, '三个款都应被人工认款建出来');
   for (const s of [mgA, mgB, mgC]) {
     const r = odb.saveStyleBasics(Number(s.id), { supplierId: MG_SUP });
     assert.strictEqual(r.ok, true, `指定厂家失败：${r.error}`);

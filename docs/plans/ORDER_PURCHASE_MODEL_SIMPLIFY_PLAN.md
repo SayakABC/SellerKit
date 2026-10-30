@@ -3,7 +3,7 @@
 > **状态**：🟢 **阶段 A 完成**（A1–A8 全部落地；A2 改判不加列、A3 由 B2 的包裹汇总替代）· 🟢 **B1 拆表完成** · 🟢 **B2 包裹完成** · 🟢 **C1 运费接进利润完成** · 🟢 **C2 两字段 + 回填 + 读写改接 + 删表全部完成**（2026-10-21；删表 = `order.main` v10）· **本计划收口**
 > **读者**：架构 / 开发者
 > **目标**：利润/对账数据源收敛到「订单表 + 订单商品关联表 + 包裹表」，退役 `ae_cost_map`
-> **前置阅读**：`docs/notes/2026-10-21-order-purchase-model-simplify.md`、`docs/plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md`、`docs/plans/PRODUCT_SKU_LINKING_PLAN.md`
+> **前置阅读**：`docs/notes/2026-10-30-order-table-and-model.md`、`docs/plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md`、`docs/plans/PRODUCT_SKU_LINKING_PLAN.md`
 
 ---
 
@@ -52,7 +52,7 @@
 | 幂等 | 第二次执行不报错、行数不变、版本不回退、`sqlite_sequence` 已追平 |
 
 拆表后才成立的三条写入口约定（空单号拒绝 / 导入与采集互斥 / 重采集清包裹）与守卫见
-`docs/notes/2026-10-21-order-table-split-b1.md`。
+`docs/notes/2026-10-30-order-table-and-model.md`。
 
 ### 0.3 过渡期的已知限制（均已随阶段 C 消失）
 
@@ -220,7 +220,7 @@ parcel_lines(id, parcel_id, order_item_id, qty, UNIQUE(parcel_id, order_item_id)
 - **总物流费 = Σ 包裹 `ship_cents`**：由 `parcelTotals()` 派生，不落库；任一包缺值 ⇒ 整单 `null`。
 - 拆包入口：**「今天 › 归类核对」行内「拆包」→ 右侧抽屉**（两个范围都给；按单个商品行拆、可拆数量）。
   上限只有一处算法（`parcelRemaining`），界面显示与写入校验共用。
-- 细节与守卫见 `docs/notes/2026-10-21-parcel-model-b2.md`。
+- 细节与守卫见 `docs/notes/2026-10-30-data-model-and-dependencies.md`。
 - 包裹收尾（B1 一并落地）：`deleteOrder` 收掉空壳包；`clearAll` 连包裹一起清；
   采集重推整单替换前先清该单包裹（明细 id 全换，留着就是空壳）。
 - ~~**未做**：运费接进利润~~ → **C1 已完成**（2026-10-21）：`orderCost.ts` 消费 `parcelTotalsByOrders`，已拆包的单不再看运价表。
@@ -300,4 +300,4 @@ parcel_lines(id, parcel_id, order_item_id, qty, UNIQUE(parcel_id, order_item_id)
 | 拆表破坏下游 | ✅ 已执行：阶段 B 独立完成，逐下游改写 + 冒烟；真实库克隆迁移对照（§0.2） |
 | 快照字段口径漂移 | 每个数字只一处写（AGENTS 铁律 5），读方统一 `orderCost.ts` |
 | `ae_settle_lines` 依赖未明 | 退役前先确认平台结算轨是否仍需 |
-| **克重回落有产品数上限**（A7 暴露，✅ **2026-10-22 已修**） | 原 `loadSkuWeights()` 只取前 500 款（`productList({limit:500})`），超过 500 款时后排行的 `weightSource` 静默变成 `none`（"缺克重"），看起来像数据没维护。已改为**产品分页拉全（单页 500）+ SKU 分批取（单次 ≤5000 id）**；任何一页读失败仍返回空表（不给半个表，避免"其实有克重"的行被误报成缺口）。守卫 `tests/skuWeights.spec.ts`（620 款第 2 页命中、5200 款分两批、两处中途失败）。见 `docs/notes/2026-10-22-sku-weight-full-scan.md` |
+| **克重回落有产品数上限**（A7 暴露，✅ **2026-10-22 已修**） | 原 `loadSkuWeights()` 只取前 500 款（`productList({limit:500})`），超过 500 款时后排行的 `weightSource` 静默变成 `none`（"缺克重"），看起来像数据没维护。已改为**产品分页拉全（单页 500）+ SKU 分批取（单次 ≤5000 id）**；任何一页读失败仍返回空表（不给半个表，避免"其实有克重"的行被误报成缺口）。守卫 `tests/skuWeights.spec.ts`（620 款第 2 页命中、5200 款分两批、两处中途失败）。见 `docs/notes/2026-10-30-goods-sku-weight.md` |

@@ -3,7 +3,7 @@
 > **状态**：🟢 **D1–D18 与 Q6 全部确认**；**R0（拆行器 + 清库）已完成并全绿（2026-10-30）**，下一步 R1（= S0a 主数据）。
 > **读者**：架构 / 开发者 / 产品
 > **起因**（用户口径）：一个很简单的功能却铺了十几张表，数据维护不好、结构不清晰；解析订单 Excel 定不了款和色；在产品管理里维护 SKU 的时间成本太高。
-> **前置**：[`reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md`](../reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md)、[`notes/2026-10-28-order-driven-classify-plan.md`](../notes/2026-10-28-order-driven-classify-plan.md)、[`plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md)、`docs/decisions/ADR-002-master-data-layer.md`（C1）
+> **前置**：[`reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md`](../reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md)、[`notes/2026-10-30-order-purchase-grid.md`](../notes/2026-10-30-order-purchase-grid.md)、[`plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md)、`docs/decisions/ADR-002-master-data-layer.md`（C1）
 > **性质**：设计方案 + 分期；R0 已落地（拆行器 / 订单行幂等键 / 清库脚本），R1 起按 §10 继续。
 >
 > ⚠️ **2026-10-30 重大订正（用户纠错）**：本文 §4 原先以 `(店铺, 商品ID, Color 原文)` 为精确键、并以
@@ -187,7 +187,7 @@ resolve(shop, itemId, imageKey, colorRaw):
 
 ## 7. 明确不做
 
-- **不用图像做归类键**（CLIP 判色 AUC 0.522 ≈ 随机；已有裁定，见 `notes/2026-10-28-classify-local-vision-direction.md`）；
+- **不用图像做归类键**（CLIP 判色 AUC 0.522 ≈ 随机；已有裁定，见 `notes/2026-10-30-order-classify-panel.md`）；
 - **不把 `pl_shop_items` 合并进 `pl_shop_sku`**，也不给它加 `product_id`（采集快照与认款决定是两个事实）；
 - **不引入 EAV / 用视图替代有 `id` 的表**（`oi_style_colors.id` 被 5 张表引用，见审查稿 §10.2）；
 - **不把成本/售价放到变体上**（C1 成本单点：`pl_products.cost_cents` + 采购快照）；
@@ -216,7 +216,7 @@ resolve(shop, itemId, imageKey, colorRaw):
 
 ## 9. 与既有方案的关系
 
-- `notes/2026-10-28-order-driven-classify-plan.md` 已得出"键在订单里"，并落地了 `variant_key`；**但它把键定成了 `(店铺,商品,Color原文)`**，且映射表里没有 SKU 级身份，于是色仍然要靠 `oi_variant_keys` + 图/别名。本文已按图片键订正（见 §4），并在该笔记里加了批注。
+- `notes/2026-10-30-order-purchase-grid.md` 已得出"键在订单里"，并落地了 `variant_key`；**但它把键定成了 `(店铺,商品,Color原文)`**，且映射表里没有 SKU 级身份，于是色仍然要靠 `oi_variant_keys` + 图/别名。本文已按图片键订正（见 §4），并在该笔记里加了批注。
 - `plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`（2026-10-21）已经把成本/克重改成快照；本方案 S3 的"款默认克重"是它的自然延伸，不新增第二套口径。
 - `reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md` 的 A/B/C 分级与删除清单，在本方案的 S2/S4 里逐项兑现。
 

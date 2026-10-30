@@ -5,7 +5,7 @@
 | 版本 | v1（草案，待用户评审） |
 | 日期 | 2026-10-12 |
 | 状态 | 待评审 |
-| 关联 | `docs/plans/DAILY_SHIPPING_FLOW_PLAN.md`（§6 五步流程）、`docs/notes/2026-10-12-classify-reopen-corrected.md` |
+| 关联 | `docs/plans/DAILY_SHIPPING_FLOW_PLAN.md`（§6 五步流程）、`docs/notes/2026-10-30-order-classify-panel.md` |
 
 ---
 

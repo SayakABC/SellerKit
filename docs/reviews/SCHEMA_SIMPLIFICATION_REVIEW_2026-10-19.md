@@ -91,7 +91,7 @@
 
 ### 3.1 `pl_shop_sku.variant_id` —— 只写不读的死列
 
-**证据**：`grep variant_id` 全仓，除了建表（`product-db.ts:854`）、写入（`:1486` `variantIdByColor`）和返回类型（`src/types.ts:1651`），**没有任何业务读者**。文档也自认"仍然填，但只作尽力关联"（`docs/notes/2026-10-05-mapping-carries-color.md:23`）。
+**证据**：`grep variant_id` 全仓，除了建表（`product-db.ts:854`）、写入（`:1486` `variantIdByColor`）和返回类型（`src/types.ts:1651`），**没有任何业务读者**。文档也自认"仍然填，但只作尽力关联"（`docs/notes/2026-10-30-mapping-color-and-replay.md:23`）。
 
 **代价**：每次认款多一次按色反查变体的查询；`variantIdByColor` 的"同色多码取最小 id"是一个**没有消费者的近似**——它填的值可能不是用户想关联的那个 SKU。
 **与既有方案的关系**：`ORDER_ATTRIBUTION_WEIGHT_PLAN.md` 的 P3 打算"升级成 `(productId,color,size)` 精确版"。在那之前，这一列**要么按码填对、要么停止写入**，不要维持"填了个大概"的中间态。

@@ -7,7 +7,7 @@
 > **取数时点**：2026-10-05（§1 全部是真实库实测，只读，非推断）。
 > **执行进度（截至 2026-10-12）**：S1/S2/S3/S4/S5/S8 及 S9 系列**已全部完成**；S6（拿货→发货动作衔接）**未开工**；
 > G1（内建化收编 + 岛下架）、G4（映射升款+色）**已拍板落地**；**G3（颜色枚举）待拍板**。
-> order-insight 岛已整体下架，三处坐标清完并线上复核（见 `docs/notes/2026-10-01-ui-island-retirement.md` §6）。
+> order-insight 岛已整体下架，三处坐标清完并线上复核（见 `docs/notes/2026-10-30-island-publish-and-retire.md` §6）。
 > **数据现状**：`pl_shop_sku` 需配 **17 个商品ID** 映射解锁「未识别款」；`ae_cost_map` 经 S1 回填 7 行。
 
 ---
@@ -80,7 +80,7 @@
 
 | 步 | 你要的 | 现状 | 取证 |
 | --- | --- | --- | --- |
-| ① | 导出已支付订单 | ✅ 自动识别 + 落库 | `src/lib/importDetect.ts`；`docs/notes/2026-10-05-mango-pending-order-import.md` |
+| ① | 导出已支付订单 | ✅ 自动识别 + 落库 | `src/lib/importDetect.ts`；`docs/notes/2026-10-30-order-import-pipeline.md` |
 | ② | SKU 汇总 | ✅ 已做 | `src/lib/picking.ts:134` `aggregatePicking` |
 | ② | 图片 | ⚠️ 三层回落已实现，但仅 27% 订单有图 | `electron/product-db.ts:1660`；产品主图 0 张 |
 | ② | 供应商 | ⚠️ 已在投影里，但 27 个产品仅 1 个填了 | `electron/picking-db.ts:88` |
@@ -193,14 +193,14 @@
 ### 执行记录（已落地，摘要；细节以各 `docs/notes/2026-10-*` 与 `CHANGELOG.md` 为准）
 
 - **S1（10-05，非代码变更）**：历史数据按决定**全部清除**（115 行半残 + 42 行芒果导入：`oi_orders` 157→0、`oi_images`/`oi_queue`/`oi_styles`/`oi_style_colors`/`oi_style_fingerprints` 同步清空；32 张图移备份未删）。存量成本回填 `ae_cost_map` **0→7 行/6 款**。配单清单 17 个商品ID。⚠️ 外部写库不刷新宿主内存态 ⇒ **改完必须重启宿主**。**用户侧待办**：① 重启宿主；② 在「货与成本 › 映射与关联」配 17 个商品ID；③ 确认芒果 42 行金额为 0 的原因。
-- **S2（10-05）**：落点 `TodayView.vue`（零新 IPC/零新表/零能力域/零发版）：四步每步"现在情况+去哪做"，点任一步直达。**关键设计判断**：状态只由本页已有数字推导；前一步未完成时后面一律 `todo` ⇒ `now`+`gap` 恒为 1（初版各步独立判断导致多块同时高亮）。⚠️ 宿主跳不进岛的某页（`switchModule` 的 `action`/`payload` 半接线）⇒ 按钮只能承诺"打开那个岛"。验证 `today:ui` 40→48。见 `docs/notes/2026-10-05-daily-flow-card.md`。
-- **S3（10-05）**：进价/预估金额复用 `orderCost.pickUnitCost`（同源同 `round2`；逐行取价非 `件数×单一价`；缺价报「无进价」不按 0 蒙）。按厂家分组 + 导出带图 xlsx（一厂家一 sheet；新增 `electron/picking-xlsx.ts` + 通道 `picking-export-excel`）。**顺手修三个真 bug**：① `exceljs addImage` 无 `extension` → `image1.undefined` 包不合法（改按内容推扩展名）；② Electron `nativeImage` 不解 WebP（真订单图 8/9 是 WebP）→ 渲染层 canvas 转 JPEG 再传；③ 冒烟 `exit(1)` 后又 `exit(0)` 恒绿 → 同一流程只调一次 `process.exit`。验证 `picking.spec`+11 / `picking:xlsx:smoke`+15 / `picking:ui` 41→44。见 `docs/notes/2026-10-05-picking-export-with-images.md`。
-- **S4（10-05，G4=①）**：映射升「款+色」落 `pl_shop_sku.spec`=`颜色`（`variant_id` 由系统按 `(product_id,色)` 反查）；匹配去写死 `spec='*'` 改带色行优先；回填新增 `reassignOrdersByItemIds()`。**顺手修两个只有老库才暴露的 bug**：① `oi_styles.name` 建表/INSERT/迁移三方矛盾 → 老库"新建款"必抛 `no such column: name`；② `pickingRows.color` 一直取订单原文（恒空/占位）⇒ 配好的色在拣货单被丢。验证 `picking:smoke` 14→19、克隆真库端到端。见 `docs/notes/2026-10-05-mapping-carries-color.md`。
-- **S5（10-10）**：「生成拣货单」并入「拿货」：清单成「要拿什么」子视图，「按此生成拿货单(N)」把所选厂家行直写 `purchase_items`（单价留 0、qty=还差、一次一厂）。原「待拿货缺口」表格视图删除（同口径两版并排只会引人追问）。拿货页最终形态：款色一行/尺码并排（表 10→6 列）· 指标条撤掉 · 开单按钮钉厂家段尾 · 生成后直接进编辑器。见 `CHANGELOG.md` 2026-10-10 与 `docs/notes/2026-10-10-picking-merged-into-purchase.md`。
-- **S8（10-05）**：`TodayView.vue` 重写为「总览+六步」七页签；`flowCtx.ts` 共享上下文；`defineAsyncComponent`+`KeepAlive` 懒挂载保活；`PickingView`/`OrderCostView` 加 `embedded`（只藏标题、保留动作）。**⚠️ 两个真问题**：① 内嵌时按"容器"藏页头 ⇒ 动作按钮一起消失——判据：**内嵌模式要按"信息层级"藏**；② 一条假守卫（按 `pickingRows` 调用总数断言，但该 IPC 两个调用方）⇒ 改按入参区分调用方后变红——判据：**跨模块共用 IPC 断言不能按调用总数**。order-insight 岛 2026-10-05 整体下架，见 `docs/notes/2026-10-01-ui-island-retirement.md`。
-- **S9（10-11）**：**拍板** ① 名称=发货台（id 仍 `today`，只改显示名）；② 口径=1–3 步按今天、4–5 步按未结清（跨天结转）；③ 范围=四问全做。改动：订单取数加**导入日**过滤（四处同改，按 `date(created_at)` 非 `order_time`）；导入回执改结论卡；归类页补「待核对X·已核对Y」+ 空态三出口（两数同源同筛，否则"核完"与"本来就没有"分不开）。⚠️ 「今天」结算对账时间窗的「今天」是**日期语义**非模块名，别一起改。门禁全过（`today:ui` 215、变异 6 条）。见 `docs/notes/2026-10-11-shipping-desk-naming-and-daily-scope.md`。
+- **S2（10-05）**：落点 `TodayView.vue`（零新 IPC/零新表/零能力域/零发版）：四步每步"现在情况+去哪做"，点任一步直达。**关键设计判断**：状态只由本页已有数字推导；前一步未完成时后面一律 `todo` ⇒ `now`+`gap` 恒为 1（初版各步独立判断导致多块同时高亮）。⚠️ 宿主跳不进岛的某页（`switchModule` 的 `action`/`payload` 半接线）⇒ 按钮只能承诺"打开那个岛"。验证 `today:ui` 40→48。见 `docs/notes/2026-10-30-ui-nav-and-tabs.md`。
+- **S3（10-05）**：进价/预估金额复用 `orderCost.pickUnitCost`（同源同 `round2`；逐行取价非 `件数×单一价`；缺价报「无进价」不按 0 蒙）。按厂家分组 + 导出带图 xlsx（一厂家一 sheet；新增 `electron/picking-xlsx.ts` + 通道 `picking-export-excel`）。**顺手修三个真 bug**：① `exceljs addImage` 无 `extension` → `image1.undefined` 包不合法（改按内容推扩展名）；② Electron `nativeImage` 不解 WebP（真订单图 8/9 是 WebP）→ 渲染层 canvas 转 JPEG 再传；③ 冒烟 `exit(1)` 后又 `exit(0)` 恒绿 → 同一流程只调一次 `process.exit`。验证 `picking.spec`+11 / `picking:xlsx:smoke`+15 / `picking:ui` 41→44。见 `docs/notes/2026-10-30-picking-and-takeout.md`。
+- **S4（10-05，G4=①）**：映射升「款+色」落 `pl_shop_sku.spec`=`颜色`（`variant_id` 由系统按 `(product_id,色)` 反查）；匹配去写死 `spec='*'` 改带色行优先；回填新增 `reassignOrdersByItemIds()`。**顺手修两个只有老库才暴露的 bug**：① `oi_styles.name` 建表/INSERT/迁移三方矛盾 → 老库"新建款"必抛 `no such column: name`；② `pickingRows.color` 一直取订单原文（恒空/占位）⇒ 配好的色在拣货单被丢。验证 `picking:smoke` 14→19、克隆真库端到端。见 `docs/notes/2026-10-30-mapping-color-and-replay.md`。
+- **S5（10-10）**：「生成拣货单」并入「拿货」：清单成「要拿什么」子视图，「按此生成拿货单(N)」把所选厂家行直写 `purchase_items`（单价留 0、qty=还差、一次一厂）。原「待拿货缺口」表格视图删除（同口径两版并排只会引人追问）。拿货页最终形态：款色一行/尺码并排（表 10→6 列）· 指标条撤掉 · 开单按钮钉厂家段尾 · 生成后直接进编辑器。见 `CHANGELOG.md` 2026-10-10 与 `docs/notes/2026-10-30-picking-and-takeout.md`。
+- **S8（10-05）**：`TodayView.vue` 重写为「总览+六步」七页签；`flowCtx.ts` 共享上下文；`defineAsyncComponent`+`KeepAlive` 懒挂载保活；`PickingView`/`OrderCostView` 加 `embedded`（只藏标题、保留动作）。**⚠️ 两个真问题**：① 内嵌时按"容器"藏页头 ⇒ 动作按钮一起消失——判据：**内嵌模式要按"信息层级"藏**；② 一条假守卫（按 `pickingRows` 调用总数断言，但该 IPC 两个调用方）⇒ 改按入参区分调用方后变红——判据：**跨模块共用 IPC 断言不能按调用总数**。order-insight 岛 2026-10-05 整体下架，见 `docs/notes/2026-10-30-island-publish-and-retire.md`。
+- **S9（10-11）**：**拍板** ① 名称=发货台（id 仍 `today`，只改显示名）；② 口径=1–3 步按今天、4–5 步按未结清（跨天结转）；③ 范围=四问全做。改动：订单取数加**导入日**过滤（四处同改，按 `date(created_at)` 非 `order_time`）；导入回执改结论卡；归类页补「待核对X·已核对Y」+ 空态三出口（两数同源同筛，否则"核完"与"本来就没有"分不开）。⚠️ 「今天」结算对账时间窗的「今天」是**日期语义**非模块名，别一起改。门禁全过（`today:ui` 215、变异 6 条）。见 `docs/notes/2026-10-30-shipping-desk-and-rate.md`。
 - **S9b（10-11，用户报「设了颜色不生效」）**：**同类 bug 第二例**（界面显示做了、数据没动）。根因：颜色两处存——`oi_orders.color` 是行属性；真正载体是 `oi_style_colors`。`saveCorrection` 的 `if(named && fingerprint)` 在 `category`/`features` 全空时短路挂款链（生产正是这形状）。**改法**：`if(named)` + 补 `colorUnattached` 静默失败守卫 + 确认/保存同格脏改动守卫。**遗留（待拍板）**：宿主侧款色写入无自动化守卫（冒烟只说"通道被调用"），要长期生效得收进 `scripts/` 或 `order:smoke`。
-- **S9c（10-12，A/B 拍板「做B」）**：真库 23 行全 `corrected=1`，无入口回改。**B=新增「退回待核对」动作**：`reopenOrdersCorrected(ids)` 只翻 `corrected` 一位、刻意无 `all` 分支；契约四处同改；渲染层 `classify.ts` 抽 `listPage(corrected,opts)` + `.wb-seg` 范围切换，已核对范围改只读。**⭐ 通用结论**：**"能力是单向的"是一类独立缺口**——发现法=问「用户做错这步怎么改？」；补反向能力先问"正反是否同一条规矩"，但**对称≠都做**（批量退回不可逆）。门禁 `today:ui` 223→238、变异 13 条。见 `docs/notes/2026-10-12-classify-reopen-corrected.md`。
+- **S9c（10-12，A/B 拍板「做B」）**：真库 23 行全 `corrected=1`，无入口回改。**B=新增「退回待核对」动作**：`reopenOrdersCorrected(ids)` 只翻 `corrected` 一位、刻意无 `all` 分支；契约四处同改；渲染层 `classify.ts` 抽 `listPage(corrected,opts)` + `.wb-seg` 范围切换，已核对范围改只读。**⭐ 通用结论**：**"能力是单向的"是一类独立缺口**——发现法=问「用户做错这步怎么改？」；补反向能力先问"正反是否同一条规矩"，但**对称≠都做**（批量退回不可逆）。门禁 `today:ui` 223→238、变异 13 条。见 `docs/notes/2026-10-30-order-classify-panel.md`。
 - **S9d（10-12）**：图片看不清=尺寸问题（主进程不裁、CSS 已 `contain`）⇒ 表图 64→**96px** + 点开看原图。**⭐ 真 bug（窄窗口）**：`.wb-table` `table-layout:auto`，已核对范围窄文本 ⇒ 图列 112px 塌到 32px——修法=图列给 CSS 地板 `.cl-thumb-col{min-width:112px}`。**⭐⭐ 通用结论**：`--dump-dom` 不传 `--window-size` ⇒ 视口仅 800×600（既是坑也是免费窄窗口测试机）；`table-layout:auto` 下固定尺寸图的地板必须由 CSS 给。门禁 `today:ui` 238→249、变异 11 条。
 
 ---

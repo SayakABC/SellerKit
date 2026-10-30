@@ -1,9 +1,9 @@
 # 集中邮件收件箱（Mail Inbox）— M1 / M2 / M3 + 正文渲染通道 已落地
 
 > 更新：2026-10-15（收件箱所在模块 2026-10-14 更名「基础数据」并整页重设计，本页位置表述已同步）
-> 代码入口：`electron/mail-*.ts`（主进程）、`src/modules/shop-accounts/`（渲染层，内建模块；曾为 UI 岛，2026-10-14 迁回宿主，见 `docs/notes/2026-10-14-shop-accounts-intake.md`）
+> 代码入口：`electron/mail-*.ts`（主进程）、`src/modules/shop-accounts/`（渲染层，内建模块；曾为 UI 岛，2026-10-14 迁回宿主，见 `docs/notes/2026-10-30-shop-account-merge-and-status.md`）
 > 相关文档：`AGENTS.md`（架构基线）、`docs/features/PROFIT_TRACKER.md`（ae 利润模块）、
-> `docs/notes/2026-10-04-mail-inline-images.md`（正文图片为什么坏 / `sk-mail://` 的两条实测取证）
+> `docs/notes/2026-10-30-mail-and-today-pages.md`（正文图片为什么坏 / `sk-mail://` 的两条实测取证）
 
 ---
 
@@ -23,7 +23,7 @@
 - **接入态谁读谁初始化**：账号清单由 `mailStore.ensureAccountState()` 提供（prefs + providers + accounts，
   **不含**轮询与同步事件）；「基础数据」的账号行与「接入邮箱」抽屉自己 await 它，**不能假设收件箱先被打开过**
   —— 否则冷启动直接进「基础数据」时每行恒显示「未接入」、抽屉是空表单（2026-10-25 修，见
-  `docs/notes/2026-10-25-mail-restore-and-cold-start-init.md`）。`ensureReady()` 负责收件箱自己
+  `docs/notes/2026-10-30-mail-and-today-pages.md`）。`ensureReady()` 负责收件箱自己
   的轮询/事件订阅，内部复用同一个加载。
 
 ---
@@ -303,7 +303,7 @@ mailAttachmentSave({ messageId: number; attachmentId: number }) -> ApiResult<{ p
 ## 6. 正文渲染通道（`sk-mail://`，2026-10-04）
 
 > 起因：正文里的图片「一张都显示不出来」。根因取证与实测日志见
-> [`docs/notes/2026-10-04-mail-inline-images.md`](../notes/2026-10-04-mail-inline-images.md)。
+> [`docs/notes/2026-10-30-mail-and-today-pages.md`](../notes/2026-10-30-mail-and-today-pages.md)。
 
 ### 6.1 为什么要另起一个协议
 

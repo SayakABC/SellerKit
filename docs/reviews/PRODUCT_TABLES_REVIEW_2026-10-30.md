@@ -3,14 +3,14 @@
 > **审查日期**：2026-10-30
 > **审查对象**：产品管理链路上的 15 张表 —— `pl_products` / `pl_variants` / `pl_images` / `pl_item_images` / `pl_shop_sku` / `pl_shop_items` / `pl_shop_store_keys` / `pl_bundle_links` / `oi_styles` / `oi_style_colors` / `oi_style_fingerprints` / `oi_variant_keys` / `oi_color_aliases` / `oi_item_parts` / `oi_images`（另有 `oi_order_items` 仅作对照）。
 > **方法**：静态通读 + `文件:行` 取证 + **真库只读副本**查询（运行库 `~/Library/Application Support/seller-kit/sellerkit.db` 的 `db` + `-wal` 复制到 `/tmp/skdb/sk.db` 后查；WAL 库直接 `-readonly` 打不开）。**未修改任何表、未跑任何迁移**。
-> **对照口径**：`features/PRODUCT_LIBRARY.md`（产品库权威口径）、`notes/2026-10-15-table-necessity-review.md`、`notes/2026-10-28-order-driven-classify-plan.md`、`notes/2026-10-29-db-table-audit.md`。
+> **对照口径**：`features/PRODUCT_LIBRARY.md`（产品库权威口径）、`notes/2026-10-30-db-schema-and-migration.md`、`notes/2026-10-30-order-purchase-grid.md`、`notes/2026-10-30-db-schema-and-migration.md`。
 > **结论性质**：审查 + 分期建议，**不含已实施的改动**。每一条都给了可复现 SQL 或代码位置，没有取证的判断一律不写。
 
 ---
 
 ## 0. 结论
 
-**没有"整张表都是多余的"表**（这与 `notes/2026-10-29-db-table-audit.md` 的"疑似无用 0"一致），但存在 **1 个表内种群真冗余、1 处字节重复、3 处结构上的"两套真相/无入口"**，以及若干必须清理的数据质量欠账。
+**没有"整张表都是多余的"表**（这与 `notes/2026-10-30-db-schema-and-migration.md` 的"疑似无用 0"一致），但存在 **1 个表内种群真冗余、1 处字节重复、3 处结构上的"两套真相/无入口"**，以及若干必须清理的数据质量欠账。
 
 | 等级 | 数量 | 内容 |
 | --- | --- | --- |
@@ -132,7 +132,7 @@
 **两个真实缺口**：
 
 1. **改 `code` 会静默断链**：`upsertProduct` 的更新分支把 `code` 一起写回（`product-db.ts:423/428`），既不校验引用，也不同步 `oi_styles.code` / `oi_style_colors.code` / `pl_variants.code`。改完编码后，订单归款、采购 JOIN 会静默"找不到款"，而不是报错。
-2. **`oi_styles` 实际仍在增长**：`notes/2026-10-28-order-driven-classify-plan.md` §8.3 写"`oi_styles` 冻结不再新建"，但 `assignOrderStyle` / `autoAssignByMap` 走 `ensureStyleByCode` 时仍会 **INSERT 占位行**（`order-db.ts:2343`）。也就是说"冻结"只对 AI 识别路径成立，**产品库新增一个从未出过订单的款、且被点名归款时，仍会长出 `mapped:` 行**。
+2. **`oi_styles` 实际仍在增长**：`notes/2026-10-30-order-purchase-grid.md` §8.3 写"`oi_styles` 冻结不再新建"，但 `assignOrderStyle` / `autoAssignByMap` 走 `ensureStyleByCode` 时仍会 **INSERT 占位行**（`order-db.ts:2343`）。也就是说"冻结"只对 AI 识别路径成立，**产品库新增一个从未出过订单的款、且被点名归款时，仍会长出 `mapped:` 行**。
 
 **建议（P2，先加锚点再收口）**：
 

@@ -3,7 +3,7 @@
 ## Status
 
 **Accepted + 已落地 (2026-10-22)** — 决策人：项目方。同日完成 P0–P3（`shop.main` v1 已在真库执行，
-落点见 `electron/shop-db.ts`，落地记录见 `docs/notes/2026-10-22-shop-account-physical-merge.md` 文末）。
+落点见 `electron/shop-db.ts`，落地记录见 `docs/notes/2026-10-30-shop-account-merge-and-status.md` 文末）。
 **部分取代** ADR-002 中「`sk_shops` 必须是凭据无关的物理身份层」这一条；
 ADR-002 的 C1–C4（单点写入 / 关联用 ID / 主数据挂宿主中立层 / per-plugin 域授权）**继续有效**。
 来处：`docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`（含真库只读取证与迁移方案）。
@@ -153,5 +153,5 @@ ADR-002（2026-09-24）当时把店铺身份与账号凭据**物理拆成两张�
 
 - `docs/decisions/ADR-002-master-data-layer.md` — 主数据层与 C1–C4（本文部分取代其物理分表结论）。
 - `docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md` — 数据模型、迁移步骤、界面与验收。
-- `docs/notes/2026-10-22-shop-account-physical-merge.md` — 结论笔记（代价与不可逆点）。
+- `docs/notes/2026-10-30-shop-account-merge-and-status.md` — 结论笔记（代价与不可逆点）。
 - `electron/shop-db.ts` / `electron/shop-accounts-db.ts` / `electron/mail-db.ts` — 落点。

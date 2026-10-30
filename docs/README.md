@@ -55,7 +55,7 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | [`plans/UX_POLISH_PLAN.md`](plans/UX_POLISH_PLAN.md) | **体验优化计划**：对 `reviews/UX_REVIEW_2026-09-30.md` 的逐条复核 + 实施计划（P0 宿主外壳零发版 7 项 / P1 结构含 2 次岛发版攒批 / P2 打磨），含 2 条改法（移回默认包 / 完整向导）与 4 项待拍板 | 架构/开发者 | 🟢 待拍板 4 项 | 2026-09-30 |
 | [`plans/RESTRUCTURE_PLAN.md`](plans/RESTRUCTURE_PLAN.md) | **平台重构方案**：形态判据（岛 = 可选加工 / 宿主 = 主干）· 目标 IA（今天 / 订单 / 货与成本 / 运费 / 算钱 / 设置）· **9 处「多套」收敛清单** · 10 项历史坑删除**待拍板** · S1–S6 迁移顺序 + 四条防复发守卫 | 架构/开发者 | 🟢 待拍板 10 项（含 1 项大手术） | 2026-09-30 |
 | [`plans/PAID_LICENSE_PLAN.md`](plans/PAID_LICENSE_PLAN.md) | **付费授权方案**：Pro 档功能 + 月/年双档订阅 + 零自建（托管授权 API）；三条工程事实（岛是明文静态站点 / 判定必须落主进程 / 客户端永远可 patch）· **三个执法闸门**（安装门 / 激活门 / 调用门，零新协议）· 到期降级语义 · P0–P3 改动清单与门禁 | 架构/开发者 | 🟢 方案已定稿，未开工（待拍板 5 项） | 2026-09-30 |
-| [`plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md) | **订单-采购模型简化执行计划**：把「进价/克重/运费」从实时反查（`ae_cost_map`/`pl_shop_sku`/`sr_rate_snapshots`）改成落库快照，利润只依赖订单域三表。分阶段 A 快照前置（`pl_products`+进价、`pl_variants`+image_id、订单表+总克重/总物流费、关联表+克重/实际进价、`purchase-cost-sync`/`manual-costs` 改落点、利润引擎改读快照）/ B 拆表+包裹（`parcels`+`parcel_lines` 支持一单多包拆数量）/ C 退役表。方案前提见 `notes/2026-10-21-order-purchase-model-simplify.md`。**A / B1 / B2 / C1 / C2 全部落地（含 `ae_cost_map` 删除，`order.main` v10），计划已收口** | 架构/开发者 | ✅ 已完成 | 2026-10-21 |
+| [`plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md) | **订单-采购模型简化执行计划**：把「进价/克重/运费」从实时反查（`ae_cost_map`/`pl_shop_sku`/`sr_rate_snapshots`）改成落库快照，利润只依赖订单域三表。分阶段 A 快照前置（`pl_products`+进价、`pl_variants`+image_id、订单表+总克重/总物流费、关联表+克重/实际进价、`purchase-cost-sync`/`manual-costs` 改落点、利润引擎改读快照）/ B 拆表+包裹（`parcels`+`parcel_lines` 支持一单多包拆数量）/ C 退役表。方案前提见 `notes/2026-10-30-order-table-and-model.md`。**A / B1 / B2 / C1 / C2 全部落地（含 `ae_cost_map` 删除，`order.main` v10），计划已收口** | 架构/开发者 | ✅ 已完成 | 2026-10-21 |
 | [`plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`](plans/SHOP_ACCOUNT_REDESIGN_PLAN.md) | **店铺账号表与界面重构方案（物理合并版）**：店铺 + 账号合成一张 `sk_shops`（`name` / `email` 任一非空即可，分别表示「只有账号」「只有店铺」），删除 `sk_shop_sets`；紫鸟/ERP 独立成 `sk_tool_accounts`（一条登录一份密码），手机号与支付宝归企业、国际支付宝密码留店；邮件外键改指 `sk_shops`。含真库取证（10 账号无店、3 店无账号、12 账号共用 1 个 ERP）、一次性重建两张表的迁移与预检、旧 id 1–9 保留、合并列表/编辑器/一次保存 + 企业/手机/支付宝联动筛选、删除保护与明确不做清单 | 架构/开发者/产品 | ✅ **已落地（2026-10-22，P0–P3）**，判据核对见其 §7.1 | 2026-10-22 |
 | [`plans/LEDGER_PLAN.md`](plans/LEDGER_PLAN.md) | **记账（店铺收支 + 公共费用分摊 + 资金相关人往来结算）设计方案 v1.3**：口径先定（记账=已发生业务收支，**与「统计」的订单毛利不可相加**）· `bk_*` 十表（`period` 用 SQLite 生成列、结算行用**部分唯一索引** `WHERE active=1` 才允许撤销后重结）· 店铺轴分摊三基准 + 最大余数法尾差 · **相关人轴往来六数（应收/应付/净往来/已结/未结清/分方向未结清）** · 结算三件套（幂等 / 台账恒等式 / **按方向上限**拦截）· **变更相关人拆三路（改挂 / 改挂+留旧账 / 撤销后改挂）** · **相关人必填** · P0–P4 分期与 19 条 FR。**一句话结论：难点不在记账表单，在于把第四套金额口径隔离干净、让分摊是可重算的派生数据，并让"改人"分成纠错与转移两件事** | 架构/开发者/产品 | 🟢 **P0 数据层 + P1 界面已落地**（明细页 / 记一笔含公共分摊 / 相关人与科目管理）；P2 剩余：营收占比基准 / 分摊方案存取 / 分摊明细展开 / 店铺删除保护；往来与结算待下一轮 | 2026-10-25 |
 | [`plans/LEDGER_FIX_PLAN_2026-10-27.md`](plans/LEDGER_FIX_PLAN_2026-10-27.md) | **记账模块修改计划**：把审查的 2 阻断 / 5 错账缺口 / 4 处口径 / 15 项交互拆成 **A 界面止血（12 项、零迁移）→ B 拦截与口径（7 项、改 handlers/db）→ C 体检与治理（4 项、含迁移 v3）→ D 文档订正**；每项给 `文件:行` 改法、可执行验收、**变异点（改坏哪一行必须红）**、风险与回滚，另含 6 项待拍板与「明确不做」清单。**一句话结论：先把「点过全部就记不了账」「读取失败反显对账通过」清掉再谈口径；B 批必须早于 C 批（B5 与 C1 落在同一段汇总 SQL）** | 架构/开发者 | ✅ 已完工（A/B/C/D 四批全部落地，含迁移 v3；见 §10.1 实施记录） | 2026-10-27 |
@@ -63,7 +63,8 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 
 状态图例：✅ 活跃 · 🟡 活跃但有已知缺口 · ⚠️ 已过期 · 🗄️ 已归档（仅历史对照）
 
-> `docs/**` 现存 **198 个 `.md`**（含本文件）；判据是 `find docs -name '*.md' | wc -l`，不是记忆。
+> `docs/**` 现存 **90 个 `.md`**（含本文件）；判据是 `find docs -name '*.md' | wc -l`，不是记忆。
+> （2026-10-30 第 30 次订正：**198 → 90**。`notes/` 的 145 篇按天笔记按主题蒸馏合并为 **33 篇**（另 4 篇独立主题原样保留），净减 108 篇 —— 每篇新笔记文末附「合并清单」给出归属，原文可 `git show b5df35c:docs/notes/<原名>` 取回。索引同时按 A–H 主题分组重排。**当场改。**）
 > （2026-10-30 第 29 次订正：计数仍 **198**，R0 落地——拆行器按"块数=段数"拆、每行只带自己那一段；订单行幂等键扩到 `(订单号,图片,色,码,件数)`；清库脚本修普通 FTS5 的 `delete-all` 回滚。门禁见方案 §10.1。**当场改。**）
 > （2026-10-30 第 28 次订正：计数仍 **198**，D1–D18 与 Q6 全部确认，方案新增 **§10 R0/R1 施工清单**（文件级改动、迁移方式、冒烟命令、5 个变异点）。**当场改。**）
 > （2026-10-30 第 27 次订正：计数仍 **198**，拆解清单的 D2–D4 已确认（`Color` 原文入唯一键 / 改 `pl_shop_sku` / `spec` 退役），D1–D8、D11 全部落定。**当场改。**）
@@ -74,26 +75,26 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 > 入库前当场实测为 **195**（第 22 次记 186 后又有 9 篇入库未计入），加本审查稿后 196。**当场改。**）
 > （2026-10-27 第 22 次订正：**178 → 186**。本轮新增 `reviews/LEDGER_REVIEW_2026-10-27.md` 与
 > `plans/LEDGER_FIX_PLAN_2026-10-27.md`；另有 6 篇（10-26 起入库）此前未计入。**当场改。**）
-> （2026-10-25 第 21 次订正：**175 → 178**。本轮新增 `notes/2026-10-25-ledger-p1-ui.md`；
+> （2026-10-25 第 21 次订正：**175 → 178**。本轮新增 `notes/2026-10-30-ledger-core-fixes.md`（原 `2026-10-25-ledger-p1-ui.md`，2026-10-30 蒸馏时并入）；
 > 另有 2 篇同期（10-25）笔记此前未计入 —— 并行改动仍在产笔记，**计数以当场实测为准**。**当场改。**）
-> （2026-10-25 第 20 次订正：**172 → 175**。本轮新增 `notes/2026-10-25-ledger-p0-formula-fixes.md`；
+> （2026-10-25 第 20 次订正：**172 → 175**。本轮新增 `notes/2026-10-30-ledger-core-fixes.md`（原 `2026-10-25-ledger-p0-formula-fixes.md`，2026-10-30 蒸馏时并入）；
 > 另有 2 篇同期笔记此前未计入。**当场改。**）
 > （2026-10-25 第 19 次订正：**152 → 172**。本轮新增 `plans/LEDGER_PLAN.md`；同时实测发现
 > 上一次计数已落后 19 篇（10-22 之后入库的笔记/方案均未计入）。**当场改。**）
-> （2026-10-22 第 18 次订正：**150 → 152**。本轮加 `decisions/ADR-003-shop-account-physical-merge.md` 与 `notes/2026-10-22-shop-account-physical-merge.md`。**当场改**。）
+> （2026-10-22 第 18 次订正：**150 → 152**。本轮加 `decisions/ADR-003-shop-account-physical-merge.md` 与 `notes/2026-10-30-shop-account-merge-and-status.md`（原 `2026-10-22-shop-account-physical-merge.md`，2026-10-30 蒸馏时并入）。**当场改**。）
 > （2026-10-22 第 17 次订正：**145 → 150**。本轮实测 149（第 16 次记 145 后又有 4 篇入库未计入），加 `plans/SHOP_ACCOUNT_REDESIGN_PLAN.md` 后 150。**当场改**。）
-> （2026-10-21 第 16 次订正：**144 → 145**。本轮新增 `notes/2026-10-21-parcel-model-b2.md`（阶段 B2 包裹）。
+> （2026-10-21 第 16 次订正：**144 → 145**。本轮新增 `notes/2026-10-30-data-model-and-dependencies.md`（原 `2026-10-21-parcel-model-b2.md`，2026-10-30 蒸馏时并入）（阶段 B2 包裹）。
 > **当场改**。上一轮（同日第 15 次）131 → 144。）
-> （2026-10-21 第 15 次订正：**131 → 144**。上一轮（10-19）之后停更，本轮实测 144（含本轮新增 `notes/2026-10-21-order-purchase-model-simplify.md` 与 `plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` 两篇 + 期间新增的笔记）。**当场改**。）
+> （2026-10-21 第 15 次订正：**131 → 144**。上一轮（10-19）之后停更，本轮实测 144（含本轮新增 `notes/2026-10-30-order-table-and-model.md`（原 `2026-10-21-order-purchase-model-simplify.md`，2026-10-30 蒸馏时并入） 与 `plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` 两篇 + 期间新增的笔记）。**当场改**。）
 > （2026-10-19 第 14 次订正：**100 → 131**。上一轮（10-13）之后停更，本轮实测 130、加 `plans/ORDER_ATTRIBUTION_WEIGHT_PLAN.md` 后 131。**当场改**。）
 > （2026-10-13 第 13 次订正：**97 → 100**。上一轮（10-12）之后又停更：实测 99（含本轮两篇 `notes/2026-10-13-*`），加本复核稿后 100。**当场改**。）
 > （2026-10-12 第 12 次订正：**70 → 97**。上一轮（10-09）之后计数又停更，本轮实测 96、加本审查稿后 97 —— 中间新增的笔记/方案均未计入。漂移量本身就是提醒：**计数必须当场改**。）
-> （2026-10-08 第 10 次订正：**68 → 69**，本轮加 `notes/2026-10-08-goods-ux-refactor-closing-batch.md`。**当场改**。）
-> （2026-10-08 第 9 次订正：**67 → 68**，本轮加 `notes/2026-10-08-goods-ux-refactor-r0-r3.md`。**当场改**。）
+> （2026-10-08 第 10 次订正：**68 → 69**，本轮加 `notes/2026-10-30-goods-ux-refactor.md`（原 `2026-10-08-goods-ux-refactor-closing-batch.md`，2026-10-30 蒸馏时并入）。**当场改**。）
+> （2026-10-08 第 9 次订正：**67 → 68**，本轮加 `notes/2026-10-30-goods-ux-refactor.md`（原 `2026-10-08-goods-ux-refactor-r0-r3.md`，2026-10-30 蒸馏时并入）。**当场改**。）
 > （2026-10-08 第 8 次订正：**66 → 67**，本轮加 `plans/GOODS_UX_REFACTOR_PLAN.md`。**当场改**。）
 > （2026-10-08 第 7 次订正：**65 → 66**，本轮加 `reviews/UX_GOODS_NOVICE_2026-10-08.md`。**当场改**。）
 > （2026-10-08 第 6 次订正：**64 → 65**，本轮加 `plans/GOODS_WORKBENCH_PLAN.md`。**当场改**。）
-> （2026-09-30 第 4 次订正：27 → 32 → 34 → 38 → 40 → 41；本轮加 `docs/notes/2026-09-30-island-publish-runbook.md`。）
+> （2026-09-30 第 4 次订正：27 → 32 → 34 → 38 → 40 → 41；本轮加 `docs/notes/2026-10-30-island-publish-and-retire.md`（原 `2026-09-30-island-publish-runbook.md`，2026-10-30 蒸馏时并入）。）
 > （2026-10-08 第 5 次订正：**41 → 64**。该计数自 2026-09-30 起未再同步，期间的 `notes/`（10-01/10-03/10-04/10-05/10-08）与 `plans/`（发货全流程、本方案审查等）都未计入 —— 实测 `find docs -name '*.md'` = 64。漂移量本身就是提醒：**计数必须当场改**。）
 > （2026-09-30 第二次订正：原写 27 → 32 → 34，均落后于实测；本轮加 `UX_REVIEW_2026-09-30-R2.md` 与两条 `notes/` 后实测 **40**。
 > 漂移的原因是把"同步计数"漏在收尾动作之外 —— 以后新增文档时**当场**改这一行。）
@@ -114,9 +115,9 @@ SellerKit 项目文档索引。**先看这里的表格找文档，再打开具�
 | **要清理内置插件 / 外置化** | `plans/PLUGIN_TRIAGE_PLAN.md` → `AGENTS.md` §1.8/§1.9 + 红线 23 → `baseline/PROJECT_BASELINE.md` §4 |
 | **要梳理业务数据 / 把各功能串起来** | `plans/DOMAIN_INTEGRATION_PLAN.md`（§1 盘点 → §2 断裂诊断 → §3 方案 → §4 阶段）→ `decisions/ADR-002-master-data-layer.md` → `features/PRODUCT_LIBRARY.md` |
 | **要数据分层 / 定写入权（主数据）** | `decisions/ADR-002-master-data-layer.md`（谁是 owner、哪些能共享、哪些只能读）→ `plans/DOMAIN_INTEGRATION_PLAN.md` §3 |
-| **要改物流运费（运价换版 / 计价口径）** | `notes/2026-10-15-shipping-rate-intake.md`（2026-10-15 回收为内建「基础数据 › 物流运费」：当前实现的入口与口径说明）→ `src/core/services/shipRateOps.ts`（**六 op 的唯一实现**：解析委托 `importSheet`、计价走 `@/lib/shipRateQuote`）→ `tests/shipRate.spec.ts`（改口径必同步的断言）→ `scripts/shipping-rate-ui-smoke.mjs`（接线断言）。⚠️ 原计划的 `ui-plugins/shipping-rate/README.md` 随该岛 2026-10-15 下架，历史换版流程留档在 `plans/SHIPPING_RATE_ISLAND_PLAN.md` |
+| **要改物流运费（运价换版 / 计价口径）** | `notes/2026-10-30-shipping-desk-and-rate.md`（2026-10-15 回收为内建「基础数据 › 物流运费」：当前实现的入口与口径说明）→ `src/core/services/shipRateOps.ts`（**六 op 的唯一实现**：解析委托 `importSheet`、计价走 `@/lib/shipRateQuote`）→ `tests/shipRate.spec.ts`（改口径必同步的断言）→ `scripts/shipping-rate-ui-smoke.mjs`（接线断言）。⚠️ 原计划的 `ui-plugins/shipping-rate/README.md` 随该岛 2026-10-15 下架，历史换版流程留档在 `plans/SHIPPING_RATE_ISLAND_PLAN.md` |
 | **要评估体验 / 改界面与文案** | `reviews/UX_REVIEW_2026-09-30-R2.md`（**最新**：§0 结论 + §2 问题清单 + §3 上一轮复核）→ `reviews/UX_REVIEW_2026-09-30.md`（第一轮，看历史）→ `plans/UX_POLISH_PLAN.md`（逐条复核 + 执行顺序 + 待拍板）→ `plans/DOMAIN_INTEGRATION_PLAN.md`（数据侧同一批断点） |
-| **要做付费授权 / 加付费墙** | `plans/PAID_LICENSE_PLAN.md`（§1 三条工程事实 → §4 定案设计 → §5 改动清单）→ `notes/2026-09-30-paid-license-enforcement.md` → `AGENTS.md`（§1.1 三层边界 / §1.8 域与权限门）→ `architecture/PLUGIN_ARCHITECTURE.md` §9 |
+| **要做付费授权 / 加付费墙** | `plans/PAID_LICENSE_PLAN.md`（§1 三条工程事实 → §4 定案设计 → §5 改动清单）→ `notes/2026-10-30-electron-and-platform.md` → `AGENTS.md`（§1.1 三层边界 / §1.8 域与权限门）→ `architecture/PLUGIN_ARCHITECTURE.md` §9 |
 | **终端用户** | **应用内**：「货与成本」页头的「?」；空库时页面自己给的引导卡（`guides/USER_GUIDE.md` 已下线，只在需要追溯历史时看） |
 
 ---

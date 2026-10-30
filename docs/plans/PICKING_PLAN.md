@@ -83,7 +83,7 @@
 ### 3.3 P3/P4 的**刻意决策**（与原计划偏差，按代码现实回改）
 **① 不做 `db` 能力域，只加一个宿主只读通道** —— 页面是内建模块，`DB_OPS` 能力域只为 UI 岛存在；加"没人消费的域"只会变死声明。⇒ 只加 `picking-rows` 一条只读通道。
 **② 聚合与"范围口径"留渲染层纯函数，宿主只回投影** —— 件数解析（`parseRowQty`）、"已终结单不该拣"按状态原文（`bucketOfStatus`）、天数窗认 `order_time` 多写法（`dateKey`）的唯一实现都在渲染层，主进程再抄必漂移；且 SQL 里做字符串日期比较会静默丢行（`'08/…' < '2026…'`）。⇒ 宿主 `WHERE` 只留机械事实（`ship_time` 空 且 `status<>'shipped'`、可选店铺、上限），"剔除谁"由纯层做并**报出剔除数**。
-**③ P5 的形态：域 op 与内建页共用同一份纯函数** —— `host.ts` 跑在渲染进程，能 `await import('@/lib/picking')`，岛侧 op 直接在宿主做完。⛔ **P5 已随 C2 撤回**（2026-09-30）：`DB_OPS.picking` 与守卫都删了。这条设计结论仍成立（现由 `shipping-rate`/`product`/`excel-copy` 三域活着），将来若真有岛要消费拣货，照 `docs/notes/2026-09-30-island-read-capability-pattern.md` 开回即可；当时的守卫写法（岛内不得出现 `aggregatePicking` + 宿主真 `await import`，断言前先剥注释）仍有价值。
+**③ P5 的形态：域 op 与内建页共用同一份纯函数** —— `host.ts` 跑在渲染进程，能 `await import('@/lib/picking')`，岛侧 op 直接在宿主做完。⛔ **P5 已随 C2 撤回**（2026-09-30）：`DB_OPS.picking` 与守卫都删了。这条设计结论仍成立（现由 `shipping-rate`/`product`/`excel-copy` 三域活着），将来若真有岛要消费拣货，照 `docs/notes/2026-10-30-island-host-boundary.md` 开回即可；当时的守卫写法（岛内不得出现 `aggregatePicking` + 宿主真 `await import`，断言前先剥注释）仍有价值。
 
 ---
 

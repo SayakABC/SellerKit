@@ -638,7 +638,7 @@ interface ShopAccountUpsertInput {
 
 - `docs/baseline/PROJECT_BASELINE.md` §6：表清单删 `sk_shop_sets`、加 `sk_tool_accounts`；`sk_shops` 说明改为「店铺 + 账号」；邮件外键改 `shop_id`；§6「schema 演进」登记 `shop.main = v1`。稳态对象数预计仍为 **37 业务表 / 40 对象**（−1 +1），以实测 `grep` 为准。
 - `CHANGELOG.md` `[Unreleased]` 写本轮变更（方案改写 + ADR-003 + 实施后的代码改动）。
-- `docs/notes/2026-10-22-shop-account-physical-merge.md`：记录「为什么开发期选择物理合并、代价是什么、迁移的不可逆点」；在 `docs/notes/README.md` 登记。
+- `docs/notes/2026-10-30-shop-account-merge-and-status.md`：记录「为什么开发期选择物理合并、代价是什么、迁移的不可逆点」；在 `docs/notes/README.md` 登记。
 - `docs/README.md`：本计划行改成物理合并版；`decisions/` 增加 ADR-003；文档计数按 `find docs -name '*.md'` 当场订正。
 - `docs/decisions/ADR-002-master-data-layer.md`：状态加「部分被 ADR-003 取代」；正文「`sk_shops` 是凭据无关身份层」的设计点标注不再成立，C1–C4 保留。
 

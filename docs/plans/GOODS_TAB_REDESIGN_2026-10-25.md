@@ -73,7 +73,7 @@
 **变异复核（2 条，均实跑）**：① `loadMapped` 的 `productId` 写死 0 ⇒ 7 条断言红（含「反查请求真的带上了
 productId」「按款反查不串款」「认款后按款反查是新值」）；② `ProductPane` 的 `watch(rows)` 不再撤回落点 ⇒
 仅「当前款被筛出列表 → 改口『先选一个款』」红（`rows=1 codes=S1 btn=认到 S2`）。两组各只红目标断言。
-教训见 [`docs/notes/2026-10-25-goods-row-select-and-status-line.md`](../notes/2026-10-25-goods-row-select-and-status-line.md)。
+教训见 [`docs/notes/2026-10-30-goods-list-and-pool.md`](../notes/2026-10-30-goods-list-and-pool.md)。
 
 ## 1. 问题清单（带取证）
 

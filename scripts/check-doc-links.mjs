@@ -227,7 +227,7 @@ const DELIBERATELY_MISSING = new Map([
   ],
   [
     'ui-plugins/shipping-rate/README.md',
-    '该岛已整体下架（2026-10-15，回收为内建「基础数据 › 物流运费」，见 `docs/notes/2026-10-15-shipping-rate-intake.md`）；CHANGELOG 与旧计划记录的是当时的换版流程与发布动作，属历史记录。⚠️ `docs/README.md` 的**活导航**不豁免、已改指该笔记',
+    '该岛已整体下架（2026-10-15，回收为内建「基础数据 › 物流运费」，见 `docs/notes/2026-10-30-shipping-desk-and-rate.md`）；CHANGELOG 与旧计划记录的是当时的换版流程与发布动作，属历史记录。⚠️ `docs/README.md` 的**活导航**不豁免、已改指该笔记',
   ],
   [
     'ui-plugins/shipping-rate/manifest.json',
@@ -255,7 +255,7 @@ const DELIBERATELY_MISSING = new Map([
   ],
   [
     'electron/ae-engine.ts',
-    '该利润引擎文件**已删除**（2026-10-15 数据依赖审查 C1，见 `docs/notes/2026-10-15-data-dependency-optimizations.md`）。引用它的四处都是**历史记录**：PROFIT_TRACKER 的「现状（extension 0.2.0）…已落地」、PRODUCT_LIBRARY 的 P4a 落地清单与「`ae-engine.ts:176` 取数」行号取证、ADR-002 记的回归面评估、CHANGELOG 旧条目 —— 改指现存文件（`ae-db.ts`）则句子不成立',
+    '该利润引擎文件**已删除**（2026-10-15 数据依赖审查 C1，见 `docs/notes/2026-10-30-data-model-and-dependencies.md`）。引用它的四处都是**历史记录**：PROFIT_TRACKER 的「现状（extension 0.2.0）…已落地」、PRODUCT_LIBRARY 的 P4a 落地清单与「`ae-engine.ts:176` 取数」行号取证、ADR-002 记的回归面评估、CHANGELOG 旧条目 —— 改指现存文件（`ae-db.ts`）则句子不成立',
   ],
   [
     'ui-plugins/order-insight/dist/views/picking.js',
@@ -315,7 +315,7 @@ const DELIBERATELY_MISSING = new Map([
   // **当时条目**与一份**当时的评审快照**，句子正在说"当时改的是它 / 当时它长这样"，不是悬空引用。
   [
     'ui-plugins/order-insight/manifest.json',
-    'CHANGELOG 的历史条目（1.4.0 升版当时改的就是这个文件）；该岛已于 2026-10-05 整体下架，见 docs/notes/2026-10-01-ui-island-retirement.md §6',
+    'CHANGELOG 的历史条目（1.4.0 升版当时改的就是这个文件）；该岛已于 2026-10-05 整体下架，见 docs/notes/2026-10-30-island-publish-and-retire.md §6',
   ],
   [
     'tests/orderInsightShopAtImport.spec.ts',
@@ -335,7 +335,7 @@ const DELIBERATELY_MISSING = new Map([
   ],
   // —— 下面这组是「店铺账号管家」岛回收为内建模块（2026-10-14）的历史记录：引用出自 CHANGELOG
   // 的**当时条目**（记录 2026-10-04 meta CSP 修复、2026-10-06 能力域校验盲区取证），句子正在说
-  // "当时改的是它 / 当时它长这样"，不是悬空引用。见 docs/notes/2026-10-14-shop-accounts-intake.md。
+  // "当时改的是它 / 当时它长这样"，不是悬空引用。见 docs/notes/2026-10-30-shop-account-merge-and-status.md。
   [
     'ui-plugins/shop-accounts/index.html',
     'CHANGELOG 的历史条目（meta CSP 修复当时改的就是岛根这个文件）；该岛已于 2026-10-14 回收为内建模块 `src/modules/shop-accounts/`，嵌正文 CSP 的宿主侧对应层现为仓库根 `index.html`',
@@ -346,7 +346,7 @@ const DELIBERATELY_MISSING = new Map([
   ],
   // —— 下面这条是「货与成本」并入「基础数据 › 货品档案」（2026-10-17）的历史记录：
   // 引用出自一份**写于 2026-10-08 的审查快照**（`docs/reviews/UX_GOODS_NOVICE_2026-10-08.md`），
-  // 句子正在说"当时从侧栏这一项进来"，见 docs/notes/2026-10-17-mail-out-goods-into-master-data.md。
+  // 句子正在说"当时从侧栏这一项进来"，见 docs/notes/2026-10-30-goods-ux-refactor.md。
   [
     'src/modules/goods/meta.ts',
     '2026-10-08 审查快照记录的**当时入口**（侧边栏「货与成本」，icon box / order 2）；该模块外壳已于 2026-10-17 删除并并入「基础数据」左导航第二项「货品档案」，改指现存文件（`src/modules/shop-accounts/MasterDataView.vue`）会让这句话描述一个当时不存在的入口',

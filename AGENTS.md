@@ -645,4 +645,4 @@ npx tsc -p tsconfig.electron.json --noEmit  # 主进程类型检查
 | 主进程多 .ts 文件顶层变量全局冲突       | 每个主进程 .ts 文件头部加 `export {}` 模块标记（见红线 12）                           |
 | 渲染层跨域（CORS）                      | 走网络模块：axios IPC adapter → Electron `net`（见 §1.7），禁止业务侧自行 fetch       |
 | vue-tsc 版本不兼容                      | 已装本地 devDependency `vue-tsc@2.x`（匹配 TS 5.4）；勿用 npx 装最新版                |
-| Electron 44 移除 clipboard 窄 API（`writeImage` 等） | 写图用 `clipboard.write([ClipboardItem + Blob])`、clipboard 全部方法已转 async；守卫 `ipc:shape:smoke` ⑧ 段（真写 + 读回）。见 `docs/notes/2026-10-10-electron44-clipboard-writeimage.md`（升级时其余窄 API 同批清理，遇到 `is not a function` 先查 v44 变更） |
+| Electron 44 移除 clipboard 窄 API（`writeImage` 等） | 写图用 `clipboard.write([ClipboardItem + Blob])`、clipboard 全部方法已转 async；守卫 `ipc:shape:smoke` ⑧ 段（真写 + 读回）。见 `docs/notes/2026-10-30-electron-and-platform.md`（升级时其余窄 API 同批清理，遇到 `is not a function` 先查 v44 变更） |

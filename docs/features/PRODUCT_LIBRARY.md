@@ -4,10 +4,10 @@
 > **读者**：架构 / 开发者
 > **落点**：数据层在宿主主进程（`electron/product-db.ts` / `-handlers.ts` / `shopSku.ts` / `shop-product-db.ts`）；**界面 = 内建页「货与成本」**（`src/modules/goods/**`）。
 > ⚠️ **2026-10-08 起界面是三个页签**：产品 / 映射与关联 / 供应商 —— 「商品清单」在界面上**收起**
-> （判据：它写的池行没有下游消费者，见 [`2026-10-08-goods-page-entry-guide.md`](../notes/2026-10-08-goods-page-entry-guide.md)），
+> （判据：它写的池行没有下游消费者，见 [`2026-10-08-goods-page-entry-guide.md`](../notes/2026-10-30-goods-list-and-pool.md)），
 > 但**数据层与 IPC 一行未删**，本文 §1–§3、§5.1、§5.2、§6.2 对它的描述仍然准确。
 > ⚠️ **2026-10-09 导入模板改列**：表头改为 `款编码|款式名|供应商|图片|颜色|尺码|克重|状态|备注`（**去「类目」**——导入不解析不提交，库层原样保留；**加图片/颜色/尺码/克重**——导出嵌真图 + 路径文本列，导入读嵌入图按锚点行归位、克重随 SKU 落 `pl_variants`）。
-> 本文 §7.2 验收表写的「导入/导出」行为以该次改列为准（`src/lib/productImport.ts` **已大改**，§0-A 表里"纯函数未动"的说法随之过期）；细节见 [`2026-10-09-product-template-rework.md`](../notes/2026-10-09-product-template-rework.md) 与 `CHANGELOG.md` 续十二。
+> 本文 §7.2 验收表写的「导入/导出」行为以该次改列为准（`src/lib/productImport.ts` **已大改**，§0-A 表里"纯函数未动"的说法随之过期）；细节见 [`2026-10-09-product-template-rework.md`](../notes/2026-10-30-goods-product-editor.md) 与 `CHANGELOG.md` 续十二。
 > **前置阅读**：`docs/decisions/ADR-002-master-data-layer.md`（**已 Accepted，本文须服从其 C1–C4**）、`docs/plans/DOMAIN_INTEGRATION_PLAN.md`（S1–S4）、`AGENTS.md`（§1.2 / §1.9 / §6.2；红线 3、23）
 
 ---
@@ -71,7 +71,7 @@
 | **1.3.0** | **SKU 改服装「颜色+尺码」组合**（尺码拖选批量生成；`pl_variants` 补列 color/size）          | ✅ 2026-09-27 | 见 §3.1 注记与 CHANGELOG；门禁全绿                                                                              |
 | **1.4.0** | **供应商维护自「拿货对账」迁移入岛（新页签）+ 产品批量编辑（部分 patch）**                   | ✅ 2026-09-27 | 新域 `product-supplier` 4 op（复用 purchase-supplier-\* 通道）+ `product-admin` +`batchUpdate`（9→10 满额）+ `product-batch-update` 通道 |
 | **1.5.0** | **新增「商品清单」页签**：Excel 导入店铺商品池（按 `item_id` 去重）+ 一件商品一对多关联产品（套装） | ✅ 2026-09-29 | 新域 `shop-products` 6 op（复用 `shop-product-*` 通道，零新通道）+ 岛 1.5.0 重发市场。**起因是 1.4.0 同版本号重发布导致本机永远拿不到该页签**（见 §7.5） |
-| P4      | 成本维护界面（读写 `ae_cost_map`，显示 `source`）                                             | ✅ 2026-10-09<br>**⛔ 2026-10-22 退役** | 当时：`CostPane.vue`（2026-10-14 整合后住「**基础数据 › 成本与费率**」，经 `CostRatesPane.vue` 拼装）+ `electron/manual-costs.ts` + `ae-cost-map-upsert-manual` / `-delete-manual`；逐条见 CHANGELOG 续十七 与 `docs/notes/2026-10-09-cost-maintenance-pane.md`。**现状**：`ae_cost_map` 已于 C2（2026-10-21）退役，界面在 B'（2026-10-22）整页删除 —— 进价只在**产品编辑抽屉的「进价（元）」栏**（`ed-cost`）维护、产品列表内联展示（`p-cost`）并支持「只看缺进价」服务端筛选；汇率面板一并退场（实时利润引擎从不读 `ae_rates`） |
+| P4      | 成本维护界面（读写 `ae_cost_map`，显示 `source`）                                             | ✅ 2026-10-09<br>**⛔ 2026-10-22 退役** | 当时：`CostPane.vue`（2026-10-14 整合后住「**基础数据 › 成本与费率**」，经 `CostRatesPane.vue` 拼装）+ `electron/manual-costs.ts` + `ae-cost-map-upsert-manual` / `-delete-manual`；逐条见 CHANGELOG 续十七 与 `docs/notes/2026-10-30-cost-maintenance-and-retire.md`。**现状**：`ae_cost_map` 已于 C2（2026-10-21）退役，界面在 B'（2026-10-22）整页删除 —— 进价只在**产品编辑抽屉的「进价（元）」栏**（`ed-cost`）维护、产品列表内联展示（`p-cost`）并支持「只看缺进价」服务端筛选；汇率面板一并退场（实时利润引擎从不读 `ae_rates`） |
 | P5      | 拣货（按产品/色码聚合）—— **变体表在本阶段才建**                                              | ⬜ 依赖 P3    | —                                                                                                               |
 
 **四处以代码为准、与下文计划不同**：
@@ -308,7 +308,7 @@ ae_cost_map.style_code ───────────────────
 > 与 `actual_cost_cents`（拿货实付）；利润取数 `实际 > 预估 > 缺`。**`ae_cost_map` 表已于同日由
 > `order.main` v10 删除**（回填在 v9，删表排在它之后）。本节保留为当时的决策记录。
 > 现状见 `docs/baseline/PROJECT_BASELINE.md` §6（`order.main` v10）与
-> [`2026-10-21-cost-two-fields-c2.md`](../notes/2026-10-21-cost-two-fields-c2.md)。
+> [`2026-10-21-cost-two-fields-c2.md`](../notes/2026-10-30-cost-maintenance-and-retire.md)。
 
 **ADR-002 Q2 已裁定：成本历史的落点是改 `ae_cost_map` 自身，不新增第二套成本表。** 因此：
 
@@ -387,7 +387,7 @@ LIMIT 1;
    「同产品」限定是有意的：**同商品把不同颜色绑到不同产品**是既有合法形态，那种写入是在新增绑定、不替换。
    同轮起 `reassignOrdersByItemIds` 回填范围由「未归款」扩为「**未归款 ∨ 占位色 `未分类`**」——
    补色当场带出挂占位的存量订单，挂在**真实颜色**上的图一律不动（人工/识别结论/上次补的色都算数），
-   计数按**实际变化行数**（before/after 比较）。见 `docs/notes/2026-10-10-mapping-recolor-backfill.md`。
+   计数按**实际变化行数**（before/after 比较）。见 `docs/notes/2026-10-30-mapping-color-and-replay.md`。
 
 ### 3.5.1 人工核对的**回流**：订单归类页的结论回写这张表（2026-10-05）
 

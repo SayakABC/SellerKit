@@ -204,4 +204,4 @@ npm run verify:docs                   # ⑤ 文档引用无悬空
 - `src/core/plugin/host.ts`（`DB_OPS` 域与 op 表）、`src/core/plugin/security.ts`（权限门内核）
 - `docs/decisions/ADR-002-master-data-layer.md`（C4：per-plugin `domains` 模型，本方案**不动**它）
 - `docs/features/PRODUCT_LIBRARY.md` §6（op 预算实测：`product-admin` 10 满额）—— 本方案不新增 op，不受影响
-- `docs/notes/2026-09-30-paid-license-enforcement.md`（本方案的跨工具结论摘要）
+- `docs/notes/2026-10-30-electron-and-platform.md`（本方案的跨工具结论摘要）

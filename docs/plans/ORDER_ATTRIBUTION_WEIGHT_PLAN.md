@@ -3,7 +3,7 @@
 > **状态**：🟡 待拍板（§8 五项）；P0 为阻断性缺陷，建议先行
 > **读者**：架构 / 开发者
 > **落点**：`electron/product-db.ts` · `electron/order-db.ts` · `src/lib/orderCost.ts` · `src/core/services/skuWeights.ts`
-> **前置阅读**：`docs/plans/AE_SHOP_ITEM_SYNC_PLAN.md`、`docs/plans/PRODUCT_SKU_LINKING_PLAN.md`、`docs/notes/2026-10-17-sku-size-normalize.md`、`docs/decisions/ADR-002-master-data-layer.md`
+> **前置阅读**：`docs/plans/AE_SHOP_ITEM_SYNC_PLAN.md`、`docs/plans/PRODUCT_SKU_LINKING_PLAN.md`、`docs/notes/2026-10-30-goods-sku-matrix.md`、`docs/decisions/ADR-002-master-data-layer.md`
 
 ---
 

@@ -5,7 +5,7 @@
 > **读者**：产品 / 架构 / 开发者
 > **起因**（用户口径）：
 > > resolve(店铺, 商品ID, Color原文) … 上面的 `(shop, item, spec=Color原文)` 这里做不到精准命中，因为订单 Excel 中的 Color 原文同一 item 下的多个不同的商品有可能重复，`shop, item, 订单图片` 才算精准命中，所以回落也应该是不正确的。你可以把当前发货台和产品管理中的功能一个个拆解，然后我们再通过讨论和确认解决这一个个问题，确认好后，再进行改造。
-> **前置**：[`reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md`](../reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md)、[`plans/PRODUCT_ORDER_SIMPLIFY_PLAN_2026-10-30.md`](PRODUCT_ORDER_SIMPLIFY_PLAN_2026-10-30.md)、[`notes/2026-10-28-order-driven-classify-plan.md`](../notes/2026-10-28-order-driven-classify-plan.md)
+> **前置**：[`reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md`](../reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md)、[`plans/PRODUCT_ORDER_SIMPLIFY_PLAN_2026-10-30.md`](PRODUCT_ORDER_SIMPLIFY_PLAN_2026-10-30.md)、[`notes/2026-10-30-order-purchase-grid.md`](../notes/2026-10-30-order-purchase-grid.md)
 
 ---
 

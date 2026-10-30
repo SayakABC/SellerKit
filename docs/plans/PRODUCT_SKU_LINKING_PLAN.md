@@ -3,7 +3,7 @@
 > **状态**：✅ 已拍板（见 §7）；**形态路线选了「整页左右分栏重构」** ⇒ 执行方案另见 `plans/GOODS_WORKBENCH_PLAN.md`
 > **读者**：架构 / 开发者 / 产品
 > **落点**：数据层在宿主主进程（`electron/product-db.ts` / `electron/product-handlers.ts`）；**界面 = 内建页「货与成本」**（`src/modules/goods/**`）。
-> **前置阅读**：`docs/features/PRODUCT_LIBRARY.md`、`docs/decisions/ADR-002-master-data-layer.md`、`docs/plans/PICKING_PLAN.md`、`docs/notes/2026-10-08-order-image-into-goods.md`
+> **前置阅读**：`docs/features/PRODUCT_LIBRARY.md`、`docs/decisions/ADR-002-master-data-layer.md`、`docs/plans/PICKING_PLAN.md`、`docs/notes/2026-10-30-goods-ux-refactor.md`
 
 ---
 

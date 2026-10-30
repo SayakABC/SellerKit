@@ -263,8 +263,8 @@ purchase_orders / purchase_items / payments ── 不动
 ## 7. 与既有结论的关系
 
 - 昨天那两份现场诊断（"图没了 + 全待拿"）是本文 **F3** 的一个实例，修法即 P0-3 + P1-6。
-- `docs/notes/2026-10-20-order-attr-color.md` 的归色第四级（报表规格串色）**保留不动** —— 它解决的是"没采集也能定色"，与本轮不冲突；本文只要求它落列 + 幂等。
-- `docs/notes/2026-10-17-purchase-merge-round3.md` 的界面结构**保留不动**。
+- `docs/notes/2026-10-30-order-color-source.md` 的归色第四级（报表规格串色）**保留不动** —— 它解决的是"没采集也能定色"，与本轮不冲突；本文只要求它落列 + 幂等。
+- `docs/notes/2026-10-30-purchase-merge-and-images.md` 的界面结构**保留不动**。
 
 ---
 

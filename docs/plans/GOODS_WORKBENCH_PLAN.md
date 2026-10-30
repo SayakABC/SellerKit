@@ -4,7 +4,7 @@
 > **读者**：架构 / 开发者 / 产品
 > **前身**：`plans/PRODUCT_SKU_LINKING_PLAN.md`（已裁定「加法路线」）；本文走「整页左右分栏重构」那一条。
 > **落点**：界面 = `src/modules/goods/**`；数据层 = `electron/product-db.ts` / `electron/product-handlers.ts`（**仅加一个查询参数**）
-> **前置阅读**：`features/PRODUCT_LIBRARY.md` · `decisions/ADR-002-master-data-layer.md` · `notes/2026-10-05-repo-hard-constraints.md` · `notes/2026-10-08-order-image-into-goods.md`
+> **前置阅读**：`features/PRODUCT_LIBRARY.md` · `decisions/ADR-002-master-data-layer.md` · `notes/2026-10-05-repo-hard-constraints.md` · `notes/2026-10-30-goods-ux-refactor.md`
 
 ---
 
@@ -195,7 +195,7 @@
 
 ## 11. 变更记录（摘要）
 
-- **2026-10-10**：①「进价」页整页重设计（信息架构：左 340px 行动区 / 右款级进价表；`cost-echo` 回显防挂错款；`startsWith` 挡板防"还没输完就报错"；单位挂 `data-act` 外）。守卫 `goods:ui` +19（总数 242→261）。详见 `docs/notes/2026-10-10-goods-cost-pane-rework.md`。② 用户口径收紧：主表撤「SKU 数·缺 m」「进价」两列（8→6）；款名改弹性列+两行折行；展开区撤只读 SKU 清单（改三层卡片）。⚠️ **撤列 ≠ 撤能力**（缺克重→工具栏「问题件」筛选；进价→「进价」页签；SKU 增删改→「编辑」抽屉）。守卫 `goods:ui` +2（227→242）。详见 `docs/notes/2026-10-10-goods-list-slimming.md`。
+- **2026-10-10**：①「进价」页整页重设计（信息架构：左 340px 行动区 / 右款级进价表；`cost-echo` 回显防挂错款；`startsWith` 挡板防"还没输完就报错"；单位挂 `data-act` 外）。守卫 `goods:ui` +19（总数 242→261）。详见 `docs/notes/2026-10-30-goods-ux-refactor.md`。② 用户口径收紧：主表撤「SKU 数·缺 m」「进价」两列（8→6）；款名改弹性列+两行折行；展开区撤只读 SKU 清单（改三层卡片）。⚠️ **撤列 ≠ 撤能力**（缺克重→工具栏「问题件」筛选；进价→「进价」页签；SKU 增删改→「编辑」抽屉）。守卫 `goods:ui` +2（227→242）。详见 `docs/notes/2026-10-30-goods-list-and-pool.md`。
 - **2026-10-08 续六**：S4 完成，页签 3→2、`TABS` 按形态分叉、删 `pool` 懒挂载开关、补窄视口守卫（`goods:ui` 105→110）。
 - **2026-10-08 续五**：S3 完成，三条关联动线零新 IPC，`CompareModal` + `useSkuPool` 收敛写路径（`goods:ui` 80→105）。
 - **2026-10-08 续四**：S2 完成，`PoolPane` 裁列、`useSkuPool` 共用（`goods:ui` 77→80）。

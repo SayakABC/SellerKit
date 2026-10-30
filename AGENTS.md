@@ -466,18 +466,15 @@ npm run verify:docs  # 文档引用校验（Markdown 链接 + 反引号路径 + 
 npm test             # 单元测试（vitest，src/lib 纯函数层）
 npm run test:watch   # 单元测试 watch 模式
 npm run schema:smoke # schema 迁移冒烟（改了 electron/db.ts 的 migrate 或任何域的表形状后必跑）
-                     # ⚠️ 例外：`shop.main`（`sk_shops` 重建 + `sk_mail_accounts` 重建）**不走 migrate() 步骤表**
-                     #   （PRAGMA foreign_keys=OFF 在事务内无效，事务外壳由 runShopMainMigration() 自管）⇒
-                     #   schema:smoke 对它一条都不覆盖；它的老库场景在 `npm run shop:smoke` 里。
 npm run mail:inline:smoke # 邮件内联图离线冒烟（改了 content_id 补列 / cid 改写 / 远程图 CSP 两态必跑；不需凭据）
 npm run mail:body:smoke   # 邮件正文渲染通道（sk-mail://）端到端冒烟（改了协议 / 岛 index.html 的 meta CSP 必跑；需真 Electron）
 npm run ipc:shape:smoke   # preload ↔ 主进程「图片 / 剪贴板通道」载荷形状端到端冒烟（改了 preload 的图片方法 / 批量缩略图包装 / 剪贴板通道必跑；⑧ 段真写系统剪贴板并读回；需真 Electron）
 npm run ae:settle:smoke # 结算明细冒烟（改了 ae_settle_lines 的落库 / 聚合 / 件数明细后必跑）
 npm run ledger:smoke  # 记账数据层冒烟（改了 electron/ledger-db.ts 的 bk_* 表形状 / 迁移 / 守恒断言 /
-                      #   分摊落库 / 结算唯一性 / 批量变更相关人三路 / 单店取数 / 四项体检后必跑；含 `ledger.main` v1 老库场景）
+                      #   分摊落库 / 结算唯一性 / 批量变更相关人三路 / 单店取数 / 四项体检后必跑；含 `ledger.main` v2/v3 老库场景）
 npm run picking:smoke # 拣货投影冒烟（改了 electron/picking-db.ts 的筛选 / JOIN / 取图回落必跑）
 npm run shop:smoke    # 店铺实体数据层冒烟（改了 sk_shops / sk_tool_accounts / sk_name_map 或 `shop.main` 迁移必跑；
-                      #   含 shop.main v1 的两条老库重建场景与「一行两态 / 部分唯一索引 / 局部更新不清账号列」）
+                      #   含「一行两态 / 部分唯一索引 / 局部更新不清账号列」）
 npm run db:inventory  # 稳态表清单与对象总数（真建一个临时库逐域 ensure 后数 sqlite_master；改了任何域的
                       #   CREATE TABLE / 迁移收尾必跑 —— 基线 §6 的「共 N 个对象」只能用这条数，grep 推算已退役）
 npm run master-data:ui # 「基础数据」页假桥无头冒烟（宽 + 窄两遍：店铺列表与两种空态 / 五个下拉联动筛选 /

@@ -13,6 +13,41 @@
 
 ## [Unreleased]
 
+### Fixed · 订单多段拆行：一段一行、色/码/件数各自就位（R0，2026-10-30）
+
+- **现象**：一单 4 段同商品的速卖通订单（`1123192657411338`）只落 2 行，且 `color=''`
+  （`尺寸` 4 行全写成 `XL`、件数 NULL）。根因是拆行器把「产品数量」（速卖通里是**总件数** 5）
+  当成段数 → 多拆一行空壳；又因 `块数 !== n`，**每行都留着多块原文** ⇒ 下游
+  `parseOrderPropsColor` 判成"一单多色"返回空、`parseOrderQty` 取不到件数。
+- **修**（`src/lib/orderRowSplitter.ts`）：有「【N】块」结构时段数 = 块数（块内件数之和 ==
+  数量列即判为"总件数"）；**每行只带自己那一段**（块不足的行留空并计入缺色）；单值尺寸列
+  不再广播，改取块内 `Size`。`expandOrderRows` 新增 `missingColorCount`，导入回执会报
+  "N 行定不出颜色（已按待认色入库）"。
+- **配套**（`electron/order-db.ts`）：订单行幂等键从 `(订单号, 图片)` 扩到
+  `(订单号, 图片, 色, 码, 件数)` —— 同一 listing 的多个 SKU 常共用一张商品图，只按图判重
+  会把后几段当重复行吞掉。
+- **清库脚本**（`scripts/reset-dev-data.mjs`）：`sk_mail_fts` 是普通 FTS5 表，`delete-all`
+  会让整条事务回滚（清库等于没清）⇒ 改 `DELETE`；清空清单补 `oi_variant_keys` / 款合并 /
+  套装部件（CLI 未开外键时不会随父表级联，会留下 59 行孤儿键）；本机已清空并自动备份。
+- **验证**：`vitest run` 1132 passed / 54 files（含新增 4 段回归 3 条）；`tsc` 两份配置 0 error；
+  `order:smoke` 全绿；`schema:smoke` 仅既有 [H] 失败。依据见
+  `docs/plans/PRODUCT_ORDER_SIMPLIFY_PLAN_2026-10-30.md` §10.1。
+
+### Removed · 退役两张"生产代码零引用"的表（2026-10-29）
+
+- **`sk_shop_sets`**（2026-10-22 物理合并前的「店铺集 / 账号套装」表）：新库本就不建，运行库只剩
+  0 行历史残留。项目尚未正式发布、没有要升级的存量库 ⇒ 当时那次整表合并迁移（搬账号 / 归并企业 /
+  建工具账号 / 重建 `sk_mail_accounts`）整段退役；`shop.main` 现为 **v1 空步骤占位**（对齐开发机
+  账本已记的版本号）+ **v2 `DROP TABLE IF EXISTS sk_shop_sets`**（幂等清残留）。
+- **`bk_periods`**（月结留位表）：全仓零读写，产品本期明确不做月结（LEDGER_PLAN RK-10）。删建表语句，
+  `ledger.main` 新增 **v4 `DROP TABLE IF EXISTS bk_periods`**。
+- 相关脚本同步：`reset-dev-data.mjs` 清数据清单去掉 `bk_periods`；`refresh-table-comments.cjs` 用途表
+  去掉两项；`shop-db-smoke.cjs` 移除两条依赖老形状的合并用例。
+- 计数：新库稳态 **54 → 53 对象**（表 53 → 52，`bk_*` 由十张变九张）；运行库 **60 → 58**。
+- 门禁：`tsc` · `verify` · `verify:docs` · `db:inventory` · `shop:smoke` · `ledger:smoke` · `order:smoke`
+  全绿；`schema:smoke` 仅既有 [H] 失败（07aaac3 回退后断言未同步）。依据见
+  `docs/notes/2026-10-29-db-table-audit.md` §8。
+
 ### Reverted · 撤销「导入即按变体键自动建款色/产品」（2026-10-29）
 
 - **现象**：产品列表出现一批 `AE-1005012506975770` 形态的占位产品，且自动建款在实际运行中

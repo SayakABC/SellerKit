@@ -397,17 +397,17 @@
 | `electron/product-db.ts` | `pl_products`（产品/款式主数据，P1；`image_id` 列 1.2.0 `ALTER` 增补，幂等判定 `PRAGMA table_info`）· **`pl_shop_sku`**（「店铺商品ID → 产品」映射 + 「商品清单」池，P3；UNIQUE **`(platform, shop_id, item_id, spec, product_id)`** —— 含 `product_id` 是**一对多（套装）的前提**，老库由版本化迁移归一，见下「schema 演进」；`shop_id` 外键 → `sk_shops`；**2026-10-05 起 `spec` 承载「颜色」**（`'*'` = 未指定，一期恒 `'*'` 的时代结束）—— 归款 `autoAssignByMap` 的颜色顺序是**映射色 → 订单原文色 → `未分类`**，`variant_id` 由写库时按 `(product_id, 色)` 反查填（0 = 该色还没录变体）；`pickingRows` 的 `color` 回落**款色 → 订单原文**。见 `docs/notes/2026-10-05-mapping-carries-color.md`；
 **2026-10-10 起「改色 = 改同一条绑定」**（该商品名下属同一产品恰好一条手动行 → `UPDATE` 它的 `spec`，否则 `INSERT`——旁留的旧行永远命中不了却出现在映射列表里；「同产品」限定使同商品多色绑不同产品仍可新增），且 `reassignOrdersByItemIds` 回填范围扩为「未归款 ∨ 占位色 `未分类`」（挂在**真实颜色**上的图一律不动），用户由此可在「货与成本 › 商品ID 映射」改绑选色自助补色。见 `docs/notes/2026-10-10-mapping-recolor-backfill.md`）· `pl_variants`（SKU 子表：name/code/**weight_g**/status，1.2.0；`color`/`size` 列 1.3.0 `ALTER` 增补——服装「颜色+尺码」组合，成对时 name 自动生成，编码部分唯一索引 `WHERE code <> ''`）· `pl_images`（产品图，`fingerprint` UNIQUE = SHA-256）· `pl_item_images`（商品ID覆盖图，`item_id` PK 经归一存储）—— 后三张 1.2.0 |
 | `electron/shop-item-db.ts` | **`pl_shop_items`**（**店铺商品快照**，2026-10-13：**采集而来 = 平台事实**，只存「店里有什么」、不认款（认款写路径永远走 `pl_shop_sku`，两套不互写）；唯一键含 `store_key`（两家未登记店采到同一商品不互相覆盖）；`shop_id` 软关联 `sk_shops`，认不出 → 0 + `store_key` 展示，**绝不自动建店**。见 `docs/plans/AE_SHOP_ITEM_SYNC_PLAN.md`）· **`pl_shop_store_keys`**（采集帧「展示名键 → 已登记店」的收养记忆，治"收养只跑一次、之后再采又落未登记桶"） |
-| `electron/shop-accounts-db.ts` | **无自有表**（2026-10-22 物理合并）：本层是 `sk_shops` **账号列** + `sk_tool_accounts` 的读写面，表 owner 是 `shop-db.ts`（建表 / 迁移 / 店铺侧局部写入）。原持有的 `sk_shop_sets` 已随 `shop.main` v1 删除 —— 账号与店铺合成一行，`CHECK (trim(name)<>'' OR trim(email)<>'')` 允许"纯店铺 / 纯账号 / 两者都是"三种行共存一张表 |
+| `electron/shop-accounts-db.ts` | **无自有表**（2026-10-22 物理合并）：本层是 `sk_shops` **账号列** + `sk_tool_accounts` 的读写面，表 owner 是 `shop-db.ts`（建表 / 迁移 / 店铺侧局部写入）。原持有的 `sk_shop_sets` 已随物理合并退役（2026-10-29 起 `shop.main` v2 幂等清表）—— 账号与店铺合成一行，`CHECK (trim(name)<>'' OR trim(email)<>'')` 允许"纯店铺 / 纯账号 / 两者都是"三种行共存一张表 |
 | `electron/shop-db.ts` | **`sk_shops`**（**店铺 + 店铺账号单表**，2026-10-22 物理合并：身份列 `platform/name/name_key/platform_shop_id/shop_url/shop_url_raw/site/status/opened_at/tags/note` ＋ 账号列 `email/company_id/ziniao_account_id/erp_account_id/secret_enc/secret_keys`；记分 `score`（REAL NOT NULL DEFAULT 0，0 = 未记录，不参与匹配 / 筛选；2026-10-23 新增，老库由 `shop.columns` v1 补列）；保证金到账 `deposit_received_at`（TEXT NOT NULL DEFAULT ''，YYYY-MM-DD，仅在「退店」行的列表里展示；2026-10-25 新增，老库由 `shop.columns` v2 补列）；状态四态 启用 / 停用 / 封店 / 退店（`SHOP_STATUSES` 唯一来源，老账号的 `banned`/`closed` 在合并时映射为封店 / 退店）。**唯一性一律走部分唯一索引**（表级 `UNIQUE(platform, name_key)` 会让纯账号行撞空店名）：`uq_sk_shops_platform_name` `WHERE trim(name_key)<>''` · `uq_sk_shops_email` 建在 `lower(email)` `WHERE trim(email)<>''` · `idx_sk_shops_platform_sid` `WHERE platform_shop_id<>''`；另一条 `CHECK` 钉住「有店名必有归一键」）· **`sk_tool_accounts`**（紫鸟 / ERP 登录，`kind CHECK IN ('ziniao','erp')`、`UNIQUE(kind, account_key)`、`password_enc BLOB` **列表只带 `has_password` 徽标**，明文唯一出口是 `revealToolAccountPassword(id)`（店铺侧凭证同理：明文只走 `revealShopAccountSecret`）、`CHECK (trim(account)<>'')`）—— 一条登录管多店，店铺行只存 `ziniao_account_id` / `erp_account_id` 外键，**新增店铺不再重填密码** · **`sk_name_map`**（名称归一映射，UNIQUE `(kind, raw_key)`；`kind` 预留 `supplier`/`style`/`product`）—— ADR-002 S1，2026-09-27。邮件侧 `sk_mail_accounts.shop_id` 已由 `sk_shop_sets(id)` 改指 **`sk_shops(id) ON DELETE CASCADE`**（删店铺行 → 邮件账号与本地邮件缓存一并清除，确认框已明说）。裁决见 `docs/decisions/ADR-003-shop-account-physical-merge.md` |
 | `electron/company-db.ts` | `sk_companies` · `sk_company_profiles`（企业管理：欧代 / 土代 / 德国包装法） |
-| **`electron/ledger-db.ts`** | **记账域 `bk_*` 十张**（2026-10-25，迁移键 `ledger.main` v1）：`bk_parties`（资金相关人，`name_key` 唯一，只提供停用 / 合并、**不物理删除**）· `bk_categories`（科目，`kind IN ('income','expense')` 建表定死、两套各自独立）· **`bk_entries`**（收支条目：金额恒为**正整数分**、方向只由 `kind` 表达；`period` 是 SQLite **生成列** `substr(biz_date,1,7) STORED`）· **`bk_allocations`**（公共条目的分摊行 = **派生数据**，无业务写入口；`Σ分摊 == 条目金额` 由主进程断言，不满足整笔回滚）· `bk_allocation_rules`（分摊方案：名称唯一、基准三选一、店铺 id 与万分比存 JSON；2026-10-26 接 UI —— 下拉套用 / 保存为方案，条目 `rule_id` 只作来源留痕）· **`bk_settlements`** / **`bk_settlement_lines`**（结算单与明细；唯一性靠**部分唯一索引** `UNIQUE(entry_id) WHERE active=1` 才允许撤销后重结）· `bk_transfers`（承接余额）· `bk_periods`（月结字段，本期界面不暴露）· `bk_op_log`（改挂 / 合并等操作留痕）。结算状态**不双写**在条目上，由结算行 JOIN 得出 |
+| **`electron/ledger-db.ts`** | **记账域 `bk_*` 九张**（2026-10-25，迁移键 `ledger.main` v1）：`bk_parties`（资金相关人，`name_key` 唯一，只提供停用 / 合并、**不物理删除**）· `bk_categories`（科目，`kind IN ('income','expense')` 建表定死、两套各自独立）· **`bk_entries`**（收支条目：金额恒为**正整数分**、方向只由 `kind` 表达；`period` 是 SQLite **生成列** `substr(biz_date,1,7) STORED`）· **`bk_allocations`**（公共条目的分摊行 = **派生数据**，无业务写入口；`Σ分摊 == 条目金额` 由主进程断言，不满足整笔回滚）· `bk_allocation_rules`（分摊方案：名称唯一、基准三选一、店铺 id 与万分比存 JSON；2026-10-26 接 UI —— 下拉套用 / 保存为方案，条目 `rule_id` 只作来源留痕）· **`bk_settlements`** / **`bk_settlement_lines`**（结算单与明细；唯一性靠**部分唯一索引** `UNIQUE(entry_id) WHERE active=1` 才允许撤销后重结）· `bk_transfers`（承接余额）· `bk_op_log`（改挂 / 合并等操作留痕）。结算状态**不双写**在条目上，由结算行 JOIN 得出。⚠️ `bk_periods`（月结留位表）2026-10-29 已退役（`ledger.main` v4） |
 | `electron/db.ts` | `sk_schema_migrations`（**迁移记账表**，非业务表：`key` 主键 = 域名，`version` = 已应用到的版本，见下「schema 演进」） |
 | `electron/ship-rate-db.ts` | **`sr_rate_snapshots`**（**运价表快照**，2026-09-29：一次导入 = 一条，`content_key` UNIQUE 按内容去重，`effective_from` = 导入当日；算账时按订单日期取"当时那份" → 历史预测可复算。ADR-002 C3 要求运价表挂宿主中立层） |
 
-稳态共 **50 个对象**：**47 业务表** + 2 内部表（`sk_mail_meta` KV、`sk_schema_migrations` 记账）+ 1 FTS5 虚拟表（`sk_mail_fts`）。
-（2026-10-25 由 `npm run db:inventory` 实测复核 —— 相对 10-22 的 40 / 37 **净 +10 张表**，全部来自记账域 `bk_*`；
-同时本轮修了脚本的**漏登记**：`ledger-db` 未进 `DOMAIN_FILES`，10-22 那次数出来的 40 个对象里一张 `bk_*` 都没有
-—— 不是"当时还没建"，而是"脚本没 ensure 它"。）
+稳态共 **53 个对象**：**50 业务表** + 2 内部表（`sk_mail_meta` KV、`sk_schema_migrations` 记账）+ 1 FTS5 虚拟表（`sk_mail_fts`）。
+（2026-10-29 由 `npm run db:inventory` 实测复核：相对 10-25 的 50 / 47 **净 −2 张表** —— 退役 `sk_shop_sets`
+（历史账号套装，`shop.main` v2 清表）与 `bk_periods`（月结留位表，`ledger.main` v4 清表），见
+`docs/notes/2026-10-29-db-table-audit.md` §8。）
 
 > **怎么数（唯一可信来源 = 真建出来的库，别再手抄 grep 推算）**：`npm run db:inventory`
 > 建一个临时库、逐域调 `ensure*Schema()`，把**新库直建的稳态形状**按域归属打印出来（`electron/*.ts` 里
@@ -450,6 +450,8 @@
 > 2026-10-22 本轮按源码逐行重数订正为 **37 / 40**。
 > **2026-10-22 同日：手抄推算退役**，改由 `npm run db:inventory` 从真建出来的库数（见上「怎么数」）；
 > 同日店铺与账号物理合并为**净 0 张表**（−`sk_shop_sets` + `sk_tool_accounts`），故 **37 / 40 未变**。
+> **2026-10-29 重数订正为 50 / 53**：退役两张"生产代码零引用"的表 —— `sk_shop_sets`（历史账号套装）
+> 与 `bk_periods`（月结留位表，`bk_*` 由十张变九张）；口径仍以 `npm run db:inventory` 实测为准。
 
 ### schema 演进（版本化迁移，2026-09-29）
 
@@ -502,39 +504,37 @@
   与 `oi_images.style_color_id` 是同一个坑——该坑位随 `ae_order_lines` 退场，纪律本身仍适用于所有新列）；
   `purchase.main` = **v1**（删 `purchase_orders.note` —— 零读者列，不进导出/对账/成本；SCHEMA 同向删除，
   冒烟场景 [F] 专测；裁决与判据见 `docs/notes/2026-10-10-purchase-note-removal.md`）；
-  `ledger.main` = **v1**（2026-10-25 记账域首版：十张 `bk_*` 表一次建到当前形状；**当前没有演进步骤** ——
-  但键已登记，后续补列 / 重建一律在此追加，别再往 `CREATE TABLE IF NOT EXISTS` 里"以为老库会跟上"）。
+  `ledger.main` = **v4**（2026-10-25 记账域首版：九张 `bk_*` 表由 `SCHEMA` 一次建到当前形状；
+  **v1 是形状基线的空步骤**，只把版本号写进账本、给后续步骤一个起点 → v2 结算支持互抵结清
+  （`direction=offset`）· v3 `bk_parties.merged_to`（区分「已并入」与「手动停用」）·
+  **v4 退役月结留位表 `bk_periods`**（2026-10-29，`DROP TABLE IF EXISTS` 幂等，产品不做月结，
+  见 `docs/notes/2026-10-29-db-table-audit.md`）。后续补列 / 重建一律在此追加版本步骤，
+  别再往 `CREATE TABLE IF NOT EXISTS` 里"以为老库会跟上"。
   ⚠️ 域内两条结构约定：`bk_entries.period` 是**生成列**（主进程 `rootDir=electron` 无法 import `src/lib`，
   避免两份 `slice(0,7)`）；结算行唯一性用**部分唯一索引** `UNIQUE(entry_id) WHERE active=1`（内联 UNIQUE 会让撤销后永远结不了）。
   口径与三处纠错见 `docs/notes/2026-10-25-ledger-p0-formula-fixes.md`；
-  `shop.main` = **v1**（2026-10-22 店铺与账号**物理合并**，一次性、不可逆）：老 `sk_shops`（表级
-  `UNIQUE(platform, name_key)`）重建为「店铺 + 账号单表」并把 `sk_shop_sets` 的账号行**搬进来后删表**；
-  紫鸟 / ERP 从"每店重填一遍"抽成独立 `sk_tool_accounts`；`sk_mail_accounts.shop_id` 外键目标由
-  `sk_shop_sets(id)` 改指 `sk_shops(id) ON DELETE CASCADE`（SQLite 改不了外键目标，`RENAME COLUMN` 也不行
-  → 邮件表必须一起重建）。裁决见 `docs/decisions/ADR-003-shop-account-physical-merge.md`，
-  落地记录与两个生产级隐患见 `docs/notes/2026-10-22-shop-account-physical-merge.md`。
+  `shop.main` = **v2**（2026-10-22 店铺与账号**物理合并**；2026-10-29 合并迁移退役）：历史 v1 做过
+  老 `sk_shops`（表级 `UNIQUE(platform, name_key)`）重建为「店铺 + 账号单表」并把 `sk_shop_sets`
+  的账号行**搬进来后删表**、紫鸟 / ERP 从"每店重填一遍"抽成独立 `sk_tool_accounts`、
+  `sk_mail_accounts.shop_id` 外键目标由 `sk_shop_sets(id)` 改指 `sk_shops(id) ON DELETE CASCADE`
+  （SQLite 改不了外键目标，`RENAME COLUMN` 也不行 → 邮件表必须一起重建）。裁决见
+  `docs/decisions/ADR-003-shop-account-physical-merge.md`，落地记录见
+  `docs/notes/2026-10-22-shop-account-physical-merge.md`。项目尚未正式发布、没有要升级的存量库，
+  新库由 `SCHEMA` 一次建到当前形状，故**整表合并整段退役**：**v1 保留空步骤占位**
+  （跑过合并的开发机账本记的是 1，跳过 v1 才轮到 v2），**v2 只做 `DROP TABLE IF EXISTS sk_shop_sets`**
+  —— 幂等清掉开发机老库的历史残留，新库上执行为空操作（见 `docs/notes/2026-10-29-db-table-audit.md`）。
   ⚠️ **本域是「先 `dbMigrate(SCHEMA)`、再迁移、最后 `dbMigrate(INDEXES)`」** —— 与上面 house convention
   的先后**相反**，且是被实测逼出来的：`INDEXES` 里的 `idx_sk_name_map_ref` 指向 `sk_name_map`，
   迁移收尾就建索引时老库第一次启动会 `no such table: main.sk_name_map`（2026-10-22 由 `shop-item` 冒烟抓到）。
   `CREATE TABLE IF NOT EXISTS` 对已存在的老表一个字都不改，所以"先建"不会把迁移该改的形状抢走。
-  ⚠️ **本域刻意不走 `migrate(key, steps)`**：迁移要在事务内 `PRAGMA foreign_keys=OFF`（DROP 老表否则级联删子表），
-  而**该 PRAGMA 在事务内无效** —— 所以事务外壳由 `runShopMainMigration()` 自己管（`OFF` → 事务 → `finally ON`），
-  `migrate(SHOP_MAIN_KEY, [])` 只用来确保账本表存在，账本行仍写 `sk_schema_migrations`（key `shop.main`，version 1）。
-  四条只在这里成立的约定：① **迁移前 `VACUUM INTO` 备份**（事务外执行；目标名**必须避让已存在文件**，
-  `VACUUM INTO` 撞到已有路径直接报错，而"上次尝试留下的备份"正是撞车的常见原因；备份失败 = 暂停迁移）；
-  ② 收尾 `PRAGMA foreign_key_check` 有违反即抛错回滚，旧库原样保留；③ **纯账号行不继承 `sk_shop_sets.id`**
-  （旧店铺的显式 id 先占位，账号行走 AUTOINCREMENT 续号）→ 邮件外键靠 `rowIdBySet` 映射改写，
-  冒烟断言因此**按邮箱取行、只断言 `id > 0`**；④ "已是新形状"的短路必须**同时**要求 `sk_shop_sets` 不存在
-  （只看形状会把"从没做过合并的早期库"直接补账本 → 账号行永久孤立）。
-  **覆盖落在 `npm run shop:smoke`**（两条：老库「店铺 + 账号套装 + 邮箱账号」合成同一行 / 早期库只有
-  `sk_shop_sets` → 账号搬成纯账号行不孤立）—— `schema:smoke` **不含本域**，它只覆盖走 `migrate()` 步骤表的域。
+  两个键都走标准 `migrate(key, steps)`（`shop.main` 2 步、`shop.columns` 2 步）；`shop.main` 的 v1
+  空步骤只用于对齐开发机账本里已记的版本号，没有"已合并即短路"的分支。
   `shop.columns` = **v2**（2026-10-23 v1 给 `sk_shops` 补 `score` 记分分值；2026-10-25 v2 补
-  `deposit_received_at` 保证金到账时间，仅退店行展示）：**独立键**，因为 `shop.main` 在
-  version ≥ 1 时短路、追加步骤永不执行；步骤用 `PRAGMA table_info` 幂等探测后 `ALTER TABLE ADD COLUMN`
+  `deposit_received_at` 保证金到账时间，仅退店行展示）：**独立键**，与 `shop.main` 的版本号互不影响；
+  步骤用 `PRAGMA table_info` 幂等探测后 `ALTER TABLE ADD COLUMN`
   （新库的 `shopTableSql` 已含这两列，步骤只记账）。本域顺序固定为
-  `SCHEMA` → `shop.main` → `shop.columns` → `INDEXES` —— 老库若还没合并，`sk_shops` 会被重建，
-  先补列会补在即将被替换的旧表上；`loadShopsSql` 不列 score / deposit_received_at ⇒ 合并出来的老店铺行
-  默认 0 / `''`。
+  `SCHEMA` → `shop.main` → `shop.columns` → `INDEXES` —— 补列必须排在 `shop.main` 之后，
+  否则补在即将被替换的旧表上。
 - ⚠️ **纪律（2026-09-29 被冒烟抓到）**：**新增列必须同时写进 `CREATE TABLE`（`SCHEMA`），迁移只负责老库**。
   原因：迁移先跑（house convention），新库上表还不存在 → 步骤只能跳过；此时版本已被记账，
   于是"只写在迁移里"的列在**全新库上永远补不上**。

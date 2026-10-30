@@ -3,7 +3,7 @@
 > **状态**：🟢 已完成（2026-10-14；门禁与守卫结果见 `docs/notes/2026-10-30-shop-account-merge-and-status.md` §3–4 与 CHANGELOG 同日条目。范围外遗留：市场仓下架待用户确认）
 > **生成日期**：2026-10-14
 > **目标**：把 `ui-plugins/shop-accounts`（店铺账号管家 UI 岛，**10,000+ 行** Vue/Pinia 源码）整体搬回宿主，成为内建业务模块，入口挂在侧边栏新的一级菜单 **「店铺管理」** 下。
-> **依据**：`AGENTS.md` §1.2/§1.3/§1.5、`docs/plans/PLUGIN_TRIAGE_PLAN.md`（反向：这次是**回收**而非下记）、`scripts/lib/module-roots.cjs`（`isUndocked` 判定）
+> **依据**：`AGENTS.md` §1.2/§1.3/§1.5、`docs/archive/plans/PLUGIN_TRIAGE_PLAN.md`（反向：这次是**回收**而非下记）、`scripts/lib/module-roots.cjs`（`isUndocked` 判定）
 
 ---
 

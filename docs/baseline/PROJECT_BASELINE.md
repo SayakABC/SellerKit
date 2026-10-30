@@ -60,7 +60,7 @@
 `extensions/` **当前不存在**（2026-09-30 C3 删除最后两个留档包之后）。它曾承载两类形态，判定依据是「有无 `meta.ts`」——留档如下，将来重建目录时照此判定：
 
 1. **视图插件包**（`kind: view` + `meta.ts`）：**当前无实例** —— 历史上是 `shop-accounts`（2026-09-16 下记；**2026-10-14 改为回收为内建模块** `src/modules/shop-accounts`）、`order-insight`（2026-09-21 下记）、`excel-copy`（2026-09-22 下记），后两者只保留 `ui-plugins/<id>` 市场岛。路径与机制（`vite.config.ts` 的 `MODULE_ROOTS` 双根探测）仍有效，供将来新增视图插件包使用。
-2. **外置插件脚手架/示例**（`manifest.entry = ./index.js`、无 `kind`、无 `src/`）：`scripts/templates/l2-plugin`（模板）/ `scripts/templates/l2-demo`（示例，原名 `sk-hello`）—— 由 `npm run plugins:create` 生成，产出物应安装到 `<userData>/plugins/`。示例包本身已于 2026-09-24 从市场与本机下架（源码脚手架保留），见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §0。
+2. **外置插件脚手架/示例**（`manifest.entry = ./index.js`、无 `kind`、无 `src/`）：`scripts/templates/l2-plugin`（模板）/ `scripts/templates/l2-demo`（示例，原名 `sk-hello`）—— 由 `npm run plugins:create` 生成，产出物应安装到 `<userData>/plugins/`。示例包本身已于 2026-09-24 从市场与本机下架（源码脚手架保留），见 `docs/archive/plans/PLUGIN_TRIAGE_PLAN.md` §0。
 3. **下记后留档的源码**（有 `meta.ts` 但**不在任何预设里**）：曾有 `extensions/order-insight/`、`extensions/excel-copy/` —— 作算法与 UI 参考、**不进构建**（由 `tests/pluginTriage.spec.ts` 守住"预设 ∩ 岛 id = ∅"）。
 
 第 2 类早已不在 `extensions/` 下（迁至 `scripts/templates/`）；**第 3 类已于 2026-09-30（C3）删除** —— 判定是「这些源码只是"多套实现"的源头、算法在内建 `src/lib` / 岛 `dist` / 宿主 op 都有落地，且它们一直占着 `tsconfig`/`eslint` 的覆盖范围」。至此**目录本身不再存在**，语义冲突彻底消失（`module-roots.cjs` / `vite.config.ts` 都用 `existsSync` 探测，缺目录无副作用）。（`extensions/ae-profit/` 的迁移残留已于 2026-09-22 删除，见 `ad7471d`；本条由「残留待清」订正为「已清」。详见审查报告 P1-5。）
@@ -716,7 +716,7 @@
 |---|---|---|
 | 规则（根） | `AGENTS.md` | 唯一规则源（含 §0 跨工具协作契约：共享层 / 私有层 / 收工两个动作） |
 | 结论 | `notes/README.md`（+ `notes/YYYY-MM-DD-*.md`） | 活跃 —— 多 AI 工具共用的结论层，`verify:docs` 有反向索引守卫 |
-| 基线 | `PROJECT_BASELINE.md`（本文件） / `baseline/REFACTOR_PLAN.md` | 活跃 / 已完成归档 |
+| 基线 | `PROJECT_BASELINE.md`（本文件） / `archive/baseline/REFACTOR_PLAN.md` | 活跃 / 已完成归档 |
 | 架构 | `architecture/PLUGIN_ARCHITECTURE.md` / `PLUGIN_DEVELOPMENT.md` / `UI_ISLAND_INTAKE_CHECKLIST.md` | 活跃（末者为 UI 岛接入 SOP + 故障速查 + 一键冒烟） |
 | 业务 | `features/MAIL_INBOX.md` / `PROFIT_TRACKER.md` | 活跃 |
 | 业务 | `features/PRODUCT_LIBRARY.md` | 活跃（P0–P3 + P4a 已落地，下一步 P4 成本界面 / P5 拣货） |
@@ -726,7 +726,7 @@
 | 决策 | `decisions/ADR-001-…`（岛设置留岛内） / `decisions/ADR-002-…`（主数据层） | 均已采纳（Accepted） |
 | 审查 | `reviews/CODE_REVIEW_REPORT.md` / `HOST_REVIEW_2026-09-22.md` | 🗄️ 历史审计（对应发现项已转任务或已修） |
 | 审查 | `reviews/ISLAND_COLD_START_AND_THEME_2026-09-22.md` | 活跃（结论已固化进 §11-10） |
-| 用户 / 需求 / 归档 | `guides/USER_GUIDE.md` / `requirements/Requirements.md` / `archive/manual.md` | 活跃（覆盖面偏旧）/ 历史档案 / 已归档 |
+| 用户 / 需求 / 归档 | `guides/USER_GUIDE.md` / `archive/requirements/Requirements.md` / `archive/manual.md` | 活跃（覆盖面偏旧）/ 历史档案 / 已归档 |
 
 > 现存 **149 个 `.md`**（含 `docs/README.md`；2026-10-22 实测：architecture 3 / archive 1 / baseline 2 / decisions 2 / features 3 / guides 1 / notes 106 / plans 17 / requirements 1 / reviews 12）。判据是 `find docs -name '*.md'`，**不是记忆**——
 > 这张表历史上长期只列 10 行、漏掉 `plans/` 与 `decisions/` 两个整类，正是靠这条命令发现并订正的。

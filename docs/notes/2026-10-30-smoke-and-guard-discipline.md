@@ -254,6 +254,23 @@ grep -rn MUTANT src/ scripts/ tests/ electron/   # 收工必须为空
 
 ---
 
+## 19. 渲染期崩溃的表现是「元素消失」而非报错 —— 抓它的姿势就是断言「元素还在」
+
+**背景**：2026-10-17 拿货页 UI 评审（原文 `UI_REVIEW_PURCHASE_2026-10-17.md`，2026-10-30 归档时本节并入）修「空行金额显示 —」时引入的 `rowAmountText` 直接调 `r.priceText.trim()`，被截图脚本的填行阶段当场打崩。
+
+- **根因**：`pue-price` 是 `<input type="number">`，其 `v-model` 会把用户输入 **coerce 成 number**（变异实测确认，不是 string）。`priceText` 类型虽声明 `string`，运行期敲价后是 number ⇒ `.trim()` 抛 `TypeError: e.priceText.trim is not a function`。
+- **症状隐蔽**：崩在**渲染期**，不走 `window.onerror`，只有 `console.error`；Vue 把整个编辑器组件卸载 ⇒ 现象是「一敲单价抽屉自己消失」，无任何报错浮出（`errs:[]`、`close()` 未被调用、无 `purchaseOrderUpdate`——三个方向都排空后才靠覆盖 `console.error` 逮到）。
+- **修法**：`String(r.priceText ?? '').trim()` 防御式包一层（`rowCents` 本就用 `Number()` 吃两种，别处无此坑）。
+- **守卫**：`scripts/today-ui-smoke.mjs` 新增「敲单价：编辑器不崩」断言（往 `pue-price-1` 敲 25.5 ⇒ 断言编辑器仍在 + 金额格实时重算 ¥76.50）。**变异验证**：还原崩溃版重构建 ⇒ 该断言精确变红（`editor-unmounted`）且后续步骤连锁失败；还原修复版 ⇒ 回绿。
+- **方法论**：对"元素在不在"类冒烟，渲染期崩溃只会表现为"元素消失"，断"元素在"恰好是唯一抓得住它的姿势；而合成事件脚本（`el.value=` + `dispatchEvent`）与真实输入同路径，能复现真实用户敲键的后果。
+- **定位次序（排除法，可复用）**：先 IDLE-CHECK 排除"放着就坏"→ 拦 `keydown`/`click` 排除误触 → 拦 `Node.removeChild` 抓卸载栈（确认是 Vue 主动卸载）→ `window.__smokeCalls` 排除保存路径（`upd:0`）→ 源码 `close()` 埋栈排除主动关闭（`cp:null`）→ 最后覆盖 `console.error` 逮到渲染崩溃。每一步都把一个假设钉死，剩到最后一个解释为止。
+
+同次评审的 P0 是「复制清单图」**假动作**：`copyingId` 判等写成恒真，卡片永远停在「生成中…」——判据见 `2026-10-30-ui-style-and-hierarchy`（"假动作"行）。
+
+**源**：`UI_REVIEW_PURCHASE_2026-10-17`（2026-10-17，原评审文档已归档）
+
+---
+
 ## 合并清单
 
 | 原笔记 | 日期 | 归并到 |

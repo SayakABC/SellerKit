@@ -74,5 +74,5 @@ Accepted (2026-09-22) — 决策人：项目方。取代 `HOST_REVIEW_2026-09-22
 ## Related
 
 - `AGENTS.md` §1.5（设置页扩展机制）— 通则与本 ADR 的引用点。
-- `docs/reviews/HOST_REVIEW_2026-09-22.md` §6 待决策项 2（本 ADR 的来处）/ M-04。
+- `docs/archive/reviews/HOST_REVIEW_2026-09-22.md` §6 待决策项 2（本 ADR 的来处）/ M-04。
 - `shop-accounts` 的 manifest.json（该岛已于 2026-10-14 内迁删除，设置贡献同步迁入宿主）— 反例对照：低频设置，已收编。

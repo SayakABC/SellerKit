@@ -178,7 +178,7 @@ C4 的论证：`security.ts:113-124` 要求 `db` 能力的每个 `domain` 都必
 
 > ⚠️ **2026-10-21 已被取代（就地标注，正文保留为当时的裁定）**：成本不再落 `ae_cost_map`，改为
 > **产品当前价 `pl_products.cost_cents` + 订单明细行两字段**（`cost_cents` 预估 / `actual_cost_cents` 实付），
-> 旧表已由 `order.main` v10 删除。原因与迁移见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5 与
+> 旧表已由 `order.main` v10 删除。原因与迁移见 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5 与
 > `docs/notes/2026-10-30-cost-maintenance-and-retire.md`。
 
 **落点：改 `ae_cost_map` 自身，不新增第二套成本表。** 现状是"每 `style_code` 一行、覆盖式更新"，

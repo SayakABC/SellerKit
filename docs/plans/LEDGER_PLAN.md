@@ -59,7 +59,7 @@
 > ④ 只记人民币，外币自行换算后录入
 > ⑤ **每条收支必须能挂「资金相关人」，按相关人统计收支总额并支持结算；结算后可批量变更相关人**
 > ⑥ **相关人必填**（不允许"未指定"兜底：保存时拦，数据库 `CHECK (party_id > 0)` 兜底）
-> **关联**：`docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`（店铺主数据）、`src/modules/order-cost/meta.ts`（统计口径）、`docs/decisions/ADR-002-master-data-layer.md`（以 ID 关联）
+> **关联**：`docs/archive/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`（店铺主数据）、`src/modules/order-cost/meta.ts`（统计口径）、`docs/decisions/ADR-002-master-data-layer.md`（以 ID 关联）
 
 ---
 

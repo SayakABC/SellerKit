@@ -233,7 +233,7 @@ parcel_lines(id, parcel_id → parcels, order_item_id → oi_order_items, qty, c
 3. **总运费 / 总重派生**（`parcelTotals`）：任一个包缺值 ⇒ 整单 `null` + `shipMissing/weightMissing` 计数。界面据此说"还有 N 个包没填"，**不报一个看起来正常的和**。
 4. **`UNIQUE(parcel_id, order_item_id)`**：同一行在同一个包里只有一条记录，数量写在那一条上 —— "同一行在同一包里记两次"在结构上不可能。
 
-状态：🟢 已落地（2026-10-21）· 数据层 + IPC + 拆包抽屉 + 两条守卫。归属：`docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` 阶段 B 的 **B2**（B1 拆表已于同日落地，行 id 约定见 `2026-10-21-order-table-split-b1.md`）。
+状态：🟢 已落地（2026-10-21）· 数据层 + IPC + 拆包抽屉 + 两条守卫。归属：`docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` 阶段 B 的 **B2**（B1 拆表已于同日落地，行 id 约定见 `2026-10-21-order-table-split-b1.md`）。
 
 **源**：`2026-10-21-parcel-model-b2`（2026-10-21）
 

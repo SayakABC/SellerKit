@@ -2,7 +2,7 @@
 
 > 状态：**Phase 1（内核）/ Phase 2（SDK + Host API）/ Phase 3（权限门 + 外置插件目录/动态加载）/ Phase 4（强化隔离：Worker 计算沙箱 + 桥协议）已落地**；外置插件现以「Level 2 Worker 沙箱」执行（详见 §9）；iframe UI 沙箱经 §11 决策裁剪为未来方向（外置插件当前为后台贡献型、无视图）。
 > 目标：在现有「构建期模块化（REFACTOR_PLAN Phase 0，已完成）」之上，演进为以 Core / Plugin SDK / Host API / Plugins 四层分离的插件化架构：运行时插件发现、贡献点注册、事件驱动、权限门控与分级沙箱。
-> 关联文档：`AGENTS.md`（编码基线，实现到对应阶段时同步更新）、`docs/baseline/REFACTOR_PLAN.md`（前一阶段方案，已完成）（`PROJECT_OVERVIEW.md` 已于 R4-1 删除）
+> 关联文档：`AGENTS.md`（编码基线，实现到对应阶段时同步更新）、`docs/archive/baseline/REFACTOR_PLAN.md`（前一阶段方案，已完成）（`PROJECT_OVERVIEW.md` 已于 R4-1 删除）
 > 适用范围：本文档描述**目标架构与实现路径**；每个 Phase 落地后需回写 `AGENTS.md` 的新红线与模式说明。
 
 ---
@@ -692,7 +692,7 @@ SDK 原则：**类型即文档**；SDK 只依赖 `packages/core` 的类型层与
 | P0   | ✅ 已完成：`sk-plugin://` 特权协议 + iframe 加载 demo UI 包（静态站点，结构等同 vite 产物）                                                                                                                                        | 跨源协议加载 / 相对 css·js·svg 资源 / CSP / sandbox / DOM 交互跑通（结论见下表）                               |
 | P1   | ✅ 核心已完成：桥 + token 握手 + 权限门复用；`storage / ui / log` 打通 + bus 双向；主题令牌注入；侧栏 + ⌘K 视图岛登记                                                                                                              | 岛内能力调用成功、越权被拒并审计（结论见下表）；P2 项（PluginCenter 管理 UI/启停卸载）已落地（见 P2 行）       |
 | P2   | ✅ 核心已完成：PluginCenter 管理 UI（市场安装/更新 + 内建与 UI 岛启停 + 卸载二次确认）+ 信任徽标（外置·视图 / 外置·L2 / L0 三态）；UI 岛并入管理面板与停用集（overview `kind:'ui'`、合成 state 广播、正显示岛被停用/卸载自动回落） | 市场全链路可用（结论见下表）；安装确认 UI（capabilities 预览）非安全缺口，已降级为可选增强（触发条件见 §15.7） |
-| P3   | ✅ 已完成：`create-ui-plugin` 模板 + `publish-plugin` 支持 UI 包 + demo 试点（`ui-plugins/sk-ui-starter`，**2026-09-24 已删除**：与 `scripts/ui-plugin-template` 内容重复，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md` §7-4）            | 发布 → 安装 → 启用 → 停用 → 卸载端到端走通（工具链/静态验证结论见下；GUI 冒烟待人工复核）                      |
+| P3   | ✅ 已完成：`create-ui-plugin` 模板 + `publish-plugin` 支持 UI 包 + demo 试点（`ui-plugins/sk-ui-starter`，**2026-09-24 已删除**：与 `scripts/ui-plugin-template` 内容重复，见 `docs/archive/plans/PLUGIN_TRIAGE_PLAN.md` §7-4）            | 发布 → 安装 → 启用 → 停用 → 卸载端到端走通（工具链/静态验证结论见下；GUI 冒烟待人工复核）                      |
 
 > ⚠️ **2026-09-24 变更（读下方 P0/P1/P2 结论前必读）**：P0 起用于验证的开发期种子 demo **`sk-ui-hello`（UI 岛 Hello）已删除** ——
 > 种子包 `scripts/poc-ui-hello/`、`plugin-ui-protocol.ts` 的 `UI_POC_ID` / `seedDevPocPackage()` / `ensurePocPackageSeeded()`

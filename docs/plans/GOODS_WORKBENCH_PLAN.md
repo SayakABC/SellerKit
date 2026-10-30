@@ -2,7 +2,7 @@
 
 > **状态**：🟢 **S0–S5 已完成**（2026-10-08），S5 收工（门禁全量 + 文档计数同步）。
 > **读者**：架构 / 开发者 / 产品
-> **前身**：`plans/PRODUCT_SKU_LINKING_PLAN.md`（已裁定「加法路线」）；本文走「整页左右分栏重构」那一条。
+> **前身**：`archive/plans/PRODUCT_SKU_LINKING_PLAN.md`（已裁定「加法路线」）；本文走「整页左右分栏重构」那一条。
 > **落点**：界面 = `src/modules/goods/**`；数据层 = `electron/product-db.ts` / `electron/product-handlers.ts`（**仅加一个查询参数**）
 > **前置阅读**：`features/PRODUCT_LIBRARY.md` · `decisions/ADR-002-master-data-layer.md` · `notes/2026-10-05-repo-hard-constraints.md` · `notes/2026-10-30-goods-ux-refactor.md`
 

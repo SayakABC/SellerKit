@@ -93,7 +93,7 @@
 
 真库只读：16 账号 / 9 店 / 3 企业 / 3 邮件；6 店有账号、10 账号无店、3 店无账号（2026-10-22）。
 
-裁定见 `docs/decisions/ADR-003-shop-account-physical-merge.md`，执行细节见 `docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`。状态：**已落地（2026-10-22，P0–P3 全部完成，含真库克隆重放）**。
+裁定见 `docs/decisions/ADR-003-shop-account-physical-merge.md`，执行细节见 `docs/archive/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md`。状态：**已落地（2026-10-22，P0–P3 全部完成，含真库克隆重放）**。
 
 **源**：`2026-10-22-shop-account-physical-merge`（2026-10-22）
 

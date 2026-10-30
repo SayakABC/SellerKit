@@ -64,7 +64,7 @@
 - 岛侧验证链（手写岛无构建、无类型门禁）：`node --check` → 接线守卫（扫描型）→
   假桥无头冒烟（如 `npm run shipping-rate:ui`）→ 真机 `npm run plugins:island:smoke`。
 
-> 关联：`docs/plans/PICKING_PLAN.md` §3.3（两条刻意决策与反证）、`docs/plans/UX_POLISH_PLAN.md` §2 P0/P1、
+> 关联：`docs/archive/plans/PICKING_PLAN.md` §3.3（两条刻意决策与反证）、`docs/plans/UX_POLISH_PLAN.md` §2 P0/P1、
 > `AGENTS.md` §1.8（域/权限门）、红线 23（岛 id 不得登记进构建预设）。
 
 **源**：`2026-09-30-island-read-capability-pattern`（2026-09-30）

@@ -395,7 +395,7 @@
 ## 23. C2 定稿：明细行两个成本字段（2026-10-21）
 
 **结论**：本节收敛 §18：早前定过「进价 + 实际进价」两个快照，实现侧只落了后者（A5 的 `cost_cents`），预估一直实时查
-`ae_cost_map`。删表前把两字段补齐。执行细则见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5「C2 定稿」。
+`ae_cost_map`。删表前把两字段补齐。执行细则见 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5「C2 定稿」。
 
 | 字段 | 语义 | 写入时点 |
 | --- | --- | --- |

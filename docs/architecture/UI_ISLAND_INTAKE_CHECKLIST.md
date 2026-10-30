@@ -93,7 +93,7 @@ node scripts/publish-plugin.js --dir ui-plugins/<id> \
   --base https://raw.githubusercontent.com/SayakABC/SellerKitPlugin/main [--build]
 ```
 
-`catalog.json` 是 **upsert 语义（没有删除路径）**——下架/改名要手工改 `catalog.json` 并删 zip，见 `docs/plans/PLUGIN_TRIAGE_PLAN.md`。
+`catalog.json` 是 **upsert 语义（没有删除路径）**——下架/改名要手工改 `catalog.json` 并删 zip，见 `docs/archive/plans/PLUGIN_TRIAGE_PLAN.md`。
 `market-out/` 是**独立 git 仓**（远端 `SayakABC/SellerKitPlugin`），本地改完不推送等于没下架。
 
 ### Step 7 — 收工前跑门禁（见 §4）

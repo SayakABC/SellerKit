@@ -13,6 +13,30 @@
 
 ## [Unreleased]
 
+### Docs · 删 3 份零引用孤儿 + 归档 11 份完结文档：`docs/` 90 → 87（2026-10-30）
+
+- **动机**：上一轮把 145 篇按天笔记蒸馏成 37 篇后，「多」集中到了 `plans/`(23) + `reviews/`(14) —— 它们不是同一类东西：
+  一半是**已完结的方案与审查**（做完即过期），一半是**在办 / 待拍板**（删了等于丢在办事项）。混在一个目录里，读者分不出该读哪个。
+- **判据不靠感觉**：`docs/README.md` 的文档地图本就有「状态」列（✅ 活跃 / 🟢 进行中 / 🟡 待拍板 / 🗄️ 归档），
+  按它 + 全仓引用扫描（按裸名与按路径两种口径）× 取交集，得到「状态已完结且有人引用」11 份、「零引用孤儿」3 份。
+  没有一条是"看着像旧的"就删。
+- **删前先搬结论**（否则删的是知识不是文件）：
+  - `SCHEMA_SIMPLIFICATION_REVIEW_2026-10-19` → 合表三条判据 + **「不该合并」5 组带理由** + 跨域用 `code` 不用 `id`，
+    并入 `docs/notes/2026-10-30-db-schema-and-migration.md` §24。这是**负知识**：不写下来，下一个人会重提合并。
+  - `UI_REVIEW_PURCHASE_2026-10-17` → 「渲染期崩溃只表现为元素消失」＋「`<input type="number">` 的 `v-model` 会把输入
+    coerce 成 number ⇒ `.trim()` 抛错」＋排除法定位次序，并入 `docs/notes/2026-10-30-smoke-and-guard-discipline.md` §19。
+  - `PRE_PURCHASE_PRECHECK_PLAN`（**从未实现**的提案）→ 六类缺口清单与「缺什么 → 去哪补 → 补完再走」动线目标，
+    并入 `docs/notes/2026-10-30-order-classify-panel.md` §65 并标注【未实施】，需求本身不丢。
+- **归档而非删除**（11 份 → `docs/archive/{plans,reviews,baseline,requirements}/`）：直接删会让 `CHANGELOG` 里 23 处
+  历史引用悬空；而 `check-doc-links.mjs` 的 `SKIP_DIRS` 含 `archive`（脚本头部「已知覆盖边界」已写明），归档件不再被扫描。
+  ⚠️ 同轮发现一个**反直觉点**：`walk()` 从仓库根就跳过 `archive`，因此 `archive/` 下的文件**不在后缀索引里** ——
+  「裸写 `plans/X.md` 靠后缀匹配兜底」在这里不成立，必须显式改成 `archive/plans/X.md`（或 `../archive/...` 相对链接）。
+  第一轮脚本按后缀假设只改了带 `docs/` 前缀的写法，门禁当场报出 20 余条悬空，才补了第二轮。
+- **指路型改指 / 事实型不改指**：`CHANGELOG` 那 23 处全是「见 X」的指路句，改指归档路径成立；另扫了一遍
+  「新增 / 新建 / 创建」类事实句，命中的唯一一处指向的是**未归档**的 `GOODS_UX_REFACTOR_PLAN`，无需处理。
+- **结果**：`docs/` 90 → 87 篇，其中 `archive/` 12 篇、**在办 75 篇**；`plans/` 23 → 15、`reviews/` 14 → 10。
+  地图 12 行标注 `🗄️ 已归档（2026-10-30）`。`verify:docs` 复跑：37 条笔记全部登记、零悬空引用。
+
 ### Docs · 结论笔记按主题蒸馏：`docs/` 198 → 90 篇（2026-10-30）
 
 - **动机**：`docs/notes/` 积到 145 篇按天短笔记，同主题扎堆（货品 25 篇、订单归类 22 篇、店铺 14 篇…），
@@ -333,7 +357,7 @@
 
 ### Fixed · 记账模块审查后的 24 项修改（2026-10-27）
 
-审查报告 `docs/reviews/LEDGER_REVIEW_2026-10-27.md` 与修改计划 `docs/plans/LEDGER_FIX_PLAN_2026-10-27.md`
+审查报告 `docs/archive/reviews/LEDGER_REVIEW_2026-10-27.md` 与修改计划 `docs/archive/plans/LEDGER_FIX_PLAN_2026-10-27.md`
 （A 界面止血 12 项 / B 拦截与口径 7 项 / C 体检与治理 4 项 / D 文档订正 3 项）已**全部落地**。
 按计划排序：D 先行（订正两处与实现相反的方案描述），A 独立提交（界面止血可单独回滚），B 早于 C
 （B5「其中公共」与 C1 体检落在同一个 `getSummary()`）。
@@ -1431,7 +1455,7 @@ C2 之后「进价」已经是 `pl_products.cost_cents` **一个字段**，而�
 
 ### Design → 落地 · 店铺账号物理合并（`shop.main` v1）+ ADR-003（2026-10-22）
 
-开发期以「表简单、好维护」为先，`docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md` 从「两表 1:1 逻辑合并」改写为
+开发期以「表简单、好维护」为先，`docs/archive/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md` 从「两表 1:1 逻辑合并」改写为
 **店铺 + 账号物理合并成一张 `sk_shops`**：
 
 - `sk_shops` 同时装店铺身份、账号、企业/工具引用、状态与加密凭据；`sk_shop_sets` 删除。
@@ -1529,7 +1553,7 @@ A7（阶段 A）遗留项：`loadSkuWeights()` 只取产品列表前 500 款，�
 利润取数 `实际 > 预估 > 缺`；0 一律视为缺失；来源由"哪个字段有值"表达，**不另加 `cost_source` 标记**。
 存量迁移：现有 `cost_cents`（实际价）先搬 `actual_cost_cents`，再按订单日期从旧价目表回填预估。
 判据更正：只要求成本侧 `costmap` 归零，`weightSource='lookup'` 是克重来源、**不在 C2 判据内**。
-执行细则见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5。
+执行细则见 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5。
 
 ### Changed · C2 收尾：`ae_cost_map` 已删除（`order.main` v10，不可逆）
 
@@ -1649,7 +1673,7 @@ A7（阶段 A）遗留项：`loadSkuWeights()` 只取产品列表前 500 款，�
 
 真实库对照（克隆库 51 行，改造前后各算一遍）：46 行逐行一致；4 行克重由 `lookup` 钉成 `snapshot`
 且重量/运费**不变**；1 行成本由估算 28 元变实付 32 元（设计意图，非回归）。
-证据与判据写在 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §0.1。
+证据与判据写在 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §0.1。
 
 ### Changed · 手工进价的镜像收进一处（阶段 A6）
 
@@ -1695,7 +1719,7 @@ A7（阶段 A）遗留项：`loadSkuWeights()` 只取产品列表前 500 款，�
 
 评审「只靠订单表 + 订单商品关联表 + 包裹表算利润、退役 `ae_cost_map`」的可行性，结论落
 `docs/notes/2026-10-30-order-table-and-model.md` + 执行计划
-`docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`：
+`docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`：
 
 - **实际进价不在导入时产生**：拿货单填价落账后才回写订单关联表（替代旧 `ae_cost_map` 落点）。
 - **运费/克重是包裹级**：无忧按总克重计费、一单可多包 ⇒ 克重钉订单行、运费钉订单表/包裹表；统一在「归类核对确认无误」时钉死。
@@ -6107,7 +6131,7 @@ manifest：声明 `picking` 域 + `groups` 动作，**版本 1.4.0 → 1.5.0**�
 
 **⚠️ 刻意不做的**：件数**不参与**成本/运费/毛利算术 —— 单件成本来自 `ae_cost_map`（可放大），
 但多件合并计费仍是运价岛的开放项；只放大成本会得到"成本×N、运费×1"的怪数。
-两件事要一起改且会改动所有已展示的毛利 → **等拍板**（开放项记在 `docs/plans/PICKING_PLAN.md` §3.2）。
+两件事要一起改且会改动所有已展示的毛利 → **等拍板**（开放项记在 `docs/archive/plans/PICKING_PLAN.md` §3.2）。
 为防止"顺手放大一半"，单测里用一条断言把这个口径钉住（`qty=2` 与 `qty=1` 的运费/成本/毛利逐项相同）。
 
 **验证**：`tests/orderCost.spec.ts` 57 例 + `tests/orderRowSplitter.spec.ts` 28 例；
@@ -6125,7 +6149,7 @@ UI 冒烟 **40 项**（含"报表 2 件 → 结算真值 3 件盖过它 → 两�
 **P0 界面精简**（用户原则：操作极简 / 界面聚焦）：低频操作（**店铺归属 / 导入结算明细 / 平台费率 / 行数**）
 收进折叠的「更多」；首屏只留 **统计数字 + 刷新 + 统计维度**。冒烟新增"首屏确实收起 + 展开后可达"两条断言。
 
-**P1 两个新维度**（对应 `docs/plans/PICKING_PLAN.md` 的 P1，**零新域 / 零通道 / 零发版**）：
+**P1 两个新维度**（对应 `docs/archive/plans/PICKING_PLAN.md` 的 P1，**零新域 / 零通道 / 零发版**）：
 - 投影补 **`color` / `size` / `supplier_id` / `supplier_name`**：颜色/尺码是 `oi_orders` 的列；
   供应商经 **`LEFT JOIN pl_products → suppliers`**（缺 `suppliers` 表时降级空串，不抛 `no such table`）。
 - `summarizeOrderCosts` 新增 **`'sku'`**（key = `款 · 色 · 码`，**缺哪段就把哪段写进 key** →
@@ -6797,7 +6821,7 @@ v2 补 `ae_order_lines.style_code`），并**把 `style_code` 补进建表语句
 
 - **需求**：读物流报价 Excel 的「无忧物流-标准」sheet，输入实际克重（g）→ 列出全部目的国的实际运费；
   报价单数值会随谈价变更，**必须支持更新运价数据而不改代码**。方案与执行记录见
-  [`docs/plans/SHIPPING_RATE_ISLAND_PLAN.md`](docs/plans/SHIPPING_RATE_ISLAND_PLAN.md)。
+  [`docs/archive/plans/SHIPPING_RATE_ISLAND_PLAN.md`](docs/archive/plans/SHIPPING_RATE_ISLAND_PLAN.md)。
 - **数据建模（宿主侧纯函数）**：报价单不是一张二维表，而是 **17 段列结构互不相同的价卡拼在同一张 sheet** 上
   （268 行 × 40 列）。归一化后为 **184 个国家 / 857 张价卡（791 `perKg` + 66 `firstStep`）**；
   已逐段验证 **17 段的国家集合两两不交**，故不需要任何优先级/覆盖规则。新增
@@ -7041,7 +7065,7 @@ v2 补 `ae_order_lines.style_code`），并**把 `style_code` 补进建表语句
   的 `SOURCE`）—— 删了它 `npm run plugins:demo:install` 会直接坏。需临时复现示例时仍可本地安装。
 - 未动：`scripts/sandbox-smoke.mjs` 里以 `sk-hello` 为名字的夹具（只是 token/命名空间字面量，不依赖该目录）。
 - 连带回写：`PROJECT_BASELINE.md` §2（脚手架旧名改为 `l2-plugin` / `l2-demo`）、
-  `PLUGIN_DEVELOPMENT.md`（市场形态示例在架包）、`docs/plans/PLUGIN_TRIAGE_PLAN.md` §0。
+  `PLUGIN_DEVELOPMENT.md`（市场形态示例在架包）、`docs/archive/plans/PLUGIN_TRIAGE_PLAN.md` §0。
 
 ### Removed · 删除 dev 种子 UI 岛 `sk-ui-hello`（UI 岛 Hello 0.2.0）
 
@@ -7151,7 +7175,7 @@ v2 补 `ae_order_lines.style_code`），并**把 `style_code` 补进建表语句
 
 ### Fixed · 宿主代码复查（2026-09-22）
 
-复查结论见 `docs/reviews/HOST_REVIEW_2026-09-22.md`（六道门禁全绿，但 11 项问题**全部落在门禁盲区**）。
+复查结论见 `docs/archive/reviews/HOST_REVIEW_2026-09-22.md`（六道门禁全绿，但 11 项问题**全部落在门禁盲区**）。
 
 - **已下记模块仍被当作打包候选**：`extensions/` 留档目录里仍有 `meta.ts`，于是
   「有 meta.ts 即模块」的枚举把 `excel-copy` / `order-insight` 重新算成可打包模块 ——

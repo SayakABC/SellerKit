@@ -204,7 +204,7 @@
 **取证**：`MAX_LIST_LIMIT` = 500；`MAX_WEIGHT_QUERY` = 5000；
 执行结果（2026-10-22）：`tsc -p tsconfig.electron.json` / `vue-tsc --noEmit` / `eslint`（改动文件 0 error）/
 `vitest run` 43 文件 827 用例 / `shipping-rate:ui` / `order-profit:ui` / `today:ui` 全绿。
-计划风险行已改为"已修"，见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §7。
+计划风险行已改为"已修"，见 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §7。
 
 **源**：`2026-10-22-sku-weight-full-scan`（2026-10-22）
 

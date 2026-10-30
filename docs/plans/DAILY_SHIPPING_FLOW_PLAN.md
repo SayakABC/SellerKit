@@ -1,7 +1,7 @@
 # 每日发货全流程改造方案（DAILY_SHIPPING_FLOW_PLAN）
 
 > **性质**：目标需求驱动的差距审查 + 阶段计划。与
-> [`PICKING_PLAN`](PICKING_PLAN.md)（拣货线）、[`DOMAIN_INTEGRATION_PLAN`](DOMAIN_INTEGRATION_PLAN.md)、
+> [`PICKING_PLAN`](../archive/plans/PICKING_PLAN.md)（拣货线）、[`DOMAIN_INTEGRATION_PLAN`](DOMAIN_INTEGRATION_PLAN.md)、
 > [`ADR-002`](../decisions/ADR-002-master-data-layer.md)（主数据层）**同一口径**，只把
 > 「日导出 → 归类 → 拣货 → 拿货 → 发货 → 结算 → 对账」这一整条从"多段有料、串不起来"落到可执行的阶段表。
 > **取数时点**：2026-10-05（§1 全部是真实库实测，只读，非推断）。

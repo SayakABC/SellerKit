@@ -244,14 +244,21 @@ export interface OrderCoveragePayload {
 // ---- 建表 ----
 
 const SCHEMA = [
+  // `suppliers`：轻量拿货商主档（一行 = 一个供货方，`name` 唯一）。与 `sk_companies`（法律主体）不是同一实体。
+  // 写 = 「货与成本 › 供应商」维护 / 拿货单里新建；读 = 拿货单、对账/付款、产品库的 `pl_products.supplier_id`。
   `CREATE TABLE IF NOT EXISTS suppliers (
+    -- 用途：拿货商主档（purchase 域，name 唯一）；与 sk_companies（企业法律主体）不是同一实体。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     phone TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // `purchase_orders`：拿货单头（一行 = 一次拿货），`supplier_id` → `suppliers`（无级联），
+  // `mode` = detail（明细单）/ pool（按需求池），`total_cents` 是明细合计的落库副本（保存时重算）。
+  // 写 = 拿货编辑器；读 = 拿货列表、对账、拣货/成本取"已拿货"事实。
   `CREATE TABLE IF NOT EXISTS purchase_orders (
+    -- 用途：拿货单头（一行 = 一次拿货，mode = detail/pool）；total_cents 是明细合计的落库副本，保存时重算。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
     biz_date TEXT NOT NULL,
@@ -261,7 +268,11 @@ const SCHEMA = [
     edited_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // `purchase_items`：拿货明细（一行 = 一个款色码，`UNIQUE(purchase_id,style_code,color,size)`）。
+  // ⚠️ 粒度与 `purchase_sources` **不同，不要合并**（那边一行 = 一条需求订单行）：明细要的是"买了多少"，
+  // 来源要的是"这数量从哪些订单行凑的"。`amount_cents` 是派生列（qty × price_cents，写入时现算）。
   `CREATE TABLE IF NOT EXISTS purchase_items (
+    -- 用途：拿货明细（一行 = 一个款色码，记买了多少）；与 purchase_sources 粒度不同（那边是需求来源），勿合并。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     purchase_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
     style_code TEXT NOT NULL,
@@ -275,7 +286,11 @@ const SCHEMA = [
     style_color_id INTEGER NOT NULL DEFAULT 0,
     UNIQUE(purchase_id, style_code, color, size)
   )`,
+  // `purchase_sources`：拿货明细的**需求来源**（一行 = 一条被用来凑数的订单行，按 FIFO 分配生成）。
+  // 同款色码可出多行（同一店也可能多行）；`order_item_id` 软关联 `oi_order_items.id`（不设外键）。
+  // 生命周期与 `purchase_items` 同批：保存拿货单时按 `purchase_id` 整批 DELETE 后重写。
   `CREATE TABLE IF NOT EXISTS purchase_sources (
+    -- 用途：拿货明细的需求来源（一行 = 一条被凑数的订单行，FIFO 分配）；与明细同批整批重写，order_item_id 为软关联。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     purchase_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
     shop TEXT NOT NULL DEFAULT '',
@@ -288,7 +303,10 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_purchase_sources_purchase ON purchase_sources(purchase_id)`,
   `CREATE INDEX IF NOT EXISTS idx_purchase_sources_item ON purchase_sources(order_item_id)`,
+  // `payments`：供应商往来流水（付款 / 退款等），`supplier_id` → `suppliers`、`type` 只作标签。
+  // 写 = 对账页「记一笔」；读 = 供应商余额与对账明细（`supplierBalance` / `listPayments`）。
   `CREATE TABLE IF NOT EXISTS payments (
+    -- 用途：供应商往来流水（付款/退款等，type 只作标签）；读 = 供应商余额与对账明细。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
     pay_date TEXT NOT NULL,
@@ -298,7 +316,10 @@ const SCHEMA = [
     note TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // `purchase_ignore`：采购需求里的「忽略标记」（一行 = 一个不再需要拿货的款色，`UNIQUE(style_code,color)`）。
+  // 写 = 需求列表的忽略/恢复；读 = 生成采购需求时整款色过滤（`listIgnored` 只用于展示原因）。
   `CREATE TABLE IF NOT EXISTS purchase_ignore (
+    -- 用途：采购需求里的忽略标记（一个款色一行，唯一键 style_code+color）；生成需求时整款色过滤。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     style_code TEXT NOT NULL,
     color TEXT NOT NULL DEFAULT '',

@@ -103,6 +103,7 @@ export interface MigrationStep {
 export function migrate(key: string, steps: MigrationStep[]): number {
   const d = getDb();
   d.exec(`CREATE TABLE IF NOT EXISTS sk_schema_migrations (
+    -- 用途：迁移记账（按域 key 记已应用版本）；基础设施表，勿删，删了会导致版本化迁移重跑。
     key TEXT PRIMARY KEY,
     version INTEGER NOT NULL DEFAULT 0,
     applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))

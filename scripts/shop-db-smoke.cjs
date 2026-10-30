@@ -124,191 +124,9 @@ check('空库：未归一名单为空、汇总全零（源表为空）', () => {
   assert.strictEqual(s.names.total, 0);
 });
 
-// ⚠️ 这条必须**造一张老版本的表**来测，不能用本脚本的库直接测：
-// 本脚本的 `sk_shops` 是 `ensureShopSchema()` 现建的，建表语句里已含新列 ——
-// 于是 `ALTER` 那条分支**一次都不会执行**，写成什么样都恒绿。
-// 这是"用干净环境测"的典型盲区（记忆里那条：新建的库没有历史状态，必然全绿）。
-//
-// 2026-10-22 物理合并后，老形状（`shop_set_id`、无 `email`）走的不再是 ALTER 补列，
-// 而是 `shop.main` v1 整表重建（店铺行 + 账号行合成一行）。所以这里同时把**账本倒回 0**：
-// 真机上老库的账本里没有 shop.main，而本脚本开头那次 ensure 已经把版本记成 1 ——
-// 不倒回去，迁移一步都不会跑，这条用例就变成安慰剂。
-check('老库迁移：shop.main v1 把「店铺 + 账号套装 + 邮箱账号」合成同一行，行不丢、外键改指新店', () => {
-  dbRun(`DROP TABLE IF EXISTS sk_shops`);
-  dbRun(`CREATE TABLE sk_shops (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform TEXT NOT NULL DEFAULT '',
-    name TEXT NOT NULL,
-    name_key TEXT NOT NULL,
-    site TEXT NOT NULL DEFAULT '',
-    shop_set_id INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    opened_at TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    UNIQUE(platform, name_key)
-  )`);
-  dbRun(`INSERT INTO sk_shops (platform, name, name_key, site, note, shop_set_id) VALUES ('ae', '老店', '老店', 'RU', '迁移前的行', 1)`);
-  // 账号侧一行（老形状 = sk_shop_sets）：邮箱 / 手机 / 紫鸟 / ERP 都在它身上
-  dbRun(`CREATE TABLE sk_shop_sets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL DEFAULT '',
-    phone TEXT NOT NULL DEFAULT '',
-    company TEXT NOT NULL DEFAULT '',
-    company_id INTEGER NOT NULL DEFAULT 0,
-    alipay TEXT NOT NULL DEFAULT '',
-    ziniao_account TEXT NOT NULL DEFAULT '',
-    erp_account TEXT NOT NULL DEFAULT '',
-    platforms TEXT NOT NULL DEFAULT '[]',
-    opened_at TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    tags TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    secret_enc BLOB,
-    secret_keys TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-  )`);
-  dbRun(
-    `INSERT INTO sk_shop_sets (id, email, phone, ziniao_account, erp_account, opened_at, status)
-     VALUES (1, 'old@example.com', '13800000000', 'zn-1', 'erp-1', '2024-01-01', 'banned')`,
-  );
-  // 邮箱账号（老形状：外键指向 sk_shop_sets.id）—— 迁移必须把它改指到合并后的店铺行
-  dbRun(`CREATE TABLE sk_mail_accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shop_set_id INTEGER NOT NULL DEFAULT 0,
-    email TEXT NOT NULL DEFAULT '',
-    provider_id TEXT NOT NULL DEFAULT '',
-    imap_host TEXT NOT NULL DEFAULT '',
-    imap_port INTEGER NOT NULL DEFAULT 993,
-    imap_secure INTEGER NOT NULL DEFAULT 1,
-    proxy TEXT NOT NULL DEFAULT '',
-    folder TEXT NOT NULL DEFAULT 'INBOX',
-    folders TEXT NOT NULL DEFAULT '',
-    sync_enabled INTEGER NOT NULL DEFAULT 1,
-    sync_days INTEGER NOT NULL DEFAULT 30,
-    max_body_bytes INTEGER NOT NULL DEFAULT 204800,
-    status TEXT NOT NULL DEFAULT 'idle',
-    last_error TEXT NOT NULL DEFAULT '',
-    last_synced_at TEXT NOT NULL DEFAULT '',
-    uid_validity INTEGER NOT NULL DEFAULT 0,
-    last_uid INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-  )`);
-  dbRun(
-    `INSERT INTO sk_mail_accounts (id, shop_set_id, email, imap_host, sync_days)
-     VALUES (77, 1, 'old@example.com', 'imap.example.com', 15)`,
-  );
-  dbRun(`DELETE FROM sk_schema_migrations WHERE key = 'shop.main'`);
-
-  const before = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => r.name);
-  assert.ok(!before.includes('email'), '前置条件：老表本来就不该有 email 列（账号在另一张表）');
-
-  sdb.ensureShopSchema();
-
-  const after = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => r.name);
-  for (const c of ['platform_shop_id', 'shop_url', 'shop_url_raw', 'email', 'ziniao_account_id', 'erp_account_id']) {
-    assert.ok(after.includes(c), `合并迁移应补上 ${c}`);
-  }
-  assert.ok(!after.includes('shop_set_id'), 'shop_set_id 这一列必须随合并消失（同一行不再需要外键）');
-  assert.strictEqual(
-    dbQuery(`SELECT name FROM sqlite_master WHERE type='table' AND name='sk_shop_sets'`).length,
-    0,
-    'sk_shop_sets 必须被删掉 —— 留着它就有第二个数据源',
-  );
-
-  const row = dbGet(`SELECT id, name, note, site, email, status, opened_at, ziniao_account_id, erp_account_id FROM sk_shops`);
-  assert.strictEqual(Number(row.id), 1, '主键不变 —— 订单/采购里的 shop_id 引用不能断链');
-  assert.strictEqual(row.name, '老店', '店名不丢');
-  assert.strictEqual(row.status, 'banned', '账号侧历史态 banned 必须并入「封店」，不能回落启用');
-  assert.ok(row.note.includes('迁移前的行'), `店铺侧备注必须还在：${row.note}`);
-  assert.ok(
-    row.note.includes('手机号 13800000000'),
-    `账号侧没有企业可归的手机号要落进备注留痕，不许静默丢：${row.note}`,
-  );
-  assert.strictEqual(row.site, 'RU', '站点不丢');
-  assert.strictEqual(row.email, 'old@example.com', '账号邮箱并进同一行');
-  assert.strictEqual(row.opened_at, '2024-01-01', '开店时间从账号侧带过来');
-  assert.ok(Number(row.ziniao_account_id) > 0, '紫鸟文本应落进 sk_tool_accounts 并被引用');
-  assert.ok(Number(row.erp_account_id) > 0, 'ERP 文本应落进 sk_tool_accounts 并被引用');
-  const tools = dbQuery(`SELECT kind, account FROM sk_tool_accounts ORDER BY id`).map((t) => `${t.kind}:${t.account}`);
-  assert.deepStrictEqual(tools.sort(), ['erp:erp-1', 'ziniao:zn-1'], '两套工具账号各一行，且账号名原样');
-
-  // 邮箱账号：外键从 sk_shop_sets 改指 sk_shops，**账号 id 不变**（同步游标/已缓存附件都挂在它上面）
-  const mailCols = dbQuery(`PRAGMA table_info(sk_mail_accounts)`).map((c) => String(c.name));
-  assert.ok(mailCols.includes('shop_id'), '迁移后应有 shop_id 列');
-  assert.ok(!mailCols.includes('shop_set_id'), 'shop_set_id 必须随合并消失');
-  const mail = dbGet(`SELECT id, shop_id, email, imap_host, sync_days FROM sk_mail_accounts WHERE id = 77`);
-  assert.ok(mail, '迁移不许丢邮箱账号');
-  assert.strictEqual(Number(mail.shop_id), 1, '账号必须并到合并出来的那一行（id 1）');
-  assert.strictEqual(mail.email, 'old@example.com', '邮箱原样');
-  assert.strictEqual(mail.imap_host, 'imap.example.com', 'IMAP 配置原样');
-  assert.strictEqual(Number(mail.sync_days), 15, '同步天数原样');
-  assert.strictEqual(
-    (dbQuery(`SELECT COUNT(*) AS c FROM sk_mail_accounts`))[0].c,
-    1,
-    '账号表行数不变（一条不丢也不多造）',
-  );
-  assert.strictEqual(dbQuery(`PRAGMA foreign_key_check`).length, 0, '迁移后外键必须自洽');
-
-  // 幂等：版本已记 ⇒ 再 ensure 不重复搬、不产生额外行（第二次不会再把工具账号插一遍）
-  sdb.ensureShopSchema();
-  sdb.ensureShopSchema();
-  assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c, 1, '幂等迁移不得产生额外店铺行');
-  assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_tool_accounts`)[0].c, 2, '幂等迁移不得重复建工具账号');
-  reset();
-  dbRun(`DROP TABLE IF EXISTS sk_shop_sets`);
-});
-
-// 只有账号表、没有店铺表的早期库（早期版本账号先落地）。只看形状的话它会命中"已是新形状"的
-// 短路，账本被补记成 1、账号行**永久孤立**在 sk_shop_sets 里（症状：邮箱账号在界面上一律看不到，
-// 且没有任何报错）。判据因此必须是"形状对 **且** 没有 sk_shop_sets"。
-check('早期库（只有 sk_shop_sets）：账号行搬成纯账号行，不孤立', () => {
-  dbRun(`DROP TABLE IF EXISTS sk_shops`);
-  dbRun(`DROP TABLE IF EXISTS sk_mail_accounts`);
-  dbRun(`CREATE TABLE sk_shop_sets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL DEFAULT '',
-    phone TEXT NOT NULL DEFAULT '',
-    company TEXT NOT NULL DEFAULT '',
-    company_id INTEGER NOT NULL DEFAULT 0,
-    alipay TEXT NOT NULL DEFAULT '',
-    ziniao_account TEXT NOT NULL DEFAULT '',
-    erp_account TEXT NOT NULL DEFAULT '',
-    platforms TEXT NOT NULL DEFAULT '[]',
-    opened_at TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    tags TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    secret_enc BLOB,
-    secret_keys TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-  )`);
-  dbRun(`INSERT INTO sk_shop_sets (id, email, phone, status) VALUES (5, 'only@ex.com', '13900000000', 'closed')`);
-  dbRun(`DELETE FROM sk_schema_migrations WHERE key = 'shop.main'`);
-
-  sdb.ensureShopSchema();
-
-  // 按邮箱取行，不按 id：纯账号行没有店铺 id 可继承（sk_shops 里旧店铺的显式 id 先占位，
-  // 账号行走 AUTOINCREMENT 续号）—— 断言钉的是"搬过来了"，不是"搬到第几行"。
-  const acct = dbGet(`SELECT id, platform, name, name_key, email, status FROM sk_shops WHERE email = 'only@ex.com'`);
-  assert.ok(acct, '账号行必须被搬进 sk_shops（不能留在 sk_shop_sets 里）');
-  assert.ok(Number(acct.id) > 0, '合并后的账号行有自己的行 id（邮件账号外键要指向它）');
-  assert.strictEqual(acct.name, '', '纯账号行没有店名');
-  assert.strictEqual(acct.name_key, '', '纯账号行的归一键也是空 —— 它不参与店名唯一性');
-  assert.strictEqual(acct.email, 'only@ex.com');
-  assert.strictEqual(acct.status, 'exited', '账号侧历史态 closed 必须并入「退店」');
-  assert.strictEqual(acct.platform, 'ae', '账号侧没有平台，合并后统一落 ae（当前只管速卖通）');
-  assert.strictEqual(
-    dbQuery(`SELECT COUNT(*) AS c FROM sqlite_master WHERE name='sk_shop_sets'`)[0].c,
-    0,
-    '搬完必须删掉旧表',
-  );
-  reset();
-});
+// `shop.main` 的整表合并迁移已随「未正式发布、无存量库」退役（现在只保留 v1 版本占位 +
+// v2 清掉 `sk_shop_sets`），老形状夹具（店铺行 + 账号套装 + 邮箱账号）不再需要。
+// `shop.columns`（score / deposit_received_at）仍要验：下面这条用例守的就是那两条补列分支。
 
 check('前置：当前库的表形状已含 score / deposit_received_at，shop.columns 账本记到 v2', () => {
   const cols = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
@@ -321,11 +139,11 @@ check('前置：当前库的表形状已含 score / deposit_received_at，shop.c
   assert.strictEqual(
     dbQuery(`SELECT version FROM sk_schema_migrations WHERE key = 'shop.columns'`)[0].version,
     2,
-    'shop.columns 应记到 v2（v1 score + v2 deposit_received_at；它独立于 shop.main，后者版本一旦 ≥1 就整段跳过）',
+    'shop.columns 应记到 v2（v1 score + v2 deposit_received_at；它与 shop.main 的版本号互不影响）',
   );
 });
 
-// ⚠️ 同「老库迁移」那条的理由：本脚本的库是现建的，建表语句已含这两列 ⇒ ALTER 分支一次都不会执行。
+// ⚠️ 本脚本的库是现建的，建表语句已含这两列 ⇒ ALTER 分支一次都不会执行。
 // 必须造一张「当前形状但既没有 score 也没有 deposit_received_at」的老表，并把 shop.columns 的账本倒回 0。
 // 注意**不能只 DROP 表就调 ensure**：`dbMigrate(SCHEMA)` 会按新形状把表建出来（带这两列），
 // 补列分支照样恒绿。所以老表要自己按 DDL 建好，让 `CREATE TABLE IF NOT EXISTS` 变成空操作。

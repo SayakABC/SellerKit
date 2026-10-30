@@ -126,7 +126,12 @@ describe('expandOrderRow', () => {
 describe('expandOrderRows', () => {
   it('cols 为 null 时原样返回，统计为 0', () => {
     const rows = [{ 产品数量: '3' }];
-    expect(expandOrderRows(rows, null)).toEqual({ rows, expanded: 0, missingImageCount: 0 });
+    expect(expandOrderRows(rows, null)).toEqual({
+      rows,
+      expanded: 0,
+      missingImageCount: 0,
+      missingColorCount: 0,
+    });
   });
 
   it('累计统计被拆分的订单行数与缺图产品数', () => {
@@ -253,5 +258,61 @@ describe('parseRowQty：件数只认这一行自己的商品信息块', () => {
 
   it('**不用**「数量」列：拆行后它仍是整行的值（照搬会把 3 件拆出的每行都按 3 件算）', () => {
     expect(parseRowQty({ 数量: '3', 商品信息: block(1) })).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────── 一单多段同商品（真库脏行回归 2026-10-30）
+//
+// 真库订单 `1123192657411338`：`产品数量=5`（**总件数** 2+1+1+1），产品信息里有 4 个【N】段，
+// 尺寸列只有一个 `XL`。旧实现把 5 当段数 → 5 行；又因 `块数 !== n` 每行都留着**多块原文** →
+// `parseOrderPropsColor` 判定"一单多色"返回空、`parseOrderQty` 取不到件数 ⇒ 入库后 `color=''`、
+// 多段被 `(订单号, 图片)` 幂等吞掉。修复后的判据：**一段一行、每行只带自己那一段**。
+describe('速卖通一单多段同商品（真库脏行回归）', () => {
+  const aeCols: MultiProductColumns = {
+    count: '产品数量',
+    image: '产品图片链接',
+    productId: '产品ID',
+    size: '尺寸',
+    info: '产品信息',
+  };
+  const seg = (color: string, size: string, qty: number) =>
+    `Men's Cotton Jacket\n(产品属性:Color:${color},Size:${size},Ships From:China Mainland)\n(产品数量:${qty} piece)`;
+  const fields = {
+    订单号: '1123192657411338',
+    产品数量: '5',
+    产品图片链接: 'https://x/a.jpg',
+    产品ID: '1005013246442752',
+    尺寸: 'XL',
+    产品信息: [
+      `【1】${seg('10', 'XL', 2)}`,
+      `【2】${seg('10', 'XXL', 1)}`,
+      `【3】${seg('10', 'XXXL', 1)}`,
+      `【4】${seg('6', 'XL', 1)}`,
+    ].join('\n'),
+  };
+
+  it('段数按【N】块算（产品数量是总件数，不能当段数）', () => {
+    const r = expandOrderRow(fields, aeCols);
+    expect(r.rows).toHaveLength(4);
+    expect(r.missingColor).toBe(false);
+  });
+
+  it('每行只留自己那一段：色 / 码 / 件数各自就位', () => {
+    const r = expandOrderRow(fields, aeCols);
+    expect(r.rows.map((x) => x.尺寸)).toEqual(['XL', 'XXL', 'XXXL', 'XL']);
+    expect(r.rows.map((x) => parseRowQty(x))).toEqual([2, 1, 1, 1]);
+    // 每行的产品信息里只剩一个 Color（多块原文会让下游判成"一单多色"→ 空色）
+    expect(r.rows.map((x) => (x.产品信息.match(/Color:/g) ?? []).length)).toEqual([1, 1, 1, 1]);
+    expect(r.rows.map((x) => /Color:(\w+)/.exec(x.产品信息)?.[1])).toEqual(['10', '10', '10', '6']);
+  });
+
+  it('块数少于段数时，多出的行留空信息并计入缺色（不拿别人的块顶替）', () => {
+    const r = expandOrderRow(
+      { ...fields, 产品数量: '3', 产品信息: `【1】${seg('10', 'XL', 1)}\n【2】${seg('10', 'XXL', 1)}` },
+      aeCols,
+    );
+    expect(r.rows).toHaveLength(3);
+    expect(r.rows[2].产品信息).toBe('');
+    expect(r.missingColor).toBe(true);
   });
 });

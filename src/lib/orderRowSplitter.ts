@@ -28,6 +28,8 @@ export interface SplitResult {
   rows: Record<string, string>[];
   /** 该行是否含缺图产品（图片链接数量不足 N） */
   missingImage: boolean;
+  /** 该行是否有产品级记录取不到平台色（原文有 Color、拆完后这一行没有） */
+  missingColor: boolean;
 }
 
 export interface ExpandResult {
@@ -37,6 +39,8 @@ export interface ExpandResult {
   expanded: number;
   /** 缺图的产品记录数 */
   missingImageCount: number;
+  /** 拆完后取不到平台色的记录数（原文有 Color） */
+  missingColorCount: number;
 }
 
 const MAX_PRODUCTS_PER_ORDER = 50;
@@ -65,16 +69,22 @@ function splitList(value: string, seps: RegExp[]): string[] {
     .filter((t) => t.length > 0);
 }
 
-/** 解析「【1】xxx【2】yyy」块结构，并尝试从块内提取 Size 兜底 */
-function parseInfoBlocks(text: string): Array<{ text: string; size?: string }> {
+/** 解析「【1】xxx【2】yyy」块结构，并尝试从块内提取 Size / 件数 */
+function parseInfoBlocks(text: string): Array<{ text: string; size?: string; qty?: number }> {
   if (!text.includes('【')) return [];
-  const blocks: Array<{ text: string; size?: string }> = [];
+  const blocks: Array<{ text: string; size?: string; qty?: number }> = [];
   const re = /【(\d+)】([\s\S]*?)(?=【\d+】|$)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const t = (m[2] ?? '').trim();
     const sm = /(?:Size|尺寸)\s*[:：]\s*([^\s,;，；)）]+)/i.exec(t);
-    blocks.push({ text: t, size: sm ? sm[1] : undefined });
+    const qm = /(?:商品数量|产品数量)\s*[:：]\s*(\d+)/.exec(t);
+    const qty = qm ? Number.parseInt(qm[1], 10) : undefined;
+    blocks.push({
+      text: t,
+      size: sm ? sm[1] : undefined,
+      qty: Number.isFinite(qty as number) && (qty as number) >= 1 ? qty : undefined,
+    });
   }
   return blocks;
 }
@@ -163,12 +173,20 @@ export function detectMultiProductColumns(
   };
 }
 
+/** 规格串里的 `Color:<值>`（与 `electron/aeMoney.propsColorTokens` 同语义，这里只判"有没有"） */
+const PROPS_COLOR_RE = /(?:colour|color)\s*[:：]\s*[^,;，；)）\n\r]+/i;
+
 /**
  * 拆分一行订单为产品级记录；N<=1 或无法判定数量时原样返回。
  * 缺图产品保留空图片链接记录（由用户补图后重处理）。
  *
- * **N 的来源**：数量列优先（有该列即权威）；**没有数量列时**取「【N】块数 / 逗号分隔的商品ID 数」的
- * 较大者。两者不一致时按较大值拆，多出来的那一行字段为空 —— 与"缺图产品保留空记录"同一处置：
+ * **N（产品段数）的来源**：
+ *   ① 报表有「【N】块」结构（≥2 块）时，**块数就是段数** —— 这是速卖通的真实形态。
+ *      `产品数量` 那一列在速卖通是**总件数**（如 4 段：2+1+1+1 = 5），拿它当段数会多拆出一行
+ *      空壳，并且 `blocks.length !== n` 会让每一行都留着**多块原文** → 色/码/件数全部定不出来
+ *      （真库脏行 `1123192657411338`：4 段只落 2 行且 `color=''`）。
+ *   ② 没有块结构时，数量列优先（芒果店长式导出里它确实是段数）；否则用「逗号商品ID 数」。
+ * 块数与 ID 数不一致时按较大值拆，多出来的那一行字段为空 —— 与"缺图产品保留空记录"同一处置：
  * **留给人看见并补齐，而不是静默丢掉一个产品**。
  */
 export function expandOrderRow(fields: Record<string, string>, cols: MultiProductColumns): SplitResult {
@@ -181,11 +199,20 @@ export function expandOrderRow(fields: Record<string, string>, cols: MultiProduc
     ? Number.parseInt((fields[cols.count] ?? '').trim(), 10) || 1
     : 0;
   const inferredN = Math.max(blocks.length, ids.length);
-  const n = Math.min(MAX_PRODUCTS_PER_ORDER, Math.max(1, declaredN || inferredN));
-  if (n <= 1) return { rows: [fields], missingImage: false };
+  // 块内件数之和 == 数量列 ⇒ 数量列说的是**总件数**（速卖通），段数只能是块数。
+  // 块内没有件数或对不上时，保留既有优先级（数量列 = 段数，芒果店长式行为不变）。
+  const blockQtySum = blocks.reduce((s, b) => s + (b.qty ?? 0), 0);
+  const blockN =
+    blocks.length >= 2 && declaredN && blockQtySum === declaredN
+      ? Math.max(blocks.length, ids.length)
+      : 0;
+  const n = Math.min(MAX_PRODUCTS_PER_ORDER, Math.max(1, blockN || declaredN || inferredN));
+  if (n <= 1) return { rows: [fields], missingImage: false, missingColor: false };
 
+  const reportHasColor = !!cols.info && PROPS_COLOR_RE.test(fields[cols.info] ?? '');
   const rows: Record<string, string>[] = [];
   let missingImage = false;
+  let missingColor = false;
   for (let i = 0; i < n; i++) {
     const row: Record<string, string> = { ...fields };
     if (cols.image) row[cols.image] = urls[i] ?? '';
@@ -193,15 +220,23 @@ export function expandOrderRow(fields: Record<string, string>, cols: MultiProduc
       row[cols.productId] = ids[i] ?? (ids.length === 1 ? ids[0] : '');
     }
     if (cols.size) {
-      row[cols.size] = sizes[i] ?? (sizes.length === 1 ? sizes[0] : blocks[i]?.size ?? sizes[0] ?? '');
+      // 多值尺寸列（芒果）按索引取；单值列（速卖通整单一个「尺寸」）不可广播 —— 块内的 Size
+      // 才是这一段的真实码数（真库 4 段分别是 XL/XXL/XXXL/XL，旧实现把 4 行全写成 XL）。
+      const byIndex = sizes.length === n ? sizes[i] : '';
+      row[cols.size] = byIndex || blocks[i]?.size || (sizes.length === 1 ? sizes[0] : '');
     }
-    if (cols.info && blocks.length === n) row[cols.info] = blocks[i].text;
+    // 有块结构时**每行只留自己那一段**：否则下游 `parseOrderPropsColor` / `parseOrderQty`
+    // 看到多块原文只能返回空（色/件数"取不到"），而块数（< n）与段数不等的行更会把多块原文
+    // 一路带下去。块不足的行写空串 —— 缺的那一段要看得见，不要拿别人的块顶替。
+    if (cols.info && blocks.length >= 2) row[cols.info] = blocks[i]?.text ?? '';
     // 只在**存在图片列**时判缺图：像速卖通订单报表那样压根没有图片列（`cols.image` 为空串）的格式，
     // 逐行标"缺图"是凭空制造待补图 —— 那种报表的图另有来源（按商品ID 抓），不属拆行该判的事。
     if (cols.image && !row[cols.image]) missingImage = true;
+    // 原文里本来有 Color、这一行却没有 ⇒ 这一段的色丢了（进"待认色"，不再写成空串蒙过去）
+    if (reportHasColor && !PROPS_COLOR_RE.test(row[cols.info] ?? '')) missingColor = true;
     rows.push(row);
   }
-  return { rows, missingImage };
+  return { rows, missingImage, missingColor };
 }
 
 /** 批量展开全部行，返回展开后记录与统计信息 */
@@ -209,15 +244,17 @@ export function expandOrderRows(
   allRows: Record<string, string>[],
   cols: MultiProductColumns | null,
 ): ExpandResult {
-  if (!cols) return { rows: allRows, expanded: 0, missingImageCount: 0 };
+  if (!cols) return { rows: allRows, expanded: 0, missingImageCount: 0, missingColorCount: 0 };
   let expanded = 0;
   let missingImageCount = 0;
+  let missingColorCount = 0;
   const out: Record<string, string>[] = [];
   for (const r of allRows) {
-    const { rows, missingImage } = expandOrderRow(r, cols);
+    const { rows, missingImage, missingColor } = expandOrderRow(r, cols);
     if (rows.length > 1) expanded += 1;
     if (missingImage) missingImageCount += 1;
+    if (missingColor) missingColorCount += 1;
     out.push(...rows);
   }
-  return { rows: out, expanded, missingImageCount };
+  return { rows: out, expanded, missingImageCount, missingColorCount };
 }

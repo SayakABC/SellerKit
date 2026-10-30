@@ -65,7 +65,8 @@
     "purchase:shot": "node --check scripts/purchase-shot.mjs && node scripts/purchase-shot.mjs",
     "classify:shot": "node --check scripts/classify-shot.mjs && node scripts/classify-shot.mjs",
     "shipping-rate:ui": "node --check scripts/shipping-rate-ui-smoke.mjs && node scripts/shipping-rate-ui-smoke.mjs",
-    "shop-item:smoke": "tsc -p tsconfig.electron.json && electron scripts/shop-item-db-smoke.cjs"
+    "shop-item:smoke": "tsc -p tsconfig.electron.json && electron scripts/shop-item-db-smoke.cjs",
+    "refresh:db-comments": "electron scripts/refresh-table-comments.cjs"
   },
   "dependencies": {
     "axios": "^1.19.0",

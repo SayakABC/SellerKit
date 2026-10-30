@@ -105,6 +105,8 @@ export interface OrdersImportOutcome {
   images: number;
   /** 有主图链接但下载失败的行数（这些行按**无图**落库，不丢行） */
   imageFailed: number;
+  /** 拆行后取不到平台色的记录数（原文有 Color；这些行按**待认色**入库，不写空色掩盖） */
+  colorMissing: number;
   /** 报表带店铺列时落库的店铺名（去重；空数组 = 报表没有店铺列，需人工「归到该店」） */
   shops: string[];
 }
@@ -194,6 +196,7 @@ export async function importOrders(src: ImportSource): Promise<OrdersImportOutco
     skipped,
     images,
     imageFailed,
+    colorMissing: expanded.missingColorCount,
     shops: [...shops],
   };
 }
@@ -403,6 +406,7 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
     const warnings: string[] = [];
     if (r.skipped) warnings.push(`${r.skipped} 行没有订单号，已跳过（这几行没进库）`);
     if (r.imageFailed) warnings.push(`${r.imageFailed} 行主图没下下来（订单进了库，但这几行没有图）`);
+    if (r.colorMissing) warnings.push(`${r.colorMissing} 行定不出颜色（已按待认色入库，去「归类核对」补）`);
     return {
       ...det,
       wrote: r.inserted > 0,
@@ -445,6 +449,7 @@ export async function detectAndImport(src: ImportSource): Promise<AutoImportResu
         (r.skipped ? `，跳过 ${r.skipped} 行` : '') +
         (r.images ? `，主图 ${r.images} 张` : '') +
         (r.imageFailed ? `，${r.imageFailed} 行主图下载失败（已按无图入库）` : '') +
+        (r.colorMissing ? `，${r.colorMissing} 行定不出色（已按待认色入库）` : '') +
         shopNote,
     };
   }

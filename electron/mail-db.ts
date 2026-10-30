@@ -171,7 +171,11 @@ export interface MailMessageUpsertRow {
 }
 
 const MAIL_SCHEMA: string[] = [
+  // `sk_mail_accounts`：邮件账号（一行 = 一个店铺邮箱），`shop_id` UNIQUE → `sk_shops(id) ON DELETE CASCADE`
+  //（删店铺行会连带清掉账号与本地邮件缓存，确认框已明说）。`last_uid` / `uid_validity` 是单文件夹增量游标。
+  // 写 = 账号设置页 / 同步引擎状态回写；读 = 同步调度、邮件列表归属。
   `CREATE TABLE IF NOT EXISTS sk_mail_accounts (
+    -- 用途：邮件账号（一行 = 一个店铺邮箱，shop_id 唯一并级联删除）；单文件夹游标为兼容列，多文件夹见 sk_mail_folders。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shop_id INTEGER NOT NULL UNIQUE REFERENCES sk_shops(id) ON DELETE CASCADE,
     email TEXT NOT NULL DEFAULT '',
@@ -194,7 +198,11 @@ const MAIL_SCHEMA: string[] = [
     updated_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_accounts_sync ON sk_mail_accounts(sync_enabled, status)`,
+  // `sk_mail_messages`：邮件元数据（一行 = 一封），业务唯一键 `(account_id,folder,uid)` —— 幂等 upsert 的基石。
+  // 正文拆到 `sk_mail_bodies`、附件拆到 `sk_mail_attachments`；`body_cached` / `preview` 只是列表用的派生标记。
+  // 写 = 同步引擎 `upsertMailMessages`；读 = 邮件列表、全文检索、未读/标记筛选。
   `CREATE TABLE IF NOT EXISTS sk_mail_messages (
+    -- 用途：邮件元数据（一账号×文件夹×UID 一行，幂等 upsert 的基石）；正文与附件分表，列表只读本表。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL REFERENCES sk_mail_accounts(id) ON DELETE CASCADE,
     folder TEXT NOT NULL DEFAULT 'INBOX',
@@ -218,13 +226,20 @@ const MAIL_SCHEMA: string[] = [
   `CREATE UNIQUE INDEX IF NOT EXISTS uidx_sk_mail_messages ON sk_mail_messages(account_id, folder, uid)`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_messages_received ON sk_mail_messages(received_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_messages_from ON sk_mail_messages(from_addr)`,
+  // `sk_mail_bodies`：邮件正文（`message_id` 主键，与消息一对一），把大文本从列表行里拆开以免全表膨胀。
+  // 写 = 按需拉取正文（同步/详情）；读 = 详情页、FTS 索引重建（`body` 列来源）。
   `CREATE TABLE IF NOT EXISTS sk_mail_bodies (
+    -- 用途：邮件正文（与消息一对一，大文本拆出列表行以免膨胀）；读 = 详情页与 FTS 的 body 来源。
     message_id INTEGER PRIMARY KEY REFERENCES sk_mail_messages(id) ON DELETE CASCADE,
     text_body TEXT NOT NULL DEFAULT '',
     html_body TEXT NOT NULL DEFAULT '',
     truncated INTEGER NOT NULL DEFAULT 0
   )`,
+  // `sk_mail_attachments`：附件**元数据**（文件名 / MIME / 大小 / `content_id`），二进制**不入库**。
+  // `content_id` 是内联图片映射键（`mail-html.ts` 用它把 cid 换成宿主可读的本地资源）。
+  // 写 = 同步引擎；读 = 邮件详情、附件下载、内联图渲染。落盘缓存另见 `sk_mail_attachment_cache`。
   `CREATE TABLE IF NOT EXISTS sk_mail_attachments (
+    -- 用途：附件元数据（文件名/MIME/大小/content_id）；content_id 是正文内联图的映射键，二进制不入库。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL REFERENCES sk_mail_messages(id) ON DELETE CASCADE,
     filename TEXT NOT NULL DEFAULT '',
@@ -233,8 +248,10 @@ const MAIL_SCHEMA: string[] = [
     content_id TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_attachments_msg ON sk_mail_attachments(message_id)`,
-  // 多文件夹：每个文件夹独立记录增量游标（M3）
+  // `sk_mail_folders`：多文件夹增量游标（一行 = 账号×文件夹，`UNIQUE(account_id,path)`），M3。
+  // 写 = 同步引擎每轮刷新；读 = 决定下一轮从哪个 UID 续拉。
   `CREATE TABLE IF NOT EXISTS sk_mail_folders (
+    -- 用途：多文件夹增量游标（账号×文件夹一行，唯一键 account_id+path）；决定下一轮从哪个 UID 续拉。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL REFERENCES sk_mail_accounts(id) ON DELETE CASCADE,
     path TEXT NOT NULL DEFAULT '',
@@ -244,16 +261,21 @@ const MAIL_SCHEMA: string[] = [
     created_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uidx_sk_mail_folders ON sk_mail_folders(account_id, path)`,
-  // 附件本地缓存索引：只记落盘路径，二进制永不入库（M3，文件读写见 mail-cache.ts）
+  // `sk_mail_attachment_cache`：附件**本地缓存索引**（`attachment_id` 主键，一对一），只记落盘路径，
+  // 二进制永不入库（M3，文件读写见 `mail-cache.ts`）。0 行是正常态 —— 只有用户真正下载过的附件才有行。
+  // 写 = `mail-cache.ts` 缓存/清理；读 = 附件下载命中、缓存容量统计、删邮件时失效。
   `CREATE TABLE IF NOT EXISTS sk_mail_attachment_cache (
+    -- 用途：附件本地缓存索引（只记落盘路径与大小，二进制永不入库）；0 行是正常态，只有下载过的附件才有行。
     attachment_id INTEGER PRIMARY KEY REFERENCES sk_mail_attachments(id) ON DELETE CASCADE,
     message_id INTEGER NOT NULL DEFAULT 0,
     file_path TEXT NOT NULL DEFAULT '',
     size INTEGER NOT NULL DEFAULT 0,
     cached_at TEXT NOT NULL DEFAULT ''
   )`,
-  // 轻量键值表：FTS 回填游标等内部状态
+  // `sk_mail_meta`：**内部**轻量 KV 表（`key` 主键），存 FTS 回填游标等非业务状态；
+  // 写/读都只在本域（`getMailMeta` / `setMailMeta`）。它不计业务表，属基础设施。
   `CREATE TABLE IF NOT EXISTS sk_mail_meta (
+    -- 用途：内部 KV（FTS 回填游标等非业务状态）；基础设施表，不计入业务表。
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
   )`,
@@ -391,6 +413,10 @@ export function isMailFtsAvailable(): boolean {
   return ftsAvailable;
 }
 
+// `sk_mail_fts`：FTS5 全文索引**虚拟表**（rowid = `sk_mail_messages.id`，列 subject/from_name/from_addr/body）。
+// 由 `indexMailMessages` 增量维护；搜索 `listMailMessages` 优先 MATCH，FTS5 不可用时回落 LIKE。
+// ⚠️ `sk_mail_fts_{config,content,data,docsize,idx}` 五张是 SQLite 自建的**影子表**，只随本虚表存在，
+//    绝不可单独 DROP —— 删本虚表时它们才会一起消失。
 function ensureMailFtsTable(): void {
   if (ftsChecked) return;
   ftsChecked = true;

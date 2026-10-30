@@ -1,8 +1,10 @@
 // electron/order-db.ts
 // 「订单归类」模块的数据访问层（基于 electron/db.ts 公共层）。
 // 表：
-//   oi_images         图片指纹库：内容指纹(SHA-256) 唯一，缓存 AI 识别结果，避免重复扣费；
-//                     style_color_id 归属款色（阶段1：识别后自动建立款式/款色并挂接）
+//   md_images         图片主数据（`electron/master-data-db.ts` 拥有；内容指纹唯一、二进制在
+//                     `userData/images/`）。本模块**只读**它（列表/拿货单取 local_path），
+//                     不写、不删 —— 写只有 `landImageBytes` 一个入口（R1 / S0a）
+//   款色代表图        挂在 `oi_style_colors.image_id`（1:1；不再有「图行挂色」的记忆表）
 //   oi_orders         订单明细：归属图片 + 原始字段 + 归一化属性（款式/颜色/logo/材质）
 //   oi_styles         款编码库：code 唯一（STYLE-001）、fingerprint 款式指纹唯一（匹配键）
 //   oi_style_colors   款色库：款编码 + 归一化颜色 → 款色编码（STYLE-001-RED），唯一
@@ -65,36 +67,31 @@ import { colorAliasKey, pickColorAlias, translateColor, type ColorAliasRow } fro
 // 店名归一（纯函数；与店铺主表 UNIQUE / 名称映射同一口径）。订单只存店名原文，
 // 下游要按**店铺身份**聚合时必须经它换算，别自己 trim（否则多一个空格就成了两家店）。
 import { toNameKey } from './shopName';
+// 图片主数据（唯一图片仓）：本域只用它的**读**接口（`md_images` 的写入口在 master-data-db）。
+import {
+  allImageLocalPaths,
+  ensureMasterDataSchema,
+  findImageByFingerprint as mdFindImageByFingerprint,
+  findImageByUrlFingerprint as mdFindImageByUrlFingerprint,
+  imageIdExists,
+  registerImageRow,
+  type MdImageId,
+  type MdImageRow,
+} from './master-data-db';
 
 // ---- 类型（与渲染层 src/types.ts 对应，结构保持一致） ----
 
 /**
- * `oi_images` 的主键 —— **品牌类型**（值仍是 number，只是带了来源标记）。
+ * 图片主键 —— **品牌类型**（值仍是 number，只是带了来源标记）。
  *
- * 为什么不是裸 `number`：产品域还有一张 `pl_images`，两表各自 AUTOINCREMENT、
- * id 在同一个库里必然撞上。把它们当成一个东西传，编译期看不出来，运行时是
- *「改了另一张表的另一行，还报成功」。品牌类型把这类错误挡在 `tsc` 这一层。
- * 造它的唯一正当途径是 `landOrderImageBytes` / `insertImage` 的返回值（见 `order-image-land`）。
+ * R1 之后全项目只有一张图片表（`md_images`），"两张表 id 撞车"的历史问题消失了；
+ * 但品牌类型保留：业务表里的 `image_id` 全是裸 number 列，把"产品 id / 款色 id"
+ * 误当图片 id 传进来仍是运行期静默写脏，`tsc` 这一层能挡住就别留到运行时。
  */
-export type OrderImageId = number & { readonly __orderImageId: unique symbol };
+export type OrderImageId = MdImageId;
 
-export interface OrderImageRecord {
-  id?: number;
-  /** 内容指纹 SHA-256 */
-  fingerprint: string;
-  /** URL 规范化指纹（同图不同参数视为同图） */
-  urlFingerprint: string;
-  sourceUrl: string;
-  localPath: string;
-  status: 'pending' | 'done' | 'error';
-  /** AI 识别结果 JSON */
-  resultJson?: string;
-  error?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  /** 归属款色 id（oi_style_colors，识别确认后挂接） */
-  styleColorId?: number;
-}
+/** 图片记录（渲染层展示用；`md_images` 的行，已无识别流水线字段，见 D16） */
+export type OrderImageRecord = MdImageRow;
 
 /** 订单发货状态：pending=未发货（导入后默认），shipped=已发货 */
 export type OrderStatus = 'pending' | 'shipped';
@@ -244,7 +241,11 @@ const ORDER_HEADER_COLS: { name: string; ddl: string }[] = [
 const ORDER_ITEM_COLS: { name: string; ddl: string }[] = [
   { name: 'id', ddl: 'id INTEGER PRIMARY KEY' },
   { name: 'order_id', ddl: 'order_id INTEGER NOT NULL REFERENCES oi_orders(id) ON DELETE CASCADE' },
-  { name: 'image_id', ddl: 'image_id INTEGER REFERENCES oi_images(id) ON DELETE CASCADE' },
+  // 图片主键指向 `md_images`（主数据域）。**刻意不写外键**：
+  //   ① 图片表由主数据域懒建，订单域不保证它在（跨域外键会把两张表的建表顺序焊死）；
+  //   ② 迁移期要重建本表去掉旧外键（`retireLegacyImageTables`），有外键就得多一次拆除；
+  //   ③ 图片行删除只发生在主数据域的"孤图清理"，那时引用它的订单行早已不存在。
+  { name: 'image_id', ddl: 'image_id INTEGER' },
   { name: 'size', ddl: "size TEXT NOT NULL DEFAULT ''" },
   { name: 'raw_fields', ddl: 'raw_fields TEXT NOT NULL' },
   { name: 'category', ddl: "category TEXT NOT NULL DEFAULT ''" },
@@ -285,12 +286,14 @@ export const ORDER_ITEM_TABLE_COLUMNS: readonly string[] = ORDER_ITEM_COLS.map((
 
 /** `oi_orders`（主表）建表语句 —— 由 `ORDER_HEADER_COLS` 拼出，改列只改数组。 */
 const ORDER_TABLE_DDL = `CREATE TABLE IF NOT EXISTS oi_orders (
+  -- 用途：订单主表（订单域，一行 = 一份订单，order_no 唯一）；金额/状态汇总，明细在 oi_order_items。
 ${ORDER_HEADER_COLS.map((c) => `    ${c.ddl}`).join(',\n')},
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`;
 
 /** `oi_order_items`（明细）建表语句 —— 由 `ORDER_ITEM_COLS` 拼出。 */
 const ORDER_ITEM_TABLE_DDL = `CREATE TABLE IF NOT EXISTS oi_order_items (
+  -- 用途：订单明细行（一行 = 订单×商品/尺码），承载归类款色、成本与变体键；order_id 级联删除。
 ${ORDER_ITEM_COLS.map((c) => `    ${c.ddl}`).join(',\n')},
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`;
@@ -333,6 +336,7 @@ const ORDER_LEGACY_SPINE_DDL = `CREATE TABLE IF NOT EXISTS oi_orders (
 
 /** `oi_variant_keys` 建表语句（`SCHEMA` 与迁移 v12 共用这一份，避免两处形状分叉） */
 const VARIANT_KEYS_DDL = `CREATE TABLE IF NOT EXISTS oi_variant_keys (
+    -- 用途：变体键→款色映射（订单驱动归类；state = auto/named/merged）；保证重导幂等，N:1 合并合法。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     variant_key TEXT NOT NULL UNIQUE,
     style_color_id INTEGER NOT NULL REFERENCES oi_style_colors(id) ON DELETE CASCADE,
@@ -358,6 +362,7 @@ const VARIANT_KEYS_DDL = `CREATE TABLE IF NOT EXISTS oi_variant_keys (
  * （那会让命名板把它们当成"人工合并过的"而不再提示命名）。
  */
 const STYLE_MERGES_DDL = `CREATE TABLE IF NOT EXISTS oi_style_merges (
+    -- 用途：款合并操作头（一行 = 一次合并，支持撤销还原）；明细见 oi_style_merge_items。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id TEXT NOT NULL DEFAULT '',
     source_style_id INTEGER NOT NULL,
@@ -366,6 +371,7 @@ const STYLE_MERGES_DDL = `CREATE TABLE IF NOT EXISTS oi_style_merges (
   )`;
 
 const STYLE_MERGE_ITEMS_DDL = `CREATE TABLE IF NOT EXISTS oi_style_merge_items (
+    -- 用途：款合并明细（kind = color 搬色 / key 改键），记 from/to 与 from_state 以支持拆开还原。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     merge_id INTEGER NOT NULL REFERENCES oi_style_merges(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
@@ -398,27 +404,12 @@ const SCHEMA = [
   STYLE_MERGE_ITEMS_DDL,
   `CREATE INDEX IF NOT EXISTS idx_oi_style_merge_items_merge ON oi_style_merge_items(merge_id)`,
   `CREATE INDEX IF NOT EXISTS idx_oi_style_merges_target ON oi_style_merges(target_style_id)`,
-  `CREATE TABLE IF NOT EXISTS oi_images (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fingerprint TEXT NOT NULL UNIQUE,
-    url_fingerprint TEXT NOT NULL,
-    source_url TEXT NOT NULL,
-    local_path TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    result_json TEXT,
-    error TEXT,
-    style_color_id INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_oi_images_sc ON oi_images(style_color_id)`,
   ORDER_TABLE_DDL,
   `CREATE INDEX IF NOT EXISTS idx_oi_orders_shop ON oi_orders(shop)`,
   ORDER_ITEM_TABLE_DDL,
   `CREATE INDEX IF NOT EXISTS idx_oi_order_items_order ON oi_order_items(order_id)`,
   `CREATE INDEX IF NOT EXISTS idx_oi_order_items_image ON oi_order_items(image_id)`,
   `CREATE INDEX IF NOT EXISTS idx_oi_order_items_sc ON oi_order_items(style_color_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_oi_images_url_fp ON oi_images(url_fingerprint)`,
   // ── 包裹（2026-10-21，订单-采购模型简化 B2）───────────────────────────────
   // 一单多包、按**单个商品行**拆、允许把一个合并行的数量拆到两个包里。
   // 为什么键是 `order_no` 而不是订单主键：`oi_orders` 现在一行 = 订单×商品图（B1 拆表前），
@@ -431,6 +422,7 @@ const SCHEMA = [
   //   · 总物流费/总重 = Σ 包裹（`parcelTotals` 派生，不另存一份），
   //     任一个包缺值就整单返回 NULL —— 不是"已知部分之和"。
   `CREATE TABLE IF NOT EXISTS parcels (
+    -- 用途：包裹（一单可多包，按订单行拆；金额/重量缺值为 NULL 不给 0）；总额与总重由 parcelTotals 派生。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_no TEXT NOT NULL,
     label TEXT NOT NULL DEFAULT '',
@@ -447,6 +439,7 @@ const SCHEMA = [
   // 数量就写在这一条上 —— 有这一条约束，"同一行在同一包里记两次"在结构上不可能。
   // `order_item_id` 指向 `oi_order_items.id`（B1 拆表后订单行就是明细行）。
   `CREATE TABLE IF NOT EXISTS parcel_lines (
+    -- 用途：拆包明细（包×订单行唯一，拆出的 qty 记在这条）；parcel_id / order_item_id 均级联删除。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     parcel_id INTEGER NOT NULL REFERENCES parcels(id) ON DELETE CASCADE,
     order_item_id INTEGER NOT NULL REFERENCES oi_order_items(id) ON DELETE CASCADE,
@@ -456,23 +449,40 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_parcel_lines_parcel ON parcel_lines(parcel_id)`,
   `CREATE INDEX IF NOT EXISTS idx_parcel_lines_item ON parcel_lines(order_item_id)`,
+  // `oi_styles`：款式主档（一行 = 一个款），`code` 与主 `fingerprint` 均唯一。
+  // 写 = 识别落库 / 人工建款 / 款合并（`mergeStylesInto` 只改色与键、不改本行）；读 = 款列表、归类、采购与拣货的款维度汇总。
+  // 附加指纹存 `oi_style_fingerprints`（本表单列只放主指纹，供快速匹配）。
   `CREATE TABLE IF NOT EXISTS oi_styles (
+    -- 用途：款式识别池（order 域，code 与主指纹唯一）；业务字段权威在 pl_products，本表只存识别私有信息。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
     fingerprint TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // `oi_style_colors`：款色（款下的一种颜色），PK `id`、编码 `code` 全局唯一、`(style_id,color)` 唯一。
+  // 它是订单行 `style_color_id` / 变体键 / 套装部件共同指向的**款色主键**；合并款时改 `style_id` 即"搬色"。
+  // 写 = 归类建款色 / 命名 / 合并；读 = 订单、采购需求、拣货、商品映射的全部款色维度。
+  //
+  // `image_id`（R1 / S0a）：**款色的代表图**（指向主数据域 `md_images`）。旧实现是反过来的
+  // —— 图片行上挂 `style_color_id`，于是「一张图只能属于一个款色、一个款色可以有很多图」；
+  // 归色改成 1:1 之后，图的生命周期归主数据、归属归业务表，这张表才是那个"业务表"。
+  // 0 = 这个色还没有代表图（允许：色可以先建、图后补）。
   `CREATE TABLE IF NOT EXISTS oi_style_colors (
+    -- 用途：款色主键（款下一种颜色，code 全局唯一）；订单行 / 变体键 / 套装部件都指向它，合并款时改 style_id 即"搬色"。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     style_id INTEGER NOT NULL REFERENCES oi_styles(id) ON DELETE CASCADE,
     color TEXT NOT NULL,
     code TEXT NOT NULL UNIQUE,
+    image_id INTEGER NOT NULL DEFAULT 0,
     UNIQUE(style_id, color)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_oi_style_colors_style ON oi_style_colors(style_id)`,
+  // 「这张图是哪个款色的代表图」—— 列表/拿货单/归款判断都按它反查（1:1 的数据，普通索引即可）
+  `CREATE INDEX IF NOT EXISTS idx_oi_style_colors_image ON oi_style_colors(image_id)`,
   // 附加款式指纹：用户手动归并款式时，把订单指纹记入目标款式，使后续自动识别也命中该款编码
   // （oi_styles.fingerprint 为主指纹 UNIQUE，无法容纳同一款式的多个识别指纹，故单独成表）
   `CREATE TABLE IF NOT EXISTS oi_style_fingerprints (
+    -- 用途：款式附加指纹（人工归并后让后续识别也命中该款；主指纹唯一约束在 oi_styles，故附加指纹单独成表）。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     style_id INTEGER NOT NULL REFERENCES oi_styles(id) ON DELETE CASCADE,
     fingerprint TEXT NOT NULL UNIQUE
@@ -483,6 +493,7 @@ const SCHEMA = [
   // 只能由人在归类核对时指认一次。新表（不是加列）⇒ `dbMigrate` 的 CREATE IF NOT EXISTS
   // 对老库同样生效，不需要版本化迁移步骤。
   `CREATE TABLE IF NOT EXISTS oi_color_aliases (
+    -- 用途：平台色名→自家色名对照（产品级，唯一键 product_id+alias_key）；人工指认一次，归类时查表翻译。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER NOT NULL,
     alias_key TEXT NOT NULL,
@@ -514,6 +525,7 @@ const SCHEMA = [
   //
   // 老数据零迁移：表里没行 ⇒ 该行不是套装 ⇒ 读取口径回落图/行的单品款色（见 `itemStyleColorIds`）。
   `CREATE TABLE IF NOT EXISTS oi_item_parts (
+    -- 用途：套装部件（订单行×部位→款色，qty_per_set 记套内件数）；表里没行 = 该行不是套装，读取回落单品款色。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_item_id INTEGER NOT NULL REFERENCES oi_order_items(id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -538,12 +550,90 @@ export function ensureOrderSchema(): void {
   // 依赖新增列的索引也就可以安全地留在 SCHEMA 里（见 `migrateColumns` 的旧注释）。
   migrate('order.main', orderMigrationSteps());
   dbMigrate(SCHEMA);
+  // R1：拆除三张旧图表（`oi_images` / `pl_images` / `pl_item_images`）并把 `oi_order_items`
+  // 上那条指向 `oi_images` 的外键一并去掉。必须排在迁移之后：迁移链 v1/v6 还要读 `oi_images`。
+  retireLegacyImageTables();
+  // 图片收口后的读侧（列表/拿货单取 `md_images.local_path`）直接 JOIN 它 ⇒ 表必须存在。
+  // 幂等且开销很小（建表 IF NOT EXISTS + 字典仅在缺失时播种，见 `seedDictionaries`）。
+  ensureMasterDataSchema();
   ensureProductSchema();
   // 存量收口：v12 只补了**键**，款色要等产品库就绪才建得出来 ⇒ 放在最后补一次。
   // 幂等（已归的行不再扫）且带 limit，启动路径不会因为老库大而卡住。
   // 不 catch 的是**归款本身**：这里的失败只有"表结构坏"一种，吞掉就变成"看着升级了却没归类"。
   // 但要挡住一个真实场景：`oi_variant_keys` 尚未建出来时（迁移中途异常）不该把启动整死。
   if (tableExists('oi_variant_keys')) backfillVariantStyleColors();
+}
+
+const RETIRED_IMAGE_TABLES = ['oi_images', 'pl_images', 'pl_item_images'] as const;
+
+/**
+ * **一次性退役三张旧图片表**（R1 / S0a）：图片收口到主数据域的 `md_images`。
+ *
+ * 为什么不能用一条 `DROP TABLE` 收工：`oi_order_items.image_id` 的旧 DDL 上挂着
+ * `REFERENCES oi_images(id) ON DELETE CASCADE`。父表一删，这条外键就指向不存在的表 ——
+ * 之后**任何**带 `image_id` 的插入都会以 `FOREIGN KEY constraint failed` 失败
+ *（症状是"导入订单全失败"，且报错指向图片表，排查方向整个反掉）。所以先重建明细表，
+ * 新 DDL（`ORDER_ITEM_TABLE_DDL`）**本来就不带这条外键**。
+ *
+ * 两个 SQLite 的硬约束决定了这个函数的形状：
+ *   ① `PRAGMA foreign_keys` **在事务内是 no-op**（关不掉）⇒ 必须在事务外切换；
+ *   ② `ALTER TABLE ... RENAME` 会**改写别的表里指向它的外键**（`parcel_lines` 指向本表）
+ *      ⇒ 只能用「建新表 → 拷数据 → 删旧表 → 改名」这个顺序，不能反过来先改名。
+ *
+ * 幂等判据：`oi_order_items` 的建表 SQL 里还含 `REFERENCES oi_images` 才重建；
+ * `oi_style_colors.image_id` 用 `PRAGMA table_info` 探列（老库要补、新库建表就带）。
+ * 旧表里**没有数据迁移**：R1 的口径是"清库重建"（方案 §10 E），老图不留。
+ */
+function retireLegacyImageTables(): void {
+  const d = getDb();
+  const needRebuild =
+    tableExists('oi_order_items') &&
+    /REFERENCES\s+oi_images/i.test(tableSql('oi_order_items'));
+  const hasRetired = RETIRED_IMAGE_TABLES.some((t) => tableExists(t));
+  if (!needRebuild && !hasRetired) return;
+
+  const prevFk = d.pragma('foreign_keys', { simple: true }) !== 0;
+  d.pragma('foreign_keys = OFF');
+  try {
+    dbTransaction(() => {
+      if (needRebuild) {
+        d.exec(
+          ORDER_ITEM_TABLE_DDL.replace(
+            /^CREATE TABLE IF NOT EXISTS oi_order_items/i,
+            'CREATE TABLE oi_order_items_md',
+          ),
+        );
+        // 只拷**老表真实存在**的列：老库可能还没有 `variant_key`（v12 才加）等新列，
+        // 按当前列清单硬拷会 `no such column`；新表缺的列由 DDL 的 DEFAULT 兜住。
+        const oldCols = new Set(
+          (d.prepare(`PRAGMA table_info(oi_order_items)`).all() as { name: string }[]).map((c) =>
+            String(c.name),
+          ),
+        );
+        const common = ORDER_ITEM_TABLE_COLUMNS.filter((c) => oldCols.has(c));
+        const cols = common.map((c) => `"${c}"`).join(', ');
+        d.exec(`INSERT INTO oi_order_items_md (${cols}) SELECT ${cols} FROM oi_order_items`);
+        d.exec(`DROP TABLE oi_order_items`);
+        d.exec(`ALTER TABLE oi_order_items_md RENAME TO oi_order_items`);
+        // 重建后索引随旧表一起没了；SCHEMA 里的 `CREATE INDEX IF NOT EXISTS` 由下面的
+        // dbMigrate 重新建出来（放在函数末尾，保证"拆完立刻补回原形状"）。
+      }
+      for (const t of RETIRED_IMAGE_TABLES) {
+        if (tableExists(t)) dbRun(`DROP TABLE ${t}`);
+      }
+      // 款色代表图这一列：新库建表就带；老库要补（补完才能被上面的读写用到）
+      const scCols = (
+        d.prepare(`PRAGMA table_info(oi_style_colors)`).all() as { name: string }[]
+      ).map((c) => String(c.name));
+      if (scCols.length && !scCols.includes('image_id')) {
+        dbRun(`ALTER TABLE oi_style_colors ADD COLUMN image_id INTEGER NOT NULL DEFAULT 0`);
+      }
+    });
+    // 重建掉的索引/新增列上的索引：把幂等 DDL 再跑一遍（只跑 DDL，不再走迁移）
+    dbMigrate(SCHEMA);
+  } finally {
+    d.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
+  }
 }
 
 /** `oi_orders` / `oi_images` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`）
@@ -1222,6 +1312,8 @@ function migrateColumns(): void {
     dbRun(`ALTER TABLE oi_orders ADD COLUMN corrected INTEGER NOT NULL DEFAULT 0`);
   }
   const imgCols = d.prepare(`PRAGMA table_info(oi_images)`).all() as { name: string }[];
+  // 表不存在（新库 / R1 之后已退役）→ 跳过。不判就会 ALTER 一张没有的表。
+  if (imgCols.length === 0) return;
   if (!imgCols.some((c) => c.name === 'style_color_id')) {
     dbRun(`ALTER TABLE oi_images ADD COLUMN style_color_id INTEGER`);
   }
@@ -1332,58 +1424,62 @@ function migrateOrderSpine(): void {
 /** 原 `migrateStyleAuthority` 已**并入 v3 迁移**（`migrateOrderSpine` ①）：名字交接必须在
  * `ALTER TABLE oi_styles DROP COLUMN name` **之前**跑，否则一删列历史展示名就没了源头。 */
 
-// ---- 图片指纹库 ----
-
-/** 行映射：DB snake_case → 领域 camelCase（避免 local_path/localPath、result_json/resultJson 字段错位） */
-function mapImageRow(row: unknown): OrderImageRecord | undefined {
-  if (!row || typeof row !== 'object') return undefined;
-  const r = row as Record<string, unknown>;
-  return {
-    id: r.id !== undefined && r.id !== null ? Number(r.id) : undefined,
-    fingerprint: r.fingerprint !== undefined && r.fingerprint !== null ? String(r.fingerprint) : '',
-    urlFingerprint: r.url_fingerprint !== undefined && r.url_fingerprint !== null ? String(r.url_fingerprint) : '',
-    sourceUrl: r.source_url !== undefined && r.source_url !== null ? String(r.source_url) : '',
-    localPath: r.local_path !== undefined && r.local_path !== null ? String(r.local_path) : '',
-    status: (['pending', 'done', 'error'].includes(String(r.status)) ? String(r.status) : 'pending') as OrderImageRecord['status'],
-    resultJson: r.result_json !== undefined && r.result_json !== null ? String(r.result_json) : undefined,
-    error: r.error !== undefined && r.error !== null ? String(r.error) : undefined,
-    createdAt: r.created_at !== undefined && r.created_at !== null ? String(r.created_at) : undefined,
-    updatedAt: r.updated_at !== undefined && r.updated_at !== null ? String(r.updated_at) : undefined,
-    styleColorId: r.style_color_id !== undefined && r.style_color_id !== null ? Number(r.style_color_id) : undefined,
-  };
-}
+// ---- 图片（主数据域 `md_images`）----
+//
+// R1 起本域**不再拥有图片表**：`oi_images` 已退役（`retireLegacyImageTables`），图片统一落
+// `md_images`（`electron/master-data-db.ts`）。这里的三个函数只是**兼容别名**：
+// 老调用方（冒烟 / 订单图落地）按原名字调，落到主数据域的唯一实现上，不引第二套去重口径。
 
 /** 按内容指纹查（同一文件字节级去重） */
 export function findImageByFingerprint(fingerprint: string): OrderImageRecord | undefined {
-  return mapImageRow(dbGet('SELECT * FROM oi_images WHERE fingerprint = ?', [fingerprint]));
+  return mdFindImageByFingerprint(fingerprint);
 }
 
 /** 按 URL 规范化指纹查（同图不同 URL/签名参数去重） */
 export function findImageByUrlFingerprint(urlFingerprint: string): OrderImageRecord | undefined {
-  return mapImageRow(dbGet('SELECT * FROM oi_images WHERE url_fingerprint = ?', [urlFingerprint]));
+  return mdFindImageByUrlFingerprint(urlFingerprint);
 }
 
-/** 记录下载成功的图片（pending 态，待 AI 识别）。返回的是 `oi_images` 的主键（`OrderImageId`） */
-export function insertImage(rec: OrderImageRecord): OrderImageId {
-  const r = dbRun(
-    `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, status)
-     VALUES (?, ?, ?, ?, 'pending')`,
-    [rec.fingerprint, rec.urlFingerprint, rec.sourceUrl, rec.localPath],
-  );
-  return Number(r.lastInsertRowid) as OrderImageId;
+/**
+ * 登记一张**已落盘**的图，返回 `md_images` 主键（`OrderImageId`）。
+ *
+ * 唯一正当用途见 `registerImageRow` 的注释（文件已经在 `images/` 里）；其余路径一律走
+ * `landImageBytes`（唯一落盘入口）。保留本函数名只为不打断既有调用方。
+ */
+export function insertImage(rec: {
+  fingerprint: string;
+  urlFingerprint?: string;
+  sourceUrl?: string;
+  localPath: string;
+  source?: string;
+}): OrderImageId {
+  return registerImageRow(rec).imageId;
 }
 
-/** 更新图片归属款色（识别确认后挂接）—— **同时**把结论投影到订单行（见 `projectImageColorToOrders`） */
+/**
+ * 把一张图绑成某个款色的**代表图**（`oi_style_colors.image_id`），并把结论投影到订单行。
+ *
+ * R1 的语义变更：归属从「图行上的 `style_color_id`」搬到「色行上的 `image_id`」——
+ * 款色 ↔ 图是 **1:1**（一个色只有一张代表图），因此绑定前必须把这张图在**别的**色上的
+ * 旧绑定摘掉；否则两行 `image_id` 相同，`findStyleColorImagePath` 的 `LIMIT 1`
+ * 会给出"别的色"的图（症状是发错货）。
+ *
+ * `styleColorId = 0/null` = 解绑（把当前持有这张图的色行摘空），不动订单行上的历史结论
+ *（旧实现的 `SET style_color_id = NULL` 在 `COALESCE` 比较下本来也是空操作）。
+ */
 export function setImageStyleColor(
   imageId: number,
   styleColorId: number | null,
   opts?: { onlyUnset?: boolean },
 ): void {
-  dbRun(`UPDATE oi_images SET style_color_id = ?, updated_at = datetime('now','localtime') WHERE id = ?`, [
-    styleColorId,
-    imageId,
-  ]);
-  projectImageColorToOrders(imageId, styleColorId, opts);
+  const imgId = Number(imageId) || 0;
+  if (!imgId) return;
+  const next = Number(styleColorId) || 0;
+  dbTransaction(() => {
+    dbRun(`UPDATE oi_style_colors SET image_id = 0 WHERE image_id = ? AND id <> ?`, [imgId, next]);
+    if (next > 0) dbRun(`UPDATE oi_style_colors SET image_id = ? WHERE id = ?`, [imgId, next]);
+  });
+  projectImageColorToOrders(imgId, styleColorId, opts);
 }
 
 /**
@@ -1394,8 +1490,8 @@ export function setImageStyleColor(
  * 订单行有了 id 列之后，需求/已拿/取图只认 id。
  *
  * 四条纪律：
- *   · **一处写**：所有改 `oi_images.style_color_id` 的地方都走 `setImageStyleColor` / 本函数
- *     （多一个写者，就回到"同一事实多个写入方"的老坑）；
+ *   · **一处写**：所有改「这张图属于哪个款色」的地方都走 `setImageStyleColor` / 本函数
+ *     （多一个写者，就回到"同一事实多个写入方"的老坑）；归属本身落在 `oi_style_colors.image_id`。
  *   · **值未变不写**（`WHERE style_color_id <> ?`）：避免每次进页自愈都白写一遍、把 WAL 撑大；
  *   · 一张图可能被多行订单共用（同单同 SKU 拆行）⇒ 按 `image_id` 全量投影，它们是同一个结论；
  *   · **`onlyUnset` 只在"图不是结论源头"时用**（自动按变体键归款、导入后补投影）：
@@ -1453,6 +1549,9 @@ function rememberVariantBinding(styleColorId: number): void {
 /**
  * 从图片反查一次结论并投影（订单落库后用：图可能**在导入前**就已被识别/人工归过色）。
  *
+ * 读的是 `oi_style_colors.image_id`（款色代表图 1:1）：一张图最多对应一个款色 ——
+ * 这比旧实现更严格，正是 R1 想要的形状（"这张图是什么色"只有一个答案）。
+ *
  * **只补空**：图上的结论是"粗"的（一张图可能挂着几个不同变体键的行），它只能补到
  * 还没有结论的行上；已经有结论的行按键更细，不许被图改判。全量把图上的值刷下去，
  * 症状是"先导的那色被后导的那色顶掉"。
@@ -1460,12 +1559,12 @@ function rememberVariantBinding(styleColorId: number): void {
 function syncOrderClassificationFromImage(imageId: number | null | undefined): void {
   const imgId = Number(imageId);
   if (!imgId) return;
-  const row = dbGet<{ style_color_id: number | null }>(
-    `SELECT style_color_id FROM oi_images WHERE id = ?`,
+  const row = dbGet<{ id: number }>(
+    `SELECT id FROM oi_style_colors WHERE image_id = ? ORDER BY id LIMIT 1`,
     [imgId],
   );
-  if (!row) return;
-  projectImageColorToOrders(imgId, row.style_color_id, { onlyUnset: true });
+  if (!row) return; // 这张图还没绑色 ⇒ 没有结论可投影（不拿 0 去刷行）
+  projectImageColorToOrders(imgId, Number(row.id), { onlyUnset: true });
 }
 
 /**
@@ -1515,16 +1614,14 @@ function isGuessedStyleColor(styleColorId: number): boolean {
  * （订单按图归色认的款色，与向导采纳绑的款色，必须是同一个东西）。
  *
  * 只补空（两条边界，都是"不换掉已经有的结论"）：
- *   ① **图侧**：这张图已挂在某个款色上（`style_color_id` 非空）⇒ 不动它。
- *      同图去重会落到同一 `oi_images` 行 —— 它可能已被订单识别或上次采纳绑过；
+ *   ① **图侧**：这张图已是某个款色的代表图（`oi_style_colors.image_id` 命中）⇒ 不动它。
+ *      同图去重会落到同一 `md_images` 行 —— 它可能已被订单识别或上次采纳绑过；
  *   ② **色侧**：目标款色已经有图 ⇒ 不换图（色→图 1:1，后来者不踢掉先来的；
  *      同一色在矩阵里出现多行时，第二条自然落在这里）。
  *
- * @param imageId **oi_images 的主键**（`OrderImageId`）。用品牌类型而不是裸 `number`：
- *   本仓有第二张图片表 `pl_images`（产品域），两表各自 AUTOINCREMENT、id 必然撞上。
- *   曾经把 `pl_images` 的 id 当成色图 id 传进来，结果是**改了另一张表的另一行**（一张订单图
- *   的归类状态被改判），而回执还报 `bound:true`（审查报告 P0-1）。品牌类型让这种传参
- *   **编译不过**，而不是留到运行时静默写脏。
+ * @param imageId **`md_images` 的主键**（`OrderImageId`）。品牌类型保留的理由：业务表里的
+ *   `image_id` 全是裸 number 列，把"产品 id / 款色 id"误当图片 id 传进来是运行期静默写脏
+ *   （历史 P0：拿 `pl_images` 的 id 改判了另一张表的行，回执还报 `bound:true`）。
  * @returns bound=false 时 `reason` 说清为什么没绑（调用方写进回执，不猜）
  */
 export function adoptStyleColorImageByCode(
@@ -1537,16 +1634,18 @@ export function adoptStyleColorImageByCode(
   if (!c || !col || !(Number(imageId) > 0)) return { bound: false };
   const style = ensureStyleByCode(c);
   const sc = ensureStyleColor(style.id, style.code, col);
-  const img = dbGet<{ style_color_id: number | null }>(
-    `SELECT style_color_id FROM oi_images WHERE id = ?`,
+  // 图片必须真实存在（否则传进来的是别域的 id：老库里 `pl_images` 撞车正是这个症状）
+  if (!imageIdExists(imageId)) return { bound: false };
+  const imgBound = dbGet<{ id: number }>(
+    `SELECT id FROM oi_style_colors WHERE image_id = ? LIMIT 1`,
     [imageId],
   );
-  if (!img) return { bound: false };
-  if (img.style_color_id) return { bound: false, reason: 'image-bound' };
-  const taken = dbGet<{ id: number }>(`SELECT id FROM oi_images WHERE style_color_id = ? LIMIT 1`, [
-    sc.id,
-  ]);
-  if (taken) return { bound: false, reason: 'color-bound' };
+  if (imgBound) return { bound: false, reason: 'image-bound' };
+  const target = dbGet<{ image_id: number }>(
+    `SELECT COALESCE(image_id, 0) AS image_id FROM oi_style_colors WHERE id = ?`,
+    [sc.id],
+  );
+  if (Number(target?.image_id ?? 0) > 0) return { bound: false, reason: 'color-bound' };
   setImageStyleColor(imageId, sc.id);
   return { bound: true };
 }
@@ -1703,10 +1802,10 @@ function mergeOrphanStyle(fromStyleId: number | undefined, toStyleId: number): v
     | { fingerprint: string }
     | undefined;
   if (!from) return; // 原款已被删除（如先 reclassify 后手动归并的两段处理）
-  // 仅空壳才清理：原款下仍有图片的，保留款式主数据
+  // 仅空壳才清理：原款下仍有代表图的，保留款式主数据（R1：图挂在色行上，见 `setImageStyleColor`）
   const alive = d
     .prepare(
-      `SELECT 1 FROM oi_images i JOIN oi_style_colors sc ON i.style_color_id = sc.id WHERE sc.style_id = ? LIMIT 1`,
+      `SELECT 1 FROM oi_style_colors sc WHERE sc.style_id = ? AND sc.image_id <> 0 LIMIT 1`,
     )
     .get(fromStyleId);
   if (alive) return;
@@ -1740,7 +1839,7 @@ function mergeOrphanStyle(fromStyleId: number | undefined, toStyleId: number): v
  * 归并后原款若因此变空壳，会把其指纹迁入目标款并删除（见 mergeOrphanStyle）。
  *
  * ⭐ **颜色是"以图为准"的记忆落点**（2026-10-10 用户口径：记住订单里的产品图片地址对应的颜色）：
- * 这里写的 `oi_images.style_color_id` 就是那份记忆 —— 图片行按内容/URL 指纹去重，同一张图
+ * 这里写的 `oi_style_colors.image_id` 就是那份记忆 —— 图片行按内容/URL 指纹去重，同一张图
  * 反复出现时**还是同一行**，于是"下次遇到同样的地址"读到的就是这次写下的颜色
  * （订单列表把 `sc.color` 联表出来给核对页当默认值）。所以颜色只在这里落一次，不要另建一张记忆表。
  *
@@ -1796,17 +1895,11 @@ export function assignOrderStyle(input: {
       const r = d.prepare(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?, ?, ?)`).run(style.id, color, scCode);
       sc = { id: Number(r.lastInsertRowid), code: scCode };
     }
-    // 改挂前记录图片原归属款（供空壳原款清理使用）
-    const prevImg = d.prepare(`SELECT style_color_id FROM oi_images WHERE id = ?`).get(order.image_id) as
-      | { style_color_id: number | null }
-      | undefined;
-    let prevStyleId: number | undefined;
-    if (prevImg?.style_color_id) {
-      const prevSc = d
-        .prepare(`SELECT style_id FROM oi_style_colors WHERE id = ?`)
-        .get(prevImg.style_color_id) as { style_id: number } | undefined;
-      prevStyleId = prevSc?.style_id;
-    }
+    // 改挂前记录图片原归属款（供空壳原款清理使用）：图 → 色行是 1:1，查一张即可
+    const prevImg = d
+      .prepare(`SELECT id AS id, style_id AS style_id FROM oi_style_colors WHERE image_id = ? ORDER BY id LIMIT 1`)
+      .get(order.image_id) as { id: number; style_id: number } | undefined;
+    const prevStyleId = Number(prevImg?.style_id) || undefined;
     // 图片归属与订单行投影**同一次写入**（同一个事务）：订单行的款色不许比图片晚一拍，
     // 否则"人工归了款、拿货页还是没归"会变成偶发（取决于哪条路径先进）。
     setImageStyleColor(order.image_id, sc.id);
@@ -1889,7 +1982,7 @@ export function styleColorOptions(styleCodes: string[]): Record<string, StyleCol
   const ph = codes.map(() => '?').join(',');
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT UPPER(s.code) AS code, sc.id AS id, sc.color AS color,
-            EXISTS (SELECT 1 FROM oi_images i WHERE i.style_color_id = sc.id AND COALESCE(i.local_path,'') <> '') AS has_image
+            EXISTS (SELECT 1 FROM md_images i WHERE i.id = sc.image_id AND COALESCE(i.local_path,'') <> '') AS has_image
      FROM oi_styles s
      JOIN oi_style_colors sc ON sc.style_id = s.id
      WHERE UPPER(s.code) IN (${ph}) AND COALESCE(TRIM(sc.color), '') <> ''
@@ -3741,13 +3834,24 @@ export function insertOrder(rec: OrderRecord): number {
   if (header && header.source !== 'import') {
     throw new Error(`订单 ${orderNo} 已由采集通道写入，不能再按导入追加`);
   }
-  // 幂等：(订单号, 图片) 已存在则跳过，避免重复导入同一 Excel 产生重复行
+  const status: OrderStatus = rec.status === 'shipped' ? 'shipped' : 'pending';
+  // 金额/状态/时点在**入库这一刻**从 raw_fields 提成正式列（口径见 `electron/orderMoney.ts`）——
+  // 放在主进程做，岛侧无需改，也就不必发版；其余 30 余列留在 raw_fields 里保真、随时可提。
+  const m = extractOrderMoney(rec.rawFields);
+  // 颜色同理：报表**没有颜色列**，颜色藏在「产品信息」的 `(产品属性:Color:5,...)` 里。
+  const color = String(rec.color ?? '').trim() || parseOrderPropsColor(rec.rawFields);
+  // 件数：**落库那一刻**从报表块里定下来（`(商品数量:2 piece)`），不再让下游各算一遍。
+  const qty = parseOrderQty(rec.rawFields);
+  const size = String(rec.size ?? '').trim();
+  // 幂等：(订单号, 图片, 色, 码, 件数) 已存在则跳过，避免重复导入同一 Excel 产生重复行。
+  // ⚠️ 不能只用 `(订单号, 图片)`：拆行后同一 listing 的多个 SKU 经常共用一张商品图
+  //   （速卖通一单 4 段同商品不同色/码就是这样），只按图判重会把后 3 段当成重复行吞掉。
+  // ⚠️ 用 `IS ?` 而不是 `= ?`：无图订单的 `image_id` 是 NULL，`= NULL` 永远不成立 →
+  //   重导同一份报表会不断插重复行（幂等当场失效）；`size`/`qty` 同理可能为空。
   if (header) {
-    // ⚠️ 用 `IS ?` 而不是 `= ?`：无图订单的 `image_id` 是 NULL，`= NULL` 永远不成立 →
-    // 重导同一份报表会不断插重复行（幂等当场失效）。
     const existing = d
-      .prepare(`SELECT id FROM oi_order_items WHERE image_id IS ? AND order_id = ?`)
-      .get(rec.imageId, header.id);
+      .prepare(`SELECT id FROM oi_order_items WHERE order_id = ? AND image_id IS ? AND color = ? AND size IS ? AND qty IS ?`)
+      .get(header.id, rec.imageId, color, size, qty);
     if (existing) {
       const id = Number((existing as { id: number }).id);
       // 幂等重入**也要再试一次归款**：映射很可能是这条订单之后才人工确认的，
@@ -3757,14 +3861,6 @@ export function insertOrder(rec: OrderRecord): number {
       return id;
     }
   }
-  const status: OrderStatus = rec.status === 'shipped' ? 'shipped' : 'pending';
-  // 金额/状态/时点在**入库这一刻**从 raw_fields 提成正式列（口径见 `electron/orderMoney.ts`）——
-  // 放在主进程做，岛侧无需改，也就不必发版；其余 30 余列留在 raw_fields 里保真、随时可提。
-  const m = extractOrderMoney(rec.rawFields);
-  // 颜色同理：报表**没有颜色列**，颜色藏在「产品信息」的 `(产品属性:Color:5,...)` 里。
-  const color = String(rec.color ?? '').trim() || parseOrderPropsColor(rec.rawFields);
-  // 件数：**落库那一刻**从报表块里定下来（`(商品数量:2 piece)`），不再让下游各算一遍。
-  const qty = parseOrderQty(rec.rawFields);
   // 变体键：**导入这一刻算一次并落库**，此后只读（除店铺改名）。口径只有一份，见 `variantKeyOfRow`。
   const variantKey = variantKeyOfRow(rec.shop, JSON.stringify(rec.rawFields ?? {}), color);
 
@@ -3789,7 +3885,7 @@ export function insertOrder(rec: OrderRecord): number {
       .run(
         headerId,
         rec.imageId,
-        rec.size,
+        size,
         JSON.stringify(rec.rawFields),
         rec.category,
         color,

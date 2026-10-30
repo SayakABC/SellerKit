@@ -187,7 +187,12 @@ export function listScrapedItemIds(store: { url?: string; storeId?: string; name
 // ---- 建表 ----
 
 const SCHEMA = [
+  // `pl_shop_items`：店铺商品**快照**（采集而来的平台事实，只存"店里有什么"，不认款）。
+  // 唯一键 `(shop_id,store_key,item_id)`：两家未登记店采到同一商品不互相覆盖；`shop_id=0` + `store_key`
+  // 表示还没认出是哪家店（**绝不自动建店**）。认款写路径永远走 `pl_shop_sku`，两套不互写。
+  // 写 = AE 店铺采集（`shop-item-db`）；读 = 商品池 / 映射候选 / 店铺商品列表。
   `CREATE TABLE IF NOT EXISTS pl_shop_items (
+    -- 用途：店铺商品快照（采集的平台事实，只存"店里有什么"，不认款）；shop_id=0 + store_key 表示未认出的店。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shop_id INTEGER NOT NULL DEFAULT 0,
     store_key TEXT NOT NULL DEFAULT '',
@@ -212,6 +217,7 @@ const SCHEMA = [
   // 收养记忆：采集帧的「展示名键」→ 已登记店。治「收养只跑一次、之后再采又落未登记桶」。
   // 见 matchShopByStore 第 4 级证据与 backfillStoreKeyMemory 迁移。
   `CREATE TABLE IF NOT EXISTS pl_shop_store_keys (
+    -- 用途：采集「展示名键」→ 已登记店 的收养记忆（防治"收养只跑一次、再采又落未登记桶"）。
     store_key TEXT PRIMARY KEY,
     shop_id INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))

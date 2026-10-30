@@ -31,7 +31,12 @@ export interface RateSnapshotRow {
 }
 
 const SCHEMA = [
+  // `sr_rate_snapshots`：运价表**快照**（一行 = 一次导入），`content_key` UNIQUE 按内容去重，
+  // `effective_from` = 导入当日；算账时按订单日期取"当时那份"（`effective_from <= 订单日` 的最近一条），
+  // 历史预测因此可复算。`payload` 是整张表的 JSON，本域不复算金额。
+  // 写 = 「基础数据 › 物流运费」导入；读 = 运费/利润计算（按订单日期取快照）。
   `CREATE TABLE IF NOT EXISTS sr_rate_snapshots (
+    -- 用途：运价表快照（一行 = 一次导入，content_key 去重）；算账按订单日期取"当时那份"，历史预测可复算。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     effective_from TEXT NOT NULL,
     source_file TEXT NOT NULL DEFAULT '',

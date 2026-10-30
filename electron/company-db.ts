@@ -195,7 +195,10 @@ interface CompanyProfileRow {
 /** 建表 + 索引（幂等） */
 export function ensureCompanySchema(): void {
   dbMigrate([
+    // `sk_companies`：企业主体（一行 = 一个法律主体；VAT / EORI / 对公账户等合规字段落这里）。
+    // 写 = 企业管理页；读 = 店铺/账号归属、合规资料、欧代/土代等 profile 主体。
     `CREATE TABLE IF NOT EXISTS sk_companies (
+      -- 用途：企业法律主体（合规字段 VAT/EORI/对公账户等）；店铺与合规资料的归属主体。
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL DEFAULT '',
       unified_code TEXT NOT NULL DEFAULT '',
@@ -215,7 +218,11 @@ export function ensureCompanySchema(): void {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_sk_companies_name ON sk_companies(name)`,
     `CREATE INDEX IF NOT EXISTS idx_sk_companies_status ON sk_companies(status)`,
+    // `sk_company_profiles`：企业合规资料（欧代 / 土代 / 德国包装法等），一行 = 一条资质。
+    // `company_id` 软关联 `sk_companies`（无外键）；`expire_at` 驱动到期提醒。
+    // 写 = 企业管理页；读 = 店铺详情 / 合规看板的资质与有效期。
     `CREATE TABLE IF NOT EXISTS sk_company_profiles (
+      -- 用途：企业合规资质（欧代/土代/德国包装法等，一行 = 一条资质）；company_id 软关联，expire_at 驱动到期提醒。
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company_id INTEGER NOT NULL DEFAULT 0,
       type TEXT NOT NULL DEFAULT 'eu_rep',

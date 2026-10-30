@@ -106,7 +106,11 @@ export interface ProductSummary {
 // ---- 表结构 ----
 
 const SCHEMA = [
+  // `pl_products`：产品 / 款式主数据（product 域，一行 = 一个可管理的产品），PK `id`、业务编码 `code` 唯一。
+  // `supplier_id` 软关联 `suppliers`（无外键）；`image_id` → `pl_images`；`cost_cents` 是**当前进价**（不是历史）。
+  // 写 = 产品库编辑 / 套装子商品；读 = 商品映射（`pl_shop_sku.product_id`）、订单归类、成本与利润估算。
   `CREATE TABLE IF NOT EXISTS pl_products (
+    -- 用途：产品/款式主数据（product 域，code 唯一）；cost_cents 是当前进价，历史成本看订单行。供应商为软关联。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL DEFAULT '',
@@ -162,6 +166,7 @@ function ensureProductColumns(): void {
  */
 const BUNDLE_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS pl_bundle_links (
+    -- 用途：套装关联（套装产品×商品×平台色号→子产品/子色/数量）；只存关系，不复制子商品字段（避免第二个真相）。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER NOT NULL,
     item_id TEXT NOT NULL DEFAULT '',
@@ -977,6 +982,7 @@ export interface SkuQueueResult {
  * 此时 `CREATE INDEX IF NOT EXISTS` 会因"名字已被占用"被静默跳过 —— 新表最后没有索引）。
  */
 const SKU_TABLE_SQL = `CREATE TABLE IF NOT EXISTS pl_shop_sku (
+    -- 用途：店铺商品认款映射（平台商品→产品/SKU，含每件用量）；认款写路径只走本表，与采集快照 pl_shop_items 不互写。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL DEFAULT '',
     shop_id INTEGER NOT NULL DEFAULT 0,
@@ -1881,7 +1887,11 @@ export interface ItemImagePoolEntry {
 }
 
 const VARIANT_SCHEMA = [
+  // `pl_variants`：产品下的 SKU（颜色 + 尺码组合），`product_id` 软关联（无外键）、`(product_id,name)` 唯一。
+  // `code` 非空时全局唯一（部分唯一索引）；`weight_g` 是拣货/运费重量的唯一落点（不再有商品级克重表）。
+  // 写 = 产品库 SKU 矩阵 / 导入；读 = 拣货、成本、商品映射的 `variant_id` 反查。
   `CREATE TABLE IF NOT EXISTS pl_variants (
+    -- 用途：产品 SKU（颜色+尺码组合，product_id 软关联，同产品内 name 唯一）；weight_g 是拣货/运费的唯一克重落点。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER NOT NULL,
     code TEXT NOT NULL DEFAULT '',
@@ -1902,7 +1912,10 @@ const VARIANT_SCHEMA = [
 ];
 
 const IMAGE_SCHEMA = [
+  // `pl_images`：产品图仓（内容寻址），`fingerprint` = SHA-256 且唯一；`local_path` 指向
+  // `userData/product-images/` 下的文件（二进制不入库）。写 = 产品图上传 / 订单图回灌；读 = 产品主图、商品图池。
   `CREATE TABLE IF NOT EXISTS pl_images (
+    -- 用途：产品图仓（内容寻址，fingerprint 唯一；二进制在 userData/product-images/，不入库）。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     fingerprint TEXT NOT NULL UNIQUE,
     local_path TEXT NOT NULL,
@@ -1910,7 +1923,11 @@ const IMAGE_SCHEMA = [
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // `pl_item_images`：商品ID → 覆盖图（`item_id` 主键，人工指定的"这个商品就用这张图"）。
+  // 它是商品图池**最高优先级**的一层（覆盖图 → 订单识别图 → 产品图，见 `productImagePool`）；
+  // 写 = 映射/关联列表的改图；读 = 产品库列表与订单图池。覆盖图被移除时 `pl_images` 行**保留**（可能仍被引用）。
   `CREATE TABLE IF NOT EXISTS pl_item_images (
+    -- 用途：商品ID→覆盖图（图池最高优先级，人工指定）；移除覆盖不删 pl_images 行（可能仍被别处引用）。
     item_id TEXT PRIMARY KEY,
     image_id INTEGER NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))

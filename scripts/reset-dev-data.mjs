@@ -39,7 +39,8 @@ const CLEAR = [
   // A 订单与派生（含 B1 拆表 / B2 包裹）
   'ae_settle_lines',
   'oi_orders', 'oi_order_items', 'oi_images', 'parcels', 'parcel_lines',
-  'oi_styles', 'oi_style_colors', 'oi_style_fingerprints',
+  'oi_styles', 'oi_style_colors', 'oi_style_fingerprints', 'oi_variant_keys',
+  'oi_style_merges', 'oi_style_merge_items', 'oi_item_parts',
   'sr_rate_snapshots',
   // B 拿货与付款
   'purchase_items', 'purchase_orders', 'purchase_ignore', 'purchase_sources', 'payments', 'suppliers',
@@ -51,7 +52,7 @@ const CLEAR = [
   'sk_shops', 'sk_tool_accounts', 'sk_name_map', 'pl_shop_items', 'pl_shop_store_keys',
   // E 记账（2026-10-25 新增域；子表在前：结算行 → 结算单 → 分摊行/方案 → 条目 → 承接 → 相关人/科目）
   'bk_settlement_lines', 'bk_settlements', 'bk_allocations', 'bk_allocation_rules',
-  'bk_entries', 'bk_transfers', 'bk_periods', 'bk_op_log', 'bk_parties', 'bk_categories',
+  'bk_entries', 'bk_transfers', 'bk_op_log', 'bk_parties', 'bk_categories',
 ];
 
 /** 保留（**动了会坏事**或属账号/配置） */
@@ -109,7 +110,7 @@ for (const t of targets) {
 }
 console.log(`保留：${KEEP.join(' · ')}`);
 if (tables.has('sk_mail_fts')) {
-  console.log('  （邮件全文索引 sk_mail_fts 会用 FTS5 的 delete-all 清空，避免留下指向已删邮件的幽灵命中）');
+  console.log('  （邮件全文索引 sk_mail_fts 会一并 DELETE，避免留下指向已删邮件的幽灵命中）');
 }
 
 if (!yes) {
@@ -122,9 +123,10 @@ const backup = `${DB}.bak-${stamp}`;
 copyFileSync(DB, backup);
 console.log(`\n· 已备份：${backup}`);
 
-const ftsReset = tables.has('sk_mail_fts')
-  ? `INSERT INTO sk_mail_fts(sk_mail_fts) VALUES('delete-all');`
-  : '';
+// ⚠️ 只能是普通 DELETE：`sk_mail_fts` 是**普通 FTS5 表**（不是 contentless / external content），
+// 对普通 FTS5 发 `delete-all` 会报 "may only be used with a contentless or external content fts5 table"
+// 并让整条事务回滚（清库等于没清）。`DELETE` 对普通 FTS5 同样会同步索引。
+const ftsReset = tables.has('sk_mail_fts') ? `DELETE FROM sk_mail_fts;` : '';
 w(`BEGIN;
 ${targets.map((t) => `DELETE FROM ${t};`).join('\n')}
 ${ftsReset}

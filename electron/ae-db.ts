@@ -147,9 +147,14 @@ const COST_MAP_DDL = `CREATE TABLE IF NOT EXISTS ae_cost_map (
 
 const SCHEMA = [
   // ---- 汇率（成本 CNY 计价需外币→CNY） ----
+  // `ae_rates`：一行 = 一个外币币种 → CNY 的**当前**汇率（PK `from_currency`）。
+  // 归属 ae 域（`electron/ae-db.ts`）；写 = 启动种子（`seedDefaultRates`）+ 设置页 `setAeRate`；
+  // 读 = 采集入站折算（`upsertOrderBatch`，缺汇率即金额 NULL）与「算钱」页汇率列表。
+  // 只留当前值、不存历史版本 —— 历史成本以订单行落库的 `cost_cents` 为准。
   // ⚠️ 这里**不再有** `ae_cost_map`（C2 退役）：新库不该再长出这张表；
   //    存量库由 `order.main` v10 删除（顺序见文件头）。
   `CREATE TABLE IF NOT EXISTS ae_rates (
+    -- 用途：外币→CNY 当前汇率（ae 域/成本折算）。写 = 启动种子 + 设置页；读 = 采集折算与「算钱」页。只存当前值。
     from_currency TEXT PRIMARY KEY,
     rate_to_cny REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
@@ -165,7 +170,11 @@ const SCHEMA = [
   // **两类行不能相加**，订单口径一律取订单级行（见 `settleOrders`）。
   //
   // 费用按 JSON 存（科目 → 分）：科目会增减（实测已八项 + 各自"退回"），科目化后加科目**零 ALTER**。
+  //
+  // 生命周期：写 = 仅 `importSettleLines`（「结算明细」导入，幂等键 `UNIQUE(order_no,item_id,sku_id)`）；
+  // 读 = `settleOrders`（按订单聚合）与结算统计；与订单域只靠 `order_no` **软对齐**，无外键。
   `CREATE TABLE IF NOT EXISTS ae_settle_lines (
+    -- 用途：AE 平台结算明细切片（商品级行 + 订单级行两种，靠 order_no 与订单域软对齐；两类行不可相加）。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_no TEXT NOT NULL,
     item_id TEXT NOT NULL DEFAULT '',

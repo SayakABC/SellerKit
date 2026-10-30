@@ -45,11 +45,10 @@
 //        b. **收拢同一家店的多种写法** —— 实测订单侧 42 行出现 7 种店名，其中 `Shop1105228632 Store`
 //           只在订单侧、按名称永远归不到「十店」上，但两者可以是同一个标识。
 //
-// 迁移（`shop.main` v1，一次性、不可逆）
-//   老 `sk_shops` 的表级 `UNIQUE(platform, name_key)` 要换成部分唯一索引；邮件表外键要从
-//   `sk_shop_sets(id)` 改指 `sk_shops(id)`。SQLite 两件事都只能重建表，且 `RENAME COLUMN`
-//   不会改外键目标。迁移必须自己管事务：`PRAGMA foreign_keys=OFF` 在事务内无效。
-//   迁移前 `VACUUM INTO` 备份是唯一退路；预检不通过就抛错回滚，旧库原样保留。
+// 迁移（`shop.main`）
+//   老库（`sk_shop_sets` 账号套装 + 旧形状 `sk_shops`）的整表合并已随"未正式发布、无存量库"
+//   整段退役（v1 只保留版本占位）。现值 v2：幂等 `DROP TABLE IF EXISTS sk_shop_sets`，
+//   把开发机上残留的历史表清掉。新库由 `SCHEMA` 一次建到当前形状，不经过任何合并迁移。
 //
 // 安全边界
 //   本层只允许主进程内部使用；渲染层与 UI 岛一律经语义化 IPC / db 能力域访问，
@@ -63,20 +62,10 @@ import {
   dbGet,
   dbRun,
   dbQuery,
-  dbTransaction,
   migrate,
-  migrationVersion,
   tableExists,
-  getDb,
-  getDbFilePath,
 } from './db';
 import { ensureCompanySchema } from './company-db';
-import {
-  encodeSecrets,
-  decodeSecretsRaw,
-  SHOP_SECRET_KEYS,
-  type ShopSecretKey,
-} from './shop-secrets';
 import { mergeNameGroups, toNameKey, type NameSourceGroup, type MergedName } from './shopName';
 
 // ---- 类型（与渲染层 src/types.ts 对应结构保持一致；两端各自声明，避免主进程 import 渲染层） ----
@@ -198,6 +187,11 @@ export interface ShopSummary {
 // ---- 表结构 ----
 
 /**
+ * `sk_shops`：店铺 + 店铺账号**单表**（2026-10-22 物理合并，`docs/decisions/ADR-003-shop-account-physical-merge.md`），
+ * 一行可以是「纯店铺 / 纯账号 / 两者都是」。PK `id`；账号列 `email`、企业列 `company_id`、工具列
+ * `ziniao_account_id` / `erp_account_id` 都是**软关联**（无外键，删对应主数据前由业务层拦）。
+ * 写 = 店铺登记 / 账号导入 / 状态与保证金维护；读 = 订单店铺名归一、商品映射、邮件账号、记账店铺维度。
+ *
  * ⚠️ `name_key` 不是冗余列：店名唯一性必须建在**归一键**上。
  * 若只对 `name` 建唯一约束，`"店A"` 与 `"店A "` 会同时入库 → 同一个键命中两家店 →
  * 自动命中的语义立刻破产（"同名不同平台"是合法的，但"同平台同归一名的两家店"不是）。
@@ -207,6 +201,7 @@ export interface ShopSummary {
  */
 function shopTableSql(table: string, ifNotExists = false): string {
   return `CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}${table} (
+    -- 用途：店铺 + 账号单表（一行可为纯店铺/纯账号/两者）；账号与企业列为软关联，店铺身份与账号同行走部分唯一索引。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL DEFAULT 'ae',
     name TEXT NOT NULL DEFAULT '',
@@ -237,7 +232,12 @@ function shopTableSql(table: string, ifNotExists = false): string {
   )`;
 }
 
+// `sk_tool_accounts`：紫鸟 / ERP 登录账号（一行 = 一个登录，`UNIQUE(kind,account_key)`）。
+// 一条登录可管多店：店铺行只存 `ziniao_account_id` / `erp_account_id`，新增店铺不再重填密码。
+// 密码只存密文 BLOB（`password_enc`），列表只带 `has_password` 徽标；明文唯一出口是 `revealToolAccountPassword(id)`。
+// 写 = 工具账号维护；读 = 店铺侧引用、登录态注入。
 const TOOL_ACCOUNTS_DDL = `CREATE TABLE IF NOT EXISTS sk_tool_accounts (
+  -- 用途：紫鸟/ERP 登录账号（一行 = 一个登录，可管多店；密码只存密文，列表只给 has_password 徽标）。
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL CHECK (kind IN ('ziniao', 'erp')),
   account TEXT NOT NULL DEFAULT '',
@@ -250,7 +250,11 @@ const TOOL_ACCOUNTS_DDL = `CREATE TABLE IF NOT EXISTS sk_tool_accounts (
   CHECK (trim(account) <> '')
 )`;
 
+// `sk_name_map`：名称归一映射（业务唯一键 `(kind,raw_key)`），把历史自由文本名字指到实体 `ref_id`
+//（`kind` 预留 shop / supplier / style / product）。`ignored=1` 表示"这条文本明确不归一"。
+// 写 = 人工归一 / 忽略；读 = 店铺匹配（`shopSku`）、供应商归一、产品库「商品ID 映射」查询时**旁挂** —— 历史文本不改写。
 const NAME_MAP_DDL = `CREATE TABLE IF NOT EXISTS sk_name_map (
+  -- 用途：名称归一映射（历史自由文本名 → 实体 ref_id / ignored，kind 预留 shop/supplier/style/product）；只存人的决定。
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL DEFAULT 'shop',
   raw TEXT NOT NULL DEFAULT '',
@@ -265,7 +269,7 @@ const NAME_MAP_DDL = `CREATE TABLE IF NOT EXISTS sk_name_map (
 )`;
 
 // ⚠️ 有意**不建** `confidence` 列：G6 已裁定模糊匹配永不写 ref_id，故没有任何生产者会写它，
-//    留一个恒 0 的死列不如以后真需要时按 `sk_shop_sets.opened_at` 的先例 ALTER 增量补列。
+//    留一个恒 0 的死列不如以后真需要时按 `sk_shops.score` 的先例走 `shop.columns` 增量补列。
 const SCHEMA = [shopTableSql('sk_shops', true), TOOL_ACCOUNTS_DDL, NAME_MAP_DDL];
 
 const INDEXES = [
@@ -287,13 +291,9 @@ const INDEXES = [
 /**
  * 幂等初始化（视图首次激活 / 每个 handler 入口调用）。
  *
- * 启动编排（main.ts）**先企业、再店铺、后邮件**：店铺迁移要把账号侧的手机号 / 支付宝回填进企业表。
- * 各 handler 里的懒 ensure 保持不变；`ensureCompanySchema()` 幂等且很轻。
- *
- * ⚠️ 建表必须在**迁移之前**：迁移收尾会按 `INDEXES` 建索引，其中
- * `idx_sk_name_map_ref` 指向 `sk_name_map` —— 迁移先跑时这张表还不存在，
- * 老库第一次启动就抛 `no such table: main.sk_name_map`（2026-10-22 由 shop-item 冒烟抓到）。
- * `CREATE TABLE IF NOT EXISTS` 对已存在的老表一个字都不改，所以先建不会把迁移抢走。
+ * 顺序：先 `dbMigrate(SCHEMA)` 建到当前形状，再跑迁移（`shop.main` 只做历史表退役，
+ * `shop.columns` 补增量列），最后补索引。新库的所有表都由 `SCHEMA` 建出；
+ * `CREATE TABLE IF NOT EXISTS` 对已存在的老表一个字都不改，先建不会把迁移抢走。
  */
 export function ensureShopSchema(): void {
   initDb();
@@ -306,8 +306,7 @@ export function ensureShopSchema(): void {
 
 // ---- shop.columns：物理合并之后的增量补列 ----
 //
-// `shop.main` 是整表重建（自带事务外壳 + 版本判断），不能再往上叠补列步骤 ——
-// 它的版本号一旦 ≥ 1 就整段跳过。故增量列走独立 key，互不影响。
+// 增量列走独立 key，不与 `shop.main`（历史表退役）共用版本号，互不影响。
 
 const SHOP_COLUMNS_KEY = 'shop.columns';
 
@@ -336,10 +335,16 @@ function runShopColumnsMigration(): void {
   ]);
 }
 
-// ---- shop.main v1 迁移 ----
+// ---- shop.main：历史账号套装表退役 ----
+//
+// `sk_shop_sets` 是 2026-10-22 物理合并（ADR-003）之前的「店铺集 / 账号套装」表。本项目尚未
+// 正式发布，没有需要升级的存量库 —— 新库由 `SCHEMA` 一次建到当前形状（`sk_shops` 店铺 + 账号
+// 单表），所以当时那次整表合并（搬账号 / 归并企业 / 建工具账号 / 重建邮件表）整段退役。
+//
+// 现在 `shop.main` 只做一件事：把开发机老库里残留的 `sk_shop_sets` 幂等删掉。
+// v1 保留空步骤占位 —— 跑过合并的开发机账本里记的是 1，跳过它才能轮到 v2。
 
 const SHOP_MAIN_KEY = 'shop.main';
-const SHOP_MAIN_VERSION = 1;
 
 type MigrationRow = Record<string, any>;
 
@@ -350,664 +355,16 @@ function columnSet(table: string): Set<string> {
   );
 }
 
-function applyShopMainLedger(): void {
-  dbRun(
-    `INSERT INTO sk_schema_migrations (key, version, applied_at)
-     VALUES (?, ?, datetime('now','localtime'))
-     ON CONFLICT(key) DO UPDATE SET version = excluded.version, applied_at = excluded.applied_at`,
-    [SHOP_MAIN_KEY, SHOP_MAIN_VERSION],
-  );
-}
-
-/**
- * 迁移前备份。
- *
- * ⚠️ `VACUUM INTO` 必须在事务外执行；备份失败按「暂停迁移」处理 —— 这次迁移会删表删列，
- *    没有 SQL 级回滚，备份是唯一退路。
- *
- * ⚠️ 目标名必须**避让已存在的文件**：`VACUUM INTO` 撞到已有路径直接报错，而"上一次尝试留下过
- *    备份"是常态（迁移预检失败 ⇒ 事务回滚、数据没动，但备份文件已经写出去了）。
- *    若按秒级时间戳定名，用户修好数据再启动就会撞名 ⇒ 备份失败 ⇒ 暂停迁移 ⇒ **永远进不去**
- *    （症状是"应用起不来 / 店铺页一直报错"，而真正原因只有一个已存在的 .bak 文件）。
- */
-function backupBeforeMigration(): string {
-  const fs = require('fs');
-  const source = getDbFilePath();
-  if (!source || !fs.existsSync(source)) return '';
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
-  let target = `${source}.bak-shop-merge-v1-${stamp}`;
-  for (let i = 1; fs.existsSync(target); i++) {
-    if (i > 50) throw new Error(`迁移前备份名重复过多（${target}）—— 请先清理旧的 .bak-shop-merge-v1-* 文件`);
-    target = `${source}.bak-shop-merge-v1-${stamp}-${i}`;
-  }
-  try {
-    getDb().prepare('VACUUM INTO ?').run(target);
-    return target;
-  } catch (err: any) {
-    throw new Error(`迁移前备份失败，已暂停迁移：${err?.message || err}`);
-  }
-}
-
-/**
- * 执行 `shop.main` v1。
- *
- * 为什么不用 `migrate()`：它在事务内跑步骤，而 `PRAGMA foreign_keys=OFF` 在事务内**无效**；
- * 重建 `sk_shops` / `sk_mail_accounts` 时必须关外键（否则 DROP 旧表会级联删子表）。
- * 账本仍写 `sk_schema_migrations`（key `shop.main`，version 1），只是事务外壳自己管。
- */
-function runShopMainMigration(): void {
-  // 只为确保账本表存在（步骤表刻意留空：真正的迁移自己管事务外壳，见下方注释）
-  migrate(SHOP_MAIN_KEY, []);
-  if (migrationVersion(SHOP_MAIN_KEY) >= SHOP_MAIN_VERSION) return;
-
-  const hasShops = tableExists('sk_shops');
-  const hasSets = tableExists('sk_shop_sets');
-  if (!hasShops && !hasSets) {
-    // 新库：形状由 dbMigrate(SCHEMA) 建（它在迁移**之前**跑，见 ensureShopSchema 注释）；这里只补账本
-    applyShopMainLedger();
-    return;
-  }
-
-  const shopCols = columnSet('sk_shops');
-  // 「已是新形状」必须**同时**没有 sk_shop_sets：迁移收尾会 DROP 它，所以它还留着 = 这台机器
-  // 从没做过合并（例如只有账号表、没有店铺表的早期库）。只看形状就补账本，会把账号行永久孤立。
-  if (hasShops && shopCols.has('email') && !shopCols.has('shop_set_id') && !hasSets) {
-    // 已是新形状（例如上次迁移已跑完但账本行丢失）——只补账本
-    applyShopMainLedger();
-    return;
-  }
-
-  const backup = backupBeforeMigration();
-  const db = getDb();
-  db.pragma('foreign_keys = OFF');
-  try {
-    dbTransaction(() => {
-      migrateShopMainV1();
-      applyShopMainLedger();
-    });
-  } finally {
-    db.pragma('foreign_keys = ON');
-  }
-  if (backup) {
-    // eslint-disable-next-line no-console
-    console.log(`[shop.main] 迁移完成；迁移前备份：${backup}`);
-  }
-}
-
-/** 老 `sk_shop_sets` 形状（仅在历史 `sk_accounts` 存在、需要临时落点时创建） */
-const LEGACY_SET_DDL = `CREATE TABLE IF NOT EXISTS sk_shop_sets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT NOT NULL DEFAULT '',
-  phone TEXT NOT NULL DEFAULT '',
-  company TEXT NOT NULL DEFAULT '',
-  company_id INTEGER NOT NULL DEFAULT 0,
-  alipay TEXT NOT NULL DEFAULT '',
-  ziniao_account TEXT NOT NULL DEFAULT '',
-  erp_account TEXT NOT NULL DEFAULT '',
-  platforms TEXT NOT NULL DEFAULT '[]',
-  opened_at TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'active',
-  tags TEXT NOT NULL DEFAULT '',
-  note TEXT NOT NULL DEFAULT '',
-  secret_enc BLOB,
-  secret_keys TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL DEFAULT ''
-)`;
-
-/** 老库补列：`sk_shop_sets.opened_at` / `company_id`（历史增量列） */
-function ensureLegacySetColumns(): void {
-  if (!tableExists('sk_shop_sets')) return;
-  const cols = columnSet('sk_shop_sets');
-  if (!cols.has('opened_at')) {
-    dbRun(`ALTER TABLE sk_shop_sets ADD COLUMN opened_at TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!cols.has('company_id')) {
-    dbRun(`ALTER TABLE sk_shop_sets ADD COLUMN company_id INTEGER NOT NULL DEFAULT 0`);
-  }
-}
-
-/** 老 `sk_shops` 补列（迁移读取前先补齐，避免缺列导致 SQL 报错） */
-function ensureLegacyShopColumns(): void {
-  const cols = columnSet('sk_shops');
-  if (!cols.has('platform_shop_id')) {
-    dbRun(`ALTER TABLE sk_shops ADD COLUMN platform_shop_id TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!cols.has('shop_url')) {
-    dbRun(`ALTER TABLE sk_shops ADD COLUMN shop_url TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!cols.has('shop_url_raw')) {
-    dbRun(`ALTER TABLE sk_shops ADD COLUMN shop_url_raw TEXT NOT NULL DEFAULT ''`);
-    // 存量回填：老库的 `shop_url` 里存的是**归一化键**（无协议），直接拿去「打开店铺」必报
-    // "链接地址无效"。补 `https://` 让这些老行当场可点 —— 90% 的电商站是 https，
-    // 真不是的话用户在抽屉里改一次就对了（比"点了没反应"强）。
-    dbRun(
-      `UPDATE sk_shops SET shop_url_raw = 'https://' || shop_url
-        WHERE shop_url_raw = '' AND shop_url <> ''`,
-    );
-  }
-}
-
-/**
- * 上一版扁平「账号 + category」模型（sk_accounts）→ `sk_shop_sets`。
- * 与旧 `migrateLegacyAccounts` 同口径，只是落点改到迁移内部的临时老表，随后随迁移一起消失。
- */
-function materializeLegacyAccounts(): void {
-  if (!tableExists('sk_accounts')) return;
-  dbRun(LEGACY_SET_DDL);
-  ensureLegacySetColumns();
-  const rows = dbQuery<MigrationRow>(`SELECT * FROM sk_accounts`);
-  for (const row of rows) {
-    const rawSecrets = decodeSecretsRaw(coerceBuffer(row.secret_enc));
-    const secrets: Record<string, string> = {};
-    if (rawSecrets.loginPwd) secrets.shopPwd = rawSecrets.loginPwd;
-    if (rawSecrets.emailPwd) secrets.emailPwd = rawSecrets.emailPwd;
-    if (rawSecrets.payPwd) secrets.alipayPwd = rawSecrets.payPwd;
-    const email = String(row.email ?? '').trim();
-    if (!email) continue;
-    const platforms = String(row.platform ?? '').trim() ? [String(row.platform).trim()] : [];
-    const now = new Date().toISOString();
-    dbRun(
-      `INSERT INTO sk_shop_sets
-         (email, phone, company, company_id, alipay, ziniao_account, erp_account, platforms,
-          opened_at, status, tags, note, secret_enc, secret_keys, created_at, updated_at)
-       VALUES (?, ?, '', 0, ?, '', '', ?, '', 'active', ?, ?, ?, ?, ?, ?)`,
-      [
-        email,
-        String(row.phone ?? '').trim(),
-        String(row.alipay ?? '').trim(),
-        JSON.stringify(platforms),
-        String(row.tags ?? '').trim(),
-        String(row.note ?? '').trim(),
-        encodeSecrets(secrets),
-        JSON.stringify(Object.keys(secrets)),
-        String(row.created_at || now),
-        String(row.updated_at || now),
-      ],
-    );
-  }
-  dbRun(`DROP TABLE IF EXISTS sk_accounts`);
-}
-
-function coerceBuffer(value: unknown): Buffer | null {
-  return Buffer.isBuffer(value) ? value : null;
-}
-
-/**
- * 状态合并（店铺侧优先；账号侧旧状态并入新四态）：
- * - 店铺侧已是非启用态（停用 / 封店 / 退店）→ 原样保留，它才是被明确标记的那个；
- * - 账号侧 `banned` → 封店、`closed` → 退店、其余非启用（paused / archived）→ 停用。
- */
-function mergeStatus(shopStatus: unknown, accountStatus: unknown): ShopStatus {
-  const shop = normStatus(shopStatus);
-  if (shop !== 'active') return shop;
-  const account = String(accountStatus ?? '').trim();
-  if (account === 'banned') return 'banned';
-  if (account === 'closed') return 'exited';
-  if (account && account !== 'active') return 'archived';
-  return 'active';
-}
-
-/** 店铺行敏感字段（只取白名单键；旧 ziniaoPwd / erpPwd 不搬进来，它们归工具账号） */
-function shopSecretsOf(set: MigrationRow): Partial<Record<ShopSecretKey, string>> {
-  const raw = decodeSecretsRaw(coerceBuffer(set.secret_enc));
-  const out: Partial<Record<ShopSecretKey, string>> = {};
-  for (const key of SHOP_SECRET_KEYS) {
-    if (raw[key]) out[key] = raw[key];
-  }
-  return out;
-}
-
-/** 没有任何企业信息的账号：旧手机号 / 支付宝原值写进备注（不建企业壳） */
-function appendLegacyNote(note: string, set: MigrationRow): string {
-  const bits: string[] = [];
-  const phone = String(set.phone ?? '').trim();
-  const alipay = String(set.alipay ?? '').trim();
-  if (phone) bits.push(`手机号 ${phone}`);
-  if (alipay) bits.push(`支付宝 ${alipay}`);
-  if (!bits.length) return note;
-  const line = `迁移遗留：${bits.join('；')}`;
-  return note ? `${note}\n${line}` : line;
-}
-
-interface CompanyResolution {
-  companyId: number;
-  pendingName: string;
-}
-
-/** `shop.main` v1 主体（必须在 foreign_keys=OFF 的事务内执行） */
-function migrateShopMainV1(): void {
-  materializeLegacyAccounts();
-  ensureLegacySetColumns();
-  if (tableExists('sk_shops')) ensureLegacyShopColumns();
-
-  const oldShops = tableExists('sk_shops')
-    ? dbQuery<MigrationRow>(`SELECT * FROM sk_shops ORDER BY id ASC`)
-    : [];
-  const oldSets = tableExists('sk_shop_sets')
-    ? dbQuery<MigrationRow>(`SELECT * FROM sk_shop_sets ORDER BY id ASC`)
-    : [];
-  const mailTable = tableExists('sk_mail_accounts');
-  const mailCols = columnSet('sk_mail_accounts');
-  const oldMail = mailTable ? dbQuery<MigrationRow>(`SELECT * FROM sk_mail_accounts ORDER BY id ASC`) : [];
-  const companies = dbQuery<MigrationRow>(`SELECT * FROM sk_companies`);
-  const now = new Date().toISOString();
-
-  const setsById = new Map<number, MigrationRow>();
-  for (const set of oldSets) setsById.set(Number(set.id), set);
-
-  // ---- 预检（只读，任一项不满足就抛错回滚） ----
-
-  const emailSeen = new Map<string, number>();
-  const platformValues = new Set(['', 'ae', '速卖通']);
-  const accountStatuses = new Set(['active', 'paused', 'banned', 'closed', 'archived', '']);
-  for (const set of oldSets) {
-    const id = Number(set.id);
-    const email = String(set.email ?? '').trim();
-    if (email) {
-      if (!email.includes('@')) throw new Error(`账号 #${id} 的邮箱格式不正确：${email}`);
-      const key = email.toLowerCase();
-      const other = emailSeen.get(key);
-      if (other !== undefined) {
-        throw new Error(`邮箱重复（忽略大小写）：${email}（账号 #${other} 与 #${id}）—— 请先人工处理`);
-      }
-      emailSeen.set(key, id);
-    }
-    let platforms: unknown = [];
-    try {
-      platforms = JSON.parse(String(set.platforms ?? '[]'));
-    } catch {
-      platforms = [];
-    }
-    if (Array.isArray(platforms)) {
-      for (const p of platforms) {
-        const v = String(p ?? '').trim().toLowerCase();
-        if (!platformValues.has(v)) {
-          throw new Error(`账号 #${id} 的平台值不受支持：${String(p)} —— 请先人工处理`);
-        }
-      }
-    }
-    const status = String(set.status ?? '').trim();
-    if (!accountStatuses.has(status)) {
-      throw new Error(`账号 #${id} 的状态值不受支持：${status} —— 请先人工处理`);
-    }
-  }
-
-  const shopRefs = new Map<number, number[]>();
-  for (const shop of oldShops) {
-    const setId = Number(shop.shop_set_id) || 0;
-    if (!setId) continue;
-    const list = shopRefs.get(setId) || [];
-    list.push(Number(shop.id));
-    shopRefs.set(setId, list);
-  }
-  for (const [setId, ids] of shopRefs) {
-    if (ids.length > 1) {
-      throw new Error(`账号 #${setId} 被多家店铺引用（店铺 ${ids.join(', ')}）—— 请先人工处理`);
-    }
-  }
-
-  if (oldMail.length && mailCols.has('shop_set_id')) {
-    for (const mail of oldMail) {
-      const sid = Number(mail.shop_set_id) || 0;
-      if (!setsById.has(sid)) {
-        throw new Error(`邮件账号 #${Number(mail.id)} 指向不存在的账号 #${sid} —— 请先人工处理`);
-      }
-    }
-  }
-
-  // 企业文本歧义（同名多家 = 无法判定，暂停）
-  const companyById = new Map<number, MigrationRow>();
-  const companyNameHits = new Map<string, number[]>();
-  for (const company of companies) {
-    companyById.set(Number(company.id), company);
-    const key = String(company.name ?? '').trim().toLowerCase();
-    if (!key) continue;
-    const hits = companyNameHits.get(key) || [];
-    hits.push(Number(company.id));
-    companyNameHits.set(key, hits);
-  }
-  for (const set of oldSets) {
-    const text = String(set.company ?? '').trim();
-    if (!text) continue;
-    const hits = companyNameHits.get(text.toLowerCase()) || [];
-    if (hits.length > 1) {
-      throw new Error(`企业名称「${text}」命中多家企业（${hits.join(', ')}）—— 请先人工处理`);
-    }
-  }
-
-  // ---- 企业归并：显式 id > 精确名称 > 待新建；纯手机号 / 支付宝不建壳 ----
-  const resolved = new Map<number, CompanyResolution>();
-  for (const set of oldSets) {
-    const id = Number(set.id);
-    const explicit = Number(set.company_id) || 0;
-    if (explicit > 0 && companyById.has(explicit)) {
-      resolved.set(id, { companyId: explicit, pendingName: '' });
-      continue;
-    }
-    const text = String(set.company ?? '').trim();
-    if (!text) {
-      resolved.set(id, { companyId: 0, pendingName: '' });
-      continue;
-    }
-    const hits = companyNameHits.get(text.toLowerCase()) || [];
-    if (hits.length === 1) {
-      resolved.set(id, { companyId: hits[0], pendingName: '' });
-    } else {
-      resolved.set(id, { companyId: 0, pendingName: text });
-    }
-  }
-
-  interface CompanyGroup {
-    companyId: number;
-    pendingName: string;
-    phones: Set<string>;
-    alipays: Set<string>;
-  }
-  const groups = new Map<string, CompanyGroup>();
-  const groupKeyOf = (r: CompanyResolution): string =>
-    r.companyId > 0 ? `id:${r.companyId}` : r.pendingName ? `new:${r.pendingName.toLowerCase()}` : '';
-  for (const set of oldSets) {
-    const id = Number(set.id);
-    const r = resolved.get(id);
-    if (!r) continue;
-    const groupKey = groupKeyOf(r);
-    if (!groupKey) continue;
-    let group = groups.get(groupKey);
-    if (!group) {
-      group = {
-        companyId: r.companyId,
-        pendingName: r.pendingName,
-        phones: new Set<string>(),
-        alipays: new Set<string>(),
-      };
-      groups.set(groupKey, group);
-    }
-    const phone = String(set.phone ?? '').trim();
-    const alipay = String(set.alipay ?? '').trim();
-    if (phone) group.phones.add(phone);
-    if (alipay) group.alipays.add(alipay);
-  }
-  for (const group of groups.values()) {
-    const label = group.companyId > 0 ? `企业 #${group.companyId}` : `企业「${group.pendingName}」`;
-    const company = group.companyId > 0 ? companyById.get(group.companyId) : undefined;
-    const existingPhone = String(company?.contact_phone ?? '').trim();
-    const existingAlipay = String(company?.alipay_account ?? '').trim();
-    if (!existingPhone && group.phones.size > 1) {
-      throw new Error(`${label} 出现多个不同手机号（${[...group.phones].join(' / ')}）—— 请先人工处理`);
-    }
-    if (!existingAlipay && group.alipays.size > 1) {
-      throw new Error(`${label} 出现多个不同支付宝（${[...group.alipays].join(' / ')}）—— 请先人工处理`);
-    }
-  }
-
-  for (const group of groups.values()) {
-    const phone = group.phones.size === 1 ? [...group.phones][0] : '';
-    const alipay = group.alipays.size === 1 ? [...group.alipays][0] : '';
-    if (group.companyId > 0) {
-      const company = companyById.get(group.companyId)!;
-      if (phone && !String(company.contact_phone ?? '').trim()) {
-        dbRun(`UPDATE sk_companies SET contact_phone = ?, updated_at = ? WHERE id = ?`, [
-          phone,
-          now,
-          group.companyId,
-        ]);
-        company.contact_phone = phone;
-      }
-      if (alipay && !String(company.alipay_account ?? '').trim()) {
-        dbRun(`UPDATE sk_companies SET alipay_account = ?, updated_at = ? WHERE id = ?`, [
-          alipay,
-          now,
-          group.companyId,
-        ]);
-        company.alipay_account = alipay;
-      }
-      continue;
-    }
-    const info = dbRun(
-      `INSERT INTO sk_companies (name, contact_phone, alipay_account, status, note, created_at, updated_at)
-       VALUES (?, ?, ?, 'active', '', ?, ?)`,
-      [group.pendingName, phone, alipay, now, now],
-    );
-    group.companyId = info.lastInsertRowid;
-    for (const item of resolved.values()) {
-      if (
-        item.companyId === 0 &&
-        item.pendingName &&
-        item.pendingName.toLowerCase() === group.pendingName.toLowerCase()
-      ) {
-        item.companyId = group.companyId;
-        item.pendingName = '';
-      }
-    }
-  }
-
-  // ---- 工具账号：按 (kind, lower(trim(account))) 归并；密码冲突 / 孤儿密码暂停 ----
-  const tools = new Map<string, { kind: string; account: string; key: string; password: string }>();
-  for (const set of oldSets) {
-    const id = Number(set.id);
-    const raw = decodeSecretsRaw(coerceBuffer(set.secret_enc));
-    const pairs = [
-      { kind: 'ziniao', login: set.ziniao_account, pwd: raw.ziniaoPwd || '' },
-      { kind: 'erp', login: set.erp_account, pwd: raw.erpPwd || '' },
-    ];
-    for (const pair of pairs) {
-      const login = String(pair.login ?? '').trim();
-      const password = String(pair.pwd ?? '');
-      if (!login) {
-        if (password) {
-          throw new Error(`账号 #${id} 存了 ${pair.kind} 密码但没有登录名 —— 请先人工处理`);
-        }
-        continue;
-      }
-      const key = `${pair.kind}|${login.toLowerCase()}`;
-      const existing = tools.get(key);
-      if (!existing) {
-        tools.set(key, { kind: pair.kind, account: login, key: login.toLowerCase(), password });
-      } else if (password && existing.password && password !== existing.password) {
-        throw new Error(`${pair.kind} 登录「${login}」出现多个不同密码 —— 请先人工处理`);
-      } else if (password && !existing.password) {
-        existing.password = password;
-      }
-    }
-  }
-
-  dbRun(TOOL_ACCOUNTS_DDL);
-  const toolIds = new Map<string, number>();
-  for (const [mapKey, tool] of tools) {
-    const info = dbRun(
-      `INSERT INTO sk_tool_accounts (kind, account, account_key, password_enc, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, '', ?, ?)`,
-      [
-        tool.kind,
-        tool.account,
-        tool.key,
-        encodeSecrets({ pwd: tool.password }),
-        now,
-        now,
-      ],
-    );
-    toolIds.set(mapKey, info.lastInsertRowid);
-  }
-
-  // ---- 重建 sk_shops：先插旧店铺（显式 id，保证 1–9 不变），再插纯账号 ----
-  dbRun(shopTableSql('sk_shops_new'));
-  const loadShopsSql = `INSERT INTO sk_shops_new
-    (id, platform, name, name_key, platform_shop_id, shop_url, shop_url_raw, site, email,
-     company_id, ziniao_account_id, erp_account_id, status, opened_at, tags, note,
-     secret_enc, secret_keys, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-  const loadAccountsSql = `INSERT INTO sk_shops_new
-    (platform, name, name_key, email, company_id, ziniao_account_id, erp_account_id,
-     status, opened_at, tags, note, secret_enc, secret_keys, created_at, updated_at)
-    VALUES ('ae', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-
-  const rowIdBySet = new Map<number, number>();
-  for (const shop of oldShops) {
-    const id = Number(shop.id);
-    const set = setsById.get(Number(shop.shop_set_id) || 0);
-    const name = String(shop.name ?? '').trim();
-    const nameKey = toNameKey(name);
-    const email = String(set?.email ?? '').trim();
-    if (!name && !email) {
-      throw new Error(`店铺 #${id} 既没有店名也没有可合并的账号 —— 请先人工处理`);
-    }
-    if (name && !nameKey) {
-      throw new Error(`店铺 #${id} 的名称只有空白字符 —— 请先人工处理`);
-    }
-    const resolution = set ? resolved.get(Number(set.id)) : undefined;
-    const secrets = set ? shopSecretsOf(set) : {};
-    const status = mergeStatus(shop.status, set?.status);
-    const openedAt = String(set?.opened_at ?? '').trim() || String(shop.opened_at ?? '');
-    let note = String(set?.note ?? '');
-    if (!resolution?.companyId && set) note = appendLegacyNote(note, set);
-    const shopNote = String(shop.note ?? '');
-    if (shopNote && shopNote !== note) note = note ? `${note}\n${shopNote}` : shopNote;
-    const ziniaoAccount = String(set?.ziniao_account ?? '').trim();
-    const erpAccount = String(set?.erp_account ?? '').trim();
-    const ziniaoId = ziniaoAccount
-      ? toolIds.get(`ziniao|${ziniaoAccount.toLowerCase()}`) || 0
-      : 0;
-    const erpId = erpAccount ? toolIds.get(`erp|${erpAccount.toLowerCase()}`) || 0 : 0;
-
-    dbRun(loadShopsSql, [
-      id,
-      String(shop.platform ?? '').trim() || 'ae',
-      name,
-      nameKey,
-      String(shop.platform_shop_id ?? '').trim(),
-      String(shop.shop_url ?? ''),
-      String(shop.shop_url_raw ?? ''),
-      String(shop.site ?? ''),
-      email,
-      resolution?.companyId || 0,
-      ziniaoId,
-      erpId,
-      status,
-      openedAt,
-      String(set?.tags ?? ''),
-      note,
-      encodeSecrets(secrets),
-      JSON.stringify(Object.keys(secrets)),
-      String(shop.created_at ?? '') || now,
-      String(shop.updated_at ?? '') || now,
-    ]);
-    if (set) rowIdBySet.set(Number(set.id), id);
-  }
-
-  for (const set of oldSets) {
-    const setId = Number(set.id);
-    if (rowIdBySet.has(setId)) continue;
-    const email = String(set.email ?? '').trim();
-    if (!email) {
-      throw new Error(`账号 #${setId} 没有邮箱且未挂店铺 —— 请先人工处理`);
-    }
-    const resolution = resolved.get(setId);
-    const secrets = shopSecretsOf(set);
-    let note = String(set.note ?? '');
-    if (!resolution?.companyId) note = appendLegacyNote(note, set);
-    const ziniaoAccount = String(set.ziniao_account ?? '').trim();
-    const erpAccount = String(set.erp_account ?? '').trim();
-    const ziniaoId = ziniaoAccount
-      ? toolIds.get(`ziniao|${ziniaoAccount.toLowerCase()}`) || 0
-      : 0;
-    const erpId = erpAccount ? toolIds.get(`erp|${erpAccount.toLowerCase()}`) || 0 : 0;
-    const info = dbRun(loadAccountsSql, [
-      email,
-      resolution?.companyId || 0,
-      ziniaoId,
-      erpId,
-      mergeStatus('active', set.status),
-      String(set.opened_at ?? ''),
-      String(set.tags ?? ''),
-      note,
-      encodeSecrets(secrets),
-      JSON.stringify(Object.keys(secrets)),
-      String(set.created_at ?? '') || now,
-      String(set.updated_at ?? '') || now,
-    ]);
-    rowIdBySet.set(setId, info.lastInsertRowid);
-  }
-
-  // ---- 重建 sk_mail_accounts（外键改指 sk_shops.id；保留账号 id 与全部列） ----
-  if (mailTable && mailCols.has('shop_set_id')) {
-    dbRun(`CREATE TABLE sk_mail_accounts_new (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      shop_id INTEGER NOT NULL UNIQUE REFERENCES sk_shops(id) ON DELETE CASCADE,
-      email TEXT NOT NULL DEFAULT '',
-      provider_id TEXT NOT NULL DEFAULT '',
-      imap_host TEXT NOT NULL DEFAULT '',
-      imap_port INTEGER NOT NULL DEFAULT 993,
-      imap_secure INTEGER NOT NULL DEFAULT 1,
-      proxy TEXT NOT NULL DEFAULT '',
-      folder TEXT NOT NULL DEFAULT 'INBOX',
-      folders TEXT NOT NULL DEFAULT '',
-      sync_enabled INTEGER NOT NULL DEFAULT 1,
-      sync_days INTEGER NOT NULL DEFAULT 30,
-      max_body_bytes INTEGER NOT NULL DEFAULT 204800,
-      status TEXT NOT NULL DEFAULT 'idle',
-      last_error TEXT NOT NULL DEFAULT '',
-      last_synced_at TEXT NOT NULL DEFAULT '',
-      uid_validity INTEGER NOT NULL DEFAULT 0,
-      last_uid INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT '',
-      updated_at TEXT NOT NULL DEFAULT ''
-    )`);
-    const loadMailSql = `INSERT INTO sk_mail_accounts_new
-      (id, shop_id, email, provider_id, imap_host, imap_port, imap_secure, proxy, folder, folders,
-       sync_enabled, sync_days, max_body_bytes, status, last_error, last_synced_at,
-       uid_validity, last_uid, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    for (const mail of oldMail) {
-      const shopId = rowIdBySet.get(Number(mail.shop_set_id) || 0);
-      if (!shopId) {
-        throw new Error(`邮件账号 #${Number(mail.id)} 找不到对应的店铺行 —— 请先人工处理`);
-      }
-      dbRun(loadMailSql, [
-        Number(mail.id),
-        shopId,
-        String(mail.email ?? ''),
-        String(mail.provider_id ?? ''),
-        String(mail.imap_host ?? ''),
-        Number(mail.imap_port ?? 993),
-        Number(mail.imap_secure ?? 1),
-        String(mail.proxy ?? ''),
-        String(mail.folder ?? 'INBOX'),
-        String(mail.folders ?? ''),
-        Number(mail.sync_enabled ?? 1),
-        Number(mail.sync_days ?? 30),
-        Number(mail.max_body_bytes ?? 204800),
-        String(mail.status ?? 'idle'),
-        String(mail.last_error ?? ''),
-        String(mail.last_synced_at ?? ''),
-        Number(mail.uid_validity ?? 0),
-        Number(mail.last_uid ?? 0),
-        String(mail.created_at ?? ''),
-        String(mail.updated_at ?? ''),
-      ]);
-    }
-    dbRun(`DROP TABLE sk_mail_accounts`);
-    dbRun(`ALTER TABLE sk_mail_accounts_new RENAME TO sk_mail_accounts`);
-    dbRun(
-      `CREATE INDEX IF NOT EXISTS idx_sk_mail_accounts_sync ON sk_mail_accounts(sync_enabled, status)`,
-    );
-  }
-
-  // ---- 换表：**直接 DROP 旧表**，不能 RENAME 成临时名 ----
-  // RENAME 会把 pl_shop_sku / pl_shop_items / sk_mail_* 的外键目标一起改写（legacy_alter_table 默认关），
-  // 之后再改回来就找不到原目标了。DROP + 新表改名，子表的外键文本始终指向 `sk_shops` / `sk_mail_accounts`。
-  dbRun(`DROP TABLE IF EXISTS sk_shops`);
-  dbRun(`ALTER TABLE sk_shops_new RENAME TO sk_shops`);
+/** `sk_shop_sets` 已随物理合并废弃；`IF EXISTS` 保证新库 / 已清理的库反复执行为空操作。 */
+function retireLegacyShopSetTable(): void {
   dbRun(`DROP TABLE IF EXISTS sk_shop_sets`);
-  for (const sql of INDEXES) dbRun(sql);
+}
 
-  const violations = dbQuery<MigrationRow>(`PRAGMA foreign_key_check`);
-  if (violations.length) {
-    const first = violations[0];
-    throw new Error(
-      `外键校验失败：${String(first.table ?? '')} 行 #${String(first.rowid ?? '')} → ${String(first.parent ?? '')}`,
-    );
-  }
+function runShopMainMigration(): void {
+  migrate(SHOP_MAIN_KEY, [
+    { version: 1, name: 'initial-shape（物理合并已退役，仅保留版本占位）', up: () => {} },
+    { version: 2, name: '退役 sk_shop_sets（历史账号套装表）', up: retireLegacyShopSetTable },
+  ]);
 }
 
 // ---- 字段规整 ----

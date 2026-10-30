@@ -100,6 +100,7 @@ const BUILTIN_CATEGORIES: Array<{ kind: LedgerKind; name: string }> = [
  */
 function settlementsDdl(table: string): string {
   return `CREATE TABLE IF NOT EXISTS ${table} (
+    -- 用途：结算单（付款/收款/互抵结清，一行 = 一次结算；作废不删行，保留原因与时间）。属 ledger 域。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     party_id INTEGER NOT NULL,
     settle_date TEXT NOT NULL,
@@ -127,7 +128,11 @@ const SETTLEMENTS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS idx_bk_settle_party ON
  *    又允许"撤销后重新结算"。
  */
 const LEDGER_SCHEMA: string[] = [
+  // `bk_parties`：记账域「资金相关人」主档（供应商 / 员工 / 房东 / 平台 / 其他），PK `id`、业务唯一键 `name_key`。
+  // 写 = 相关人维护页（新增 / 改名 / 停用 / 合并）；读 = 条目、结算、余额（`partyLedger`）全部按 `party_id` 汇总。
+  // 只停用 / 合并、**不物理删除**：历史条目必须始终能指回一个人。
   `CREATE TABLE IF NOT EXISTS bk_parties (
+    -- 用途：记账「资金相关人」主档（供应商/员工/房东/平台/其他），余额按 party_id 汇总；停用/合并不删行。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     name_key TEXT NOT NULL,
@@ -144,7 +149,10 @@ const LEDGER_SCHEMA: string[] = [
     UNIQUE (name_key)
   )`,
 
+  // `bk_categories`：收支科目（`kind` 在收入 / 支出两套里各独立），唯一键 `(kind,name_key)`。
+  // 写 = 启动种子内置科目 + 科目维护页；读 = 条目表单下拉、分类汇总。停用走 `archived`，不删行。
   `CREATE TABLE IF NOT EXISTS bk_categories (
+    -- 用途：收支科目（收入/支出两套各自独立，唯一键 kind+name_key）；停用走 archived，不删行。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL CHECK (kind IN ('income','expense')),
     name TEXT NOT NULL,
@@ -156,7 +164,12 @@ const LEDGER_SCHEMA: string[] = [
     UNIQUE (kind, name_key)
   )`,
 
+  // `bk_entries`：记账域**收支条目**主表（金额恒为正整数分，方向只由 `kind` 表达）。
+  // `period` 是 SQLite 生成列（取 `biz_date` 前 7 位，只读、不写）；`shop_id` 是软关联（无外键，删店由
+  // `shop-delete-guard` 拦）；结算状态**不双写在本表**，由 `bk_settlement_lines` JOIN 得出。
+  // 写 = 条目录入 / 导入 / 改挂；读 = 台账列表、月汇总、分摊、结算候选。
   `CREATE TABLE IF NOT EXISTS bk_entries (
+    -- 用途：收支条目主表（金额恒为正、方向由 kind 表达；period 是生成列）；读 = 台账/月汇总/分摊/结算候选。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     biz_date TEXT NOT NULL,
     period TEXT GENERATED ALWAYS AS (substr(biz_date, 1, 7)) STORED,
@@ -183,7 +196,11 @@ const LEDGER_SCHEMA: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_bk_entries_party  ON bk_entries(party_id, biz_date)`,
   `CREATE INDEX IF NOT EXISTS idx_bk_entries_scope  ON bk_entries(scope, status)`,
 
+  // `bk_allocations`：公共条目（`scope='shared'`）的**分摊行**，一行 = 一条目×一店铺（`UNIQUE(entry_id,shop_id)`）。
+  // 派生数据：无业务写入口，只有 `writeAllocations()` 内部整批重写；`Σ分摊 == 条目金额` 由主进程断言，
+  // 不满足整笔回滚。读 = 店铺维度损益、删店校验（`shop-delete-guard`）。
   `CREATE TABLE IF NOT EXISTS bk_allocations (
+    -- 用途：公共条目（scope=shared）的分摊行，一行 = 一条目×一店；派生数据，由 writeAllocations 整批重写。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entry_id INTEGER NOT NULL REFERENCES bk_entries(id) ON DELETE CASCADE,
     shop_id INTEGER NOT NULL,
@@ -193,7 +210,10 @@ const LEDGER_SCHEMA: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_bk_alloc_shop ON bk_allocations(shop_id)`,
 
+  // `bk_allocation_rules`：分摊方案（名称唯一；基准 equal / revenue / manual；店铺 id 与万分比存 JSON）。
+  // 写 = 条目页「保存为方案」；读 = 分摊下拉套用。条目上的 `rule_id` 只作来源留痕，重算不读它。
   `CREATE TABLE IF NOT EXISTS bk_allocation_rules (
+    -- 用途：分摊方案（equal/revenue/manual，店铺 id 与万分比存 JSON）；条目上的 rule_id 只留痕，重算不读。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     name_key TEXT NOT NULL,
@@ -207,10 +227,15 @@ const LEDGER_SCHEMA: string[] = [
     UNIQUE (name_key)
   )`,
 
+  // `bk_settlements`：结算单（付款 / 收款 / 互抵结清），一行 = 一次结算；`direction` 三态，
+  // `status='void'` 为作废（不删行，保留 `void_reason` / `voided_at`）。写 = 结算页；读 = 相关人余额与明细。
   SETTLEMENTS_TABLE_SQL,
   SETTLEMENTS_INDEX_SQL,
 
+  // `bk_settlement_lines`：结算单明细（一行 = 一张单结掉的条目；`settlement_id` → `bk_settlements` 级联）。
+  // 唯一性靠部分唯一索引 `WHERE active=1`（见上），作废时置 0，允许撤销后重结。写 = 结算页；读 = 条目结算状态。
   `CREATE TABLE IF NOT EXISTS bk_settlement_lines (
+    -- 用途：结算单明细（一张单结掉的条目，settlement_id 级联；有效行由部分唯一索引约束，可撤销后重结）。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     settlement_id INTEGER NOT NULL REFERENCES bk_settlements(id) ON DELETE CASCADE,
     entry_id INTEGER NOT NULL REFERENCES bk_entries(id),
@@ -221,7 +246,10 @@ const LEDGER_SCHEMA: string[] = [
      ON bk_settlement_lines(entry_id) WHERE active = 1`,
   `CREATE INDEX IF NOT EXISTS idx_bk_settle_line_settle ON bk_settlement_lines(settlement_id)`,
 
+  // `bk_transfers`：相关人之间的**承接余额**（合并相关人时把残额转给承接人；`from ≠ to` 由 CHECK 钉住）。
+  // 写 = 相关人合并（`mergeParty`）；读 = 相关人余额的起始项（`partyLedger` 的 transfer 净额）。
   `CREATE TABLE IF NOT EXISTS bk_transfers (
+    -- 用途：相关人之间的承接余额（合并相关人时把残额转给承接人）；读 = 相关人余额的起始项。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_party_id INTEGER NOT NULL,
     to_party_id INTEGER NOT NULL,
@@ -233,14 +261,10 @@ const LEDGER_SCHEMA: string[] = [
     CHECK (from_party_id <> to_party_id)
   )`,
 
-  `CREATE TABLE IF NOT EXISTS bk_periods (
-    period TEXT PRIMARY KEY,
-    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','locked')),
-    locked_at TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT ''
-  )`,
-
+  // `bk_op_log`：记账域操作留痕（改挂 / 合并 / 作废等），一行 = 一次动作，前后值存 JSON，**只追加不更新**。
+  // 写 = `logOp()`（各写操作事务内）；读 = 操作历史面板 / 排障取证。
   `CREATE TABLE IF NOT EXISTS bk_op_log (
+    -- 用途：记账域操作留痕（改挂/合并/作废等），前后值存 JSON，只追加不更新；读 = 操作历史/排障取证。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
     entity TEXT NOT NULL,
@@ -335,13 +359,25 @@ function shopExists(shopId: number): boolean {
 export function ensureLedgerSchema(): void {
   dbMigrate(LEDGER_SCHEMA);
   // 记账表全部由上面的幂等 DDL 建立，v1 是"形状基线"的空步骤：
-  // 它的作用只是把版本号写进 sk_schema_migrations，让后续 v2/v3 有起点可比。
+  // 它的作用只是把版本号写进 sk_schema_migrations，让后续 v2/v3/v4 有起点可比。
   migrate('ledger.main', [
     { version: 1, name: 'initial-shape', up: () => {} },
     { version: 2, name: 'settlements 支持互抵结清（direction=offset）', up: widenSettleDirection },
     { version: 3, name: 'bk_parties.merged_to（区分「已并入」与「手动停用」）', up: addPartyMergedTo },
+    { version: 4, name: '退役 bk_periods（月结留位表，产品不做月结）', up: retirePeriodsTable },
   ]);
   seedBuiltinCategories();
+}
+
+/**
+ * v4 迁移：删掉月结留位表 `bk_periods`。
+ *
+ * 本期产品明确不做月结 / 锁账（`docs/plans/LEDGER_PLAN.md` RK-10），这张表从未被任何代码读写，
+ * 只是历史建表语句里的占位。项目尚未正式发布，没有需要保留它的存量库；将来真做锁账时，
+ * 再按需新建（形状可以重新设计，不必背着这张空表）。
+ */
+function retirePeriodsTable(): void {
+  dbRun(`DROP TABLE IF EXISTS bk_periods`);
 }
 
 /**

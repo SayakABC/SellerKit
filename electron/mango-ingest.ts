@@ -261,8 +261,8 @@ export function toInternal(frame: unknown): MangoToInternalResult {
 
 /** 匹配索引（由 `shop-db.shopIdentityIndex()` 喂进来；本层不读库，故用纯结构） */
 export interface ShopMatchIndex {
-  byErpShopId: Map<string, { id: number; name: string }>;
-  byNameKey: Map<string, { id: number; name: string }>;
+  byErpShopId: Map<string, { id: number; name: string; status: string }>;
+  byNameKey: Map<string, { id: number; name: string; status: string }>;
   /** 同名多家店的 nameKey —— **不参与匹配**（见 `buildShopMatchIndex`） */
   nameAmbiguous: Set<string>;
 }
@@ -274,14 +274,21 @@ export interface ShopMatch {
   shop: string;
   /** 命中路径（排障用）：'erp' / 'name' / '' */
   matchedBy: 'erp' | 'name' | '';
+  /**
+   * 命中店铺**当前**状态（未命中为 ''）。
+   *
+   * 只用于事后可见性（"这家店退了却还有单待发"），**绝不参与匹配判定** ——
+   * 退店只说明这家店现在不开，不改变它退店前那些单归谁。
+   */
+  shopStatus: string;
 }
 
 /** 用店铺清单构建匹配索引 */
 export function buildShopMatchIndex(
-  rows: readonly { id: number; name: string; nameKey?: string; erpShopId?: string }[],
+  rows: readonly { id: number; name: string; nameKey?: string; erpShopId?: string; status?: string }[],
 ): ShopMatchIndex {
-  const byErpShopId = new Map<string, { id: number; name: string }>();
-  const byNameKey = new Map<string, { id: number; name: string }>();
+  const byErpShopId = new Map<string, { id: number; name: string; status: string }>();
+  const byNameKey = new Map<string, { id: number; name: string; status: string }>();
   const nameAmbiguous = new Set<string>();
   const counted = new Map<string, number>();
   for (const r of rows) {
@@ -289,11 +296,12 @@ export function buildShopMatchIndex(
     const name = String(r.name ?? '');
     const nameKey = String(r.nameKey ?? '') || toNameKey(name);
     const erp = String(r.erpShopId ?? '').trim();
+    const status = String(r.status ?? '');
     if (id <= 0) continue;
-    if (erp && !byErpShopId.has(erp)) byErpShopId.set(erp, { id, name });
+    if (erp && !byErpShopId.has(erp)) byErpShopId.set(erp, { id, name, status });
     if (nameKey) {
       counted.set(nameKey, (counted.get(nameKey) ?? 0) + 1);
-      if (!byNameKey.has(nameKey)) byNameKey.set(nameKey, { id, name });
+      if (!byNameKey.has(nameKey)) byNameKey.set(nameKey, { id, name, status });
     }
   }
   // 同名多家店（跨平台同名是真实场景）：**按名匹配一律放弃**。
@@ -308,17 +316,20 @@ export function buildShopMatchIndex(
  *
  * 未命中时返回 `shopId=0` 且 **`shop` 保留芒果原文**：订单仍要进来（"认不出店"是数据问题，
  * 不是丢单的理由），而原文留着才能让人在「店铺归一」页看到"这家店还没登记"。
+ *
+ * **店状态不参与判定**：退店/封店的店与活跃店一视同仁 —— 订单归属看下单那一刻，
+ * 店今天开不开是另一回事。状态只随 `shopStatus` 带出去供调用方统计。
  */
 export function matchShop(shopRaw: string, authId: string, index: ShopMatchIndex): ShopMatch {
   const erp = String(authId ?? '').trim();
   if (erp) {
     const hit = index.byErpShopId.get(erp);
-    if (hit) return { shopId: hit.id, shop: hit.name, matchedBy: 'erp' };
+    if (hit) return { shopId: hit.id, shop: hit.name, matchedBy: 'erp', shopStatus: hit.status };
   }
   const key = toNameKey(shopRaw);
   if (key && !index.nameAmbiguous.has(key)) {
     const hit = index.byNameKey.get(key);
-    if (hit) return { shopId: hit.id, shop: hit.name, matchedBy: 'name' };
+    if (hit) return { shopId: hit.id, shop: hit.name, matchedBy: 'name', shopStatus: hit.status };
   }
-  return { shopId: 0, shop: String(shopRaw ?? '').trim(), matchedBy: '' };
+  return { shopId: 0, shop: String(shopRaw ?? '').trim(), matchedBy: '', shopStatus: '' };
 }

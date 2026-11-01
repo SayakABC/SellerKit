@@ -414,6 +414,40 @@ initDb(path.join(tmpDir, 'mango-smoke.db'));
     assert.deepStrictEqual(r.learned, [], '已经绑过就不该再"学到"一次（learned 空 = 走的是 erp 路径）');
   });
 
+  await check('店铺置为「退店」后**仍然认得出**：归属不变，只多一条提示，绝不落未登记桶', async () => {
+    const shop = dbGet(`SELECT id FROM sk_shops WHERE name = '十号店'`);
+    shopDb.upsertShop({ id: Number(shop.id), name: '十号店', platform: 'ae', status: 'exited' });
+
+    const r = await mangoSync.ingestMangoOrders(payload(orders));
+    assert.strictEqual(r.updated, 2);
+    assert.strictEqual(
+      r.shopUnmatched, 0,
+      '退店只是店铺**今天**的状态，不该让退店前下的单掉进未登记桶（那会把一家店拆成两家）',
+    );
+    assert.strictEqual(String(orderRow(no0).shop), '十号店', '归属照旧：写店铺规范名，不写芒果 alias');
+    assert.strictEqual(
+      r.onClosedShop, 2,
+      `要能数出"落在已退店店铺上的单数"，实际：${JSON.stringify(r.onClosedShop)}`,
+    );
+    assert.ok(
+      r.warnings.some((w) => String(w).includes('已退店')),
+      `提示里要说清这件事（不是吞掉也不是当失败）：${JSON.stringify(r.warnings)}`,
+    );
+    // 订单本身不受影响：状态仍是芒果原文、金额不变（退店不该连带改订单任何字段）
+    assert.strictEqual(String(orderRow(no0).biz_status), '等待卖家发货');
+    assert.strictEqual(String(orderRow(no0).shop_auth_id), '32958002');
+
+    // 改回 active ⇒ 计数归零。这一条守的是"状态真的是从店铺行带出来的"，
+    // 而不是恒等于 2（恒 2 的实现上面那条断言也会绿）。
+    shopDb.upsertShop({ id: Number(shop.id), name: '十号店', platform: 'ae', status: 'active' });
+    const back = await mangoSync.ingestMangoOrders(payload(orders));
+    assert.strictEqual(back.onClosedShop, 0, '店铺恢复 active 后不该再报"已退店"');
+    assert.strictEqual(back.shopUnmatched, 0);
+
+    // 复测前把状态留在 active（后面几段还要用这家店）
+    assert.strictEqual(String(dbGet(`SELECT status FROM sk_shops WHERE id = ?`, [shop.id]).status), 'active');
+  });
+
   // ===================================================================================
   // 六、色名塌陷：唯一判别证据是图 URL
   // ===================================================================================

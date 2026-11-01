@@ -75,6 +75,13 @@ export interface MangoIngestResult {
   missingImage: number;
   /** 落到未登记桶的订单数（店名认不出 / 没登记） */
   shopUnmatched: number;
+  /**
+   * 认到了店、但那家店**当前**不是 active 的订单数（已退店 / 封店 / 停用）。
+   *
+   * 这些单**照常入库、照常归属**（订单归属看下单那一刻，与店铺今天的状态无关），
+   * 这个数只是让"退了店却还有单没发"这件事可见 —— 通常意味着芒果那边还有残留单要收尾。
+   */
+  onClosedShop: number;
   partial: boolean;
   /** 逐条跳过原因（复用 `/ae/ingest` 的形状） */
   skips: { orderNo: string; reason: string }[];
@@ -152,6 +159,7 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
     skipped: 0,
     missingImage: 0,
     shopUnmatched: 0,
+    onClosedShop: 0,
     partial,
     skips: [],
     warnings: [],
@@ -218,6 +226,11 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
     }
     const match = matchShop(mapped.order.shop, mapped.order.shopAuthId, index);
     if (!match.shopId) result.shopUnmatched += 1;
+    // 认到了店、但店已经不在营业：**照样归属这家店**（订单归属是下单那一刻的事实），
+    // 只是记一笔让人知道"这家店退了还有单"。绝不因此改走未登记桶。
+    if (match.shopId && match.shopStatus && match.shopStatus !== 'active') {
+      result.onClosedShop += 1;
+    }
     if (match.shop) mapped.order.shop = match.shop; // 命中 ⇒ 写店铺规范名；未命中 ⇒ 保留原文
     for (const w of mapped.warnings) {
       if (result.warnings.length < 50) result.warnings.push(`${mapped.order.orderNo}: ${w}`);
@@ -249,6 +262,13 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
   // （最常见：翻页到一半页面被切走）。标了 partial 的是"没抓全但知道为什么"，不算异常。
   if (totalItems > 0 && fetched < totalItems && !partial) {
     result.warnings.push(`芒果说共 ${totalItems} 单，只收到 ${fetched} 单（未标 partial，疑似漏抓）`);
+  }
+  // 已退店/封店的店仍有单：这些单**归属不变**，但值得人说一句 —— 通常是那边还有残留单要收尾。
+  // 刻意写成 warning 而不是 reason/bucket：把它当异常会让正常收尾误报，当无事又埋掉真实信号。
+  if (result.onClosedShop > 0) {
+    result.warnings.push(
+      `${result.onClosedShop} 单属于已退店/封店的店铺（归属照旧，只是提示那边还有单没收尾）`,
+    );
   }
 
   // 写库：一单一次（upsertCollectedOrder 内部是整单替换）
@@ -304,6 +324,7 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
       skipped: result.skipped,
       missingImage: result.missingImage,
       shopUnmatched: result.shopUnmatched,
+      onClosedShop: result.onClosedShop,
       ordered: drafts.length,
       imageFetched: imageIdByUrl.size,
       skips: result.skips,

@@ -713,6 +713,8 @@ export interface ShopIdentityRow {
   nameKey: string;
   /** 芒果 `authId`；空 = 还没学到 */
   erpShopId: string;
+  /** 店铺**当前**状态（active/archived/banned/exited）—— 不影响匹配，只用于事后可见性 */
+  status: string;
 }
 
 /**
@@ -721,20 +723,26 @@ export interface ShopIdentityRow {
  * 为什么不让同步层自己 `SELECT * FROM sk_shops`：店名归一口径只有 `toNameKey` 一份，
  * 谁按自己的方式 trim，谁就会把一家店拆成两家（"十店" 与 "十店 "）。
  *
- * 只返回**活跃店**（`status='active'`）：停用/封店/退店的店不该再接新订单，否则新单会落到一个
- * 已经不做的地方，拣货单上永远多一行"这家店还有单"。历史订单的店铺仍是那家店（`sk_shops` 行还在，
- * 只是不再参与匹配）—— 所以这是"匹配范围"，不是"数据过滤"。
+ * ⚠️ **不按 status 过滤**（曾经加过 `WHERE status='active'`，是错的）：
+ * 订单归属是**下单那一刻**的事实，与店铺今天的经营状态无关。一家店退店前还有 5 单没发，
+ * 那 5 单必须认到这家店 —— 过滤掉的后果是它们落进"未登记桶"，订单上写的是芒果 `alias`
+ * （"十店"），而库里那家店叫"十店-UK"，同一家店在统计里变成两家（本仓反复栽过的派生漂移）。
+ * 而且这种错**看起来完全正常**：店名是合法文本，只是永远不会被点开。
+ *
+ * 同一判断在台账侧已有先例（`src/modules/ledger/labels.ts`：「退店不在此列：它照样参与分摊」）。
+ * "这家店退了却还有单"是**值得人看见**的信息，不是应当被静默隐藏的信息 —— 所以 `status`
+ * 一路带到 `ShopMatch.shopStatus`，由调用方统计并写进同步日志，而不是在匹配阶段丢掉。
  */
 export function shopIdentityIndex(): ShopIdentityRow[] {
   if (!tableExists('sk_shops')) return [];
-  return dbQuery<{ id: number; name: string; name_key: string; erp_shop_id: string }>(
-    `SELECT id, name, name_key, erp_shop_id FROM sk_shops
-      WHERE status = 'active' ORDER BY id`,
+  return dbQuery<{ id: number; name: string; name_key: string; erp_shop_id: string; status: string }>(
+    `SELECT id, name, name_key, erp_shop_id, status FROM sk_shops ORDER BY id`,
   ).map((r) => ({
     id: Number(r.id) || 0,
     name: String(r.name ?? ''),
     nameKey: String(r.name_key ?? '') || toNameKey(String(r.name ?? '')),
     erpShopId: String(r.erp_shop_id ?? ''),
+    status: String(r.status ?? ''),
   }));
 }
 

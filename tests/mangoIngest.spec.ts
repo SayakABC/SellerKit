@@ -265,4 +265,39 @@ describe('matchShop · 认店顺序 authId → 店名 → 未登记桶', () => {
     ]);
     expect(matchShop('B', '777', dup).shopId).toBe(1); // 确定性：取先出现的
   });
+
+  it('退店/封店的店**照样认得出**（归属看下单那一刻，与店铺今天的经营状态无关）', () => {
+    // 曾经按 `status='active'` 过滤过店铺清单，后果是退店前的残留单全部掉进未登记桶：
+    // 订单上写芒果别名「八店」，库里那家店叫「八店-UK」，同一家店在统计里变两家。
+    const withClosed = buildShopMatchIndex([
+      { id: 10, name: '八店-UK', erpShopId: '4001', status: 'exited' },
+      { id: 11, name: '十二店', erpShopId: '', status: 'banned' },
+    ]);
+
+    // ① authId 命中退店店 —— 不许落桶
+    const byErp = matchShop('八店', '4001', withClosed);
+    expect(byErp.shopId).toBe(10);
+    expect(byErp.matchedBy).toBe('erp');
+    expect(byErp.shop).toBe('八店-UK'); // 仍写规范名
+    expect(byErp.shopStatus).toBe('exited'); // 状态**带出来**供上层计数，但不参与判定
+
+    // ② 名字命中封店 —— 同上
+    const byName = matchShop('十二店', '', withClosed);
+    expect(byName.shopId).toBe(11);
+    expect(byName.matchedBy).toBe('name');
+    expect(byName.shopStatus).toBe('banned');
+
+    // ③ 未命中时 shopStatus 是空串（不是"碰巧第一个店的状态"）
+    expect(matchShop('没见过的店', '', withClosed).shopStatus).toBe('');
+
+    // ④ 逐条对照：同一家店 active 与 exited 的匹配结果**必须完全一致**
+    //   （除了 shopStatus）。这条守的是"状态永远不该改变归属"。
+    const asActive = buildShopMatchIndex([{ id: 10, name: '八店-UK', erpShopId: '4001', status: 'active' }]);
+    const asExited = buildShopMatchIndex([{ id: 10, name: '八店-UK', erpShopId: '4001', status: 'exited' }]);
+    for (const [shop, erp] of [['八店', '4001'], ['八店-UK', ''], ['八店', '']] as const) {
+      const x = matchShop(shop, erp, asActive);
+      const y = matchShop(shop, erp, asExited);
+      expect({ ...y, shopStatus: '' }).toEqual({ ...x, shopStatus: '' });
+    }
+  });
 });

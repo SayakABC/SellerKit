@@ -12,6 +12,9 @@ import type { DbBindValue, MigrationStep } from './db';
 import { normImageUrl, skuColorsByImage, toSkuKey } from './shopSku';
 import { ensureShopSchema, getShop, normalizeShopUrl } from './shop-db';
 import { parseSkuProps, normalizeSkuSize } from './aeMoney';
+// 判别力统计（几个色 / 一个色名最多挂几张图）。纯函数、零依赖，因此这个纯模块可以被
+// vitest 直接覆盖 —— 而本文件（better-sqlite3 ABI）只能走 shop-item:smoke。
+import { podLinkStats } from './podLinkStats';
 
 /** 采集帧 schema（与 electron/ae-receiver.ts 的 SCHEMA_SHOP_ITEM 同值） */
 const SCHEMA_SHOP_ITEM = 'ae-shop-item/v1';
@@ -251,7 +254,7 @@ function shopItemMigrationSteps(): MigrationStep[] {
     },
     {
       version: 3,
-      name: 'pl_shop_items += pod_n_colors / pod_n_images（图案域判别力统计，M3·T3-4）',
+      name: 'pl_shop_items += pod_n_colors / pod_n_images（图案域判别力统计，M3·T3-4；含存量回填）',
       up: addPodStatsColumns,
     },
   ];
@@ -265,14 +268,25 @@ function shopItemMigrationSteps(): MigrationStep[] {
  * 同一个键（错印高风险）。把这两个数存成列，`WHERE pod_n_images > 1` 就是"塌陷链接"，
  * 不必再维护一份会过期的人工清单。
  *
- * 只加列、**不回填**：回填要跑 `podLinkStats(skuJson)`，而那是 T3-4 的写入口
- * （INSERT 与 UPDATE 两处都要调）—— 在迁移里再算一遍就是第二套实现，
- * 将来改了统计口径会出现"新采的是对的、存量是旧的"，且没人分得清。
- * 存量行按 0 处理（= 还没算过），T3-4 落地后重跑一次采集即补齐。
+ * 只加列 + **回填存量**（2026-11-01 二次修正）。
+ *
+ * ⚠️ 为什么必须回填（不是"等下次采集自然补上"）：真库此刻已有 71 条链接，
+ *    全按 0 落库之后，`WHERE pod_n_images > 1` 这类筛选会筛出 **0 行** ——
+ *    那不是"没有塌陷链接"，而是"没人算过"。下游（T3-5 真库实跑 / T3-6 定向重算）
+ *    拿到的会是一个**看起来很确定的空结果**，而且它和真实结论长得一模一样。
+ *    也就是说：不回填不是"晚点再说"，是**制造一个静默的错误事实**。
+ *
+ * ⚠️ 回填**不再算第二套实现**：`podLinkStats` 已摘成纯模块（`electron/podLinkStats.ts`），
+ *    迁移与写路径调的是**同一个函数**。早先"回填就是把统计口径写两遍"的顾虑不成立了 ——
+ *    那正是当时不回填的唯一理由。
+ *
+ * 回填口径 = 只补「两列都还是 0」的行（`= 0` 就是"没算过"这个哨兵值，与 `podLinkStats`
+ * 的脏输入返回值同义）。已经算过的行**一个字节都不动** —— 迁移不该改写"后来的正确值"，
+ * 那种改写会在"迁移跑第二遍"与"业务刚写过"之间分出两套结果。
  *
  * ⚠️ 幂等靠 `PRAGMA table_info` 逐列判（SQLite 没有 `ADD COLUMN IF NOT EXISTS`，
  *    重复 ALTER 会 `duplicate column name` —— 那会发生在用户升级那一刻）。
- *    新库由 SCHEMA 的建表语句直接带上，这里空转。
+ *    新库由 SCHEMA 的建表语句直接带上，这里空转（新库也没有存量行要回填）。
  */
 function addPodStatsColumns(): void {
   const cols = new Set(
@@ -285,6 +299,22 @@ function addPodStatsColumns(): void {
   };
   add('pod_n_colors');
   add('pod_n_images');
+
+  const rows = dbQuery<{ id: number; sku_json: string }>(
+    `SELECT id, sku_json FROM pl_shop_items
+      WHERE pod_n_colors = 0 AND pod_n_images = 0 AND sku_json <> ''`,
+  );
+  for (const r of rows) {
+    const stats = podLinkStats(r.sku_json);
+    // 算不出来（`{}` / 脏 JSON）就保持 0：那是"没有可判别的 SKU 矩阵"，
+    // 与"算出来 0 个色"是同一件事，不必区分（区分了也没人会对它做什么）。
+    if (!stats.nColors && !stats.nImages) continue;
+    dbRun(`UPDATE pl_shop_items SET pod_n_colors=?, pod_n_images=? WHERE id=?`, [
+      stats.nColors,
+      stats.nImages,
+      r.id,
+    ]);
+  }
 }
 
 /**
@@ -761,6 +791,16 @@ export function normalizeIngestSku(raw: unknown): ShopItemSkuRow | null {
  *
  * `opts.pinnedShopId` = **人点名的店铺 id**（保底通道手贴时用）：帧本身不带身份证据
  * （扩展选择器没采到 store），身份来自用户在下拉里的选择，故单独传、不混进帧。
+ *
+ * ⭐ `pod_n_colors` / `pod_n_images` **两处都算，且都从"这次真正写进库的那个 sku_json"算**
+ * （INSERT 用本帧的 `skuJson`，UPDATE 用合并后的 `merged.skuJson`）。这是 T3-4 的验收点
+ * ——「同一款采集重跑两次，两列值不变」，具体有三种跑法都必须对：
+ *   · 详情帧 → 详情帧：两列都等于本帧统计（同一个值，看不出差别）；
+ *   · 详情帧 → 列表轻帧（不带 SKU）：`skuJson` 走"只覆盖非空"保住了旧值，
+ *     两列**跟着保住**。若这里改用 `skuRows`（本帧的行）来算，两列会被清成 0，
+ *     而 `sku_json` 里明明还有 8 个色 —— 那就是"统计说这条链接没色，绑定台却列出 8 个槽位"；
+ *   · 列表轻帧 → 详情帧：第一次算不出（0），第二次必须**变成真实值**，不能停在 0
+ *     （"只写一次"省掉 UPDATE 那一处调用就会停住，而界面上分不出"没算"和"真没有"）。
  */
 export function upsertShopItems(
   payload: ShopItemIngestPayload,
@@ -819,19 +859,26 @@ export function upsertShopItems(
         url: url || existing.url,
         skuJson: skuRows.length ? skuJson : existing.sku_json,
       };
+      // 判别力**从合并后的值算**（不是从本帧的 skuRows 算）：列表轻帧不带 SKU 时，
+      // sku_json 走"只覆盖非空"保住了旧值，统计就必须跟着保住 —— 见函数头注释的三种跑法。
+      const stats = podLinkStats(merged.skuJson);
       dbRun(
         `UPDATE pl_shop_items SET title=?, image_url=?, price_text=?,
-          category=?, status=?, url=?, sku_json=?, raw_json=?, source=?, scraped_at=?, updated_at=datetime('now','localtime')
+          category=?, status=?, url=?, sku_json=?, pod_n_colors=?, pod_n_images=?,
+          raw_json=?, source=?, scraped_at=?, updated_at=datetime('now','localtime')
          WHERE id=?`,
-        [merged.title, merged.imageUrl, merged.priceText, merged.category, merged.status, merged.url, merged.skuJson, rawJson, source, now, existing.id],
+        [merged.title, merged.imageUrl, merged.priceText, merged.category, merged.status, merged.url, merged.skuJson, stats.nColors, stats.nImages, rawJson, source, now, existing.id],
       );
       updated += 1;
     } else {
+      const stats = podLinkStats(skuJson);
       dbRun(
         `INSERT INTO pl_shop_items
-          (shop_id, store_key, item_id, title, image_url, price_text, category, status, url, sku_json, raw_json, source, scraped_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [shopId, storeKey, itemId, title, imageUrl, priceText, category, status, url, skuJson, rawJson, source, now],
+          (shop_id, store_key, item_id, title, image_url, price_text, category, status, url,
+           sku_json, pod_n_colors, pod_n_images, raw_json, source, scraped_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [shopId, storeKey, itemId, title, imageUrl, priceText, category, status, url,
+         skuJson, stats.nColors, stats.nImages, rawJson, source, now],
       );
       inserted += 1;
     }

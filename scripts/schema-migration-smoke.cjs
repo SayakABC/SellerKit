@@ -1218,19 +1218,45 @@ try {
     UNIQUE(shop_id, store_key, item_id)
   )`);
   dbRun(`INSERT INTO pl_shop_items (item_id, sku_json) VALUES ('IT-OLD', '[]')`);
+  // 第二条老行带**真实矩阵**：用来钉死"补列必须回填"，而不只是"补列成功"。
+  // 形状取真库最常见的两种：色 A 挂 2 张图（这一色塌陷）、色 B 挂 1 张图。
+  dbRun(`INSERT INTO pl_shop_items (item_id, sku_json) VALUES ('IT-OLD2', ?)`, [
+    JSON.stringify([
+      { color: 'A', size: 'M', price: '1', imageUrl: 'https://ae01.alicdn.com/kf/SA1.jpg' },
+      { color: 'A', size: 'L', price: '1', imageUrl: 'https://ae01.alicdn.com/kf/SA2.jpg' },
+      { color: 'B', size: 'M', price: '2', imageUrl: 'https://ae01.alicdn.com/kf/SB1.jpg' },
+    ]),
+  ]);
   check('迁移前：老库确实没有这两列（夹具自证，免得断言打在别的形状上）', () => {
     const cols = dbQuery(`PRAGMA table_info(pl_shop_items)`).map((c) => String(c.name));
     assert.ok(!cols.includes('pod_n_colors') && !cols.includes('pod_n_images'), cols.join(','));
   });
   sdb2.ensureShopSchema();
   sidb2.ensureShopItemSchema();
-  check('迁移 v3 补列生效，存量行取默认值 0（= 还没算过，不是"零个颜色"）', () => {
+  check('迁移 v3 补列生效，空矩阵的存量行是 0（= 还没算过，不是"零个颜色"）', () => {
     const cols = dbQuery(`PRAGMA table_info(pl_shop_items)`).map((c) => String(c.name));
     assert.ok(cols.includes('pod_n_colors'), cols.join(','));
     assert.ok(cols.includes('pod_n_images'), cols.join(','));
     const r = dbQuery(`SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD'`)[0];
     assert.strictEqual(Number(r.a), 0);
     assert.strictEqual(Number(r.b), 0);
+  });
+  // ⚠️ 这条是本场景的重点：**只补列不回填**会让真库（已有 71 条链接）升级后两列全 0，
+  //    于是 `WHERE pod_n_images > 1`（找塌陷链接的唯一入口）筛出 0 行 ——
+  //    那不是"没有塌陷链接"，而是"没人算过"，而且长得跟真结论一模一样。
+  check('迁移 v3 回填存量：真实矩阵的老行升级后两列就是真实值，不是 0', () => {
+    const r = dbQuery(`SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD2'`)[0];
+    assert.strictEqual(Number(r.a), 2, '色 A / 色 B 两个色名');
+    assert.strictEqual(Number(r.b), 2, '色 A 下挂了 2 张图（塌陷）；色 B 的 1 张不该把它抬到 3');
+  });
+  check('迁移 v3 回填只补「没算过」的行：重跑迁移不改业务已写过的统计值', () => {
+    // 真·重入：把记账删掉逼 v1–v3 再跑一遍。这不是人为制造的场景 ——
+    // 用户跨版本升级、或另一个入口先跑了别的域，都可能让同一段迁移再走一次。
+    dbRun(`UPDATE pl_shop_items SET pod_n_colors=9, pod_n_images=9 WHERE item_id='IT-OLD2'`);
+    dbRun(`DELETE FROM sk_schema_migrations WHERE key='shop-item.main'`);
+    sidb2.ensureShopItemSchema();
+    const r = dbQuery(`SELECT pod_n_colors AS a FROM pl_shop_items WHERE item_id='IT-OLD2'`)[0];
+    assert.strictEqual(Number(r.a), 9, '回填的 WHERE 只挑两列都还是 0 的行，不能把 9 改回 2');
   });
   check('幂等：再跑一次不许 duplicate column name（SQLite 无 ADD COLUMN IF NOT EXISTS）', () => {
     sidb2.ensureShopItemSchema();

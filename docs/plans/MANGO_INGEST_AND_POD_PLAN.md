@@ -386,21 +386,23 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | **T3-1** | 迁移 **v14**：`pod_patterns` / `pod_variant_patterns` / `pod_sheet_batches` / `pod_sheet_ledger` / 视图 `pod_pattern_balance` / `pod_binding_worklist`；`pl_shop_items` 加 `pod_n_colors`、`pod_n_images`。**DDL 全文照抄附录 A**，ALTER 单独走 `cols()` 判断 | `order-db.ts` v14 | `npm run schema:smoke` 全绿；新库与旧库升级后 `pod%` 表齐全 | M1 |
 | **T3-2** | `electron/podImageKey.ts`：`imageKeyOf(url)` 只认 `/kf/([0-9A-Za-z]+)\.(jpg\|jpeg\|png\|webp)`，**不归一化 hash 段本身** | 新文件（纯函数，零依赖） | 单测 6 例：四种域名 / 带尺寸后缀 / 非 `/kf/` 返回 `''` | T3-1 |
 | **T3-3** | `variantKey` 加第 4 段 `imageKey?`（**只有非空才追加**，存量 3 段键逐字节不变）；`splitVariantKey` 的 `p.length !== 3` 改 `< 3 \|\| > 4` | `variantKey.ts:61-74` | 单测 5 例，含「不传 imageKey 与旧实现逐字节相同」这条防回归 | T3-2 |
-| **T3-4** | `podLinkStats(skuJson)` 纯函数（返回 `{nColors, nImages}`），在 `upsertShopItems` 的 **INSERT 与 UPDATE 两处都调** | `shop-item-db.ts` | 同一款采集重跑两次，两列值不变（不是停在第一次的值） | T3-1 |
+| **T3-4** | `podLinkStats(skuJson)` 纯函数（返回 `{nColors, nImages}`），在 `upsertShopItems` 的 **INSERT 与 UPDATE 两处都调**（✅ 施工时摘成独立纯模块 `electron/podLinkStats.ts`，并在迁移 v3 内回填存量，见施工记录偏离 3/4） | 新 `podLinkStats.ts` + `shop-item-db.ts` | 同一款采集重跑两次，两列值不变（不是停在第一次的值） | T3-1 |
 | **T3-5** | 视图 `pod_binding_worklist` 真库实跑，导出清单人工看一遍 | 附录 A | `SELECT COUNT(*)` = **560**，`SUM(image_key<>'')` = **50** | T3-1 |
-| **T3-6** | 塌陷链接**定向重算**：只对 `pod_n_colors=1 AND pod_n_images>1` 的链接重算 `variant_key`（加第 4 段），其余 64 链接**一个字节都别动** | 一次性脚本 `scripts/pod-rekey-collapsed.cjs` | 重算前后：非塌陷链接的 `variant_key` 集合**完全相同**；塌陷链接行数 = 重算前 | T3-3、T3-5 |
+| **T3-6** | 塌陷链接**定向重算**：只对 `pod_n_images > 1` 的链接重算 `variant_key`（加第 4 段），其余链接**一个字节都别动** | 一次性脚本 `scripts/pod-rekey-collapsed.cjs` | 重算前后：非塌陷链接的 `variant_key` 集合**完全相同**；塌陷链接行数 = 重算前 | T3-3、T3-5 |
 | **T3-7** | 绑定台 UI（内建页，**不做 UI 岛** —— 内建页不受 `DB_OPS` 10 op 上限限制）：一屏 24 张 SKU 色图，键盘 `Space` 多选 / `1-9` 快选 / `Enter` 确认跳下一张 / `N` 新建 / `S` 跳过 | `src/modules/pod/`（新模块） | 键盘流能连续绑 24 个槽位不出鼠标 | T3-5 |
 | **T3-8** | 采集铺开：`ae-profit` 把剩余 14 家店扫一遍（**这是覆盖率分母的前提**）；扫完重跑 T3-4 统计 | 扩展侧操作 + 现有采集功能 | `SELECT COUNT(DISTINCT shop_id) FROM pl_shop_items` ≥ 14 | 用户配合 |
 
 #### M3 施工记录（2026-11-01）
 
-已完成 **T3-1**（表 + 两个视图 + `pl_shop_items` 两列；T3-2 `imageKeyOf` 此前已落地）。
+已完成 **T3-1**（表 + 两个视图 + `pl_shop_items` 两列）与 **T3-4**（判别力统计）。
+T3-2 `imageKeyOf` / T3-3 `variantKey` 第 4 段此前随 M0 的 T0-6 已落地（`da2e4d8`），本阶段不必重做。
 
 | 任务 | 落点 | 验证 |
 |---|---|---|
 | T3-1 迁移/建表 | 新 `electron/pod-db.ts`（`POD_SCHEMA` + `ensurePodSchema` + `podSchemaReport`）；`shop-item-db.ts` 迁移 **v3** 补 `pod_n_colors` / `pod_n_images` | `schema:smoke` 新增 **[I] / [J] 两个场景共 8 条**：空库一条 ensure 建齐六件 / 幂等 / 老库无 pod 对象也能补回 / 幂等补列不吃 `duplicate column` |
+| T3-4 判别力统计 | 新 `electron/podLinkStats.ts`（纯函数 `podLinkStats` + `isCollapsedLink`）；`upsertShopItems` 的 **INSERT 与 UPDATE 两处**都调；迁移 v3 内**回填存量** | 单测 `tests/podLinkStats.spec.ts` **16 例**；`shop-item:smoke` 新增 **5 条**写路径断言；`schema:smoke` [J] 新增 **2 条**回填断言 |
 
-**两处偏离（都是施工时才发现的口径问题，比计划更严）**：
+**四处偏离（都是施工时才发现的口径问题，比计划更严）**：
 
 1. **没有 v14 版本步骤**。计划写"迁移 v14"，但本域全是**新对象**（四张表 + 两个视图），
    没有"老库形状需要追"的东西 —— `dbMigrate` 的幂等 `CREATE IF NOT EXISTS` 对老库就是补建、
@@ -412,13 +414,35 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
    第一版把建表挂在订单主干 ensure 里，`schema:smoke` 场景 H 当场红；后来的形状是
    `ensurePodSchema()` **先建输入域**（`ensureShopSchema` → `ensureShopItemSchema`）**再建视图**，
    依赖方向是"消费者 → 提供方"，并在 `check-cross-domain-edges.mjs` 里登记了这两条边。
+3. **`pod_n_images` 取"同一色名下不同图键个数的最大值"，不是"整条链接的图总数"**。
+   后者会把「5 个色各挂 1 张图」算成 5 —— 那种链接**完全不需要**图键（色名已经分开了），
+   而「1 个色挂 5 张图」才必须靠图键。两个数一样大、含义相反，而这两个数的**唯一用途**
+   就是区分它们。相应地，`isCollapsedLink()` 的判据只有 `nImages > 1` 一条；计划里写的
+   `pod_n_colors = 1 AND pod_n_images > 1` 是它的极端情形（真库 7 条塌陷链接恰好都是这种形状），
+   拿 `n_colors = 1` 当前提会在"1 个色塌了、另 1 个色正常"的链接上漏判 —— 那种同样会错印。
+4. **补列必须同时回填存量（最初写的"不回填"是错的）**。真库此刻已有 71 条链接，两列全 0 之后
+   `WHERE pod_n_images > 1`（找塌陷链接的唯一入口）会筛出 **0 行** —— 那不是"没有塌陷链接"，
+   而是"没人算过"，而且它和真结论长得一模一样，T3-5 / T3-6 会据此得出一个**静默的错事实**。
+   当时不回填的理由是"回填就是把统计口径写两遍"；`podLinkStats` 摘成纯模块后这条理由不成立了
+   —— 迁移与写路径调的是同一个函数。回填只挑「两列都还是 0」的行，已算过的一个字节不动。
 
-**门禁**：`schema:smoke` 全绿（含新增两场景）· `npm test` 1236 例 / 60 文件 · `verify`（跨域边已登记）·
-`verify:docs` · `lint`（0 error）· `shop-item:smoke` 53 项 · `order:smoke` · `mango:smoke` 21 项全绿。
+**门禁**：`schema:smoke` 全绿（[I] 5 条 / [J] 5 条）· `npm test` **1252 例 / 61 文件** ·
+`verify`（跨域边已登记）· `verify:docs` · `lint`（0 error）· `shop-item:smoke` **58 项** ·
+`order:smoke` · `mango:smoke` 21 项全绿。
+
+**变异测试（确认断言真的会咬人）**：
+
+| 改坏什么 | 预期变红 | 实际 |
+|---|---|---|
+| UPDATE 分支改用本帧的 `skuJson` 而不是 `merged.skuJson` | 「列表轻帧不把两列打回 0」 | ✅ 只红那 1 条 |
+| `nImages` 改成"整条链接的图总数" | 「三色各一图 → 1」等 5 例 | ✅ 单测 5 红 + 冒烟 2 红 |
+| 回填的 WHERE 去掉「两列都是 0」两个条件 | 「重跑迁移不改已写过的值」 | ✅ 红，9 被改回 2 |
 
 > ⚠️ 跑 electron 类冒烟要多加一句 `env -u ELECTRON_RUN_AS_NODE`：本机环境里继承了这个变量时，
 > `require('electron')` 返回的是**可执行文件路径**而不是 API 对象，症状是七个"色图采纳"用例
 > 齐刷刷报 `Cannot read properties of undefined (reading 'getPath')` —— 看着像代码坏了，其实是没起 Electron。
+> 另外 `mango:smoke` 偶尔会 `sandbox initialization failed: Operation not permitted`，
+> 加 `ELECTRON_DISABLE_SANDBOX=1` 即可（同上，是环境不是代码）。
 
 **阶段门禁**：
 
@@ -528,8 +552,9 @@ npm run order:smoke     # M0 起
 | **M4** | 报单闭环（T4-1~5） | 2 d | M3 | 一键出花纸报单 |
 | **M5** | 开机自动化（T5-1~6） | 1.5 d | M1、M2 | 重启电脑无人干预 |
 
-> 施工进度（2026-11-01）：**M0 / M1 / M2 已完成**，下一步是 M3（图案槽位域；T3-2 的 `imageKeyOf`
-> 已提前落地）。M2 的门禁数字：`npm test` 1236 例 / 60 文件、`today:ui` 377 项 PASS。
+> 施工进度（2026-11-01）：**M0 / M1 / M2 已完成**；M3 已完成 T3-1（图案槽位域建表）与 T3-4（判别力统计），
+> T3-2 / T3-3 早已随 M0 的 T0-6 落地。下一步 T3-5（待绑定清单真库实跑，验收 560 行 / 50 个带图键）。
+> M2 的门禁数字：`npm test` 1236 例 / 60 文件、`today:ui` 377 项 PASS；M3 至 T3-4 后为 1252 例 / 61 文件。
 
 **顺序不能换的三条**：
 

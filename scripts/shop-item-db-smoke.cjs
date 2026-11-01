@@ -151,6 +151,126 @@ check('SKU 矩阵规范化：props 两种形式都解析成 {color,size,price,im
   assert.deepStrictEqual(skus[2], { color: '藏蓝', size: 'XL', price: 'US $11.00', imageUrl: '' });
 });
 
+// ---- 判别力统计（2026-11-01 / M3·T3-4）----
+//
+// `pod_n_colors` / `pod_n_images` 决定"这条链接的变体键能不能唯一定位到图案"：
+// 每个色名一张图 ⇒ 色名就够；某个色名挂多张图 ⇒ 3 段键把几个图案并成一个（错印）。
+// 统计口径本身由 `podLinkStats` 的 16 例单测覆盖（`tests/podLinkStats.spec.ts`），
+// 这里只测**写路径**：一次落库有没有把两列写成"这次真正进库的那个 sku_json"的结果。
+//
+// ⚠️ 最要紧的一条是「列表轻帧不能把两列打回 0」：`sku_json` 走"只覆盖非空"保住了旧值，
+//    统计若从本帧的 `skuRows` 算，两列会被清成 0，而库里明明还有 8 个色 ——
+//    界面上就变成"统计说这条链接没有色，绑定台却列出 8 个槽位"，没人判得出哪个是真的。
+
+/** 读一行的两列（列不在这条用例的语义里，但读不到就等于没写） */
+const podStats = (itemId) =>
+  dbGet(`SELECT pod_n_colors AS c, pod_n_images AS i FROM pl_shop_items WHERE item_id = ?`, [itemId]);
+
+check('判别力统计：入库即算（三色各一图 → n_colors=3、n_images=1，不是"图总数 3"）', () => {
+  reset();
+  const img = (id) => `https://ae01.alicdn.com/kf/${id}.jpg`;
+  sidb.upsertShopItems(
+    frame({}, [
+      item({
+        itemId: 'P1',
+        skus: [
+          { color: 'Red', size: 'M', price: '1', imageUrl: img('S1') },
+          { color: 'Blue', size: 'M', price: '1', imageUrl: img('S2') },
+          { color: 'Green', size: 'M', price: '1', imageUrl: img('S3') },
+        ],
+      }),
+    ]),
+  );
+  const s = podStats('P1');
+  assert.strictEqual(Number(s.c), 3, '三个色名');
+  assert.strictEqual(Number(s.i), 1, 'n_images 是"一个色名最多挂几张图"，不是整条链接的图总数');
+});
+
+check('判别力统计：同色 S/M/L 共用一张图 → n_images=1（按行数算会得 3，全库都会被误判塌陷）', () => {
+  reset();
+  const u = 'https://ae01.alicdn.com/kf/Same.jpg';
+  sidb.upsertShopItems(
+    frame({}, [
+      item({
+        itemId: 'P2',
+        skus: [
+          { color: 'Picture color', size: 'S', price: '1', imageUrl: u },
+          { color: 'Picture color', size: 'M', price: '1', imageUrl: u },
+          { color: 'Picture color', size: 'L', price: '1', imageUrl: u },
+        ],
+      }),
+    ]),
+  );
+  const s = podStats('P2');
+  assert.strictEqual(Number(s.c), 1);
+  assert.strictEqual(Number(s.i), 1, '同一张图的三个尺码是一张图');
+});
+
+check('判别力统计：同一色名挂三张不同图 → n_images=3（真库 7/71 链接的塌陷形状）', () => {
+  reset();
+  const img = (id) => `https://ae01.alicdn.com/kf/${id}.jpg`;
+  sidb.upsertShopItems(
+    frame({}, [
+      item({
+        itemId: 'P3',
+        skus: ['S1', 'S2', 'S3'].map((id, i) => ({ color: 'Picture color', size: 'M', price: String(i), imageUrl: img(id) })),
+      }),
+    ]),
+  );
+  const s = podStats('P3');
+  assert.strictEqual(Number(s.c), 1);
+  assert.strictEqual(Number(s.i), 3);
+});
+
+check('判别力统计：详情帧之后来一帧列表轻采（不带 SKU）→ 两列保持，不被打回 0', () => {
+  reset();
+  const img = (id) => `https://ae01.alicdn.com/kf/${id}.jpg`;
+  const detail = frame({}, [
+    item({
+      itemId: 'P4',
+      skus: [
+        { color: 'Red', size: 'M', price: '1', imageUrl: img('S1') },
+        { color: 'Blue', size: 'M', price: '1', imageUrl: img('S2') },
+      ],
+    }),
+  ]);
+  sidb.upsertShopItems(detail);
+  assert.strictEqual(Number(podStats('P4').c), 2);
+
+  // 列表帧：没有 skus，只有标题/价 —— 这是「全店重采」的常态
+  const r = sidb.upsertShopItems(frame({}, [item({ itemId: 'P4', title: '列表帧改的标题' })]));
+  assert.strictEqual(r.updated, 1);
+  const s = podStats('P4');
+  assert.strictEqual(Number(s.c), 2, 'sku_json 保住了旧矩阵，统计就必须跟着保住');
+  assert.strictEqual(Number(s.i), 1);
+});
+
+check('判别力统计：列表轻帧先到（0）→ 详情帧后到 → 必须变成真实值（不是停在第一次的 0）', () => {
+  reset();
+  sidb.upsertShopItems(frame({}, [item({ itemId: 'P5', title: '只有列表信息' })]));
+  assert.deepStrictEqual(
+    { c: Number(podStats('P5').c), i: Number(podStats('P5').i) },
+    { c: 0, i: 0 },
+    '列表帧没有 SKU 矩阵，两列应是 0（"没算过"）',
+  );
+
+  const img = (id) => `https://ae01.alicdn.com/kf/${id}.jpg`;
+  sidb.upsertShopItems(
+    frame({}, [
+      item({
+        itemId: 'P5',
+        skus: [
+          { color: 'Picture color', size: 'M', price: '1', imageUrl: img('S1') },
+          { color: 'Picture color', size: 'M', price: '2', imageUrl: img('S2') },
+        ],
+      }),
+    ]),
+  );
+  const s = podStats('P5');
+  assert.strictEqual(Number(s.c), 1, 'UPDATE 那一处也要算 —— 只写 INSERT 会永远停在 0');
+  assert.strictEqual(Number(s.i), 2);
+});
+
 // ---- 尺码归一（2026-10-17）----
 //
 // 真库取证：546 条 SKU 里 78 条的尺码带卖家写的**修饰**，只有三种形态 ——

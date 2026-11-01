@@ -207,6 +207,11 @@ function shopTableSql(table: string, ifNotExists = false): string {
     name TEXT NOT NULL DEFAULT '',
     name_key TEXT NOT NULL DEFAULT '',
     platform_shop_id TEXT NOT NULL DEFAULT '',
+    -- 芒果店长的 authId（店铺在 ERP 里的 id）。**与 platform_shop_id 不是一回事**：
+    -- 前者是速卖通给的店铺 ID，后者是 ERP 内部编号。芒果订单帧只带 authId ⇒ 订单→店铺
+    -- 的硬关联只能靠它（靠店名文本猜，"十店" 与 "十号店" 就会落错店，而落错店会让图案跟着错）。
+    -- 空 = 还没学到；首次同步匹配成功时**只补空**（见 bindErpShopIdIfEmpty）。
+    erp_shop_id TEXT NOT NULL DEFAULT '',
     shop_url TEXT NOT NULL DEFAULT '',
     shop_url_raw TEXT NOT NULL DEFAULT '',
     site TEXT NOT NULL DEFAULT '',
@@ -324,6 +329,18 @@ function ensureShopDepositColumn(): void {
   dbRun(`ALTER TABLE sk_shops ADD COLUMN deposit_received_at TEXT NOT NULL DEFAULT ''`);
 }
 
+/**
+ * 老库补 `erp_shop_id`（芒果 `authId`）。
+ *
+ * 只加列、不回填：存量 16 家店都没有这个值，而"哪家店对应哪个 authId"不是能从库里推出来的
+ * —— 硬猜等于给订单挑一个店。空 = 还没学到；第一次同步匹配成功后**只补空**地写上。
+ */
+function ensureShopErpShopIdColumn(): void {
+  if (!tableExists('sk_shops')) return;
+  if (columnSet('sk_shops').has('erp_shop_id')) return;
+  dbRun(`ALTER TABLE sk_shops ADD COLUMN erp_shop_id TEXT NOT NULL DEFAULT ''`);
+}
+
 function runShopColumnsMigration(): void {
   migrate(SHOP_COLUMNS_KEY, [
     { version: 1, name: 'sk_shops 补 score（记分分值）', up: ensureShopScoreColumn },
@@ -331,6 +348,11 @@ function runShopColumnsMigration(): void {
       version: 2,
       name: 'sk_shops 补 deposit_received_at（保证金到账时间）',
       up: ensureShopDepositColumn,
+    },
+    {
+      version: 3,
+      name: 'sk_shops 补 erp_shop_id（芒果 authId，订单→店铺的硬关联）',
+      up: ensureShopErpShopIdColumn,
     },
   ]);
 }
@@ -680,6 +702,69 @@ export interface ShopGate {
   pending: ShopGateRow[];
   /** 覆盖的订单行数合计（"够不够严重"看这个数，不看店铺家数） */
   orders: number;
+}
+
+/** 店铺身份三元组（芒果同步的匹配输入之一；只读） */
+export interface ShopIdentityRow {
+  id: number;
+  /** 店铺名原文（订单里要写的规范名 —— 采集单匹配上之后写这个，不写芒果 `alias`） */
+  name: string;
+  /** 归一键（`toNameKey` 口径；与 `sk_name_map.raw_key` 同一份归一） */
+  nameKey: string;
+  /** 芒果 `authId`；空 = 还没学到 */
+  erpShopId: string;
+}
+
+/**
+ * 全部店铺的身份清单（供芒果同步做"authId → 店名"的匹配）。
+ *
+ * 为什么不让同步层自己 `SELECT * FROM sk_shops`：店名归一口径只有 `toNameKey` 一份，
+ * 谁按自己的方式 trim，谁就会把一家店拆成两家（"十店" 与 "十店 "）。
+ *
+ * 只返回**活跃店**（`status='active'`）：停用/封店/退店的店不该再接新订单，否则新单会落到一个
+ * 已经不做的地方，拣货单上永远多一行"这家店还有单"。历史订单的店铺仍是那家店（`sk_shops` 行还在，
+ * 只是不再参与匹配）—— 所以这是"匹配范围"，不是"数据过滤"。
+ */
+export function shopIdentityIndex(): ShopIdentityRow[] {
+  if (!tableExists('sk_shops')) return [];
+  return dbQuery<{ id: number; name: string; name_key: string; erp_shop_id: string }>(
+    `SELECT id, name, name_key, erp_shop_id FROM sk_shops
+      WHERE status = 'active' ORDER BY id`,
+  ).map((r) => ({
+    id: Number(r.id) || 0,
+    name: String(r.name ?? ''),
+    nameKey: String(r.name_key ?? '') || toNameKey(String(r.name ?? '')),
+    erpShopId: String(r.erp_shop_id ?? ''),
+  }));
+}
+
+/**
+ * 把芒果 `authId` **只补空**地绑到某家店上（首次同步匹配成功后调用）。
+ *
+ * 三条纪律：
+ *   · **只补空** —— 人已经绑过的（哪怕绑错了）不覆盖，覆盖等于把人的决定悄悄改掉；
+ *   · **一对多不绑** —— 若这个 authId 已经绑在另一家店上，说明前面某一步识别有问题，
+ *     此时改写会让两家店指向同一个 ERP 店铺（订单全部落错店），宁可留空让人看见；
+ *   · **不改店名** —— 名字是业务身份（ADR-002），同步只写"这家店在芒果里叫哪个 id"。
+ *
+ * @returns 真的写入了才返回 true（调用方据此判断"这次学到了新东西"）
+ */
+export function bindErpShopIdIfEmpty(shopId: number, erpShopId: string): boolean {
+  const id = Number(shopId) || 0;
+  const v = String(erpShopId ?? '').trim().slice(0, 64);
+  if (id <= 0 || !v) return false;
+  if (!tableExists('sk_shops')) return false;
+  const taken = dbGet<{ id: number }>(
+    `SELECT id FROM sk_shops WHERE erp_shop_id = ? AND id <> ? LIMIT 1`,
+    [v, id],
+  );
+  if (taken) return false;
+  const r = dbRun(
+    `UPDATE sk_shops SET erp_shop_id = ?, updated_at = datetime('now','localtime')
+      WHERE id = ? AND erp_shop_id = ''`,
+    [v, id],
+  );
+  return Number(r.changes) > 0;
 }
 
 /**

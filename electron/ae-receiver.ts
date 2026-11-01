@@ -3,7 +3,7 @@
 //
 // 安全设计（对本机其他进程开放 HTTP 的最小暴露面）：
 //   - 仅监听 127.0.0.1 loopback，不绑定 0.0.0.0；
-//   - 固定协议路径白名单（GET /ae/ping、POST /ae/ingest），其余 404；
+//   - 固定协议路径白名单（GET /ae/ping、POST /ae/ingest、POST /mango/ingest），其余 404；
 //   - X-Ae-Token 头鉴权（默认常量，可用环境变量 AE_RECEIVER_TOKEN 覆盖；扩展侧 options 同步配置）；
 //   - body ≤1MB、orders ≤100/批、单条 schema 校验失败跳过（双防线：扩展 protocol.js 同限）；
 //   - 简单滑动窗口限速（60 次/分），超限 429。
@@ -22,6 +22,7 @@ import {
   sanitizeShopItem,
   listScrapedItemIds,
 } from './shop-item-db';
+import { ingestMangoOrders } from './mango-sync';
 
 const { app } = require('electron');
 
@@ -40,9 +41,26 @@ const PATH_INGEST = '/ae/ingest';
 const PATH_ITEMS_INGEST = '/ae/shop-items/ingest';
 /** 只读：问「这家店已经采过哪些款」（扩展跨轮去重的真源头，2026-10-18） */
 const PATH_ITEMS_KNOWN = '/ae/shop-items/known';
+/**
+ * 芒果订单同步（`SellerKitExtensions/extensions/mango-order`）。
+ *
+ * 为什么单独一条路由而不是复用 `/ae/ingest`：两者帧结构不同（芒果是 ERP 的行形状，
+ * 带 `authId`/`attrMap`/`skuCode`），而且芒果这边要走**认店 + 图落地 + 同步日志**三段，
+ * 与速卖通采集的 `upsertOrderBatch` 不是一条链。共用入口只会让两套口径在一个函数里打架。
+ * 防线（token / 限速 / 1MB / 条数上限）**完全共用**，不另开一套。
+ */
+const PATH_MANGO_INGEST = '/mango/ingest';
 /** 接受 v1（顶层费用便捷字段）与 v2（结构化 fees 数组）两版 schema，字段演进不阻断老扩展 */
 const ACCEPT_SCHEMAS = ['ae-order/v1', 'ae-order/v2'];
 const SCHEMA_SHOP_ITEM = 'ae-shop-item/v1';
+/** 芒果帧协议（扩展 `mango-main.js` 的 `schema` 常量，改一处必须改两处） */
+const SCHEMA_MANGO = 'mango-order/v1';
+/**
+ * 芒果单批上限比速卖通宽（100 → 200）：芒果是"一次同步把待发货全抓回来"，
+ * 不分批；而 1MB body 上限对 200 单 × 约 3KB ≈ 600KB 仍有余量。
+ * 超过上限时扩展会收到 413 并提示分批（它的 `hint` 里已写明）。
+ */
+const MAX_BATCH_MANGO = 200;
 const HEADER_TOKEN = 'X-Ae-Token';
 
 let server: http.Server | null = null;
@@ -295,6 +313,74 @@ function handleItemsIngest(req: http.IncomingMessage, res: http.ServerResponse):
 }
 
 /**
+ * 芒果订单入库端点（POST /mango/ingest）。
+ *
+ * 与 `/ae/ingest` 的差别只在**业务编排**（认店 / 图落地 / 同步日志），防线完全一致：
+ * token、60 次/分限速、1MB body、单批条数上限。
+ *
+ * 两个刻意的宽松：
+ *   ① **`orders` 允许空数组** —— 待发货为 0 单时扩展也会推一帧空数组，
+ *      而"今天真的没单"必须在 `sk_sync_log` 里留痕（否则永远分不出"没单"和"抓不到"）；
+ *   ② 不在这里校验单条订单的字段 —— 那是 `mango-ingest.toInternal` 的职责（它按帧给原因），
+ *      HTTP 层替它挡会让"这一单为什么没进来"变成一个 400 错误码，而不是一条可读的 skips。
+ */
+function handleMangoIngest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const header = req.headers[HEADER_TOKEN.toLowerCase()];
+  const provided = Array.isArray(header) ? header[0] ?? '' : header ?? '';
+  if (String(provided) !== TOKEN) {
+    writeJson(res, 401, { ok: false, error: 'token 无效' });
+    return;
+  }
+  if (rateLimited()) {
+    writeJson(res, 429, { ok: false, error: '请求过于频繁，请稍后再试' });
+    return;
+  }
+
+  readBody(req)
+    .then(async (buf) => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(buf.toString('utf-8'));
+      } catch {
+        writeJson(res, 400, { ok: false, error: 'body 不是合法 JSON' });
+        return;
+      }
+      if (!payload || typeof payload !== 'object') {
+        writeJson(res, 400, { ok: false, error: 'payload 必须是对象' });
+        return;
+      }
+      const p = payload as Record<string, unknown>;
+      if (p.schema !== SCHEMA_MANGO) {
+        writeJson(res, 400, {
+          ok: false,
+          error: `不支持的 schema：${String(p.schema)}（支持 ${SCHEMA_MANGO}）`,
+        });
+        return;
+      }
+      if (!Array.isArray(p.orders)) {
+        writeJson(res, 400, { ok: false, error: 'orders 必须是数组（待发货 0 单时传空数组）' });
+        return;
+      }
+      if (p.orders.length > MAX_BATCH_MANGO) {
+        writeJson(res, 400, {
+          ok: false,
+          error: `orders 单批不能超过 ${MAX_BATCH_MANGO} 条（本次 ${p.orders.length}），请分批推送`,
+        });
+        return;
+      }
+      const result = await ingestMangoOrders(p);
+      lastIngestAt = new Date().toISOString();
+      if (!result.ok) lastError = result.warnings[0] || '芒果同步未取到数据';
+      writeJson(res, 200, result);
+    })
+    .catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      lastError = msg;
+      writeJson(res, msg.includes('1MB') ? 413 : 400, { ok: false, error: msg });
+    });
+}
+
+/**
  * 「这家店已经采过哪些款」只读端点（GET /ae/shop-items/known?storeId=&url=&name=）。
  *
  * ⭐ 这是**扩展跨轮去重的真源头**（2026-10-18 用户报障「库里已有 40 条，第二次点采集
@@ -360,6 +446,8 @@ export function startAeReceiver(): boolean {
           handleIngest(req, res);
         } else if (req.method === 'POST' && url === PATH_ITEMS_INGEST) {
           handleItemsIngest(req, res);
+        } else if (req.method === 'POST' && url === PATH_MANGO_INGEST) {
+          handleMangoIngest(req, res);
         } else if (req.method === 'GET' && url === PATH_ITEMS_KNOWN) {
           handleItemsKnown(req, res);
         } else {

@@ -126,28 +126,34 @@ check('空库：未归一名单为空、汇总全零（源表为空）', () => {
 
 // `shop.main` 的整表合并迁移已随「未正式发布、无存量库」退役（现在只保留 v1 版本占位 +
 // v2 清掉 `sk_shop_sets`），老形状夹具（店铺行 + 账号套装 + 邮箱账号）不再需要。
-// `shop.columns`（score / deposit_received_at）仍要验：下面这条用例守的就是那两条补列分支。
+// `shop.columns`（score / deposit_received_at / erp_shop_id）仍要验：下面这条用例守的就是那几条补列分支。
 
-check('前置：当前库的表形状已含 score / deposit_received_at，shop.columns 账本记到 v2', () => {
+check('前置：当前库的表形状已含 score / deposit_received_at / erp_shop_id，shop.columns 账本记到 v3', () => {
   const cols = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
   assert.ok(cols.includes('score'), '新库的建表语句必须自带 score —— 否则只有老库能补，新库反而缺列');
   assert.ok(
     cols.includes('deposit_received_at'),
     '新库的建表语句必须自带 deposit_received_at（保证金到账时间）',
   );
+  // v3（2026-11-01，芒果同步）：`erp_shop_id` = 芒果 `authId`，是订单→店铺的硬关联锚点。
+  // 新库的建表语句也必须自带 —— 只给老库补列的话，新装用户反而拿不到这个字段。
+  assert.ok(
+    cols.includes('erp_shop_id'),
+    '新库的建表语句必须自带 erp_shop_id（否则新装用户的芒果订单永远匹配不到店）',
+  );
   // 账本一 key 一行、只存**最新版本**（migrate 的 upsert 语义），不是每步一行
   assert.strictEqual(
     dbQuery(`SELECT version FROM sk_schema_migrations WHERE key = 'shop.columns'`)[0].version,
-    2,
-    'shop.columns 应记到 v2（v1 score + v2 deposit_received_at；它与 shop.main 的版本号互不影响）',
+    3,
+    'shop.columns 应记到 v3（v1 score + v2 deposit_received_at + v3 erp_shop_id；与 shop.main 的版本号互不影响）',
   );
 });
 
-// ⚠️ 本脚本的库是现建的，建表语句已含这两列 ⇒ ALTER 分支一次都不会执行。
-// 必须造一张「当前形状但既没有 score 也没有 deposit_received_at」的老表，并把 shop.columns 的账本倒回 0。
-// 注意**不能只 DROP 表就调 ensure**：`dbMigrate(SCHEMA)` 会按新形状把表建出来（带这两列），
+// ⚠️ 本脚本的库是现建的，建表语句已含这几列 ⇒ ALTER 分支一次都不会执行。
+// 必须造一张「当前形状但既没有 score / deposit_received_at / erp_shop_id」的老表，并把 shop.columns 的账本倒回 0。
+// 注意**不能只 DROP 表就调 ensure**：`dbMigrate(SCHEMA)` 会按新形状把表建出来（带这些列），
 // 补列分支照样恒绿。所以老表要自己按 DDL 建好，让 `CREATE TABLE IF NOT EXISTS` 变成空操作。
-check('老库补列：shop.columns v1/v2 给 sk_shops 补 score 与 deposit_received_at，老行默认值正确、数据不丢、幂等', () => {
+check('老库补列：shop.columns v1/v2/v3 给 sk_shops 补 score / deposit_received_at / erp_shop_id，老行默认值正确、数据不丢、幂等', () => {
   reset();
   dbRun(`DROP TABLE IF EXISTS sk_shops`);
   dbRun(`CREATE TABLE sk_shops (
@@ -186,14 +192,16 @@ check('老库补列：shop.columns v1/v2 给 sk_shops 补 score 与 deposit_rece
   const before = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
   assert.ok(!before.includes('score'), '前置条件：老表本来就没有 score 列');
   assert.ok(!before.includes('deposit_received_at'), '前置条件：老表本来也没有 deposit_received_at 列');
+  assert.ok(!before.includes('erp_shop_id'), '前置条件：老表更不可能有 erp_shop_id 列（v3）');
 
   sdb.ensureShopSchema();
 
   const after = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
   assert.ok(after.includes('score'), 'shop.columns v1 必须把 score 补上');
   assert.ok(after.includes('deposit_received_at'), 'shop.columns v2 必须把 deposit_received_at 补上');
+  assert.ok(after.includes('erp_shop_id'), 'shop.columns v3 必须把 erp_shop_id 补上');
   const row = dbGet(
-    `SELECT name, site, status, note, score, deposit_received_at FROM sk_shops WHERE id = ?`,
+    `SELECT name, site, status, note, score, deposit_received_at, erp_shop_id FROM sk_shops WHERE id = ?`,
     [seeded.lastInsertRowid],
   );
   assert.ok(row, '补列不许丢行');
@@ -202,6 +210,9 @@ check('老库补列：shop.columns v1/v2 给 sk_shops 补 score 与 deposit_rece
   assert.strictEqual(row.note, '这条备注不许丢');
   assert.strictEqual(Number(row.score), 0, '老行没有记分记录 ⇒ 0（未记录），不是 NULL、也不是脏值');
   assert.strictEqual(row.deposit_received_at, '', '老行没有保证金记录 ⇒ 空串（未填写），不是 NULL');
+  // v3 的默认值必须是空串：空 = "还没学到这个 authId"，落 NULL 会让
+  // `WHERE erp_shop_id = ?` 与 `erp_shop_id = ''` 两套判断分叉
+  assert.strictEqual(row.erp_shop_id, '', '老行没有任何 ERP 绑定 ⇒ 空串（未学到），不是 NULL');
 
   // 幂等：再 ensure 两次不重复 ALTER、不产生额外行
   sdb.ensureShopSchema();

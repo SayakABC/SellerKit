@@ -230,6 +230,7 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | T1-3 的 HTTP 端到端 | ✅ 错 token → 401；`schema` 错 → 400（提示支持哪个）；正确帧 → 200 `{ok:true,inserted:1}` 且订单落库；空帧但 `totalItems=7` → **200 而体内 `ok:false`**（帧合法、业务失败，扩展能看见"没抓到"） |
 | 真库副本跑 `shop.columns` v3（不动线上库） | ✅ `version 2 → 3`；16 家店**行数不变**；`erp_shop_id` 全部空串（未学到，不是 NULL）；二次运行无 `duplicate column name` |
 | `npm test` | ✅ 1166 例 / 56 文件（新增 `mangoIngest` 18 例、`podImageKey` 6 例） |
+| T1-8 扩展侧（`SellerKitExtensions`） | ✅ manifest 补 `alarms`（**静默权限**，`chrome://extensions` 无警告）并升到 1.1.0；`alarms.getAll()` 只有 **1 条** `mango:autoSync`（30 分钟）；12 组 vm 单测驱动真实监听器；两次变异确认会红（去掉次数上限 → 红；`active:false` 改 `true` → 红） |
 | `verify` / `verify:docs` / `lint` / `schema:smoke` / `order:smoke` / `shop:smoke` | ✅ 全绿（lint 0 error） |
 
 **与上表的偏离（都已回改上表，此处只记原因）**：
@@ -249,6 +250,9 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 7. **冒烟的图片下载是打桩的（不联网）**：桩必须在 `require order-image-land` **之前**替换 —— 它在模块加载时就把
    `downloadFile` 抓走了，之后改 `http-client.downloadFile` 对它无效。两次变异测试确认这些守卫真的会红：
    去掉变体键第 4 段 → 3 项红；关掉行数保护 → 1 项红。
+8. **T1-8 的补跑是「刷新已有的列表页」而不是「有新数据才补」**：列表页开着但几小时前抓失败了（当时应用没启动），
+   它**不会再自己发请求** —— 不刷新就永远卡在失败态。所以 `hasListTab` 的结论是 `reload` 而不是"等着它自己抓"。
+   另外 `ok:false`（抓 0 条但芒果说有单）**不置"今天已同步"**：那正是最需要补跑的时候。
 
 > **D-1 的现场线索（2026-11-01，真库副本只读导出）**：`sk_shops` 共 **16 家**，其中 **5 家已 `exited`**
 > （八店、十二店、二店、三店、五店），活跃 **11 家**；`platform_shop_id`（`ShopXXXX Store`）只登记了 9 家。

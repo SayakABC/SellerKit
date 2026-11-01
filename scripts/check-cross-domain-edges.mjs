@@ -137,13 +137,30 @@ const DB_EDGES = [
     symbols: ['ensureShopSchema', 'getShop', 'normalizeShopUrl'],
     why: '采集商品认店：先比归一化 URL / storeId，认不出落未登记桶（绝不自动建店）；建表也找 owner（读链 LEFT JOIN sk_shops，全新库第一站是「店铺商品」时不能炸）',
   },
+  // 图案域（M3·T3-1，2026-11-01）：它的「待绑定清单」视图从**商品快照**摊槽位，
+  // 键的第一段是**店名** —— 两张输入表缺一张视图就建不出来。
+  // 方向是"消费者 → 提供方"（图案域读它们，所以图案域先把它们的建表跑到），
+  // 刻意**不**反过来让商品快照域替图案域建视图：底层域不该知道上层域的存在。
+  // ⚠️ 这个顺序不是口味问题：跨域视图建早了会让**整个库**的语句报
+  //   `error in view pod_binding_worklist: no such table: main.pl_shop_items`（2026-11-01 实测）。
+  {
+    from: 'pod-db.ts',
+    to: './shop-item-db',
+    symbols: ['ensureShopItemSchema'],
+    why: '槽位从 pl_shop_items.sku_json 摊出来；本域入口先确保输入表在，再建跨域视图（建早了整库语句都会报错）',
+  },
+  {
+    from: 'pod-db.ts',
+    to: './shop-db',
+    symbols: ['ensureShopSchema'],
+    why: '槽位键的第一段是店铺名（读 sk_shops）；且商品快照域的迁移自己也要 sk_shops 先就位',
+  },
   {
     from: 'shop-product-db.ts',
     to: './product-db',
     symbols: ['SKU_POOL_SOURCE', 'ensureProductSchema', 'ensureSkuSchema', 'skuPoolSql'],
     why: '商品↔产品关联共用「商品池」SQL（池的唯一定义在 product-db）',
-  },
-  {
+  },  {
     from: 'product-db.ts',
     to: './shop-item-db',
     symbols: ['itemShopIndex', 'shopIdByItemId', 'skuColorByItemImage'],

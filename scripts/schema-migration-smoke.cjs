@@ -1111,6 +1111,140 @@ try {
   /* 清理失败不影响结论 */
 }
 
+// ── [I] 图案域（M3·T3-1）：四张表 + 两个视图，一条 `ensurePodSchema()` 全建齐 ─────────
+//
+// 为什么这条必须单列：`pod_binding_worklist` 读的是 `pl_shop_items` / `sk_shops`
+// （别的域的表）。SQLite 在**准备任何语句**时都会解析 schema 里的视图 ——
+// 视图引用了不存在的表时，报的错打在**别处**的 SQL 上
+// （`error in view pod_binding_worklist: no such table: main.pl_shop_items`，2026-11-01 场景 H 当场踩到）。
+// 也就是说"跨域视图建早了"不是"这张视图不可用"，而是整个库的语句都可能失败。
+// 所以它只能由"确定输入已就位"的那一处建：图案域自己的 `ensurePodSchema`（先建输入域，再建视图）。
+console.log('\n[I] 图案域建表：一条 ensure 全建齐（含跨域视图的前提）');
+const dirI = newDb('pod');
+try {
+  const pod = require(path.join(ROOT, 'dist', 'electron', 'pod-db.js'));
+
+  // ① 空库直接调：输入域（sk_shops / pl_shop_items）由它自己去建，六件必须齐全
+  check('空库上 ensurePodSchema 一次建齐六件（四表 + 余量视图 + 待绑定清单）', () => {
+    pod.ensurePodSchema();
+    const rep = pod.podSchemaReport();
+    assert.deepStrictEqual(rep.missing, [], JSON.stringify(rep));
+    assert.strictEqual(rep.tables.length, 4);
+    assert.strictEqual(rep.views.length, 2);
+  });
+
+  // ② 幂等：每次入口都会调它（绑定台/看板/报单页），重跑必须不报错
+  check('幂等：重复 ensure 不报错、六件仍在（CREATE IF NOT EXISTS 就是"补建"）', () => {
+    pod.ensurePodSchema();
+    pod.ensurePodSchema();
+    assert.deepStrictEqual(pod.podSchemaReport().missing, []);
+  });
+
+  // ③ 老库升级路径：库里没有 pod 对象／没有那两列（等同旧版本用户）→ ensure 必须补回
+  dbRun('DROP VIEW IF EXISTS pod_binding_worklist');
+  dbRun('DROP VIEW IF EXISTS pod_pattern_balance');
+  dbRun('DROP TABLE IF EXISTS pod_sheet_ledger');
+  dbRun('DROP TABLE IF EXISTS pod_sheet_batches');
+  dbRun('DROP TABLE IF EXISTS pod_variant_patterns');
+  dbRun('DROP TABLE IF EXISTS pod_patterns');
+  check('老库（完全没有 pod% 对象）升级后同样建齐，且不需要版本步骤', () => {
+    pod.ensurePodSchema();
+    assert.deepStrictEqual(pod.podSchemaReport().missing, []);
+    assert.strictEqual(
+      migrationVersion('pod.main'),
+      0,
+      '图案域不该有版本步骤（全是新对象，幂等 CREATE 就是升级路径）',
+    );
+  });
+
+  // ④ 待绑定清单的键必须与 variantKey() 同构：char(0) 分隔、三/四段
+  dbRun(`INSERT INTO sk_shops (id, name, name_key, erp_shop_id, status) VALUES (1, '一店', '一店', '', 'active')`);
+  dbRun(
+    `INSERT INTO pl_shop_items (shop_id, store_key, item_id, sku_json)
+     VALUES (1, '', 'IT-9', '[{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A1.jpg"},{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A2.jpg"}]')`,
+  );
+  check('待绑定清单：同色两个图 ⇒ 键带第 4 段（图键），这是"色名塌陷"的唯一判据', () => {
+    const rows = dbQuery(`SELECT variant_key, image_key, imgs_in_name FROM pod_binding_worklist`);
+    assert.strictEqual(rows.length, 2, `两个图应摊成两个槽位：${JSON.stringify(rows)}`);
+    for (const r of rows) {
+      const parts = String(r.variant_key).split('\u0000');
+      assert.strictEqual(parts.length, 4, `塌陷链接的键必须是四段：${JSON.stringify(parts)}`);
+      assert.strictEqual(parts[3], String(r.image_key));
+    }
+  });
+  check('待绑定清单：同色只有一个图 ⇒ 键仍是三段（不许多出空段）', () => {
+    dbRun(
+      `INSERT INTO pl_shop_items (shop_id, store_key, item_id, sku_json)
+       VALUES (1, '', 'IT-10', '[{"color":"白","imageUrl":"https://img.alicdn.com/kf/B1.jpg"}]')`,
+    );
+    const r = dbQuery(`SELECT variant_key FROM pod_binding_worklist WHERE item_id = 'IT-10'`)[0];
+    assert.strictEqual(String(r.variant_key).split('\u0000').length, 3, String(r.variant_key));
+  });
+} finally {
+  closeDb();
+  try {
+    fs.rmSync(dirI, { recursive: true, force: true });
+  } catch {
+    /* 清理失败不影响结论 */
+  }
+}
+
+// ── [J] `pl_shop_items` 补两列（M3·T3-4 的前置）：老库走 ALTER，新库建表即带 ────────
+console.log('\n[J] pl_shop_items += pod_n_colors / pod_n_images（判别力统计列）');
+const dirJ = newDb('pod-cols');
+try {
+  const sidb2 = require(path.join(ROOT, 'dist', 'electron', 'shop-item-db.js'));
+  const sdb2 = require(path.join(ROOT, 'dist', 'electron', 'shop-db.js'));
+  // 手写一份**改动前**的建表语句 = 老形状夹具（没有那两列）。抄 DDL 是有意的：
+  // 夹具必须忠于"用户机器上现在长什么样"，而不是忠于当前 SCHEMA（否则这条永远恒绿）。
+  dbRun(`CREATE TABLE pl_shop_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id INTEGER NOT NULL DEFAULT 0,
+    store_key TEXT NOT NULL DEFAULT '',
+    item_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    image_url TEXT NOT NULL DEFAULT '',
+    image_id INTEGER NOT NULL DEFAULT 0,
+    price_text TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    sku_json TEXT NOT NULL DEFAULT '',
+    raw_json TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'ae-scrape',
+    scraped_at INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(shop_id, store_key, item_id)
+  )`);
+  dbRun(`INSERT INTO pl_shop_items (item_id, sku_json) VALUES ('IT-OLD', '[]')`);
+  check('迁移前：老库确实没有这两列（夹具自证，免得断言打在别的形状上）', () => {
+    const cols = dbQuery(`PRAGMA table_info(pl_shop_items)`).map((c) => String(c.name));
+    assert.ok(!cols.includes('pod_n_colors') && !cols.includes('pod_n_images'), cols.join(','));
+  });
+  sdb2.ensureShopSchema();
+  sidb2.ensureShopItemSchema();
+  check('迁移 v3 补列生效，存量行取默认值 0（= 还没算过，不是"零个颜色"）', () => {
+    const cols = dbQuery(`PRAGMA table_info(pl_shop_items)`).map((c) => String(c.name));
+    assert.ok(cols.includes('pod_n_colors'), cols.join(','));
+    assert.ok(cols.includes('pod_n_images'), cols.join(','));
+    const r = dbQuery(`SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD'`)[0];
+    assert.strictEqual(Number(r.a), 0);
+    assert.strictEqual(Number(r.b), 0);
+  });
+  check('幂等：再跑一次不许 duplicate column name（SQLite 无 ADD COLUMN IF NOT EXISTS）', () => {
+    sidb2.ensureShopItemSchema();
+    assert.ok(migrationVersion('shop-item.main') >= 3, '版本号应记到 v3 以上');
+  });
+} finally {
+  closeDb();
+  try {
+    fs.rmSync(dirJ, { recursive: true, force: true });
+  } catch {
+    /* 清理失败不影响结论 */
+  }
+}
+
 console.log('\n' + '\u2500'.repeat(64));
 if (failed) {
   console.log(`\u2717 版本化迁移冒烟失败：${failed} 项\n`);

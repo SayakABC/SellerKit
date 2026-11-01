@@ -66,6 +66,28 @@
   三次变异确认会红：去掉待发货筛选 → 3 红；风险窗口改"只算已过期" → 2 红；
   第二次取数也带 `importDate` → 3 红。
 
+### Added · 图案槽位域建表：四表两视图 + 判别力两列（2026-11-01，M3·T3-1）
+
+- **动机**：一件印花定制品"印哪个图案"必须是能被查出来的事实，不能每次凭记忆挑。
+  这一域存两件事：图案主数据（**图稿与预览图分开** —— 传错花纸商拿模特图制版 = 整批报废）、
+  变体键 → 图案的绑定台账（一行 = 一个槽位）。
+- **新 `electron/pod-db.ts`**：`pod_patterns` / `pod_variant_patterns` / `pod_sheet_batches` /
+  `pod_sheet_ledger` + 视图 `pod_pattern_balance`（余量按**件**求和，不存冗余列）、
+  `pod_binding_worklist`（把 `pl_shop_items.sku_json` 摊成槽位，
+  键与 `variantKey()` **逐字节同构**：`char(0)` 分隔，第 4 段图键只在该颜色有多个图时追加）。
+- **`pl_shop_items` 补 `pod_n_colors` / `pod_n_images`**（shop-item 迁移 v3）：一个颜色下挂几个图，
+  决定了这个键能不能唯一定位图案 —— `WHERE pod_n_images > 1` 就是"塌陷链接"，
+  不必再维护一份一定会过期的人工清单。存量按 0（= 还没算过，不是"零个颜色"）。
+- **没有版本步骤**：全是新对象，幂等 `CREATE IF NOT EXISTS` 对老库就是补建、对新库就是一次建到当前形状。
+  冒烟里直接钉死"图案域版本号必须为 0"，免得有人顺手加一个空的 v14。
+- **⚠️ 施工时踩到并修掉的一处**：`pod_binding_worklist` 读别的域的表，而 SQLite 在**准备任何语句**时
+  都会解析 schema 里的视图 —— 视图引用了不存在的表时，报错会打在**别处**的 SQL 上
+  （`error in view pod_binding_worklist: no such table: main.pl_shop_items`，场景 H 当场红）。
+  最终形状：`ensurePodSchema()` **先建输入域**（店铺 → 商品快照）**再建视图**，依赖方向"消费者 → 提供方"，
+  两条新的 db→db 边在 `check-cross-domain-edges.mjs` 里登记了理由。
+- **`schema:smoke` 新增两场景共 8 条**：空库一条 ensure 建齐六件 / 幂等 / 老库没有 pod 对象也能补回 /
+  槽位键三 vs 四段（同色两图才带图键）/ 老库 `pl_shop_items` 补列不吃 `duplicate column`。
+
 ### Added · 空态骨化：`0` 单时要说清"是哪种没有"，并给一个能点的下一步（2026-11-01，M2）
 
 - **动机**：`0` 在界面上有**三种**完全不同的含义，而它们要做的事完全不同 ——

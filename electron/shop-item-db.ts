@@ -206,6 +206,11 @@ const SCHEMA = [
     url TEXT NOT NULL DEFAULT '',
     sku_json TEXT NOT NULL DEFAULT '',
     raw_json TEXT NOT NULL DEFAULT '',
+    -- 判别力统计（M3·T3-4）：这条链接有几个颜色 / 几个图。
+    -- 「是否塌陷」靠这两列可查，不再靠人工维护一份清单（人工清单一定会过期）。
+    -- 新库建表就带；老库靠迁移 v3 补列（SQLite 没有 ADD COLUMN IF NOT EXISTS）。
+    pod_n_colors INTEGER NOT NULL DEFAULT 0,
+    pod_n_images INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL DEFAULT 'ae-scrape',
     scraped_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -244,7 +249,42 @@ function shopItemMigrationSteps(): MigrationStep[] {
       name: '合并「未登记桶 × 已登记店」的同款重复行 + 回填收养记忆（store_key → shop_id）',
       up: mergeDuplicateUnregisteredRows,
     },
+    {
+      version: 3,
+      name: 'pl_shop_items += pod_n_colors / pod_n_images（图案域判别力统计，M3·T3-4）',
+      up: addPodStatsColumns,
+    },
   ];
+}
+
+/**
+ * **v3：给 `pl_shop_items` 补两列"判别力统计"**（2026-11-01，M3·T3-4 的前置）。
+ *
+ * 为什么需要它们：一个"色名"下挂着几个图，决定了这个变体键**能不能唯一定位图案** ——
+ * 一个颜色只有一张图 ⇒ 直接绑；一个颜色挂了 5 张图 ⇒ 这 5 个图案在这条链接里塌陷成
+ * 同一个键（错印高风险）。把这两个数存成列，`WHERE pod_n_images > 1` 就是"塌陷链接"，
+ * 不必再维护一份会过期的人工清单。
+ *
+ * 只加列、**不回填**：回填要跑 `podLinkStats(skuJson)`，而那是 T3-4 的写入口
+ * （INSERT 与 UPDATE 两处都要调）—— 在迁移里再算一遍就是第二套实现，
+ * 将来改了统计口径会出现"新采的是对的、存量是旧的"，且没人分得清。
+ * 存量行按 0 处理（= 还没算过），T3-4 落地后重跑一次采集即补齐。
+ *
+ * ⚠️ 幂等靠 `PRAGMA table_info` 逐列判（SQLite 没有 `ADD COLUMN IF NOT EXISTS`，
+ *    重复 ALTER 会 `duplicate column name` —— 那会发生在用户升级那一刻）。
+ *    新库由 SCHEMA 的建表语句直接带上，这里空转。
+ */
+function addPodStatsColumns(): void {
+  const cols = new Set(
+    dbQuery<{ name: string }>(`PRAGMA table_info(pl_shop_items)`).map((r) => String(r.name ?? '')),
+  );
+  if (cols.size === 0) return; // 新库：建表即带这两列
+  const add = (name: string): void => {
+    if (cols.has(name)) return;
+    dbRun(`ALTER TABLE pl_shop_items ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
+  };
+  add('pod_n_colors');
+  add('pod_n_images');
 }
 
 /**

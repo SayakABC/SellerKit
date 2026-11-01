@@ -392,6 +392,34 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | **T3-7** | 绑定台 UI（内建页，**不做 UI 岛** —— 内建页不受 `DB_OPS` 10 op 上限限制）：一屏 24 张 SKU 色图，键盘 `Space` 多选 / `1-9` 快选 / `Enter` 确认跳下一张 / `N` 新建 / `S` 跳过 | `src/modules/pod/`（新模块） | 键盘流能连续绑 24 个槽位不出鼠标 | T3-5 |
 | **T3-8** | 采集铺开：`ae-profit` 把剩余 14 家店扫一遍（**这是覆盖率分母的前提**）；扫完重跑 T3-4 统计 | 扩展侧操作 + 现有采集功能 | `SELECT COUNT(DISTINCT shop_id) FROM pl_shop_items` ≥ 14 | 用户配合 |
 
+#### M3 施工记录（2026-11-01）
+
+已完成 **T3-1**（表 + 两个视图 + `pl_shop_items` 两列；T3-2 `imageKeyOf` 此前已落地）。
+
+| 任务 | 落点 | 验证 |
+|---|---|---|
+| T3-1 迁移/建表 | 新 `electron/pod-db.ts`（`POD_SCHEMA` + `ensurePodSchema` + `podSchemaReport`）；`shop-item-db.ts` 迁移 **v3** 补 `pod_n_colors` / `pod_n_images` | `schema:smoke` 新增 **[I] / [J] 两个场景共 8 条**：空库一条 ensure 建齐六件 / 幂等 / 老库无 pod 对象也能补回 / 幂等补列不吃 `duplicate column` |
+
+**两处偏离（都是施工时才发现的口径问题，比计划更严）**：
+
+1. **没有 v14 版本步骤**。计划写"迁移 v14"，但本域全是**新对象**（四张表 + 两个视图），
+   没有"老库形状需要追"的东西 —— `dbMigrate` 的幂等 `CREATE IF NOT EXISTS` 对老库就是补建、
+   对新库就是一次建到当前形状，两条路等价。版本步骤留给**将来改形状**（加列 / 换唯一键）。
+   冒烟里直接钉了这条：`migrationVersion('pod.main') === 0`。
+2. **跨域视图只能由"确定输入已就位"的那一处建**。`pod_binding_worklist` 读 `pl_shop_items` / `sk_shops`，
+   而 SQLite 在**准备任何语句**时都会解析 schema 里的视图 —— 视图引用了不存在的表时，
+   报错会打在**别处**的 SQL 上（`error in view pod_binding_worklist: no such table: main.pl_shop_items`）。
+   第一版把建表挂在订单主干 ensure 里，`schema:smoke` 场景 H 当场红；后来的形状是
+   `ensurePodSchema()` **先建输入域**（`ensureShopSchema` → `ensureShopItemSchema`）**再建视图**，
+   依赖方向是"消费者 → 提供方"，并在 `check-cross-domain-edges.mjs` 里登记了这两条边。
+
+**门禁**：`schema:smoke` 全绿（含新增两场景）· `npm test` 1236 例 / 60 文件 · `verify`（跨域边已登记）·
+`verify:docs` · `lint`（0 error）· `shop-item:smoke` 53 项 · `order:smoke` · `mango:smoke` 21 项全绿。
+
+> ⚠️ 跑 electron 类冒烟要多加一句 `env -u ELECTRON_RUN_AS_NODE`：本机环境里继承了这个变量时，
+> `require('electron')` 返回的是**可执行文件路径**而不是 API 对象，症状是七个"色图采纳"用例
+> 齐刷刷报 `Cannot read properties of undefined (reading 'getPath')` —— 看着像代码坏了，其实是没起 Electron。
+
 **阶段门禁**：
 
 ```sql

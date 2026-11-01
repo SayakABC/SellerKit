@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { syncBanner, type SyncBannerInput } from '../src/lib/syncBanner';
+import { isNeverSynced, syncBanner, type SyncBannerInput } from '../src/lib/syncBanner';
 import { localDayKey } from '../src/lib/localDay';
 
 const NOW = new Date();
@@ -130,5 +130,23 @@ describe('syncBanner · 采集状态条文案与配色（T2-3）', () => {
     const v = syncBanner({ last: ok(), error: '' });
     expect(v.text).toContain('今天');
     expect(localDayKey(new Date(TODAY_ISO))).toBe(localDayKey(new Date()));
+  });
+});
+
+describe('isNeverSynced · 空态用的判据（T2-5）', () => {
+  it('真的没同步过 ⇒ true（这是唯一该给"去芒果采集"出口的形态）', () => {
+    expect(isNeverSynced({ last: null, error: '' })).toBe(true);
+    expect(isNeverSynced(null)).toBe(true);
+    expect(isNeverSynced(undefined)).toBe(true);
+  });
+
+  it('**读不到日志 ≠ 没同步过**：这是两种不同的处境，做的事也不同', () => {
+    // 日志表坏了的时候说"还没同步过"是假话，而且会让人白做一遍同步
+    expect(isNeverSynced({ last: null, error: '日志表读不出来' })).toBe(false);
+    expect(isNeverSynced({ last: null, error: 'x' })).toBe(false);
+  });
+
+  it('同步过（哪怕抓 0 条）⇒ false：那说明芒果那边真是空的，不是"没开始"', () => {
+    expect(isNeverSynced({ last: ok({ fetched: 0, totalItems: 0 }), error: '' })).toBe(false);
   });
 });

@@ -85,3 +85,19 @@ function num(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
+
+/**
+ * 「从来没同步过」——**空态**要用的判据（T2-5）。
+ *
+ * 为什么单独抽出来：`0 单` 在界面上有**三种**完全不同的含义，而它们要先做才谈得上做对：
+ *   ① 读不到日志（`error`）——日志表坏了/读不出来，这时候说"还没同步过"是**假话**，
+ *      而且是会让人白做一遍同步的假话；
+ *   ② 从没同步过 —— 去芒果点一下就有；
+ *   ③ 同步过、芒果那边就是空的 —— 真没单，该去干别的。
+ *
+ * 只有 ② 该给"去芒果采集"的出口。三处空态（总览 `现在还没发`、清单、以后的托盘提示）
+ * 必须按同一份判据走，否则同一个 0 在不同屏上说三种话。
+ */
+export function isNeverSynced(input: SyncBannerInput | null | undefined): boolean {
+  return !String(input?.error ?? '') && !(input?.last ?? null);
+}

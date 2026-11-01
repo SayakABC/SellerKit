@@ -11,15 +11,26 @@
         <span class="wb-muted" data-act="queue-scope">全部待发货 · 跨天 · 按最晚发货时间排</span>
       </header>
 
-      <!-- 空态：**必须区分"还没同步"与"真没单"**（T2-3 状态条治的就是这个歧义，
-           这里不能自己再犯一次）。两句话指向两个完全不同的动作。 -->
+      <!-- 空态：**必须区分"还没同步"与"真没单"**（T2-5）。两句话指向两个完全不同的动作，
+           而它们的界面长得一模一样 —— 混成一句"暂无数据"，用户只能靠猜。
+           判据与总览那块共用 `isNeverSynced`（同一个 0 不许在两屏上说两种话）。 -->
       <div v-if="!q.orders" class="q-empty" data-act="queue-empty">
         <p class="q-empty__main">
-          <template v-if="neverSynced">还没同步过 —— 去芒果的待发货页面点一下采集，这里就会有单</template>
-          <template v-else>当前没有待发货订单（芒果那边待发货列表是空的）</template>
+          <template v-if="neverSynced">
+            还没同步过 —— 打开芒果店长的待发货页面，扩展会自动抓一次
+          </template>
+          <template v-else>芒果那边待发货是空的（确实没有要发的单）</template>
         </p>
-        <p class="q-empty__hint">
-          如果芒果上明明有单，看页面顶部的采集状态条：登录过期 / 扩展没生效 / 抓取被截断都会在那里说
+        <button
+          v-if="neverSynced"
+          class="wb-btn wb-btn--primary q-empty__cta"
+          data-act="queue-open-mango"
+          @click="onOpenMango"
+        >
+          打开芒果待发货页面
+        </button>
+        <p v-else class="q-empty__hint">
+          若芒果上明明有单，看页面顶部的采集状态条：登录过期 / 扩展没生效 / 抓取被截断都会在那里说
         </p>
       </div>
 
@@ -111,6 +122,8 @@
 // + `patternStateOf` 三档。本面板**一个 ipc 都不调**，行源由容器注入（见 `flowCtx.pulseRows`）。
 import { computed, ref, watch } from 'vue';
 import { PATTERN_STATE_LABEL, remainText, shippingQueue } from '@/lib/shippingPulse';
+import { isNeverSynced } from '@/lib/syncBanner';
+import { openMangoPending } from '../mangoOpen';
 import { useShipping } from '../flowCtx';
 
 const { pulseRows, token, summary } = useShipping();
@@ -134,11 +147,12 @@ watch(
 const q = computed(() => shippingQueue(pulseRows.value, { now: now.value }));
 
 /** 从没同步过：空态要指向"去采集"，而不是说"没单"（两件事的下一步完全不同） */
-const neverSynced = computed(() => {
-  const s = summary.value.sync;
-  // 读不到日志时不能说"还没同步过"（那会把"日志表坏了"说成"你今天还没开始"）
-  return !s.error && s.last === null;
-});
+const neverSynced = computed(() => isNeverSynced(summary.value.sync));
+
+/** 空态的出口：打开芒果待发货页（失败自己 toast，见 `mangoOpen`） */
+function onOpenMango(): void {
+  void openMangoPending();
+}
 </script>
 
 <style scoped>
@@ -290,5 +304,11 @@ tbody tr.is-risk td:first-child {
   font-size: 12px;
   line-height: 1.6;
   color: var(--wb-text-muted);
+}
+
+/* 入口按钮跟内容宽度，不铺满整行 */
+.q-empty__cta {
+  align-self: flex-start;
+  margin-top: 2px;
 }
 </style>

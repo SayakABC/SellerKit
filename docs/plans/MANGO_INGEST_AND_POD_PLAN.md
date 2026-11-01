@@ -298,7 +298,7 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 
 #### M2 施工记录（2026-11-01）
 
-已完成 **T2-1 / T2-2 / T2-3 / T2-4**（T2-5 空态骨化待做）。
+已完成 **T2-1 ~ T2-5**（M2 全部完成）。
 
 | 任务 | 落点 | 验证 |
 |---|---|---|
@@ -306,6 +306,7 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | T2-2 第二行四数 | `src/lib/shippingPulse.ts`（纯函数）+ `flowCtx.ShippingSummary.pulse` + `TodayView.reload()` + `OverviewPanel` 新块 | `tests/shippingPulse.spec.ts` 12 例；`today:ui` 3 条新断言；两次变异确认会红 |
 | T2-3 采集状态条 | `src/lib/syncBanner.ts`（纯函数）+ 新 IPC `mango-sync-status` + `OverviewPanel` 顶部 | `tests/syncBanner.spec.ts` 13 例；`today:ui` 3 条接线断言；变异「error 字段丢掉」立刻红 |
 | T2-4 待发货清单 | `shippingQueue`（`src/lib/shippingPulse.ts`，与四数**同一份实现**）+ 新页签 `src/modules/today/tabs/QueuePanel.vue`（`flowCtx` 加 `pulseRows` 行源）+ 总览下钻按钮 | `tests/shippingQueue.spec.ts` 16 例；`today:ui` 5 条接线断言（含"没有截止期的垫底"与"清单单数 == 页签徽标"）；两次变异确认会红 |
+| T2-5 空态骨化 | `isNeverSynced`（`src/lib/syncBanner.ts`）+ `src/modules/today/mangoOpen.ts`（`MANGO_PENDING_URL` + `openMangoPending`）+ 总览/清单两处空态各分两支 | `syncBanner.spec.ts` 追加 3 例；`today:ui` 5 条断言（含"出口打开的是待发货筛选页"）；两次变异确认会红 |
 
 **与计划的三处偏离（都是实现时才发现的口径问题）**：
 
@@ -351,6 +352,16 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
    （"1970 年就到期"），当"最不急"排到最后又会被读成"这几单不重要"。所以：垫底 + 单元格写「不知道」，
    并且**件数与风险里都要单独交代**（`noDeadline`）。单测与 UI 各钉一条。
 
+**T2-5 的两条口径（空态）**：
+
+1. **`0` 分三种，不是两种**：读不到日志 / 从没同步过 / 同步过但芒果那边是空的。
+   计划写的是"空态不能说'今天没有订单'而要说'还没同步，点这里'"，实现时补了第三种：
+   `error` 非空时**不许**说"还没同步过" —— 日志表坏了却让人去重新点一遍采集，
+   是白做一遍还会把真正的问题藏起来。判据抽成 `isNeverSynced`，两处空态共用（同一个 0 不许在两屏上说两种话）。
+2. **出口给的是"待发货筛选页"，不是芒果首页**：`status/正常/normal` 这个筛选段就是扩展抓取用的那一个。
+   写歪了不会报错 —— 只会打开另一个列表，而用户看到的仍然是"芒果"。所以断言核的是 URL，
+   不是"按钮点得动"。
+
 **变异测试（确认守卫有效，不是"跑了就绿"）**：
 - 去掉 `isWaitingShip` 筛选 → 3 条红
 - 风险窗口 `<= 24h` 改成 `< 0`（只算已过期）→ 2 条红
@@ -358,8 +369,10 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 - 状态条的 `error` 字段恒空 → 「读不到 ≠ 没同步过」立刻红（detail 里显示"还没同步过"）
 - 清单排序里"无截止期"改成按 0 参与比较 → 单测「垫底」红 + UI「最急的在最上」红（顺序变成 I-OLD 打头）
 - `patternStateOf` 忽略 `styleColorId` → 单测「有图未归类⇒待绑」红 + UI 状态列变成「已绑,缺图,缺图」
+- `isWaitingShip` 改成全等匹配桶名（`=== 'unshipped'`）→ **8 条红**（四数、清单、徽标、下钻全挂）
+- `isNeverSynced` 恒 `false`（两态合一）→ 3 条红（两处空态都退回"待发货是空的"，出口按钮消失）
 
-**门禁**：`npm test` **1233 例 / 60 文件** · `today:ui` **372 项 PASS / 0 FAIL**（`SMOKE: ALL PASS`）· `verify` · `verify:docs` · `lint`（0 error）全绿。
+**门禁**：`npm test` **1236 例 / 60 文件** · `today:ui` **377 项 PASS / 0 FAIL**（`SMOKE: ALL PASS`）· `verify` · `verify:docs` · `lint`（0 error）全绿。
 
 ---
 
@@ -480,12 +493,15 @@ npm run order:smoke     # M0 起
 
 | 阶段 | 内容 | 工期 | 依赖 | 里程碑产出 |
 |---|---|---|---|---|
-| **M0** | 断点修复（T0-1~6） | 1.5 d | — | 采集路径字段齐 |
-| **M1** | 入库通道（T1-1~8） | 2 d | M0 | 扩展能推，日志能查 |
-| **M2** | 今日待办（T2-1~5） | 1.5 d | M1 | 早上打开知道做什么 |
+| **M0** | 断点修复（T0-1~6） | 1.5 d | — | 采集路径字段齐 ✅ |
+| **M1** | 入库通道（T1-1~8） | 2 d | M0 | 扩展能推，日志能查 ✅ |
+| **M2** | 今日待办（T2-1~5） | 1.5 d | M1 | 早上打开知道做什么 ✅ |
 | **M3** | 图案槽位（T3-1~8） | 3 d | M1 | 560 槽位可绑，覆盖率 ≥ 60% |
 | **M4** | 报单闭环（T4-1~5） | 2 d | M3 | 一键出花纸报单 |
 | **M5** | 开机自动化（T5-1~6） | 1.5 d | M1、M2 | 重启电脑无人干预 |
+
+> 施工进度（2026-11-01）：**M0 / M1 / M2 已完成**，下一步是 M3（图案槽位域；T3-2 的 `imageKeyOf`
+> 已提前落地）。M2 的门禁数字：`npm test` 1236 例 / 60 文件、`today:ui` 377 项 PASS。
 
 **顺序不能换的三条**：
 

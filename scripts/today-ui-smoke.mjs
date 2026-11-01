@@ -622,8 +622,7 @@ const FAKE_BRIDGE = `<script>
       return { success: true, data: null };
     },
     'orderShippingRows': function (p) {
-      rec('orderShippingRows', p);
-      if (window.__emptyOrders) return { success: true, data: [] };
+      rec('orderShippingRows', p);      if (window.__emptyOrders) return { success: true, data: [] };
       // 主干一个读口：导入行与采集行在同一个返回里（按 source 区分）
       var rows = IMPORTED.concat(COLLECTED, IMPORTED_OLD);
       // ⚠️ 必须**真的**按 importDate 筛（与主进程 shippingRows 同口径：比 created_at 的日期部分）。
@@ -658,6 +657,11 @@ const FAKE_BRIDGE = `<script>
         missingImage: 0, shopUnmatched: 0, partial: false, reason: '',
       } };
     },
+
+    // 「打开芒果待发货页面」（T2-5 空态的出口）。断言要能核对**打开的是哪个地址** ——
+    // 打开首页也能叫"打开了芒果"，但它没帮上忙（首页还得自己找菜单）；
+    // 打开别的筛选也能叫"打开了芒果"，只是抓回来的是另一个列表，而且不会报错。
+    'openExternal': function (p) { rec('openExternal', p); return { success: true }; },
 
     // 待拣：四行四个厂家格（厂A / 未指定 / 厂C / 厂B 无行）—— 宫格 + 拖拽的落点地基，见 PICK_ROWS 注释。
     // ⚠️ styleName 必须有值：「按此生成拿货单」的入参要带上它（拿货单里看的是款名）。
@@ -1911,6 +1915,61 @@ async function main() {
     report('空态不挂口径小字、也不挂四格数字与进度条（避免与那句话重复 / 摆一排 0）',
       !card('daily-scope') && !card('stat-orders') && !card('stat-pieces') && !card('daily-bar'),
       '');
+
+    // ---- 空态骨化（T2-5）：数字 0 的意思**不止一个** -------------------------------
+    // 上面三条只钉住了「今天要发」那半块。这一屏还有第二块（现在还没发），
+    // 而 0 单时它必须**分两种处境**说话：
+    //   ① 同步过、芒果那边就是空的 ⇒ 真没单（给排查指引，不给"去采集"按钮）；
+    //   ② 从没同步过             ⇒ 数字 0 不代表没生意（给一个能点的出口）。
+    // 混成一句"或还没同步过"，用户既不知道下一步做什么，也没法判断要不要担心 ——
+    // 那正是 T2-3 状态条治的病，空态不能自己再犯一次。
+    var pulseEmpty = flat(card('pulse-empty'));
+    report('空态（已同步过）：说"芒果那边是空的"（真没单），不说"还没同步过"、也不给采集按钮',
+      !!card('pulse-empty') && pulseEmpty.indexOf('待发货是空的') >= 0 &&
+        pulseEmpty.indexOf('还没同步') < 0 && !card('pulse-open-mango'),
+      '文案=' + pulseEmpty);
+
+    // 反向守卫：这句是**假话**（库里可能有前几天的单，今天的也可能还没抓回来）。
+    // 旧的空态文案里出现过"或还没同步过"这种两可说法，断它不许回来。
+    report('空态不许说"今天没有订单"（库里可能有前几天的单，今天的也可能还没抓回来）',
+      flat(document.querySelector('[data-act="pulse-summary"]')).indexOf('今天没有订单') < 0 &&
+        pulseEmpty.indexOf('或还没同步过') < 0,
+      pulseEmpty.slice(0, 120));
+
+    // 换成"从来没同步过"：同一屏必须换一种说法，并给出可点的出口
+    // ⚠️ 等待条件仍然是"这一次 IPC 真被调了"，不是"文案变了"（理由见 T2-3 那段注释）
+    window.__syncMode = 'never';
+    var nSyncNever = calls('mangoSyncStatus').length;
+    document.querySelector('[data-act="refresh"]').click();
+    await waitSoft(function () { return calls('mangoSyncStatus').length > nSyncNever; }, 8000);
+    var pulseNever = flat(card('pulse-empty'));
+    report('空态（从没同步过）：说"还没同步过"并给可点的出口（不是一句"暂无数据"）',
+      pulseNever.indexOf('还没同步') >= 0 && pulseNever.indexOf('待发货是空的') < 0 &&
+        !!card('pulse-open-mango'),
+      '文案=' + pulseNever + ' 按钮=' + !!card('pulse-open-mango'));
+
+    // 出口真的把**待发货筛选页**打开了（不是首页、不是别的筛选、也不是没发出去）
+    var nOpen = calls('openExternal').length;
+    if (card('pulse-open-mango')) card('pulse-open-mango').click();
+    await waitSoft(function () { return calls('openExternal').length > nOpen; }, 6000);
+    var opened = calls('openExternal');
+    var lastUrl = opened.length ? String(opened[opened.length - 1]) : '';
+    report('空态出口打开的是芒果"待发货筛选页"（首页也帮不上忙；换个筛选会抓错列表且不报错）',
+      opened.length > nOpen && lastUrl.indexOf('order/list') >= 0 && lastUrl.indexOf('status/') >= 0,
+      'url=' + lastUrl);
+
+    // 清单页签的空态用**同一份判据**（同一个 0 不许在两屏上说两种话）
+    await activateTab('queue');
+    await waitSoft(function () { return !!card('queue-empty'); }, 8000);
+    var qEmptyNever = flat(card('queue-empty'));
+    report('清单空态与总览空态同口径：从没同步过时说"还没同步过"，并给同一个出口',
+      qEmptyNever.indexOf('还没同步') >= 0 && !!card('queue-open-mango'),
+      '文案=' + qEmptyNever + ' 按钮=' + !!card('queue-open-mango'));
+    // 切回总览：下面的「导入 Excel」按钮在总览这块（保活只缓存实例，切走就不在 DOM 里）
+    await activateTab('overview');
+    // 恢复成"同步过"的形态 —— 后面的步骤（以及最后的 T2-3 状态条段）都假设是正常态。
+    // 这里**不必再刷一次**：紧接着的「导入 Excel」点击之后有 nav 那一步的刷新会带上这个值。
+    window.__syncMode = 'ok';
     // ⚠️ 这条同时验两件事：**切到了导入页签**（看不见的按钮点了等于没点）+ **真的弹了选文件**。
     //    改成"一页多页签"之后，"只切过去不弹框"（或反过来）都会漏。
     var beforeSel = calls('selectExcel').length;

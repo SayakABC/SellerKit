@@ -151,10 +151,30 @@
         </button>
       </template>
 
-      <!-- 空态：说"没有待发货"，不说"没有数据" —— 后者会让人以为采集坏了 -->
-      <p v-else class="td-pulse__empty" data-act="pulse-empty">
-        当前没有待发货订单（芒果那边待发货列表是空的，或还没同步过）
-      </p>
+      <!-- 空态（T2-5）：这里**必须分两种处境**，因为 0 的含义不止一个 ——
+            ① 还没同步过 ⇒ 数字 0 不代表没生意，要去把单抓回来（给按钮，直达芒果待发货页）；
+            ② 同步过、芒果那边就是空的 ⇒ 真没单，给一句排查指引（登录过期/扩展没生效都在状态条里说）。
+           混成一句"或还没同步过"，用户既不知道该做什么，也没法判断要不要担心。
+           ⚠️ 不许说"今天没有订单"：用户库里可能有前几天的单，而且今天的单可能还没被抓回来。 -->
+      <div v-else class="td-pulse__empty" data-act="pulse-empty">
+        <p class="td-pulse__empty-main">
+          <template v-if="neverSynced">
+            还没同步过 —— 打开芒果店长的待发货页面，扩展会自动抓一次
+          </template>
+          <template v-else>芒果那边待发货是空的（确实没有要发的单）</template>
+        </p>
+        <button
+          v-if="neverSynced"
+          class="wb-btn wb-btn--primary td-pulse__cta"
+          data-act="pulse-open-mango"
+          @click="onOpenMango"
+        >
+          打开芒果待发货页面
+        </button>
+        <p v-else class="td-pulse__empty-hint">
+          若芒果上明明有单，看上面那条状态条：登录过期 / 扩展没生效 / 抓取被截断都会在那里说
+        </p>
+      </div>
     </section>
   </div>
 </template>
@@ -171,7 +191,8 @@
 // ⚠️ 数据全部从容器注入（`useShipping()`），本面板**自己一个 ipc 都不调**
 //    （"这页说 21 件、那页说 16 行"这类缝，根因就是各页各取一份数）。
 import { computed } from 'vue';
-import { syncBanner } from '@/lib/syncBanner';
+import { isNeverSynced, syncBanner } from '@/lib/syncBanner';
+import { openMangoPending } from '../mangoOpen';
 import { useShipping } from '../flowCtx';
 
 const { summary, go, importing, importExcel } = useShipping();
@@ -192,6 +213,12 @@ const sync = computed(() => summary.value.sync);
 /** 三种形态的文案与染色都在纯函数里（四态各有单测），这里只摆放 */
 const banner = computed(() => syncBanner(sync.value));
 
+/**
+ * 「从来没同步过」（T2-5 空态）。判据在 `@/lib/syncBanner` 的 `isNeverSynced` ——
+ * 清单页签用的是同一个函数：同一个 0 在两屏上说两种话，用户就没法相信任何一个。
+ */
+const neverSynced = computed(() => isNeverSynced(sync.value));
+
 /** 模板里要的三样：文案 / 配色档位 / 是否带"抓取被截断"标签 */
 const syncText = computed(() => banner.value.text);
 const syncTone = computed(() => `is-${banner.value.tone}`);
@@ -207,6 +234,14 @@ const percent = computed(() => {
 function onEmptyImport(): void {
   go('import');
   void importExcel();
+}
+
+/**
+ * 空态的「打开芒果待发货页面」（T2-5）：把"该怎么开始"变成一次点击。
+ * 失败由 `openMangoPending` 自己 toast（这一步失败的唯一表现就是"没反应"，必须给原因）。
+ */
+function onOpenMango(): void {
+  void openMangoPending();
 }
 </script>
 
@@ -434,6 +469,20 @@ function onEmptyImport(): void {
 /* 下钻按钮跟内容宽度，不铺满（铺满会变成"整块只有一个按钮"） */
 .td-pulse__cta {
   align-self: flex-start;
+}
+
+/* 空态两段：主句说"哪种没有"，副句/按钮说"接下来做什么" */
+.td-pulse__empty-main {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--wb-text);
+}
+
+.td-pulse__empty-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--wb-text-muted);
 }
 
 .td-stat.is-done {

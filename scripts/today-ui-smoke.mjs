@@ -637,6 +637,28 @@ const FAKE_BRIDGE = `<script>
       return { success: true, data: rows };
     },
 
+    // 最近一次芒果同步（T2-3 采集状态条）。四种形态都要能造出来 ——
+    // 这一条的全部价值就在"把 0 单与没抓到分开"，只测正常态等于什么都没测。
+    'mangoSyncStatus': function () {
+      rec('mangoSyncStatus');
+      var mode = window.__syncMode || 'ok';
+      if (mode === 'readfail') return { success: false, error: '模拟：日志表读不出来' };
+      if (mode === 'never') return { success: true, data: null };
+      var now = new Date().toISOString();
+      if (mode === 'fail') {
+        // 红线 1 的真实原文：芒果说有 12 单，一单都没抓到
+        return { success: true, data: {
+          at: now, fetched: 0, totalItems: 12, inserted: 0, updated: 0, skipped: 0,
+          missingImage: 0, shopUnmatched: 0, partial: false,
+          reason: '芒果说共 12 单，但一单都没抓到（登录过期 / 没停在待发货筛选 / 扩展未生效）',
+        } };
+      }
+      return { success: true, data: {
+        at: now, fetched: 3, totalItems: 3, inserted: 2, updated: 1, skipped: 0,
+        missingImage: 0, shopUnmatched: 0, partial: false, reason: '',
+      } };
+    },
+
     // 待拣：四行四个厂家格（厂A / 未指定 / 厂C / 厂B 无行）—— 宫格 + 拖拽的落点地基，见 PICK_ROWS 注释。
     // ⚠️ styleName 必须有值：「按此生成拿货单」的入参要带上它（拿货单里看的是款名）。
     // ⚠️ __movedSuppliers 的写入要**反映在这里**（真库拖一次就改了 supplier_id）：
@@ -1125,6 +1147,24 @@ var STEP = 'init';
 (function () { var m = document.createElement('pre'); m.id = 'assert-start'; m.textContent = 'started'; document.body.appendChild(m); })();
 function step(n) { STEP = n; }
 function report(name, ok, detail) { lines.push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' | ' + detail : '')); }
+/**
+ * 「等到某个条件成立，最多等 timeout 毫秒」—— 但**不抛错**，返回 true/false。
+ *
+ * 为什么不能直接用 waitFor 等"被测实现应该产生的文案"：waitFor 超时会 reject，
+ * 那一刻 main() 直接中断 ⇒ **后面所有断言一条都不跑**，而输出里只有前面几条 PASS。
+ * 症状是"变异了却看不到 FAIL"——看起来像守卫有效（没红），实际是根本没跑到断言那一步。
+ * 断言前的等待只应等"与实现无关的稳定信号"（或干脆等一小段），再让断言自己去判真假。
+ */
+async function waitSoft(fn, timeout) {
+  var t0 = Date.now();
+  for (;;) {
+    var v = false;
+    try { v = fn(); } catch (e) { v = false; }
+    if (v) return true;
+    if (Date.now() - t0 > (timeout || 4000)) return false;
+    await new Promise(function (r) { setTimeout(r, 30); });
+  }
+}
 function waitFor(fn, timeout) {
   return new Promise(function (resolve, reject) {
     var t0 = Date.now();
@@ -1453,6 +1493,7 @@ async function main() {
       flat(document.querySelector('[data-act="pulse-nodeadline"]')).indexOf('1') >= 0 &&
         flat(document.querySelector('[data-act="pulse-nodeadline"]')).indexOf('截止期') >= 0,
       flat(document.querySelector('[data-act="pulse-nodeadline"]')));
+
     // 进度条 = 已拿 / 件数（1/3 ⇒ 约 33%）。判据按**几何比例**，不按 class 名：
     // 宽度算错了条子照样"有"，只有比例能抓（±3% 容差给亚像素与四舍五入）。
     var barRatio = (function () {
@@ -5044,6 +5085,63 @@ async function main() {
     await clickRefresh();
     try { await waitFor(function () { return !!card('rc-table'); }, 8000); } catch (e) {}
 
+    // ---- 采集状态条（T2-3）-----------------------------------------------------
+    // ⚠️ 分段原则：**四种形态的文案/配色由单测覆盖**（tests/syncBanner.spec.ts，13 例），
+    //    这里只验"接线对不对"——真的渲染出来、真的读 summary.sync、class 真的生效。
+    //    原因是实测教训：五种形态各点一次刷新（每次一轮完整 reload）会把页面的虚拟时间预算
+    //    撑爆，断言脚本没跑完就被 dump，输出在最后一条 PASS 处截断、grep FAIL 一条都没有 ——
+    //    看起来像"全绿"，实际是没跑到。
+    //
+    // 这一段必须放在**最后**：它要切 __syncMode 并点刷新，会改变后面断言的运行环境。
+    // （实测插在进度条断言之前时，总 PASS 数从 308 掉到 306：有两条断言走了另一条分支，
+    //   覆盖被悄悄削掉而已有断言全绿，看不出来。）
+    //
+    // ⚠️ 但要先**切回「总览」**：前面几段最后停在「归类核对」页签上，状态条不在 DOM 里 ——
+    //    漏这一步的后果是三条断言全红而文案是空的（文案= 色=(无)，看起来像"状态条没实现"）。
+    await activateTab('overview');
+    await waitSoft(function () { return !!card('sync-bar'); }, 4000);
+
+    function syncBar() { return card('sync-bar'); }
+    function syncHas(s) { return flat(syncBar()).indexOf(s) >= 0; }
+    function syncTone() {
+      var el = syncBar();
+      if (!el) return '(无)';
+      var hits = ['is-ok', 'is-warn', 'is-idle', 'is-error'].filter(function (c) {
+        return el.className.indexOf(c) >= 0;
+      });
+      return hits.length ? hits.join(',') : '(无)';
+    }
+
+    // ① 正常态：初始加载用的就是 ok 桩（__syncMode 未设 ⇒ 桩默认 ok），不必刷新
+    report('状态条正常态：说清"抓了几条、入库几条"，且不染警示色',
+      syncHas('抓 3 条') && syncHas('入库 3') && syncTone() === 'is-ok',
+      '文案=' + flat(syncBar()) + ' 色=' + syncTone());
+
+    // ② 同步失败：整条染红 + 原话给原因（不翻译）；且绝不许说成"今天没单"
+    //
+    // ⚠️ 等待条件必须是「这一次 IPC 真的被调用」而**不是**「文案变成 X」：
+    //    等文案的话，刷新没发生时也只会等满超时然后拿旧文案去断言 —— 失败信息指向"文案不对"，
+    //    而真实原因是"根本没刷新"（实测就踩过一次：detail 里显示的还是上一次的文案）。
+    window.__syncMode = 'fail';
+    var nFail = calls('mangoSyncStatus').length;
+    await clickRefresh();
+    await waitSoft(function () { return calls('mangoSyncStatus').length > nFail; }, 8000);
+    report('同步失败：整条染红 + 把**原始原因**给出来（不翻译成"同步异常"）',
+      syncTone() === 'is-error' && syncHas('芒果说共 12 单') && syncHas('登录过期'),
+      '文案=' + flat(syncBar()) + ' 色=' + syncTone() + ' 调用=' + calls('mangoSyncStatus').length);
+    report('同步失败时不许说成"今天没单"（那正是这个功能要消灭的歧义）',
+      flat(syncBar()).indexOf('没有订单') < 0 && flat(syncBar()).indexOf('没单') < 0,
+      '文案=' + flat(syncBar()));
+
+    // ③ 「读不到日志」与「没同步过」必须分开说（两件事要做的事完全不同）
+    window.__syncMode = 'readfail';
+    var nRead = calls('mangoSyncStatus').length;
+    await clickRefresh();
+    await waitSoft(function () { return calls('mangoSyncStatus').length > nRead; }, 8000);
+    report('读不到日志 ≠ 没同步过（两件事要做的事完全不同，必须分开说）',
+      syncTone() === 'is-error' && syncHas('读不到同步状态') && !syncHas('还没同步过'),
+      '文案=' + flat(syncBar()) + ' 色=' + syncTone() + ' 调用=' + calls('mangoSyncStatus').length);
+
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0, JSON.stringify(window.__smokeErrors || []));
   } catch (e) {
@@ -5083,7 +5181,12 @@ const server = http.createServer((req, res) => {
 await new Promise((resolve) => server.listen(PORT, '127.0.0.1', resolve));
 
 const dom = await new Promise((resolve, reject) => {
-  const cp = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox', '--virtual-time-budget=45000', '--dump-dom', `http://127.0.0.1:${PORT}/index.html`]);
+  // ⚠️ `--virtual-time-budget` 是**整页虚拟时间预算**：断言脚本没跑完就会被 dump，
+  //    而症状极其像"全绿"——输出在最后一条 PASS 处**截断**、`SMOKE: ALL PASS` 没出现、
+  //    `grep FAIL` 一条都没有。判断"跑完了没"的唯一可靠标志是**输出里有没有 SMOKE: 收尾行**。
+  //    2026-11-01：加了几个"切桩 + 点刷新"的断言后 45s 不够用了（那几段每轮都是一次完整 reload），
+  //    提到 90s。以后再往里加会点刷新的断言时，先看这一行。
+  const cp = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox', '--virtual-time-budget=90000', '--dump-dom', `http://127.0.0.1:${PORT}/index.html`]);
   let out = '';
   cp.stdout.on('data', (d) => (out += String(d)));
   cp.on('error', reject);

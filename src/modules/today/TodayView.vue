@@ -171,6 +171,7 @@ const summary = ref<ShippingSummary>({
   orders: { total: 0, collect: 0, import: 0, lastTime: '' },
   daily: { orders: 0, pieces: 0, taken: 0, remaining: 0, estimated: false },
   pulse: { pending: 0, risk: 0, pieces: 0, missingImage: 0, noDeadline: 0, assumedQty: 0 },
+  sync: { last: null, error: '' },
   gaps: { style: 0 },
   purchase: { orders: 0, draft: 0, gap: 0, ignored: 0, balance: 0 },
 });
@@ -484,6 +485,15 @@ async function reload(): Promise<void> {
     const pr = await ipc.orderShippingRows({ limit: 2000 });
     if (pr.success && pr.data) pulse = shippingPulse(pr.data);
 
+    // 3c) 最近一次芒果同步（T2-3 采集状态条）。
+    //     ⚠️ **`success:false` 不许折成 `last: null`**：那会把"读日志失败"显示成"还没同步过"，
+    //        而用户对这两件事要做的事完全不同（前者要重装/反馈，后者只要去芒果页面点一下）。
+    const st = await ipc.mangoSyncStatus();
+    const sync = {
+      last: st.success ? (st.data ?? null) : null,
+      error: st.success ? '' : String(st.error || '读取同步状态失败'),
+    };
+
     // 4) 未识别款：只服务「归类核对」页签徽标与主线第 2 步（"缺什么"不再在这里算）
     const gaps = { style: all.length - all.filter((o) => String(o.styleCode ?? '')).length };
 
@@ -503,6 +513,7 @@ async function reload(): Promise<void> {
         estimated: d.estimated,
       },
       pulse,
+      sync,
       gaps,
       purchase,
     };

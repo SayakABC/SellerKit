@@ -17,3 +17,28 @@ export function localDayKey(d: Date = new Date()): string {
   const p = (x: number): string => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+
+/** 本地时分 `HH:mm`（与 `localDayKey` 同一份实现，别在面板里再写一遍补零） */
+export function localClock(d: Date = new Date()): string {
+  const p = (x: number): string => String(x).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 「今天 09:12」/「11-01 09:12」—— 采集状态条这类"上次发生在什么时候"的文案（T2-3）。
+ *
+ * 两个刻意的决定：
+ *   · **跨天必须带日期**。所有情况都写"今天"是假话：昨天 23:50 同步的，今天早上开机看到
+ *     "今天 23:50"会以为数据是刚抓的，于是不去点同步。
+ *   · 输入是 ISO 串（`new Date().toISOString()` 存进库的那种），**按本地时区展示** ——
+ *     直接 `slice(11,16)` 拿到的是 UTC 时分，东八区差 8 小时。
+ *
+ * @param iso ISO 时间串；认不出返回空串（调用方据此不显示时间，而不是显示 `Invalid Date`）
+ */
+export function localWhen(iso: unknown): string {
+  const t = Date.parse(typeof iso === 'string' ? iso : '');
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return localDayKey(d) === localDayKey() ? `今天 ${localClock(d)}` : `${md} ${localClock(d)}`;
+}

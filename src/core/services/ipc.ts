@@ -124,6 +124,7 @@ import type {
   LedgerShopBreakdown,
   LedgerSummary,
   LedgerTemplateSheetInput,
+  MangoSyncStatusRow,
   OrderCoveragePayload,
   ParcelCountMap,
   ParcelDetail,
@@ -213,6 +214,8 @@ export interface ElectronApi {
     /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库。记账的营收占比用 */
     period?: string;
   }): Promise<ApiResult<UnifiedOrderRow[]>>;
+  /** 最近一次芒果同步的状态（`sk_sync_log` 最新一行；`null` = 从来没同步过） */
+  mangoSyncStatus(): Promise<ApiResult<MangoSyncStatusRow | null>>;
   orderDownloadImage(url: string): Promise<ApiResult<OrderImageRecord>>;
   /** 拣货投影（只读；聚合在渲染层纯函数 `src/lib/picking.ts`） */
   pickingRows(payload?: {
@@ -1806,6 +1809,16 @@ export function orderShippingRows(payload?: {
   period?: string;
 }): Promise<ApiResult<UnifiedOrderRow[]>> {
   return ipc.orderShippingRows(payload);
+}
+
+/**
+ * 最近一次芒果同步的状态（`null` = 从来没同步过）。
+ *
+ * 总览的采集状态条读它。**失败要让调用方能区分**：这一条本身就是"用来发现失败"的，
+ * 它自己再静默降级成 null，就变成"没同步过"与"读不到"分不开了。
+ */
+export function mangoSyncStatus(): Promise<ApiResult<MangoSyncStatusRow | null>> {
+  return ipc.mangoSyncStatus();
 }
 
 /** 插入一条订单（`imageId: null` = 无图订单，S2-b 免图导入） */

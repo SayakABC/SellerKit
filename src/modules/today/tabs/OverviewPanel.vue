@@ -1,5 +1,18 @@
 <template>
   <div class="wb-page td-view">
+    <!-- 采集状态条（T2-3，2026-11-01）—— **必须排在数字上面**。
+         数字再准，若同步没成功（登录过期 / 扩展没装 / 抓 0 条但芒果说有 12 单），
+         用户看到的是"今天 0 单"而不是"没抓到" —— 那正是这个条要消灭的歧义：
+         两者在界面上长得一模一样，而要做的事完全不同（一个去发货，一个去重新登录）。
+         ⚠️ 它是**唯一**把"没同步过"与"读不到日志"分开的地方（见 `summary.sync.error`）。 -->
+    <p class="td-sync" :class="syncTone" data-act="sync-bar">
+      <span class="td-sync__dot" aria-hidden="true"></span>
+      <span data-act="sync-text">{{ syncText }}</span>
+      <span v-if="banner.partial" class="td-sync__tag" data-act="sync-partial">
+        抓取被截断
+      </span>
+    </p>
+
     <!-- 总览 = **一块四格数字**（2026-10-22 用户裁定：原先的流程卡 + 订单/待拣/缺口三张卡"暂时没什么意义"）。
          这一屏只回答一个问题：今天的货发到什么程度了 —— 要发几单 / 共几件 / 拿了多少 / 还差多少。
          ⚠️ 四个数字**都来自容器那一份汇总**（`summary.daily`），本面板一个 ipc 都不调：
@@ -152,6 +165,7 @@
 // ⚠️ 数据全部从容器注入（`useShipping()`），本面板**自己一个 ipc 都不调**
 //    （"这页说 21 件、那页说 16 行"这类缝，根因就是各页各取一份数）。
 import { computed } from 'vue';
+import { syncBanner } from '@/lib/syncBanner';
 import { useShipping } from '../flowCtx';
 
 const { summary, go, importing, importExcel } = useShipping();
@@ -159,6 +173,22 @@ const { summary, go, importing, importExcel } = useShipping();
 const daily = computed(() => summary.value.daily);
 /** 「现在还没发」四数（容器里的 `@/lib/shippingPulse` 算好，这里只摆放） */
 const pulse = computed(() => summary.value.pulse);
+
+/**
+ * 采集状态条（T2-3）。文案与配色**都在 `@/lib/syncBanner`**（纯函数，vitest 覆盖四种形态）——
+ * 这里只把结果摆进模板，不再算第二遍。
+ *
+ * 为什么抽出去：四种形态若都在这一页验，UI 冒烟要连点五次刷新，实测把虚拟时间预算撑爆，
+ * 断言脚本没跑完页面就被 dump 了（症状是输出截断、`grep FAIL` 一条都没有，看着像全绿）。
+ */
+const sync = computed(() => summary.value.sync);
+
+/** 三种形态的文案与染色都在纯函数里（四态各有单测），这里只摆放 */
+const banner = computed(() => syncBanner(sync.value));
+
+/** 模板里要的三样：文案 / 配色档位 / 是否带"抓取被截断"标签 */
+const syncText = computed(() => banner.value.text);
+const syncTone = computed(() => `is-${banner.value.tone}`);
 
 /** 已拿占比（0~100）。件数为 0 时进度条不渲染，这里只在有件数时被用到 */
 const percent = computed(() => {
@@ -175,6 +205,75 @@ function onEmptyImport(): void {
 </script>
 
 <style scoped>
+/* 采集状态条（T2-3）：一行小字 + 一个状态点。
+   刻意做得**轻**（不加卡片、不加边框）：它是背景信息，不是主角；
+   但失败时整条染色 + 状态点变红，足够让人一眼看到 —— 因为它挡的是"以为今天没单"。
+   配色一律用语义变量（`--wb-danger` 等），不写死色值：浅色/深色主题下都要能读。 */
+.td-sync {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 2px;
+  padding: 7px 10px;
+  border-radius: var(--wb-radius);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wb-text-muted);
+  /* `--wb-surface-2` 是"比卡片再退一层"的底色（浅色/深色主题各有定义）；
+     早期这里写过一个不存在的 `--wb-surface-sunken`，fallback 会生效但等于悄悄绕过主题 */
+  background: var(--wb-surface-2);
+}
+
+.td-sync__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.75;
+}
+
+/* 正常：安静 */
+.td-sync.is-ok {
+  color: var(--wb-text-muted);
+}
+
+.td-sync.is-ok .td-sync__dot {
+  background: var(--wb-success);
+  opacity: 1;
+}
+
+/* 从没同步过：不是错误，但要知道怎么开始 —— 用中性偏提示的色，别用红 */
+.td-sync.is-idle {
+  color: var(--wb-text-muted);
+}
+
+.td-sync.is-idle .td-sync__dot {
+  background: var(--wb-warning);
+  opacity: 1;
+}
+
+/* 抓取被截断：数据能用但不全 */
+.td-sync.is-warn {
+  color: var(--wb-warning);
+  background: color-mix(in srgb, var(--wb-warning) 10%, transparent);
+}
+
+/* 失败 / 读不到：整条染色（文字也染色，避免"只有小圆点变色"的半截感） */
+.td-sync.is-error {
+  color: var(--wb-danger);
+  background: color-mix(in srgb, var(--wb-danger) 10%, transparent);
+}
+
+.td-sync__tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  line-height: 16px;
+}
+
 /* 一行四格：窄窗自动折成两行（`auto-fit` + 132px 下限），不硬挤成四列把数字压扁 */
 .td-daily {
   display: flex;

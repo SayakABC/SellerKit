@@ -14,6 +14,7 @@ const path = require('path');
 // ⚠️ `as typeof import(...)` 不是装饰：不加它这里是 `any`，`orderDb` 的签名怎么变都不报错
 // （跨文件 require 没进过类型检查）。见 `scripts/check-cross-domain-edges.mjs` 规则 A。
 const orderDb = require('./order-db') as typeof import('./order-db');
+const mangoSync = require('./mango-sync') as typeof import('./mango-sync');
 const { register } = require('./ipc-util') as typeof import('./ipc-util');
 const { isUserFileAllowed } = require('./user-file-allowlist') as typeof import('./user-file-allowlist');
 
@@ -162,6 +163,19 @@ register('order-shipping-rows', async (payload) => {
       period: sanitizePeriod(payload?.period),
     }),
   };
+});
+
+// 最近一次芒果同步的状态（总览的采集状态条读它）。
+//
+// ⚠️ **这里不吞异常**：这一条存在的意义就是"发现同步失败"，它自己再静默变成 null，
+//    「从来没同步过」与「读日志失败」就分不开了 —— 那正是这个功能要消灭的歧义。
+register('mango-sync-status', async () => {
+  try {
+    return { success: true, data: mangoSync.lastMangoSync() };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: `读取同步状态失败：${msg}` };
+  }
 });
 
 // ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----

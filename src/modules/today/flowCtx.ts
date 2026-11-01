@@ -12,6 +12,7 @@
 //     各面板 `watch(token)` 重取 ⇒ 切回该 tab 看到的就是新数据（保活不再等于"看到旧的"）。
 import { inject, type ComputedRef, type InjectionKey, type Ref } from 'vue';
 import type { AutoImportResult } from '@/core/services/importSheet';
+import type { MangoSyncStatusRow } from '@/types';
 
 /** 发货主线的一步（界面只读；状态由汇总数字推导，不引入新取数） */
 export interface FlowStep {
@@ -70,6 +71,14 @@ export interface ShippingSummary {
     /** 件数按 1 兜底的行数 */
     assumedQty: number;
   };
+  /**
+   * 最近一次芒果同步（2026-11-01 T2-3，采集状态条读它）。
+   *
+   * 为什么必须把"读不到"与"没同步过"分开（`error` 字段）：这一条存在的意义就是
+   * **发现同步失败**。它自己再静默降级成 `null`，用户看到的就是"还没同步过" ——
+   * 而真相可能是"日志表读不出来"，两者要做的事完全不同。
+   */
+  sync: { last: MangoSyncStatusRow | null; error: string };
   /**
    * 今天这批里还有多少行没识别出款（「归类核对」页签徽标 + 主线的第 2 步都读它）。
    *

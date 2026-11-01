@@ -467,6 +467,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       // 订单发生月过滤（`yyyy-mm`）；空串 = 不筛。记账的营收占比按条目月份取数。
       period: typeof payload?.period === 'string' ? payload.period.slice(0, 7) : '',
     }),
+  // 最近一次芒果同步的状态（无入参；总览的采集状态条读它）
+  mangoSyncStatus: () => ipcRenderer.invoke('mango-sync-status'),
   orderDownloadImage: (url: string) =>
     ipcRenderer.invoke('order-download-image', { url: String(url ?? '') }),
   // ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----

@@ -86,6 +86,13 @@ export interface ElectronAPI {
     /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库。记账的营收占比用 */
     period?: string;
   }) => Promise<APIResult<UnifiedOrderRow[]>>;
+  /**
+   * 最近一次芒果订单同步的状态（`sk_sync_log` 里最新一行；`null` = **从来没同步过**）。
+   *
+   * 为什么它必须独立于订单数存在：「今天真没单」与「登录过期一单没抓到」在界面上
+   * 长得一模一样（都是 0），只有把 `fetched` 与芒果自己说的 `totalItems` 摆在一起才分得开。
+   */
+  mangoSyncStatus: () => Promise<APIResult<MangoSyncStatusRow | null>>;
   // ---- 包裹（阶段 B2）：一单多包 / 按商品行拆 / 拆合并行数量 ----
   // 写通道都回**整单**最新状态（`ParcelDetail`）：拆包面板在开着的时候别人也可能在改同一单，
   // 用返回值重绘比"本地推测结果"稳（推测的结果和库不一致时，用户看到的是"点了没反应"）。
@@ -1905,6 +1912,33 @@ export interface ProductMoveSupplierInput {
   code: string;
   /** 目标厂家 suppliers(id)；0 = 清空关联（"未指定厂家"格是合法落点） */
   supplierId: number;
+}
+
+/**
+ * 最近一次芒果订单同步的状态（主进程 `mango-sync.lastMangoSync()`；`sk_sync_log` 最新一行）。
+ *
+ * 与 `electron/mango-sync.ts` 的 `MangoSyncStatus` **同形**，但渲染层不能引 `electron/` 的类型
+ * （两个 tsconfig 互不可见），所以各自声明一份。字段增删要**两边同时改** ——
+ * 少改一边的后果是界面读到 `undefined` 而不报错（显示成空/0，看起来像"今天没单"）。
+ */
+export interface MangoSyncStatusRow {
+  /** 同步开始时刻（ISO） */
+  at: string;
+  /** 实际收到的订单数 */
+  fetched: number;
+  /** 芒果自己说的"这个筛选下共几单"（0 = 没给） */
+  totalItems: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  /** 图没落地的行数（>0 不是失败，只是这些单没图） */
+  missingImage: number;
+  /** 落到未登记桶的订单数 */
+  shopUnmatched: number;
+  /** 抓取被截断（服务端无视页码 / 中途失败） */
+  partial: boolean;
+  /** 失败原因（空串 = 正常）；界面在它有值时把条染成警示色 */
+  reason: string;
 }
 
 /**

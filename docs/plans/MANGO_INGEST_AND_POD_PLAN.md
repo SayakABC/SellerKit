@@ -298,12 +298,13 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 
 #### M2 施工记录（2026-11-01）
 
-已完成 **T2-1 / T2-2**（T2-3 采集状态条、T2-4 待发货清单、T2-5 空态骨化待做）。
+已完成 **T2-1 / T2-2 / T2-3**（T2-4 待发货清单、T2-5 空态骨化待做）。
 
 | 任务 | 落点 | 验证 |
 |---|---|---|
 | T2-1 状态分桶 | `src/lib/mangoStatus.ts`（5 桶 + 唯一实现） | `tests/mangoStatus.spec.ts` 25 例；变异「认不出→pending」立刻红 |
 | T2-2 第二行四数 | `src/lib/shippingPulse.ts`（纯函数）+ `flowCtx.ShippingSummary.pulse` + `TodayView.reload()` + `OverviewPanel` 新块 | `tests/shippingPulse.spec.ts` 12 例；`today:ui` 3 条新断言；两次变异确认会红 |
+| T2-3 采集状态条 | `src/lib/syncBanner.ts`（纯函数）+ 新 IPC `mango-sync-status` + `OverviewPanel` 顶部 | `tests/syncBanner.spec.ts` 13 例；`today:ui` 3 条接线断言；变异「error 字段丢掉」立刻红 |
 
 **与计划的三处偏离（都是实现时才发现的口径问题）**：
 
@@ -322,12 +323,25 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 带空格的格式在 `Date` 构造器里行为是**实现相关**的（V8 当本地时间，别的引擎可能当 Invalid Date），
 而这一屏显示"还剩几小时"，解析偏一小时就是错的告警。
 
+**T2-3 的两处偏离 + 一个被查明的旧问题**：
+
+1. **状态条也走容器汇总**（`summary.sync`）而不是面板自己取数 —— 守「面板不直接调 IPC」的纪律；
+   但**必须新增 `error` 字段**：`success:false` 若折成 `last:null`，"读不到日志"会被显示成"还没同步过"，
+   而这两件事要做的事完全不同（前者要重装/反馈，后者只要去芒果页面点一下）。
+2. **文案/配色下沉成纯函数**（`syncBanner.ts`）而不是写在面板里：四种形态若都在 `today:ui` 里验，
+   要连点五次刷新，把 `--virtual-time-budget` 撑爆。下沉后单测覆盖四种形态，UI 只验接线，两次刷新够。
+3. **⚠️ 查明了一个一直存在的假绿**：`today:ui` 的输出在预算耗尽时会**截断在最后一条 PASS**，
+   而 `SMOKE: ALL PASS` 不出现、`grep FAIL` 一条都没有 —— 看着就是"全绿"。
+   此前记录的"308 PASS 全绿"其实就是截断，实际跑完是 **364+** 条。预算已提到 90s，
+   且**判据改为"输出里有 `SMOKE:` 收尾行"**，不再是"没有 FAIL"。
+
 **变异测试（确认守卫有效，不是"跑了就绿"）**：
 - 去掉 `isWaitingShip` 筛选 → 3 条红
 - 风险窗口 `<= 24h` 改成 `< 0`（只算已过期）→ 2 条红
 - `today:ui` 把第二次取数也带上 `importDate` → 3 条红（正是"两块口径必须不同"那条）
+- 状态条的 `error` 字段恒空 → 「读不到 ≠ 没同步过」立刻红（detail 里显示"还没同步过"）
 
-**门禁**：`npm test` 1204 例 / 58 文件 · `today:ui` 308 项 PASS · `verify` · `verify:docs` · `lint`（0 error）全绿。
+**门禁**：`npm test` 1217 例 / 59 文件 · `today:ui` 367 项 PASS（连跑两次稳定）· `verify` · `verify:docs` · `lint`（0 error）全绿。
 
 ---
 

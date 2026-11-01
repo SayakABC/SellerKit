@@ -1,18 +1,18 @@
 # 产品 / 订单模型简化方案（2026-10-30）
 
-> **状态**：🟢 **D1–D18 与 Q6 全部确认**；**R0（拆行器 + 清库）已完成并全绿（2026-10-30）**，下一步 R1（= S0a 主数据）。
+> **状态**：🟢 **D1–D18 与 Q6 全部确认**；**R0（拆行器 + 清库）与 R1（= S0a 主数据）已完成并全绿（2026-10-30）**，下一步 R2（`pl_shop_sku` 键改造）+ R1b（色/码外键收口）。
 > **读者**：架构 / 开发者 / 产品
 > **起因**（用户口径）：一个很简单的功能却铺了十几张表，数据维护不好、结构不清晰；解析订单 Excel 定不了款和色；在产品管理里维护 SKU 的时间成本太高。
 > **前置**：[`reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md`](../reviews/PRODUCT_TABLES_REVIEW_2026-10-30.md)、[`notes/2026-10-30-order-purchase-grid.md`](../notes/2026-10-30-order-purchase-grid.md)、[`archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md`](../archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md)、`docs/decisions/ADR-002-master-data-layer.md`（C1）
-> **性质**：设计方案 + 分期；R0 已落地（拆行器 / 订单行幂等键 / 清库脚本），R1 起按 §10 继续。
+> **性质**：设计方案 + 分期；R0 / R1 已落地（拆行器 / 订单行幂等键 / 清库脚本 / 唯一图片仓），R2 起按 §10 继续。
 >
 > ⚠️ **2026-10-30 重大订正（用户纠错）**：本文 §4 原先以 `(店铺, 商品ID, Color 原文)` 为精确键、并以
 > `spec='*'` 作单色 listing 回落 —— **两条都作废**。订单 Excel 里同一 item 下的不同商品可能复用同一
 > `Color` 原文，**`(店铺, 商品ID, 订单图片)` 才是 SKU 级身份**；`spec='*'` 回落会把一个 listing 的多个色
 > 静默并成一个款色，**不能保留**。新的键与回落规则见
 > [`plans/FEATURE_DECOMPOSITION_2026-10-30.md`](FEATURE_DECOMPOSITION_2026-10-30.md) 的 D1–D5；
-> D1–D5 已于 2026-10-30 确认（D2 原文入键 / D3 改 `pl_shop_sku` / D4 `spec` 退役）；
-> S0a（主数据）仍待 D14–D18，确认前不动代码。
+> D1–D5 已于 2026-10-30 确认（D2 原文入键 / D3 改 `pl_shop_sku` / D4 `spec` 退役）。
+> S0a（主数据）已实施（见 §10.2 的「实施记录」）；D 组（色/码外键收口）拆为 **R1b** 延后，理由同节。
 
 ---
 
@@ -239,7 +239,7 @@ resolve(shop, itemId, imageKey, colorRaw):
 
 **R0 门禁**：`vitest run` **1132 passed / 54 files**；`tsc`（`tsconfig.json` + `tsconfig.electron.json`）0 error；`order:smoke` 全绿；`schema:smoke` 仅既有 [H] 失败（与本轮无关，CHANGELOG 已记录）。
 
-### 10.2 R1：主数据落地（= S0a）
+### 10.2 R1：主数据落地（= S0a）（✅ 已完成 2026-10-30；D 组拆为 R1b 延后）
 
 **A. 新增主数据模块（唯一写入口）**
 
@@ -312,3 +312,264 @@ node scripts/order-row-splitter-smoke.cjs     # R0-2
 - ❌ 不改 `oi_style_colors.style_id → product_id`、不删 `oi_styles` → R4；
 - ❌ 不删 `pl_variants` 文本列 → R5（R1 只停写）；
 - ❌ 不动 `oi_order_items.variant_key` 与 `snapshotOrderWeights` → R2/R5 随键与克重一起改。
+
+#### 实施记录（2026-10-30，本刀实际落地）
+
+| 组 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **A 主数据模块** | ✅ 落地 | `electron/master-data-db.ts`：`md_images`（内容指纹唯一）/ `md_colors` / `md_sizes` / `md_color_aliases`；唯一落盘入口 `landImageBytes`（两级去重 URL 指纹 → 内容指纹，文件落 `userData/images/<sha256><ext>`）；`registerImageRow` 只登记已落盘的图；种子 27 色 + 10 码（`未分类` 与平台数字色**不入**字典，播种幂等且清库后自愈）。**没有** `md.main` 版本化迁移：四张表是全新表，D12 口径是"清库重建"而非升级老形状 |
+| **B 删旧实现** | ✅ 落地 | 三张旧图表（`oi_images` / `pl_images` / `pl_item_images`）的 DDL 与读写全删；`retireLegacyImageTables()` 负责老库拆除：先重建 `oi_order_items`（去掉指向 `oi_images` 的外键）再 DROP 三表、补 `oi_style_colors.image_id`（`foreign_keys` 在事务内是 no-op，且 RENAME 会改写别的表的外键 ⇒ 只能"建新表 → 拷数据 → DROP → RENAME"）。**旧图改为「搬完再拆」**（2026-10-30 修订）：原定"零迁移"是按「无存量库」定的，真库实测有 101 行 `oi_images` + 12 行 `pl_images` + 92 条「图 → 款色」绑定，直接 DROP 等于把人工定款定色的积累清零 ⇒ 新增一次性过渡件 `electron/legacy-image-migration.ts`：经 `landImageBytes`（唯一落盘入口）搬进 `images/`，改写订单行/产品行 `image_id`，款色代表图按 `updated_at DESC` 取 1:1（同色多图其余保留为普通图片） |
+| **C 引用收口** | ✅ 落地 | 备份 / 体检 / 孤图清理 / 缩略图白名单统一认 `images/`；订单、产品两域只读 `md_images`（`image_id` 唯一图片键）；采集行图写 `pl_shop_items.image_id`；`oi_style_colors.image_id` 成为**款色代表图**（1:1，真库取证：图→多色 0、色→多图 0）。读取口径统一为 `ITEM_STYLE_COLOR_ID`（行上 `style_color_id` 优先、图上代表款色回落） |
+| **D 色/码外键** | ⏭️ **延后为 R1b** | `oi_style_colors.color → color_id`、`pl_variants` 加 `color_id`/`size_id` 并停写文本列、`oi_color_aliases` 并入 `md_color_aliases`。延后理由：这三项都要求**改键**（`UNIQUE(style_id, color)` → `(style_id, color_id)`、`(product_id,color,size)` → `(product_id,color_id,size_id)`），而键改造正是 R2 的内容；同一刀里既改图片事实又改颜色事实，会同时触发两套事实迁移（§0.3 铁律）。字典与别名写入接口（`resolveColorId` / `ensureColorId` / `setColorAlias`）已就绪，R1b 只做"业务表换列 + 回填 + 停写" |
+| **E 迁移方式** | ✅ 落地 | `md_*` 已进 `scripts/reset-dev-data.mjs` 的清理清单；`md_*` 本身仍不写 backfill。**图片例外**：旧图表的数据由 `legacy-image-migration.ts` 一次性搬入（过渡件，迁移窗口结束后可整文件删除），理由见 B 组 |
+| **F 门禁** | ✅ 全绿 | 见下方「R1 门禁实测」 |
+
+**R1 门禁实测（2026-10-30）**：
+
+```text
+npm run build             ✅ vite + tsc 0 error
+npm run verify            ✅ IPC 契约 / 跨域边 13 条在册 / shop upsert 字段（新增 order-db / product-db → master-data-db 两条边并写明理由）
+npm run verify:docs       ✅ 零悬空引用
+npm run lint              ✅ 0 error（622 warning 为既存量）
+npm run test              ✅ 1132 passed / 54 files
+npm run order:smoke       ✅ 全部通过
+npm run product:smoke     ✅ 全部通过
+npm run product:sku:smoke ✅ 全部通过
+npm run style:smoke       ✅ 全部通过
+npm run shop-item:smoke   ✅ 全部通过
+npm run picking:smoke     ✅ 全部通过
+npm run ipc:shape:smoke   ✅ 58 项
+npm run schema:smoke      ✅ 全部通过（[C] 老库夹具按真表名 oi_images 造 stub；[H] 收口断言改为回退后语义）
+npm run images:smoke      ✅ 新增，25 项（唯一图片仓 / 两级去重 / 拒绝路径 / 字典与别名 / 播种自愈）
+                          ＋[9] 旧图搬迁 1 项（同内容收敛 / 引用改写 / 款色 1:1 / 幂等）
+```
+
+**真库落地记录（2026-10-30）**：
+
+- `scripts/reset-dev-data.mjs` 当天被误跑三次，清空了店铺（16）/ 邮件账号（6）/ 订单（70）等主数据 —— 已用
+  `sellerkit.db.bak-2026-10-30T06-07-49`（首次清库前的备份）整库恢复，数据一条不丢。
+- 真库此前停在**半迁移**状态（旧图表已拆、`md_images` 却是 0 行：一次被沙箱拦在落盘那一步的启动所致）⇒
+  以备份为源在副本上重跑整条启动链，产物回写：**113 行旧图 → 101 张唯一图**（同内容合并 12 张），
+  75 行订单图 / 11 个产品图全部改写并解析到 `md_images`，**72 个款色**拿到代表图（同色多图省 11 张、悬空绑定 9 条），
+  `images/` 落盘 101 个文件、0 缺失。旧图表 `oi_images` / `pl_images` / `pl_item_images` 已拆除。
+- 回退位保留：`sellerkit.db.half-migrated-2026-10-30`（半迁移现场）、`sellerkit.db.wiped-2026-10-30`（被清空的库）。
+
+> ⚠️ 两处**冒烟口径变更**（不是"修红断言"，是被测语义在 2026-10-29 已回退 / R1 已换形状）：
+> ① `backfillVariantStyleColors` 自 `07aaac3` 起只给**已归类行**补记绑定，不再"导入即建款/建色"
+> ⇒ `schema:smoke` [H] 与 `picking:smoke` 的临时款用例改为"待认款"或走 `assignOrderStyle` 认款写路径；
+> ② 款色代表图 1:1 之后"同图两色各归各色"不可达 ⇒ `picking:smoke` [7] 改为"同一张图只有一个色结论"。
+
+#### 实施记录（2026-10-30 晚，R1c：字典 IPC + SKU「颜色工作台」）
+
+> 这一刀解决的是 §5 的第二步（"把现有的颜色列出来，批量归类、批量拖动"，用户明确否决"颜色用下拉"）。
+> 口径：字典是**只读**数据源，界面只消费；写入仍只经业务路径（`ensureColorId` / `ensureSizeId` / `setColorAlias`）。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **字典 IPC** | ✅ 落地 | `electron/master-data-handlers.ts`：`md-color-list` / `md-size-list` 两条只读通道（`handle` 契约），先 `ensureMasterDataSchema()`（老库缺表时自建 + 播种）再返回；`main.ts` 注册、`preload.ts` 暴露、`src/types.ts` + `src/core/services/ipc.ts` 登记（渲染层唯一入口 `mdColorList()` / `mdSizeList()`） |
+| **常用色字典驱动** | ✅ 落地 | `SkuMatrixEditor.vue` 的 `paletteColors` = 字典 27 色（`sort_order,id`）+ 矩阵里字典没有的异写（逐个追加）。色块取 `swatchOf()`：**先字典 hex、再 `findSwatch` 模糊**；字典取不到时整排回落 `COMMON_COLORS`（`src/lib/colorSwatch.ts`）。候选列表（点色名弹出的那条）同步换成字典名 |
+| **多选 + 批量** | ✅ 落地 | 多选是显式开关（默认零勾选框）；`toggleSelect` 支持 Shift 连选，`全选 / 取消选择 / 已选 N 色` 在批量条上；从已选行起手拖动 = 整组（`dragGroup`），落「常用色」= `classifySelection`（归成字典写法）、落另一色 = `mergeSelectionInto`；`pickCommon` 在多选且已选时也走 `classifySelection`（点常用色 = 归类） |
+| **撤销** | ✅ 落地 | 批量走同一条 `markBulk`（12 秒「撤销」，与整行/整列开关共用回执位）；撤销同时清空勾选（旧下标不能残留到下一次批量） |
+| **写后立刻读的坑** | ✅ 修 | `matrix` 是 `defineModel`（props 模式）⇒ `matrix.value = x` 只 emit，父组件**下一帧**才回写 prop，立刻读回来仍是旧矩阵。批量循环里因此只有最后一个色生效（冒烟实测：两色批量只归了后一个，回执还说"已经是这些色名"）。改为**累加局部变量、最后一次写回**；`addSize` 的焦点下标是同一类（焦点落在倒数第二码），一并修 |
+| **版式** | ✅ 守住 | 27 色靠压字号/内边距/色点放进两行，胶囊**高度保持 24px**（这是拖动靶子）；版式守卫的规格区上限 200 → 250 并写明"矩阵可见性由 ≥7 行组合的独立守卫兜" |
+| **冒烟** | ✅ 新增 | `goods:ui` 增 `sku-batch-classify`（多选开关 / 整组落点文案 / 归一成「黑色」/ 撤销搬回两行 / 全选 / 合并为一行 / 退出多选 / 批量步零写入）；`ipc:shape:smoke` 增 ⑬ 段 10 条（通道在册 / camelCase / 升序 / 不含「未分类」与数字色 / 别名是逗号字符串），58 → 68 项 |
+
+**R1c 门禁实测（2026-10-30 晚）**：
+
+```text
+npm run build             ✅ vite + tsc 0 error
+npm run verify            ✅ IPC 契约 / 跨域边 / shop upsert 字段
+npm run verify:docs       ✅ 零悬空引用
+npm run lint              ✅ 0 error
+npm run test              ✅ 1132 passed / 54 files（新增「常用色」文案豁免）
+npm run images:smoke      ✅ 主数据域（字典 / 别名 / 播种）全绿
+npm run ipc:shape:smoke   ✅ 68 项（含新增 ⑬ 段 10 条）
+npm run goods:ui          ✅ 宽 1440 + 默认 1200 + 窄 900 三遍全绿
+```
+
+**留给下一刀（已确认方向，未开工）**：「未归类 → 别名吸收」；发货台「补代表图」；产品页主图「先选图后保存」；
+P1 旧形状注释清扫 + 退役表名 lint；P2 色值单一来源（`colorSwatch.ts` 与 `md_colors.hex` 目前各有一份事实）。
+（「色卡托盘 + 拖图定色」与「批量定色弹层」已落地，见文末 §实施记录。）
+
+#### 实施记录（2026-10-30 深夜，R1d：色名只读 + 点选归类 + 通用「常用色」组件）
+
+> 用户口径：「编辑产品中的颜色修改为不能修改，可以改成可多选，点击选中，批量拖动到常用色中选择颜色，
+> 如果不存在颜色，可以在常用色后面新增颜色，这可以做成通用的页面或方法，可供产品编辑页和归类核对页使用」。
+> 四条拆解：① 色名只读；② 点行即选中（撤 R1c 的「多选」开关）、选中后点/拖到常用色归类；
+> ③ 常用色末尾「＋ 新增颜色」写 `md_colors`；④ 抽通用组件供两个页面复用。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **色名只读** | ✅ 落地 | `SkuMatrixEditor.vue` 色名 `<input v-model>` 撤掉，改只读 `<span data-color>`；改色名唯一路径 = 归类 / 合并（落库色名永远取字典写法，界面不再产出异写）。候选词浮层（suggest）整段删除 —— 点行选中后「常用色」那排本身就是候选列表。只读后整条 chip 都是拖动抓手（不再排除 input） |
+| **点行即选中** | ✅ 落地 | 点 chip 任意处 = `toggleSelect`（Shift 连选保留），`.mx-sel` 勾常显；R1c 的「多选」显式开关撤掉（选中态本身可见，开关是第二套规则）；批量条只在有选中时渲染 |
+| **通用组件** | ✅ 落地 | `src/core/components/ColorPalette.vue`（色点胶囊条 + 打勾 = 已在矩阵 + 拖放落点高亮 + 末尾「＋ 新增颜色」inline 编辑器）；共享服务 `src/core/services/colorDict.ts` 单例字典（失败回落 `COMMON_COLORS`）。产品矩阵接「加行 / 归类 / 落点」，归类页接「写草稿色」 |
+| **`md-color-create`** | ✅ 落地 | 「＋ 新增颜色」唯一写通道：空名 / >40 字 / 纯数字拒绝（数字色 = "还没定色"的证据，不是主数据）；同名幂等（`created:false`）。preload 消毒 + `types.ts` / `ipc.ts` 四件套登记 |
+| **归类页颜色格** | ✅ 落地 | `ClassifyPanel.vue`：有款色卡的行 = 「色点 + 色名」按钮（`data-color` 带当前值），点开 Teleport 弹层复用 `ColorPalette`（compact、不开新增 —— 加款色是产品页职责）；无款 / 无色卡行仍是自由输入 + datalist。弹层带「清空颜色」，Esc / 遮罩关闭 |
+| **回执互斥** | ✅ 修 | 单条回执（8s）与批量「撤销」回执（12s）同行互斥，**最新一条优先**（`flashHint` 清 `undoBulk` / `markBulk` 清 `mergeHint`）。顺带堵掉一条数据路：`undoBulk` 是批量前整矩阵快照，中间又改动再点撤销会把新改动抹掉 |
+| **冒烟** | ✅ 改写 | `goods:ui` 颜色断言整体改写（`mxChip/mxNames/tapColorRow/ensureDictColor`；假桥 `mdColorCreate` 桩与真进程同闭环；规格区上限 250 → 300 = 新增颜色按钮多占的小半行）；`today:ui` 颜色格 SELECT → 按钮 + 弹层（`clPickColor/clClearColor`；回车保存改派勾选框 —— 按钮上的 Enter 被组件刻意忽略）；`ipc:shape:smoke` 增 ⑬b 段 5 条，68 → 74 项。lint 抓出假桥模板串里 `\d` 没双重转义的真 bug（实际匹配字母 d），已修 |
+
+**R1d 门禁实测（2026-10-30 深夜）**：
+
+```text
+npm run build             ✅ vite + tsc 0 error
+npx vue-tsc --noEmit      ✅
+npm run verify            ✅ IPC 契约 / 跨域边
+npm run verify:docs       ✅ 零悬空引用
+npm run lint              ✅ 0 error
+npm run test              ✅ 1132 passed / 54 files
+npm run images:smoke      ✅ 主数据域全绿
+npm run schema:smoke      ✅ 版本化迁移全绿
+npm run ipc:shape:smoke   ✅ 74 项（含新增 ⑬b 段 5 条）
+npm run goods:ui          ✅ 宽 1440 + 默认 1200 + 窄 900 三遍全绿
+npm run today:ui          ✅ 全绿
+```
+
+**留给下一刀（R1d 后更新）**：「未归类 → 别名吸收」；发货台「补代表图」；产品页主图「先选图后保存」；P1 清扫；
+P2 色值单一来源。（归类页「批量定色」已落地，见文末。）
+
+#### 附带改动（2026-10-30，SKU 编码 `{color}` → 颜色 ID）
+
+> 用户口径：「SKU编码把color修改为颜色ID」。色名会被归类改名（`藏蓝` → `藏青`），编码跟着改就对不上实际色；
+> `md_colors.id` 是主数据身份，改名不动。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **取值** | ✅ 落地 | `colorDict.ts` 的 `ColorDictItem` 带 `id`，新增 `colorIdOf()`（`0` = 不在字典）；`skuCode.ts` 的 `SkuCodeSeed` 增 `colorId?`，`renderSkuCode` 经 `colorToken` 渲染 `{color}` |
+| **回落** | ✅ 落地 | 拿不到 id（未归类的异写色 / 字典未载入 / 内置兜底色）⇒ 回落色名，不留 `S1--L` 残码 |
+| **界面** | ✅ 落地 | 占位符标签与 title 改「颜色ID」；`ProductEditorDrawer` 的 `codeSeeds` 带 `colorId`，`onMounted` 预载 `loadColorDict()`（避免第一帧按色名算再跳成 ID） |
+| **门禁** | ✅ 全绿 | `test` 1134（+2：id=3 ⇒ `SUST-001-3-L`；无 id ⇒ 回落 `黑色`）；`goods:ui` `sku-drag-grab` 段 +2（字典已有「黑」时预览为 `S1-29-L`、提示标「颜色ID」）；其余同上一节 |
+
+#### 实施记录（2026-10-30，归类核对：色卡托盘 + 拖图定色）
+
+> 用户口径：「接下来继续改归类核对」→ 确认先做 **「色卡托盘 + 拖图定色」**
+> （原描述：「页面上常驻一排字典色卡；把某行/某张图拖到色卡上 = 给这些行定色。
+> 拖放语义与产品页的归类拖动对齐」）。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **托盘位置** | ✅ 落地 | `ClassifyPanel.vue` 在页头与表格之间常驻 `.cl-tray`（仅待核对范围且本页有行时渲染，不吸顶 —— 吸顶会压扁 `cl-list` 弹性区）；chip 复用 `ColorPalette`（`act="cl-tray"`、`dropAttr="data-cl-tray"`、compact） |
+| **列哪些色** | ✅ 落地 | 托盘颜色 = **本页各行 `styleCode` 的款色卡并集**，不是 27 个字典色。理由：这一页落库的是"款 + 色"的款色，颜色不在款色卡里就落不下去，而宿主 `ensureStyleColor` 会顺着它**给这个款新建一个色**（本页不该凭空造款色）。用行上的 `styleCode` 而非草稿 —— `draftOf` 在 computed 里新建草稿会自激 |
+| **点色卡** | ✅ 落地 | 有勾选 ⇒ 给这批行定色并保存；没勾选 ⇒ 只说下一步（不写库），托盘自己的提示句跟着勾选数变（「已选 N 行」） |
+| **拖图定色** | ✅ 落地 | 行头缩略图同时是"点击看大图"与"拖动抓手"：`pointerdown` 起手、6px 阈值区分两个意图、拖动期间捕获阶段 `selectstart` 一律 `preventDefault`（产品页同一条教训），拖完那一下的 `click` 被吞掉（否则松手就顺手开大图）；落点按 `data-cl-tray` 认，不按坐标区间 |
+| **统一写入口** | ✅ 落地 | 点与拖共用 `applyTrayColor(color, ids)`：串行 `saveOne({ silent, defer })` + 一次 `bump()`（与批量定款同形）；回执**分四类计数**（已保存 / 本来就同色 / 还没点名款 / 款色卡里没有这个色），不合并成一句"完成" |
+| **冒烟** | ✅ 落地 | `today:ui` 增 9 条（托盘内容 = 黑/白且不含别款的「蓝」；每颗带 `data-cl-tray`；无勾选点色卡不写库；勾 2 行点色卡 ⇒ 两次 `orderStyleAssign` 带 S1+黑；回执含"已把 2 行定到"；拖 P-44 到「白」⇒ 单行落库；拖动中 `is-dragging` + `is-drop`；拖后 click 被吞、大图没开） |
+
+**门禁实测（2026-10-30）**：`build` / `vue-tsc --noEmit` / `test` 1134 / `lint` 0 error /
+`verify` / `verify:docs` 全绿；`today:ui` 353 PASS；`goods:ui` 444 PASS（三窗口遍）。
+
+#### 实施记录（2026-10-30，归类核对：批量定色弹层）
+
+> 用户口径：「继续实现批量定色弹层」。上一刀（托盘 + 拖图）是**快路径**；这一层治的是**混款**：
+> 同一个色名在有的款色卡里、在有的款色卡里没有 —— 托盘只按"有没有这个色"逐行处理，
+> 人看不到"这一下会改几行、几行会不动"，于是要点完才知道结果。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **入口** | ✅ 落地 | 底部动作条在「批量定款…」旁加「批量定色…」（`data-act="cl-bulk-color"`，仅勾选时出现的同一条 `.cl-bulk`） |
+| **弹层** | ✅ 落地 | 新组件 `src/modules/today/tabs/BulkColorPicker.vue`（`bc-*` 命名空间，与 `BulkStylePicker` 同一套 `.wb-dialog` 外壳）；头行报「已选 N 行 · M 个款」 |
+| **候选色** | ✅ 落地 | 这批行各自款色卡的**并集**（保持首次出现顺序：色卡顺序就是产品页里人排的顺序）。不摆字典全集 —— 这一页写的是「款 + 色」的款色 |
+| **覆盖账** | ✅ 落地 | 每种色**点之前**就摆出「改 N 行 · 已是 M · 另 K 行不适用」；`change = 0` 的色仍然列出但**点不动**（"已经是它"要看得见，藏起来会被读成"色卡读错了"）；`noStyle`（还没点名款）与"色卡没这个色"分开数，title 里点名最多 3 个订单号 |
+| **写入口** | ✅ 落地 | 与托盘**同一个入口** `applyTrayColor(color, ids)`（串行 `saveOne({ silent, defer })` + 一次 `bump()`，四类回执照旧）；弹层只 emit 一个色名、落库后自动关闭 —— 不另写一套批量落库（两套必然分叉，症状是"弹层说改了 3 行、列表里只动了 1 行"） |
+| **纯函数** | ✅ 落地 | `colorOptionsOf(rows)` 放进 `src/lib/classifyBulk.ts`（与 `pickColorFor` 同区）：`change` / `same` / `miss` / `noStyle` / `missNos` 一次算清，单测 5 条 |
+| **冒烟** | ✅ 落地 | `today:ui` 增 9 条（入口与「批量定款…」并排；弹层头「已选 2 行 · 1 个款」；黑「改 1 行 · 另 1 行不适用」、白「改 0 行 · 已是 1」；白点不动而黑可点；未选色时「确定」禁用；选中后按钮报「定色并保存（1 行）」；落库只写 P-42、没点名款的 P-43 一行都不写；回执点名"1 行还没点名款"；落库后弹层自动关闭） |
+
+**门禁实测（2026-10-30）**：`build` / `vue-tsc --noEmit` / `test` **1139**（+5）/ `lint` 0 error（625 存量 warning）/
+`verify` / `verify:docs` 全绿；`today:ui` **362 PASS**。
+
+#### 实施记录（2026-10-30，归类核对：「颜色叫什么」改成点选起名）
+
+> 用户口径：「归类核对页面的颜色叫什么也修改成编辑产品页的 SKU 编辑的方式」。
+> 追问后选定的形态：「单格选中 + 卡片顶部一排色卡」—— 点一个色格 = 选中它，卡片顶部出现
+> 「正在给『5』起名」+ 常用色卡（末尾「＋ 新增颜色」）；点色卡即存并自动跳到下一个未命名的色；
+> 把色格拖到色卡上也能命名。一屏只有一排色卡，**不再逐格手打色名**。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **为什么撤掉逐格输入框** | ✅ 落地 | 色名会进拿货单与统计，手打必然漂成「黑 / 黑色 / Black」三行 —— 同一件货在两张纸上分成三行。改成"只能从字典里点"后，落库色名总是字典写法 |
+| **选中** | ✅ 落地 | 点整格 = 选中/取消（色名改成只读后"点一下"只剩这一种含义）；`vn-sel` 标记常显（未选空框、已选打勾），点它等价于点整格；缩略图按钮仍走 `@click.stop`（点图是看原图，不选中） |
+| **色卡** | ✅ 落地 | 复用通用组件 `ColorPalette`（`act="vn"` / `drop-attr="data-vn-pc"` / `allow-add` / `compact`）。色名来源 = `md_colors` 字典 + 命名板里已起过的名字；**平台原文不进这一排**（摆上去等于允许"把色叫 5"） |
+| **点之前的拒绝预告** | ✅ 落地 | 色卡的打勾按**款**算（`presentColors` = 选中格同 `styleCode` 下已命名的名字）—— 正是 `renameStyleColor` 拦"同款重名"的边界。人点之前就知道"这一下会被拒，要合并请用映射与关联" |
+| **接力** | ✅ 落地 | 存完把选中交给**同组下一个未命名**的格，本组没了交下一组的第一个；只在 `shownGroups`（这一批渲染出来的）里接力 —— 更后面的那批交给「再看 N 个商品」，**不把人交给看不见的格子**（否则色卡上那句"正在给 X 起名"就是一次看不见的写库） |
+| **拖动** | ✅ 落地 | 与产品页 `SkuMatrixEditor` 同一套 pointer 手势（6px 阈值、`selectstart` 捕获阻止刷蓝、`elementFromPoint` + `closest('[data-vn-pc]')` 判落点）；拖完**吞掉**随后的那一次 click（`@click.capture`），否则它会顺手把松手位置下面那一格选中、或把另一颗色卡再点一次 |
+| **被拒时** | ✅ 落地 | 原话显示在**那一格**（`vn-err-*`），且**不跳选中** —— 跳走等于把错误甩在身后，人还得回头找是哪一格失败 |
+| **冒烟** | ✅ 落地 | `today:ui` 命名板段由 7 条扩到 11 条：色格同屏 / **色格内没有任何输入框** / 未选中时只提示且无「取消选择」/ 点格后改口成"正在给「5」起名" / 色卡按款打勾（藏青打勾、军绿不打）/ 只送 `{styleColorId, name}` 两键 / 被拒显示原话且不跳选中 / 存成功接力同组（902）/ 本组填完跨组（904）/ 拖到空白处不改名且吞掉 click / 拖到色卡落库（`{904, 藏蓝}`）并验拖动中的三个 class（在 `pointerup` 之前取） |
+| **夹具/桩** | ✅ 落地 | 新增 `mdColorList` / `mdColorCreate` 桩（可变种子 `NAMING_DICT`）—— 不桩会退回内置 `COMMON_COLORS`，而它**恰好**含藏青/军绿/酒红，断言会"碰巧"绿；`orderVariantRename` 的拒绝名从「撞名」改成「藏青」（夹具里 903 同款已叫藏青，正对"同款重名"语义） |
+
+**门禁实测（2026-10-30）**：`node --check` / `build` / `vue-tsc --noEmit` / `test` **1139** / `lint` 0 error（625 存量 warning）/
+`verify:docs` 全绿；`today:ui` **368 PASS**；`goods:ui` **447 PASS**（三窗口遍，共用 `ColorPalette` 未受影响）。
+
+**踩坑（写在这里免得下次重犯）**：
+1. 注入脚本整体在一个模板串里 ⇒ 注释与文案**不能出现反引号**（会提前结束字符串，`node --check` 报 `Unexpected identifier`）；
+2. 绑定在响应式状态上的 class（`is-dragging` / `is-drop` / `is-src`）**必须等一次重绘**再读 —— 同步读永远是"操作之前"的样子，断言要么恒绿要么恒红；
+3. 拖完的 click 要**同步**补派（`setTimeout(0)` 之前），否则吞 click 的那支根本走不到；
+4. 落点用 `elementFromPoint` ⇒ 目标必须真的在视口里（`scrollIntoView` 后再取 `rectCenter`）。
+
+#### 实施记录（2026-10-30 续，「只列还没认的色」+ 撤下「可能是同一件货」）
+
+> 用户口径：「颜色叫什么中只展示订单中没有认颜色的数据，目的只为了能认款和色，为之后的拿货统计做准备，
+> 可能是同一件货模块现在的推荐完全不准，你看看是不是需要去掉」。
+> 追问后确认撤法：**只从页面撤掉**（组件 / IPC / 库表全留）。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **命名板只列待办** | ✅ 落地 | 已起过名的色**不进渲染**（`unnamedOf(g)` 过滤后才是色格）；组头由「· N 色 / 还剩 N 个没起名」收成一句「· N 个没起名」；「查看全部颜色」开关（`showAll`）删掉 —— 它唯一的用途就是"把已起名的也摆出来"，与这次口径相反 |
+| **选中态收口** | ✅ 落地 | `selected` 的查找加了 `!named`：选中的一定是没认的格，`selHint` 里"现在叫 X"那半句因此不可达，一并删掉（避免留死分支） |
+| **撤下「可能是同一件货」** | ✅ 落地 | `ClassifyPanel` 不再挂 `StyleMergeCard`；模板里留注释写明撤下的理由与"判据有了再接回来"，防止有人顺手挂回去 |
+| **为什么只撤界面** | ✅ 落地 | 真库 `select count(*) from oi_style_merges` = **0**，没有"想拆拆不掉"的问题；组件与三支 IPC 全留，恢复成本 = 一行 `<StyleMergeCard />` |
+| **为什么它不算推荐** | ✅ 取证 | `styleMergeCandidates()` 的唯一判据是"同厂家 + 该厂家下 ≥2 个有键的款"；真库 5 号厂家挂了 8 个款 ⇒ 一屏 8 行全是同一个厂的**不同货**，人得逐行自己判 |
+| **冒烟** | ✅ 落地 | ① 新增「只列待办：903 / 905 都不在 DOM 里」（N1 剩 2 格、N2 剩 1 格）；② 原 10 条款合并断言与 1 条其几何守卫删掉，换成 1 条**反向**断言「没有这块，也不再请求 `orderStyleMergeBoard`」—— 撤下这件事本身要有守卫，否则以后被挂回来冒烟照样全绿 |
+
+**门禁实测（2026-10-30）**：`node --check` / `build` / `vue-tsc --noEmit` / `test` **1139** / `lint` 0 error（625 存量 warning）/
+`verify:docs` 全绿；`today:ui` **359 PASS**（368 − 9：删 10 条合并断言 + 1 条几何守卫，加 2 条新的）。
+
+#### 实施记录（2026-10-30 续，颜色管理页 + 同色异名合并）
+
+> 用户口径：「当前颜色的管理页面还没有，现状是存在相同的颜色，只是名称不一样，要支持颜色合并」。
+> 此前已确认的四项：① 合并后颜色 ID 归一，统计与展示都按归一后的颜色与名称 ⇒ **必须真改业务数据**
+> （不是只记别名）；② 同款 / 同产品撞名**自动并掉**，由用户在本页把人认出的同色归一；
+> ③ 入口 = **基础数据 › 产品管理组内「颜色」页签**；④ 手势 = **拖到另一行**（与 SKU 矩阵一致）。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **颜色板是什么** | ✅ 落地 | 一行 = 一个色名，取 **字典（`md_colors`）∪ 业务表（`oi_style_colors` / `oi_order_items` 经 `style_color_id` / `pl_variants`）**。只列字典就看不见要并的东西（`黑` 常常只在款色里、`黑色` 才是字典种子）；只列业务表又看不见"还没人用的字典色"。来源徽标三态：`字典` / `未入字典` / `数字色号`；用量列 `款 N · SKU N · 订单 N`（为 0 说「没用到」，不写 0） |
+| **排序** | ✅ 落地 | 字典色按 `sort_order`（与下拉一致）在前，其余按用量降序，同用量按色名 —— **用得多的问题色先看见** |
+| **合并必须真改数据** | ✅ 落地 | 编排层 [`color-merge.ts`](../../electron/color-merge.ts) 一个事务内六步：① `md_color_aliases` 指向源色的改指保留色 ② **新增**一条全局别名 `源 → 保留`（下次导入平台色直接归一） ③ 删源字典行 ④ `oi_color_aliases` 同改 ⑤ 款色：同款已有保留色 ⇒ **先搬引用**（`oi_order_items` / `oi_variant_keys` / `oi_item_parts`）、`image_id` 只补空、再删源行；没有 ⇒ **原地改色名** ⑥ SKU：同产品已有「保留色 + 同尺码」⇒ **先删源行再补** `weight_g` / `code`（顺序反了会撞 `code` 全局唯一索引），没有 ⇒ 改 `color` 与 `name` |
+| **为什么跨域要单开一层** | ✅ 落地 | 合并同时写主数据 / 订单 / 产品三个域，收进任何一个 `-db` 都会让那个域知道别的域的查表字段。`color-merge.ts` 只做编排，`ensureSchemas()` 三个域全建（**含 `ensureVariantSchema()`**，见踩坑 1） |
+| **三条纪律** | ✅ 落地 | ① `code` 一律不动（拣货 / 编码规则已引用） ② `oi_order_items.color` 平台原文不动（"未认色"是派生态） ③ 数字色号只能当源、不能当保留名（与 `md-color-create` 同一条校验） |
+| **拒绝路径** | ✅ 落地 | 全部在写之前判定：源为空 / 保留为空 / 同一个色 / 保留名是数字色号 / 源色根本不存在（字典与两处业务表都没有）。前端同口径先拦一次（拖到数字色号行只出回执、**不发请求**） |
+| **回执** | ✅ 落地 | 只列真的动过的项：`款色改名 N 行` / `款色并掉 N 行` / `SKU 改名 N 行` / `SKU 并掉 N 行` / `订单改指 N 行` / `变体键 N 条` / `套装部件 N 行` / `别名 N 条` / `源色已从字典移除`；全为 0 ⇒ `（没有用到它的业务数据）`。"改了多少行"是用户事后唯一能核对的东西 |
+| **合并后必须重拉** | ✅ 落地 | `loadColorDict(true)`（字典单例，两个页面共享）+ `load()`（颜色板）。少一个就会出现"别的页面点色卡还是旧名字" |
+| **拖拽手势** | ✅ 落地 | 与 `SkuMatrixEditor` 同一套：`pointerdown` 只记起点并**立刻锁原生选择**；移动 ≥6px 才进拖动（点一下不等于一次合并）；落点用矩形放宽（`DROP_PAD_X=16` / `DROP_PAD_Y=12`）+ 最近距离，**松手那一行的色名保留**；拖后吞掉一次 click |
+| **在拖的时候说清会发生什么** | ✅ 落地 | 起手即提示「拖到另一行 = 并进那一行（落点色名保留）」；有落点时改口「松手：把「A」并进「B」」。一行字复用回执那一行，不额外占高 |
+| **新增颜色** | ✅ 落地 | 输入 + 新增走 `addColorToDict`（`md-color-create`），已在字典时回执「已经在字典里了」而不是报错 |
+| **搜索** | ✅ 落地 | 按色名子串（大小写折叠）；数字色号与英文色名都搜得到；无匹配走空态 |
+| **DB 冒烟** | ✅ 落地 | `master-data-db-smoke.cjs` 的 `[10]` 段换新库后补 `ensureVariantSchema()`，5 条颜色合并断言（字典删行 / 别名改指 / 款色改名 / 同款撞名搬引用 / SKU 并掉）全绿 |
+| **IPC 形状冒烟** | ✅ 落地 | `preload-ipc-shape-smoke.cjs` 新增 ⑬c 段（12 条）：两条通道已注册、`mdColorBoard → { rows }` 非空、行字段 camelCase 齐全、`黑色` `inDict=true` 且 `numeric` 与纯数字判定一致、合并回执 `dictRemoved=1`、源字典行真删、全局别名真写、合并后板无源色，以及同色 / 数字保留名 `'15'` / 幽灵源色三条拒绝 |
+| **UI 冒烟** | ✅ 落地 | `master-data-ui-smoke.mjs` 新增 `colors` step（10 条）：页签可进且面板可见、三行渲染、三种徽标、用量文案、搜「黑」剩 2 行 / 清空回 3 行、拖行前记录行序、真拖 `黑 → 黑色` 后源行消失且用量累加、回执原文、**只发一次请求**且 payload `{source:'黑',target:'黑色'}`、`mdColorBoard` 被重拉（≥2 次）、再拖到数字色号行被本地拦下（`calls` 不增、行数不变） |
+
+**门禁实测（2026-10-30）**：`build` / `vue-tsc --noEmit` / `test` **1139** / `lint` 0 error（629 存量 warning）/
+`verify` / `verify:docs` 全绿；`master-data:ui` **182 PASS**（两视口两遍）/ `images:smoke`（含 `[10]` 颜色合并）全通过 /
+`ipc:shape:smoke` **86 项**全通过 / `order:smoke` / `today:ui` 全绿。
+
+**踩坑（写在这里免得下次重犯）**：
+1. **`ensureProductSchema()` 不建 `pl_variants`** —— SKU 表由另一个入口 `ensureVariantSchema()` 建。合并时只调前者 ⇒ `tableExists('pl_variants')` 为假、SKU 那半段被**静默跳过**：回执里 `skusRenamed/skusMerged` 恒为 0，用户看到"合并成功"但矩阵里同色异名还在（升级后没打开过产品页的新库必踩）。冒烟里同样要补，否则 `[10]` 直接 `no such table`。
+2. **拖拽落点矩形必须在拖动"激活之后"重新量** —— 起手时插入的"松手会发生什么"提示会把表整体下移约一行，用拖动前的 `getBoundingClientRect()` 拖到相邻行找不到落点（第一次写这条冒烟就踩了，表现为"拖了但没合并"）。
+3. **注入脚本整体在模板串里** ⇒ 注释与文案不能出现反引号（会提前结束字符串，`node --check` 报 `Unexpected token '^'`）；正则要写成 `/^\\d+$/`。
+
+##### 2026-10-30 重新设计（用户反馈：拖行麻烦 + 不知真实颜色）
+
+> 用户口径：「现在颜色太多时拖动起来有点麻烦，并且数字和文字颜色不知道真实的颜色，没办法合并」。
+> 两点根因：① 小行 × 小行的拖放，色多时落点难对准；② 数字色号 / 平台原文（`5` / `Khaki` /
+> `Photo color`）没有真实色块，人眼无法判断"这两行是不是同一个色"，自然没法合并。
+
+| 改动 | 形态 |
+| --- | --- |
+| **板拆两区** | 上：**标准色**（字典色，合并目标）= 色卡网格，色块 = 真实 hex；下：**待归一色名**（数字色号 / 平台原文 / 未入字典的异写）= 列表，**没有色块**（"还没认"就是没色块，不给中性灰兜底假装是答案） |
+| **合并主路径改成点选** | 点待归一行 → 选中态（回执行提示"已选 X，点上面标准色即合并"）→ 点任一标准色卡 = 合并。色卡是大目标，不再靠拖小行；拖拽保留为**快捷**（拖待归一行到色卡） |
+| **真实色块可修** | 标准色卡的色块点一下 = 原生取色器改 hex（`md-color-update-hex`，**只改 hex 不改名字** —— 名字是业务身份，改错会牵一发动全身）；新增标准色时也可取色器选 hex |
+| **拒绝路径不变** | 数字色号仍只能当源、不能当保留名（标准色区不会出现数字色，该路径现基本靠主进程兜底） |
+
+**门禁实测（2026-10-30 续）**：`build` / `vue-tsc --noEmit` / `test` **1139** / `lint` 0 error /
+`verify` / `verify:docs` 全绿；`master-data:ui` ALL PASS（colors step 重写为两区 + 点选合并 + 拖卡合并）/
+`ipc:shape:smoke` **95 项**（新增 ⑬d `md-color-update-hex`：成功 / 只改 hex 不改名 / 非法 hex 拒 / 幽灵 id 拒）/
+`order:smoke` / `today:ui` 全绿。

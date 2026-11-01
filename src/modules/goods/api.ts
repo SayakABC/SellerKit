@@ -135,6 +135,8 @@ export const skuQueue = (payload?: {
  *  `adopted` = 认款顺手把订单图采纳为**款主图**的张数（只补空，已有主图的款不动） */
 export const skuMap = (payload: {
   rows: SkuMapInputPayload[];
+  /** 是否顺手采纳商品图（缺省 true = 认款就补图；向导取消勾选时传 false） */
+  adoptImages?: boolean;
 }): Promise<{
   created: number;
   updated: number;
@@ -146,6 +148,14 @@ export const skuMap = (payload: {
 /** 标失效（**不物理删除**，否则关联率回落查不出原因） */
 export const skuInvalidate = (id: number): Promise<{ changed: boolean }> =>
   unwrap(ipc.productSkuInvalidate(id));
+
+/**
+ * 存量补图：已确认认款、但款还没主图的商品图（本地订单图 + 采集远程图）补上。
+ * 只补空、不覆盖；`pending` = 这一轮之后仍有几个款缺主图。
+ */
+export const skuRepairImages = (payload?: {
+  limit?: number;
+}): Promise<{ adopted: number; pending: number }> => unwrap(ipc.productSkuRepairImages(payload));
 
 /* ============================================================================
    店铺商品采集快照（pl_shop_items；AE_SHOP_ITEM_SYNC_PLAN P1）

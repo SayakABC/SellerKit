@@ -307,7 +307,7 @@ register('purchase-price-history', async (payload) => {
 // ---- 拿货单导出（Excel 嵌入款色图；主进程生成：图片在本地缓存，xlsx 社区版不支持写图）----
 const { dialog: electronDialog, BrowserWindow, app } = require('electron');
 // **跨域读**（边 C）：拿货单的款色图来自订单域的识别结果（`oi_styles`/`oi_style_colors`/`oi_images`）。
-// 与购货同域无关，是 ADR-002 允许的 3 条受控合流点之一 —— 见 `docs/notes/2026-10-15-host-data-dependencies.md`。
+// 与购货同域无关，是 ADR-002 允许的 3 条受控合流点之一 —— 见 `docs/notes/2026-10-30-island-host-boundary.md`。
 // ⚠️ 类型标注必须留着（同规则 A）：不带标注时下面几处调用**编译期不报错**，只在运行期按错的参数查图。
 // 2026-10-20 起签名是 `(styleCode, color, size, styleColorId?)`：明细带了款色 id 就**只按 id** 取图
 // （色名是可变标签，改名后按色名取图会静默变 null ⇒ "拿货单图片全没了"）。

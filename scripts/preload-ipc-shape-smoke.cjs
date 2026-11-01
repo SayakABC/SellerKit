@@ -141,10 +141,15 @@ app.whenReady().then(async () => {
     require(path.join(ROOT, 'dist', 'electron', 'purchase-handlers.js'));
     // shop-item 域：⑩ 段验「店铺商品列表」shopId 三态透传 + 全新库 sk_shops 守卫（真 handler + 真库）
     require(path.join(ROOT, 'dist', 'electron', 'shop-item-handlers.js'));
+    // 主数据字典域：⑬ 段验颜色/尺码只读面（SKU 矩阵「颜色工作台」的常用色就取自这里）
+    require(path.join(ROOT, 'dist', 'electron', 'master-data-handlers.js'));
     assert.ok(exposed, 'preload 没有 exposeInMainWorld');
 
     section('准备素材（真实 PNG，落进图片缓存目录）');
-    const imgDir = path.join(tmpDir, 'product-images');
+    // R1 起图片只有一个落盘目录：`userData/images/`（`IMAGE_CACHE_DIRS = ['images']`）。
+    // 还用旧目录名（product-images / order-images）会让白名单把本机素材判成"越权"，
+    // 症状是每条缩略图断言都红、而真实实现是好的。
+    const imgDir = path.join(tmpDir, 'images');
     const pngPath = path.join(imgDir, 'probe-a.png');
     const pngBuf = makeRealPng(pngPath);
     const missingPath = path.join(imgDir, 'not-exist.png');
@@ -231,19 +236,19 @@ app.whenReady().then(async () => {
     }).id;
     pdb.upsertSkuMappings([{ platform: 'amazon', shopId, itemId: 'SHAPE-ITEM', productId: pid }]);
 
-    section('⑥ 认款顺手采纳订单图为款主图（真 handler：复制文件 + 登记 pl_images + 写 image_id）');
+    section('⑥ 认款顺手采纳订单图为款主图（真 handler：复制文件 + 登记 md_images + 写 image_id）');
     // 前一段（product:sku:smoke）只守"挑哪个款、挑哪张图"的挑选逻辑；**换图这件事真的发生了吗**
-    // 只能在真 handler 上验：复制文件、算指纹、登记 pl_images、写 pl_products.image_id 四步
+    // 只能在真 handler 上验：复制文件、算指纹、登记 md_images、写 pl_products.image_id 四步
     // 任一步漏了，界面上都只是"款还是没图"，一条错都不报。
     const { dbGet, dbRun } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
     const odb = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
     odb.ensureOrderSchema();
 
-    // 素材：一张真 PNG 落进**订单图缓存目录**（与线上同形态：oi_images.local_path 指向它）
+    // 素材：一张真 PNG 落进**订单图缓存目录**（与线上同形态：md_images.local_path 指向它）
     const orderImgPath = path.join(tmpDir, 'order-images', 'adopt-src.png');
     makeRealPng(orderImgPath);
     const oiImgId = dbRun(
-      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
       ['fp-adopt-shape', 'ufp-adopt-shape', '', orderImgPath],
     ).lastInsertRowid;
     // 2026-10-21（B1 拆表）：订单图挂在**明细行**（`oi_order_items.image_id`），主表只留一单一份的字段
@@ -269,13 +274,13 @@ app.whenReady().then(async () => {
     const adoptedImageId = imageIdOf(adoptPid);
     check('款主图真的写进 pl_products.image_id（不是只在返回值里数了个数）',
       adoptedImageId > 0, `image_id=${adoptedImageId}`);
-    const imgRow = dbGet(`SELECT local_path, source FROM pl_images WHERE id = ?`, [adoptedImageId]);
+    const imgRow = dbGet(`SELECT local_path FROM md_images WHERE id = ?`, [adoptedImageId]);
     const copiedPath = imgRow ? String(imgRow.local_path) : '';
-    check('pl_images 登记了这张图，且落盘在 product-images 目录（源图在 order-images，孤图清理会删它）',
+    check('md_images 登记了这张图，且落盘在唯一的 images 目录（源图在 order-images，孤图清理会删它）',
       !!imgRow &&
-        copiedPath.indexOf(path.join(tmpDir, 'product-images')) === 0 &&
+        copiedPath.indexOf(path.join(tmpDir, 'images')) === 0 &&
         fs.existsSync(copiedPath),
-      `local_path=${copiedPath} source=${imgRow ? imgRow.source : '(无行)'}`);
+      `local_path=${copiedPath}`);
     check('复制出来的是**同一份内容**（按内容去重，指纹即文件名）',
       !!imgRow && fs.existsSync(copiedPath) &&
         fs.readFileSync(copiedPath).equals(fs.readFileSync(orderImgPath)));
@@ -288,6 +293,45 @@ app.whenReady().then(async () => {
     check('已有主图的款再认一次 → adopted=0 且 image_id 一个字节没动（不覆盖人的决定）',
       r7b?.data?.adopted === 0 && afterId === adoptedImageId,
       `adopted=${r7b?.data?.adopted} image_id=${afterId}（应为 ${adoptedImageId}）`);
+
+    // 反面：向导取消勾选「采纳为款主图」⇒ 发 `adoptImages: false`，两档都不许跑。
+    // 只守"挑选"不够 —— 若 preload 没把 false 透传出去（或 handler 用 `=== true` 读缺省），
+    // 用户的取消会被悄悄推翻，而且一条错都不报。
+    const optOutPid = pdb.upsertProduct({
+      id: 0, code: 'SHAPE-OPTOUT', name: '不采纳款', supplierId: 0,
+      category: '', status: 'active', note: '',
+    }).id;
+    dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?,?,?)`, [
+      adoptOrderId, oiImgId, JSON.stringify({ 商品ID: 'SHAPE-OPTOUT' }),
+    ]);
+    const r7c = await exposed.productSkuMap({
+      rows: [{ platform: 'amazon', shopId, itemId: 'SHAPE-OPTOUT', productId: optOutPid }],
+      adoptImages: false,
+    });
+    check('adoptImages=false → adopted=0 且款主图仍为空（人取消的勾选不被"顺手"推翻）',
+      r7c?.success === true && r7c?.data?.adopted === 0 && imageIdOf(optOutPid) === 0,
+      `success=${r7c?.success} data=${JSON.stringify(r7c?.data)} image_id=${imageIdOf(optOutPid)}`);
+
+    section('⑥+ 存量补图：已确认但没主图的映射，打开页面时自动补上（不用重新认款）');
+    // 为什么单列一段：认款顺手补图只覆盖**写入那一刻**的行；升级前已确认的映射不会自己长图，
+    // 用户重启后看到的仍是白图（2026-10-30 实报「认款后产品图片还是没更新」）。
+    // 这一段直接调用渲染层同一个入口（preload → 真 handler），验"老映射也能补"这条链路真的通。
+    // 夹具：`optOutPid` 在上一段刚以 `adoptImages=false` 认过款 —— 映射是 confirmed、款还没主图。
+    const repair = await exposed.productSkuRepairImages();
+    const repairedId = imageIdOf(optOutPid);
+    check('productSkuRepairImages() → 已确认映射的款补上主图，且回执报出 adopted ≥ 1',
+      repair?.success === true && Number(repair?.data?.adopted) >= 1 && repairedId > 0,
+      `success=${repair?.success} data=${JSON.stringify(repair?.data)} image_id=${repairedId}`);
+    check('缺省 limit 传 0（主进程回落默认上限；渲染层不猜第二个上限）',
+      invokes.at(-1)?.[1]?.limit === 0, JSON.stringify(invokes.at(-1)?.[1]));
+    const repairAgain = await exposed.productSkuRepairImages({ limit: 5 });
+    check('再跑一次 → adopted=0 且主图不被覆盖（只补空这条边界也守在补图通道上）',
+      repairAgain?.success === true && repairAgain?.data?.adopted === 0 &&
+        imageIdOf(optOutPid) === repairedId && repairAgain?.data?.pending === 0,
+      `data=${JSON.stringify(repairAgain?.data)} image_id=${imageIdOf(optOutPid)}（应为 ${repairedId}）`);
+    check('limit 原样透传（渲染层要求单轮少补几张时主进程真的收到）',
+      invokes.at(-1)?.[1]?.limit === 5, JSON.stringify(invokes.at(-1)?.[1]));
+
     section('⑦ 反向过滤：product-sku-list 带 productId（产品侧「已关联商品」的取数）');
     // 风险与 ⑥ 同形：渲染层声明里新加了 `productId`，而 preload 若没把它透传出去，主进程就按
     // **不过滤**处理 —— 于是每一款点开都显示"全库的映射"，看着像"这款关联了几十条商品"，
@@ -396,10 +440,13 @@ app.whenReady().then(async () => {
     const scB = dbRun(`INSERT INTO oi_style_colors (style_id, color, code) VALUES (?,?,?)`, [siB, '蓝', 'SHAPE-S2-蓝']).lastInsertRowid;
     const siImgB = path.join(tmpDir, 'order-images', 'style-b.png');
     makeRealPng(siImgB);
-    dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
-      ['fp-shape-si-a', 'ufp-si-a', '', orderImgPath, scA]);
-    dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
-      ['fp-shape-si-b', 'ufp-si-b', '', siImgB, scB]);
+    // R1：款色的代表图挂在 `oi_style_colors.image_id`（1:1），不再有 md_images 上的 style_color_id 列。
+    dbRun(`INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      ['fp-shape-si-a', 'ufp-si-a', '', orderImgPath]);
+    dbRun(`UPDATE oi_style_colors SET image_id = (SELECT id FROM md_images WHERE fingerprint = 'fp-shape-si-a') WHERE id = ?`, [scA]);
+    dbRun(`INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      ['fp-shape-si-b', 'ufp-si-b', '', siImgB]);
+    dbRun(`UPDATE oi_style_colors SET image_id = (SELECT id FROM md_images WHERE fingerprint = 'fp-shape-si-b') WHERE id = ?`, [scB]);
 
     invokes.length = 0;
     const rs = await exposed.purchaseStyleImages({
@@ -430,7 +477,7 @@ app.whenReady().then(async () => {
       (rsCap?.data?.paths ?? []).length === 500, `len=${(rsCap?.data?.paths ?? []).length}`);
 
     // ---- 「款色 + 尺码」取图（2026-10-11，用户报"拿货单明细的图片都是一样的"）----
-    // 真形状：订单 Excel 解析出来的图挂在**订单行**上（oi_order_items.image_id → oi_images.local_path），
+    // 真形状：订单 Excel 解析出来的图挂在**订单行**上（oi_order_items.image_id → md_images.local_path），
     // 而拿货单明细行的粒度是「款色 × 尺码」（= outstanding 的聚合键 = purchase_items 唯一键）
     // ⇒ 取图必须带上尺码，否则同一款的多行全落到"该款色最新那张"。
     // 这里造的就是最小区分场景：同款同色，L 行挂一张、M 行挂另一张。
@@ -440,14 +487,19 @@ app.whenReady().then(async () => {
     const szM = path.join(tmpDir, 'order-images', 'size-m.png');
     makeRealPng(szL);
     makeRealPng(szM);
-    const idL = dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
-      ['fp-shape-si-sl', 'ufp-si-sl', '', szL, scC]).lastInsertRowid;
-    const idM = dbRun(`INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
-      ['fp-shape-si-sm', 'ufp-si-sm', '', szM, scC]).lastInsertRowid;
+    const idL = dbRun(`INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      ['fp-shape-si-sl', 'ufp-si-sl', '', szL]).lastInsertRowid;
+    const idM = dbRun(`INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      ['fp-shape-si-sm', 'ufp-si-sm', '', szM]).lastInsertRowid;
+    // 代表图 1:1：同一个款色只能挂一张，选**较新的** M（旧口径"该款色最新图"的回落目标仍是它）；
+    // 尺码级区分靠订单行（①），不靠第二张代表图。
+    dbRun(`UPDATE oi_style_colors SET image_id = ? WHERE id = ?`, [idM, scC]);
     for (const [imgId, no, size] of [[idL, 'SI-SIZE-L', 'L'], [idM, 'SI-SIZE-M', 'M']]) {
       const ordId = dbRun(`INSERT INTO oi_orders (order_no) VALUES (?)`, [no]).lastInsertRowid;
-      dbRun(`INSERT INTO oi_order_items (order_id, image_id, size, raw_fields) VALUES (?,?,?,?)`, [
-        ordId, imgId, size, '{}',
+      // 行上的款色是取图①的判定依据（`ITEM_STYLE_COLOR_ID` 行优先、图回落）：
+      // L 行的图没有代表图绑定，只能靠行上这个值认出"它属于 scC"。
+      dbRun(`INSERT INTO oi_order_items (order_id, image_id, size, raw_fields, style_color_id) VALUES (?,?,?,?,?)`, [
+        ordId, imgId, size, '{}', scC,
       ]);
     }
 
@@ -608,6 +660,178 @@ app.whenReady().then(async () => {
     check('条目真的挂在新建的相关人上（不是落成 party_id=0）',
       (wlImp?.data?.ids ?? []).length === 1 && wlParties.length === 1,
       JSON.stringify(wlImp?.data?.ids));
+
+    // ── ⑬ 主数据字典：颜色 / 尺码只读面 ────────────────────────────────
+    // 为什么单独钉：字典行是 SKU 矩阵「颜色工作台」与归类页色卡的**唯一数据源**，
+    // 而它此前只存在于 `master-data-db`（无通道、渲染层零消费）。三段都可能坏得无声：
+    //   ① preload 声明了 `mdColorList`、主进程没注册 ⇒ invoke 直接 reject（界面只看见"没有常用色"）；
+    //   ② 注册了但 `handle` 包错 ⇒ 回来的是 `{success:true}` 没有 `data`（`res.data?.colors ?? []` 静默空排）；
+    //   ③ 字段形状漂移（snake_case / aliases 变数组）⇒ 色块全透明、别名提示失效，也一条错都不报。
+    section('⑬ 主数据字典：颜色 / 尺码只读通道（真 preload + 真 handler）');
+    check('md-color-list 已注册', typeof handlers.get('md-color-list') === 'function');
+    check('md-size-list 已注册', typeof handlers.get('md-size-list') === 'function');
+    const colorsRes = await exposed.mdColorList().catch((e) => ({ success: false, error: String(e) }));
+    const sizesRes = await exposed.mdSizeList().catch((e) => ({ success: false, error: String(e) }));
+    const colors = colorsRes?.data?.colors ?? [];
+    const sizes = sizesRes?.data?.sizes ?? [];
+    check('mdColorList → { colors: [...] } 且非空（种子色是界面那排常用色的底）',
+      colorsRes?.success === true && colors.length > 0,
+      `success=${colorsRes?.success} n=${colors.length} err=${colorsRes?.error || ''}`);
+    check('颜色行是 camelCase 字典形状（id/name/hex/sortOrder/status 齐全）',
+      colors.length > 0 && colors.every((c) => Number(c.id) > 0 && typeof c.name === 'string' &&
+        typeof c.hex === 'string' && Number.isFinite(Number(c.sortOrder)) && typeof c.status === 'string'),
+      JSON.stringify(colors[0]));
+    const colorOrders = colors.map((c) => Number(c.sortOrder));
+    check('颜色按 sortOrder 升序（否则同一色每次刷新换位置，人记不住那排色块）',
+      colorOrders.every((v, i) => i === 0 || v >= colorOrders[i - 1]),
+      JSON.stringify(colorOrders.slice(0, 8)));
+    check('含「黑色」且带色值（界面靠 hex 画色块）',
+      colors.some((c) => c.name === '黑色' && String(c.hex).startsWith('#')),
+      JSON.stringify(colors.find((c) => c.name === '黑色')));
+    check('「未分类」与平台数字色不入字典（"还没定色"不是主数据）',
+      !colors.some((c) => c.name === '未分类' || /^\d+$/.test(c.name)));
+    check('mdSizeList → { sizes: [...] } 且含 M / 均码',
+      sizesRes?.success === true && sizes.some((s) => s.name === 'M') && sizes.some((s) => s.name === '均码'),
+      `success=${sizesRes?.success} n=${sizes.length} err=${sizesRes?.error || ''}`);
+    const sizeOrders = sizes.map((s) => Number(s.sortOrder));
+    check('尺码按 sortOrder 升序（S/M/L 的显示顺序取自这里）',
+      sizeOrders.every((v, i) => i === 0 || v >= sizeOrders[i - 1]), JSON.stringify(sizeOrders));
+    check('尺码别名是**逗号字符串**（渲染层按 split 用；改成数组会静默失效）',
+      sizes.every((s) => typeof s.aliases === 'string' && typeof s.sizeGroup === 'string'),
+      JSON.stringify(sizes.find((s) => s.name === '2XL')));
+
+    // ── ⑬b 新增颜色（「常用色」末尾那个「＋」的唯一写路径）────────────────
+    // 三段都可能坏得无声：
+    //   ① preload 只声明了 mdColorList、没声明 mdColorCreate ⇒ 界面「＋ 新增颜色」点了报"没有这个方法"；
+    //   ② 主进程校验被绕开 ⇒ 空名 / 纯数字色号进了字典，"未分类"从此变主数据（种子刻意不播数字色）；
+    //   ③ 幂等被打破 ⇒ 同名加两次多出两行，两个页面的常用色排都开始长重复色。
+    check('md-color-create 已注册', typeof handlers.get('md-color-create') === 'function');
+    const cNew = await exposed.mdColorCreate({ name: '冒烟青', hex: '#2a9d9a' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('新增颜色成功并回带字典行（id/name/hex 齐全，界面据此立刻画出这颗色块）',
+      cNew?.success === true && cNew?.data?.created === true &&
+        Number(cNew?.data?.color?.id) > 0 && cNew?.data?.color?.name === '冒烟青',
+      JSON.stringify(cNew?.data ?? cNew?.error));
+    const cDup = await exposed.mdColorCreate({ name: '冒烟青', hex: '#2a9d9a' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('同名再加是幂等（created:false 且同一个 id，不重复建行）',
+      cDup?.success === true && cDup?.data?.created === false &&
+        Number(cDup?.data?.color?.id) === Number(cNew?.data?.color?.id),
+      JSON.stringify(cDup?.data ?? cDup?.error));
+    const cEmpty = await exposed.mdColorCreate({ name: '' }).catch((e) => ({ success: false, error: String(e) }));
+    check('空名被拒（success:false，不落库）',
+      cEmpty?.success === false, JSON.stringify(cEmpty));
+    const cNum = await exposed.mdColorCreate({ name: '15' }).catch((e) => ({ success: false, error: String(e) }));
+    check('纯数字色号被拒（数字色 = "还没定色"的证据，不是主数据）',
+      cNum?.success === false && /数字/.test(String(cNum?.error || '')),
+      JSON.stringify(cNum?.error ?? cNum));
+    const colorsAfter = (await exposed.mdColorList().catch(() => null))?.data?.colors ?? [];
+    check('新增的颜色下一次 md-color-list 就能查到（两个页面共用同一份字典）',
+      colorsAfter.some((c) => c.name === '冒烟青'),
+      `n=${colorsAfter.length}`);
+
+    // ── ⑬c 颜色管理：颜色板 + 合并（「同色异名」的唯一出口）──────────────────
+    // 2026-10-30 用户口径「存在相同的颜色，只是名称不一样，要支持颜色合并」。
+    // 三段都可能坏得无声：
+    //   ① preload 少声明一条 ⇒ 页签永远是空表 / 拖合并报"没有这个方法"；
+    //   ② 板行字段漂移（snake_case、数字变字符串）⇒ 用量列全 0，界面看着像"没人用"，
+    //      而"同色异名"正是靠用量判断（用得多的问题色先看见）；
+    //   ③ 合并只回 `{success:true}` 却没真改库 ⇒ 用户以为并好了，下次导入又落回源色。
+    section('⑬c 颜色管理：颜色板 + 合并（真 preload + 真 handler）');
+    check('md-color-board / md-color-merge 已注册',
+      typeof handlers.get('md-color-board') === 'function' &&
+        typeof handlers.get('md-color-merge') === 'function');
+    const boardRes = await exposed.mdColorBoard().catch((e) => ({ success: false, error: String(e) }));
+    const boardRows = boardRes?.data?.rows ?? [];
+    check('mdColorBoard → { rows: [...] } 且非空（字典色与只在业务表里的色都在板上）',
+      boardRes?.success === true && boardRows.length > 0,
+      `success=${boardRes?.success} n=${boardRows.length} err=${boardRes?.error || ''}`);
+    check('板行是 camelCase 齐全形状（name/colorId/hex/styles/skus/orders/inDict/numeric/imagePath）',
+      boardRows.every(
+        (r) =>
+          typeof r.name === 'string' && r.name.length > 0 &&
+          Number.isFinite(Number(r.colorId)) && typeof r.hex === 'string' &&
+          Number.isFinite(Number(r.styles)) && Number.isFinite(Number(r.skus)) &&
+          Number.isFinite(Number(r.orders)) &&
+          typeof r.inDict === 'boolean' && typeof r.numeric === 'boolean' &&
+          typeof r.imagePath === 'string',
+      ),
+      JSON.stringify(boardRows[0]));
+    // 2026-10-31 用户口径「带归一列表中需要加款图，不然数字没法知道是什么颜色」：
+    // 板上每个色名要带一张**款色代表图**的本地路径（`oi_style_colors.image_id` → `md_images`）。
+    // 若这一段坏了（字段缺失 / 路径没解析出来），界面只能画空占位 —— 数字色号照样认不出色。
+    check('带款图的板行：款色有图的色名解析出本地路径（数字色号靠它认色）',
+      boardRows.some((r) => r.imagePath && r.imagePath.length > 0) &&
+        boardRows.every((r) => r.imagePath === '' || !/^\d+$/.test(r.imagePath)),
+      JSON.stringify(boardRows.filter((r) => r.imagePath).map((r) => [r.name, r.imagePath]).slice(0, 3)));
+    check('字典色 inDict=true，数字色号一律 numeric=true（界面据此禁止它当保留名）',
+      boardRows.some((r) => r.name === '黑色' && r.inDict === true) &&
+        boardRows.every((r) => r.numeric === /^\d+$/.test(r.name)),
+      JSON.stringify(boardRows.filter((r) => r.numeric).slice(0, 3)));
+    // 源色造两个字典色再并：合并的**字典侧**行为（删源行 + 记别名）必须真的落库
+    await exposed.mdColorCreate({ name: '冒烟深蓝' }).catch(() => null);
+    const merged = await exposed
+      .mdColorMerge({ source: '冒烟深蓝', target: '冒烟青' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('mdColorMerge 成功并回带合并回执（界面靠它念一句"动了多少"）',
+      merged?.success === true && merged?.data?.result?.source === '冒烟深蓝' &&
+        merged?.data?.result?.target === '冒烟青' &&
+        Number(merged?.data?.result?.dictRemoved) === 1,
+      JSON.stringify(merged?.data ?? merged?.error));
+    check('合并真的删掉了源色行（不是只记别名）',
+      dbGet(`SELECT COUNT(*) AS n FROM md_colors WHERE name = ?`, ['冒烟深蓝']).n === 0,
+      JSON.stringify(dbGet(`SELECT id FROM md_colors WHERE name = ?`, ['冒烟深蓝'])));
+    check('合并记下「源 → 保留」的全局别名（下次导入平台色直接归一）',
+      Number(dbGet(`SELECT COUNT(*) AS n FROM md_color_aliases WHERE alias_raw = ?`, ['冒烟深蓝']).n) === 1,
+      JSON.stringify(dbGet(`SELECT product_id, color_id FROM md_color_aliases WHERE alias_raw = ?`, ['冒烟深蓝'])));
+    const boardAfter = (await exposed.mdColorBoard().catch(() => null))?.data?.rows ?? [];
+    check('合并后再查颜色板：源色已消失、保留色还在',
+      !boardAfter.some((r) => r.name === '冒烟深蓝') && boardAfter.some((r) => r.name === '冒烟青'),
+      JSON.stringify(boardAfter.map((r) => r.name).slice(0, 12)));
+    const mSame = await exposed.mdColorMerge({ source: '冒烟青', target: '冒烟青' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('同一个色合并被拒（success:false，不写库）',
+      mSame?.success === false && /同一个颜色/.test(String(mSame?.error || '')),
+      JSON.stringify(mSame?.error ?? mSame));
+    const mNum = await exposed.mdColorMerge({ source: '冒烟青', target: '15' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('数字色号不能当保留名（与「新增颜色」同一条校验）',
+      mNum?.success === false && /数字色号/.test(String(mNum?.error || '')),
+      JSON.stringify(mNum?.error ?? mNum));
+    const mGhost = await exposed.mdColorMerge({ source: '从不在的色', target: '冒烟青' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('源色不存在被拒（空合并不许假装成功）',
+      mGhost?.success === false && /不存在/.test(String(mGhost?.error || '')),
+      JSON.stringify(mGhost?.error ?? mGhost));
+
+    // ── ⑬d 修改色块 hex（只改显示，不改名字）────────────────────────────
+    // 2026-10-30 重新设计颜色管理页：标准色卡的色块可点取色器改 —— 这是"知道数字色 /
+    // 平台原文色真实颜色"的前提（色块不对可以单独修，不用删色重建）。
+    // 三段都可能坏得无声：
+    //   ① preload 少声明 ⇒ 取色器改完没反应；
+    //   ② 校验被绕开 ⇒ 非法 hex 进库，色块画不出来；
+    //   ③ 顺手改了名字 ⇒ 款色 / SKU / 别名引用全断。
+    section('⑬d 修改色块 hex（md-color-update-hex）');
+    check('md-color-update-hex 已注册', typeof handlers.get('md-color-update-hex') === 'function');
+    const qingId = Number(dbGet(`SELECT id FROM md_colors WHERE name = ?`, ['冒烟青']).id) || 0;
+    const upd = await exposed.mdColorUpdateHex({ id: qingId, hex: '#123456' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('修改 hex 成功并回带新行（hex 规范化成 #rrggbb）',
+      upd?.success === true && upd?.data?.color?.hex === '#123456' && upd?.data?.color?.name === '冒烟青',
+      JSON.stringify(upd?.data ?? upd?.error));
+    check('只改 hex，不动名字（名字是业务身份，改错会牵一发动全身）',
+      dbGet(`SELECT name FROM md_colors WHERE id = ?`, [qingId]).name === '冒烟青',
+      JSON.stringify(dbGet(`SELECT name, hex FROM md_colors WHERE id = ?`, [qingId])));
+    const badHex = await exposed.mdColorUpdateHex({ id: qingId, hex: 'not-a-color' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('非法 hex 被拒（只接受 #RRGGBB）',
+      badHex?.success === false && /色值格式/.test(String(badHex?.error || '')),
+      JSON.stringify(badHex?.error ?? badHex));
+    const ghostId = await exposed.mdColorUpdateHex({ id: 999999, hex: '#000000' })
+      .catch((e) => ({ success: false, error: String(e) }));
+    check('不存在的颜色 id 被拒（不静默 no-op）',
+      ghostId?.success === false && /不存在/.test(String(ghostId?.error || '')),
+      JSON.stringify(ghostId?.error ?? ghostId));
   } catch (e) {
     check(`冒烟自身异常：${e && e.message}`, false, e && e.stack ? String(e.stack).split('\n')[1] : '');
   }

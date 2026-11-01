@@ -20,6 +20,8 @@ import { productSchemaReady } from './product-db';
 // 「一个订单行 → 它的款色」的唯一展开口径（套装 = 一件实物多个款色）。
 // 进货口的**需求**必须与核对页/拣货同一份口径，否则套装会被算成一个款、子商品永远不进拿货单。
 import { ITEM_STYLE_COLOR_ID, ITEM_STYLE_COLOR_SRC } from './order-db';
+// 覆盖行缩略图：image_id → 本地路径（缺 `md_images` 表时降级为空，不抛）
+import { imageLocalPathMap } from './master-data-db';
 
 /**
  * 款式展示名的派生片段（ADR-002 D1：款名权威在 `pl_products`，按 `code` 关联）。
@@ -229,6 +231,13 @@ export interface OrderCoverageRow {
   size: string;
   qty: number | null;
   rawFields: Record<string, string>;
+  /**
+   * 这一行的色图（本地路径；'' = 没图）。
+   *
+   * 取图优先级与拣货投影同一条：**款色代表图**（`oi_style_colors.image_id`，1:1 挂款色）
+   * → **本行订单图**（`oi_order_items.image_id`）。按单核对要能"看图核对"，就不能只回文字。
+   */
+  imagePath: string;
   /** 已提交拿货单里指向本行的件数合计 */
   covered: number;
   /** 没有款色归属（`style_color_id = 0`）—— 界面要标出来，不许静默当成"已齐" */
@@ -394,7 +403,6 @@ function addSourceOrderItem(): void {
             COALESCE(sc.color, '') AS color, oi.size AS size
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       LEFT JOIN oi_images i ON oi.image_id = i.id
        LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
       WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
@@ -759,7 +767,6 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
               COALESCE(NULLIF(oi.qty, 0), 1) AS qty
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       LEFT JOIN oi_images i ON oi.image_id = i.id
        JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
@@ -1224,11 +1231,12 @@ export function orderCoverage(): OrderCoveragePayload {
     `SELECT oi.id AS order_item_id, o.order_no AS order_no, o.shop AS shop, o.order_time AS order_time,
             oi.raw_fields AS raw_fields, oi.qty AS qty, oi.size AS size,
             COALESCE(sc.id, 0) AS style_color_id, COALESCE(sc.color, '') AS style_color,
+            COALESCE(sc.image_id, 0) AS style_color_image_id,
+            COALESCE(oi.image_id, 0) AS order_image_id,
             COALESCE(oi.color, '') AS color_raw, COALESCE(s.code, '') AS style_code,
             ${n.name} AS style_name, COALESCE(oc.covered, 0) AS covered
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       LEFT JOIN oi_images i ON oi.image_id = i.id
        LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
@@ -1274,6 +1282,14 @@ export function orderCoverage(): OrderCoveragePayload {
     taken: Number(r.taken ?? 0),
   }));
 
+  // 色图：一次批量取本地路径（缺 `md_images` 表时 Map 为空 ⇒ imagePath 全 ''
+  // —— 界面据此标"缺图"，不能把"图仓还没建"报成"这单没图可选"）
+  const mediaIds = rows.flatMap((r) => [
+    Number(r.style_color_image_id ?? 0) || 0,
+    Number(r.order_image_id ?? 0) || 0,
+  ]);
+  const imagePaths = mediaIds.length ? imageLocalPathMap(mediaIds) : new Map<number, string>();
+
   return {
     rows: rows.map((r) => {
       let rawFields: Record<string, string> = {};
@@ -1284,6 +1300,8 @@ export function orderCoverage(): OrderCoveragePayload {
         rawFields = {}; // 一条脏 raw_fields 只让这一行的件数走兜底，不该毁掉整张清单
       }
       const styleColorId = Number(r.style_color_id ?? 0) || 0;
+      const colorImageId = Number(r.style_color_image_id ?? 0) || 0;
+      const orderImageId = Number(r.order_image_id ?? 0) || 0;
       return {
         orderItemId: Number(r.order_item_id ?? 0) || 0,
         orderNo: String(r.order_no ?? ''),
@@ -1297,6 +1315,10 @@ export function orderCoverage(): OrderCoveragePayload {
         size: String(r.size ?? ''),
         qty: r.qty === null || r.qty === undefined ? null : Number(r.qty),
         rawFields,
+        // 款色代表图优先（图跟着色走）；没有才用本行订单图
+        imagePath:
+          (colorImageId > 0 ? imagePaths.get(colorImageId) ?? '' : '') ||
+          (orderImageId > 0 ? imagePaths.get(orderImageId) ?? '' : ''),
         covered: Math.max(0, Number(r.covered ?? 0)),
         unclassified: styleColorId <= 0,
       };

@@ -3,7 +3,7 @@
 //
 // 为什么独立成文件（而不是写在 host.ts 里）：
 //   ① 报价单不是二维表 —— 一张 sheet 上拼了 17 段**列结构互不相同**的价卡（见
-//      docs/plans/SHIPPING_RATE_ISLAND_PLAN.md §1），归一化是纯数组处理，与 IPC / axios 无关；
+//      docs/archive/plans/SHIPPING_RATE_ISLAND_PLAN.md §1），归一化是纯数组处理，与 IPC / axios 无关；
 //   ② 独立后可被 vitest 直接覆盖（tests/shipRate.spec.ts 用真实 Excel 的夹具断言），
 //      不必 mock 整个宿主能力面 —— 与 sanitizeExcel.ts / payloadBudget.ts 同构；
 //   ③ 岛运行在 iframe 内（不打包 xlsx、CSP 无 unsafe-eval），"读表"与"算费"都必须留在宿主；

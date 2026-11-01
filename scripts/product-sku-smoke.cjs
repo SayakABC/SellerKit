@@ -52,7 +52,7 @@ function check(name, fn) {
 const PLATFORMS = ['amazon', 'shopee', 'temu', 'aliexpress', 'lazada'];
 
 function reset() {
-  for (const t of ['pl_shop_sku', 'pl_products', 'sk_shops', 'sk_name_map', 'oi_orders', 'oi_images', 'pl_shop_items', 'oi_color_aliases']) {
+  for (const t of ['pl_shop_sku', 'pl_products', 'sk_shops', 'sk_name_map', 'oi_orders', 'md_images', 'pl_shop_items', 'oi_color_aliases']) {
     dbRun(`DELETE FROM ${t}`);
   }
   imageId = 0; // 图片行被清了，缓存 id 会变成外键悬空值
@@ -128,7 +128,7 @@ let imageId = 0;
 function seedOrders(rows) {
   if (!imageId) {
     imageId = dbRun(
-      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
       ['fp-smoke', 'ufp-smoke', '', ''],
     ).lastInsertRowid;
   }
@@ -621,14 +621,14 @@ let fpSeq = 0;
 /**
  * 每条订单**自己的**图片行。
  * ⚠️ 不能复用 `seedOrders`（那批订单共用一张图）：回填是按图片算的
- * （`oi_images.style_color_id IS NULL`），共用一张图时"回填了几单"根本无法区分。
+ * （`md_images.style_color_id IS NULL`），共用一张图时"回填了几单"根本无法区分。
  */
 function seedOrderRows(rows) {
   const ids = [];
   for (const r of rows) {
     fpSeq += 1;
     const img = dbRun(
-      `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+      `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
       [`fp-cls-${fpSeq}`, `ufp-cls-${fpSeq}`, '', ''],
     ).lastInsertRowid;
     const no = `CO-${fpSeq}`;
@@ -656,7 +656,7 @@ function importOrderRows(rows) {
     let img = r.imageId;
     if (!img) {
       img = dbRun(
-        `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+        `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
         [`fp-imp-${fpSeq}`, `ufp-imp-${fpSeq}`, r.imageUrl ?? '', ''],
       ).lastInsertRowid;
     }
@@ -712,14 +712,18 @@ function seedClassify() {
   return { style1, style2 };
 }
 
-/** 某条订单的图片落在哪个款色上（"回填存量"唯一可观测的落点） */
+/**
+ * 某条订单的图片落在哪个款色上（"回填存量"唯一可观测的落点）。
+ * 口径就是生产代码的 `ITEM_STYLE_COLOR_ID`（**行优先、图回落**）：R1 之后款色↔图是 1:1，
+ * 两张不同的订单图不可能同时挂在同一个色行的 `image_id` 上 —— 只按 `c.image_id = o.image_id`
+ * 联表会让"后绑的那张"顶掉先绑的，看起来像订单没归色。
+ */
 function styleColorOfOrder(orderId) {
   return dbGet(
-    `SELECT c.color AS color, s.code AS code FROM oi_order_items o
-       JOIN oi_images i ON i.id = o.image_id
-       LEFT JOIN oi_style_colors c ON c.id = i.style_color_id
+    `SELECT c.color AS color, s.code AS code FROM oi_order_items oi
+       LEFT JOIN oi_style_colors c ON c.id = ${odb.ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON s.id = c.style_id
-      WHERE o.id = ?`,
+      WHERE oi.id = ?`,
     [orderId],
   );
 }
@@ -740,6 +744,162 @@ check('点名某个款 → 把「(店铺, 商品ID) → 款 + 色」记进映射
   // 店铺必须是**归一后的实体**：拿原文当键会让映射与待关联队列的键对不上（明明配了却查不中）
   assert.strictEqual(r.rows[0].shopName, '店铺1');
   assert.strictEqual(r.rows[0].platform, 'amazon');
+});
+
+check('认款后产品没有主图 → 把这次认款用的订单图采纳为款主图（只补空）', () => {
+  const { style1 } = seedClassify();
+  const pid = productByCode('P-0001').id;
+  assert.strictEqual(
+    Number(dbGet(`SELECT image_id FROM pl_products WHERE id = ?`, [pid]).image_id),
+    0,
+    '夹具前提：产品本来没有主图',
+  );
+  const [{ orderId, imageId }] = importOrderRows([
+    { shop: '店1', fields: { 商品ID: 'B0ADOPT' }, imageId: 0 },
+  ]);
+  const res = odb.assignOrderStyle({ orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(res.imageId, imageId, '归属结果应带上这次用的订单图');
+  assert.strictEqual(
+    Number(dbGet(`SELECT image_id FROM pl_products WHERE id = ?`, [pid]).image_id),
+    imageId,
+    '认款后产品主图应取这次的订单图 —— 否则产品页一直是白图（2026-10-30 用户报）',
+  );
+
+  // 再认另一行（另一张图）⇒ 已有主图不许被后来的认款覆盖（人挑过的图优先）
+  const [second] = importOrderRows([{ shop: '店1', fields: { 商品ID: 'B0ADOPT2' } }]);
+  odb.assignOrderStyle({ orderId: second.orderId, styleId: style1, color: '黑色' });
+  assert.strictEqual(
+    Number(dbGet(`SELECT image_id FROM pl_products WHERE id = ?`, [pid]).image_id),
+    imageId,
+    '已有主图的款被后来的认款覆盖了 —— 只补空这条边界必须收在 adoptProductImageIfEmpty',
+  );
+
+  // 订单**本身没图**、但这个款色早就有图（历史认款只绑了款色、没绑产品 ⇒ 产品仍是 0）
+  // ⇒ 也要把款色现有的图补到产品上 —— 用户说的是"当前款的图片"，不是"当前订单的图片"。
+  const scImg = Number(
+    dbGet(`SELECT image_id FROM oi_style_colors WHERE style_id = ? AND color = '黑色'`, [style1]).image_id,
+  );
+  assert.ok(scImg > 0, '夹具前提：这个款色已经绑过图');
+  dbRun(`UPDATE pl_products SET image_id = 0 WHERE id = ?`, [pid]);
+  const orderNoImg = odb.insertOrder({
+    imageId: null,
+    orderNo: 'NOIMG-ADOPT',
+    shop: '店1',
+    size: 'M',
+    orderTime: '',
+    category: '',
+    color: '',
+    logo: '',
+    rawFields: { 商品ID: 'B0ADOPT3' },
+  });
+  odb.assignOrderStyle({ orderId: orderNoImg, styleId: style1, color: '黑色' });
+  assert.strictEqual(
+    Number(dbGet(`SELECT image_id FROM pl_products WHERE id = ?`, [pid]).image_id),
+    scImg,
+    '订单没图时应采纳款色已有的图（否则这类历史产品永远补不上图）',
+  );
+});
+
+check('采集商品只有远程图：认款时应挑出「下载后采纳」的待办（只补空 / 一款一张 / 已入库跳过）', () => {
+  reset();
+  const shops = seedShops(2);
+  const products = seedProducts(2);
+  sidb.upsertShopItems(
+    {
+      items: [
+        { itemId: 'B0REMOTE2', imageUrl: 'https://example.com/r2.jpg' },
+        { itemId: 'B0REMOTE1', imageUrl: 'https://example.com/r1.jpg' },
+      ],
+    },
+    { pinnedShopId: shops[0] },
+  );
+  const row1 = dbGet(`SELECT id FROM pl_shop_items WHERE item_id = 'B0REMOTE1'`);
+  const row2 = dbGet(`SELECT id FROM pl_shop_items WHERE item_id = 'B0REMOTE2'`);
+
+  // ① 产品没主图 + 采集行只有 URL ⇒ 挑出待办，并带上采集行 id（下载后要回填）
+  //    同一款给两个商品：取 itemKey 升序的第一个（B0REMOTE1），不依赖入参顺序
+  const todo = pdb.pendingRemoteProductImages([
+    { productId: products[0], itemId: 'B0REMOTE2' },
+    { productId: products[0], itemId: 'B0REMOTE1' },
+  ]);
+  assert.strictEqual(todo.length, 1, '一个款只挑一张图');
+  assert.strictEqual(todo[0].itemId, 'B0REMOTE1', '同款多商品时必须确定性取第一个');
+  assert.strictEqual(todo[0].imageUrl, 'https://example.com/r1.jpg');
+  assert.strictEqual(todo[0].shopItemId, Number(row1.id), '要带上采集行 id，下载后回填它');
+
+  // ② 产品已有主图 ⇒ 不挑（只补空、不覆盖人的决定）
+  dbRun(`UPDATE pl_products SET image_id = 999 WHERE id = ?`, [products[0]]);
+  assert.strictEqual(
+    pdb.pendingRemoteProductImages([{ productId: products[0], itemId: 'B0REMOTE1' }]).length,
+    0,
+    '已有主图的款不该再下载覆盖',
+  );
+  dbRun(`UPDATE pl_products SET image_id = 0 WHERE id = ?`, [products[0]]);
+
+  // ③ 采集行已经入库（image_id 非 0）⇒ 交给第一档本地采纳，这里不再重复下载
+  sidb.setShopItemImageId(Number(row2.id), 999);
+  assert.strictEqual(
+    pdb.pendingRemoteProductImages([{ productId: products[0], itemId: 'B0REMOTE2' }]).length,
+    0,
+    '已入库的采集图不该再按远程 URL 下一遍',
+  );
+
+  // ④ 产品不存在 ⇒ 静默跳过（映射那步已经报过失败）
+  assert.strictEqual(
+    pdb.pendingRemoteProductImages([{ productId: 888888, itemId: 'B0REMOTE1' }]).length,
+    0,
+  );
+});
+
+check('存量补图取数：全库只认「confirmed + 真映射行」的配对（池行 / 待确认 / 失效 / 无款一律不进）', () => {
+  reset();
+  const shops = seedShops(2);
+  const products = seedProducts(2);
+  const shopId = shops[0];
+  const run = (itemId, productId, status, source, sid, rawItem = null) =>
+    dbRun(
+      `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, status, source, note)
+       VALUES ('amazon', ?, ?, '*', ?, ?, ?, '')`,
+      [sid, rawItem ?? itemId, productId, status, source],
+    );
+
+  // ① 已确认的真映射（两条，两款）—— 这两条必须被取到
+  run('B0PAIR1', products[0], 'confirmed', 'manual', shopId);
+  // ② 待确认：还没生效的映射不该替用户决定"这个商品属于哪一款"
+  run('B0PAIR2', products[1], 'pending', 'manual', shopId);
+  // ③ 已失效：商品ID 变过的历史绑定，成图会挂到错误的款上
+  run('B0PAIR3', products[1], 'invalid', 'manual', shopId);
+  // ④ 池行（商品清单的套装关联）：source='shop-import'，不是一对一映射
+  run('B0POOL', products[0], 'confirmed', 'shop-import', shopId);
+  // ⑤ 存量池行（标记落地前导入）：shop_id = 0 就是池行
+  run('B0POOL2', products[0], 'confirmed', 'manual', 0);
+  // ⑥ 没有归款的池行（product_id = 0）：没有款可补
+  run('B0POOL3', 0, 'confirmed', 'manual', shopId);
+  // ⑦ 商品ID 原文带空白：出参必须是归一后的键（补图按归一键去查采集行/订单图）
+  run('B0PAIR4', products[0], 'confirmed', 'manual', shopId, '  B0PAIR4  ');
+  // ⑧ 同一件商品在库里存成两条原文（归一后相同）—— 只该出一个配对，否则"一款只补一张"会漂
+  run('B0PAIR1', products[0], 'confirmed', 'manual', shopId, '  B0PAIR1  ');
+  // ⑨ 另一款也有一条：出参按产品 id 升序，补图次序可复现
+  run('B0PAIR5', products[1], 'confirmed', 'manual', shopId);
+
+  const pairs = pdb.confirmedMapPairs();
+  assert.deepStrictEqual(
+    pairs,
+    [
+      { productId: products[0], itemId: 'B0PAIR1' },
+      { productId: products[0], itemId: 'B0PAIR4' },
+      { productId: products[1], itemId: 'B0PAIR5' },
+    ],
+    `存量补图的配对取错了：${JSON.stringify(pairs)}`,
+  );
+
+  // 自证非空转：同一条改成 pending ⇒ 它立刻从结果里消失（不是"无论状态都返回"）
+  dbRun(`UPDATE pl_shop_sku SET status = 'pending' WHERE TRIM(item_id) = 'B0PAIR1'`);
+  assert.deepStrictEqual(
+    pdb.confirmedMapPairs().map((p) => p.itemId),
+    ['B0PAIR4', 'B0PAIR5'],
+    '把 confirmed 改成 pending 后仍被取到 —— 状态过滤没生效',
+  );
 });
 
 check('两个款各自回流 → 各指各的 pl_products.id（锚点取错会张冠李戴）', () => {
@@ -1025,17 +1185,17 @@ check('验收②：批量确认后同一批 1000 个商品 100% 命中', () => {
 // 由 `ipc:shape:smoke` 走真 handler 端到端守 —— 两边都省不掉。
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// 产品图两表（pl_images / pl_item_images）由 `ensureVariantSchema` 建 —— handler 与
+// 图片主数据（`md_images`）由 `ensureVariantSchema` 建 —— handler 与
 // `pendingProductImages` 都会走它，这里显式先建好，免得清表时撞 `no such table`。
 pdb.ensureVariantSchema();
 
-const ADOPT_IMG_A = '/tmp/sk-adopt/order-images/a.webp';
-const ADOPT_IMG_B = '/tmp/sk-adopt/order-images/b.webp';
-const ADOPT_IMG_OVERRIDE = '/tmp/sk-adopt/product-images/override.webp';
+const ADOPT_IMG_A = '/tmp/sk-adopt/images/a.webp';
+const ADOPT_IMG_B = '/tmp/sk-adopt/images/b.webp';
+const ADOPT_IMG_OVERRIDE = '/tmp/sk-adopt/images/override.webp';
 
-/** 清掉产品图两表：`reset()` 不管它们，不清会串到上一条用例 */
+/** 清掉图片主数据：`reset()` 不管它，不清会串到上一条用例 */
 function clearProductImages() {
-  for (const t of ['pl_item_images', 'pl_images']) dbRun(`DELETE FROM ${t}`);
+  dbRun('DELETE FROM md_images');
 }
 
 let adoptSeq = 0;
@@ -1043,7 +1203,7 @@ let adoptSeq = 0;
 function seedOrderImage(shop, itemId, localPath) {
   adoptSeq += 1;
   const img = dbRun(
-    `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+    `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
     [`fp-adopt-${adoptSeq}`, `ufp-adopt-${adoptSeq}`, '', localPath],
   ).lastInsertRowid;
   const no = `ADO-${adoptSeq}`;
@@ -1099,7 +1259,7 @@ check('取对那张：同一商品有多张订单图 → 取图池首选（最�
   seedShops(1);
   mapShopNames(1);
   const pid = seedProducts(1)[0];
-  seedOrderImage('店1', 'AD-2', ADOPT_IMG_A); // 先落（oi_images.id 小）
+  seedOrderImage('店1', 'AD-2', ADOPT_IMG_A); // 先落（md_images.id 小）
   seedOrderImage('店1', 'AD-2', ADOPT_IMG_B); // 后落（id 大 = 更新）
 
   const list = pdb.pendingProductImages([{ productId: pid, itemId: 'AD-2' }]);
@@ -1170,6 +1330,8 @@ check('与界面同口径：该商品有**覆盖图**时采纳覆盖图（你看
   mapShopNames(1);
   const pid = seedProducts(1)[0];
   seedOrderImage('店1', 'AD-5', ADOPT_IMG_A);
+  // 覆盖图落在采样快照行自己的 image_id 上（R1），所以先要有这条采集行
+  seedSnapshot('店铺1', 'AD-5');
   const ov = pdb.upsertImageRecord({
     fingerprint: 'fp-ov-5',
     localPath: ADOPT_IMG_OVERRIDE,
@@ -1274,11 +1436,9 @@ check('反查认店⑤：队列里"其实已配映射"的行不得留在待办�
 
 /** 归款结果里的颜色（`''` = 图没归到任何款色） */
 function colorOfImage(imageId) {
-  const r = dbGet(
-    `SELECT COALESCE(c.color,'') AS color FROM oi_images i
-       LEFT JOIN oi_style_colors c ON c.id = i.style_color_id WHERE i.id = ?`,
-    [imageId],
-  );
+  const r = dbGet(`SELECT COALESCE(color,'') AS color FROM oi_style_colors WHERE image_id = ?`, [
+    imageId,
+  ]);
   return String(r?.color ?? '');
 }
 
@@ -1360,11 +1520,12 @@ check('按图定色④：图已有真实色（人工/AI/色图采纳）→ 归�
     ]).lastInsertRowid;
   }
   // 这张图**指向采集里的色 7**（按图推导会得出 7），但它已经归好真实色「黑色」
-  // ⇒ 归款必须保留人的结论，不能被推导冲掉
+  // ⇒ 归款必须保留人的结论，不能被推导冲掉（R1：色↔图 1:1，绑在 `oi_style_colors.image_id`）
   const img = dbRun(
-    `INSERT INTO oi_images (fingerprint, url_fingerprint, source_url, local_path, style_color_id) VALUES (?,?,?,?,?)`,
-    ['fp-keep-1', 'ufp-keep-1', 'https://cdn/kf/S7.jpg', '', sc],
+    `INSERT INTO md_images (fingerprint, url_fingerprint, source_url, local_path) VALUES (?,?,?,?)`,
+    ['fp-keep-1', 'ufp-keep-1', 'https://cdn/kf/S7.jpg', ''],
   ).lastInsertRowid;
+  dbRun(`UPDATE oi_style_colors SET image_id = ? WHERE id = ?`, [img, sc]);
   const [{ imageId: used }] = importOrderRows([
     { shop: '店1', fields: { 商品ID: 'B0KEEP' }, imageId: img },
   ]);

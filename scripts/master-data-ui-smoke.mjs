@@ -76,6 +76,26 @@ const FAKE_BRIDGE = `<script>
     { id: 8, name: '厂B', phone: '', note: '只做辅料', createdAt: '2026-09-25 09:00' },
   ];
 
+  /* 颜色板（2026-10-30：产品管理组新增「颜色」页签）。三行覆盖三种来源徽标 ——
+     字典色 / 只在业务表里出现的异写色 / 平台数字色号。
+     用量是**夹具自说自话**的数，合并后必须变（见 mdColorMerge 桩）：
+     只回回执不改它的桩，会让"合并后重拉板"这条接线永远验不出来。 */
+  var COLORS = [
+    { name: '黑色', colorId: 1, hex: '#3a3a3a', styles: 2, skus: 0, orders: 3, inDict: true, numeric: false, imagePath: '' },
+    // 待归一两行刻意**有图 / 无图**各一：数字色号「5」带款图（"不看图不知道是红是蓝"的样本），
+    // 异写名「黑」不带图（验空占位，不拿中性灰假装是答案）。
+    { name: '黑', colorId: 0, hex: '', styles: 1, skus: 2, orders: 1, inDict: false, numeric: false, imagePath: '' },
+    { name: '5', colorId: 0, hex: '', styles: 1, skus: 1, orders: 0, inDict: false, numeric: true, imagePath: '/tmp/smoke-color-5.png' },
+  ];
+  /* 「色卡多到一屏」那条断言要往板上灌标准色，但断言脚本是**另一段 script**（作用域分开），
+     直接暴露 COLORS 数组不可行：合并桩会「COLORS = COLORS.filter(...)」换掉绑定，
+     外部拿到的旧引用推不动新数组。所以暴露一个**闭包函数**（读的永远是当前绑定）。 */
+  window.__smokeAddStandardColors = function (count) {
+    for (var i = 1; i <= count; i++) {
+      COLORS.push({ name: '烟雾色' + i, colorId: 0, hex: '', styles: 0, skus: 0, orders: 0, inDict: true, numeric: false, imagePath: '' });
+    }
+  };
+
   var RATES = [
     { fromCurrency: 'USD', rateToCny: 7.1, updatedAt: '2026-09-30 10:00' },
   ];
@@ -557,6 +577,63 @@ const FAKE_BRIDGE = `<script>
       return { success: true, data: { found: true, updated: updated } };
     },
 
+    /* ---- 颜色管理（2026-10-30 用户口径「同色异名要支持合并」）----
+       ⚠️ 合并桩必须**真改夹具**（COLORS）：只回回执而不动数据的话，界面会出现
+       "合并成功"而源行还留在板上 —— 这种自相矛盾的假界面能让断言全绿，
+       却验不出"合并完要重拉颜色板 / 重拉字典单例"这条接线。
+       拒绝路径也照主进程抄一遍：拖到数字色号上时界面**根本不发请求**（回执在本地拦），
+       所以这里的纯数字判定只会被"直接调"的用例撞到。 */
+    'mdColorList': function () {
+      return { success: true, data: { colors: COLORS.filter(function (c) { return c.inDict; })
+        .map(function (c) { return { id: c.colorId, name: c.name, hex: c.hex }; }) } };
+    },
+    'mdColorBoard': function () {
+      rec('mdColorBoard', {});
+      return { success: true, data: { rows: COLORS.map(function (c) { return Object.assign({}, c); }) } };
+    },
+    // 色块 hex 编辑：只改夹具里那一行的 hex，不动名字（与主进程 updateColorHex 同口径）。
+    'mdColorUpdateHex': function (p) {
+      rec('mdColorUpdateHex', p || {});
+      var id = Number(p && p.id) || 0;
+      var hex = String((p && p.hex) || '').trim().toLowerCase();
+      var hit = null;
+      for (var i = 0; i < COLORS.length; i++) {
+        if (COLORS[i].colorId === id) { hit = COLORS[i]; break; }
+      }
+      if (!hit) return { success: false, error: '颜色不存在' };
+      hit.hex = hex;
+      return { success: true, data: { color: { id: hit.colorId, name: hit.name, hex: hit.hex } } };
+    },
+    'mdColorMerge': function (p) {
+      rec('mdColorMerge', p || {});
+      var src = String((p && p.source) || ''), tgt = String((p && p.target) || '');
+      if (src === tgt) return { success: false, error: '这是同一个颜色，不需要合并' };
+      if (/^\\d+$/.test(tgt)) return { success: false, error: '数字色号不能作为保留色名（先认成具体的颜色）' };
+      var si = -1, ti = -1;
+      for (var i = 0; i < COLORS.length; i++) {
+        if (COLORS[i].name === src) si = i;
+        if (COLORS[i].name === tgt) ti = i;
+      }
+      if (si < 0) return { success: false, error: '颜色「' + src + '」不存在' };
+      if (ti < 0) {
+        COLORS.push({ name: tgt, colorId: 0, hex: '', styles: 0, skus: 0, orders: 0, inDict: true, numeric: false, imagePath: '' });
+        ti = COLORS.length - 1;
+      }
+      var s = COLORS[si], t = COLORS[ti];
+      t.styles += s.styles;
+      t.skus += s.skus;
+      t.orders += s.orders;
+      t.inDict = true;
+      COLORS = COLORS.filter(function (c) { return c !== s; });
+      return { success: true, data: { result: {
+        source: src, target: tgt,
+        dictRemoved: s.inDict ? 1 : 0, aliases: 1,
+        styleRenamed: s.styles, styleMerged: 0,
+        orders: s.orders, keys: 0, parts: 0,
+        skusRenamed: s.skus, skusMerged: 0,
+      } } };
+    },
+
     /* ---- 汇率域（ae_rates）：写入有唯一的家，就在这一项 ---- */
     'aeRateList': function () {
       rec('aeRateList', {});
@@ -650,6 +727,34 @@ async function clickText(sel, text, timeout) {
     await sleep(40);
   }
 }
+/** 派发一个指针事件（拖行合并的唯一驱动方式：面板用 pointerdown/move/up 一套手势）。 */
+function pev(el, type, x, y) {
+  el.dispatchEvent(new PointerEvent(type, {
+    bubbles: true, cancelable: true, clientX: x, clientY: y,
+    button: 0, buttons: type === 'pointerup' ? 0 : 1,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true,
+  }));
+}
+/** 把 fromEl 拖到 toEl 松手（先越过 6px 阈值，否则只会被当成一次点击）。 */
+async function dragRow(fromEl, toEl) {
+  var root = document.querySelector('[data-act="colors-panel"]');
+  var a = fromEl.getBoundingClientRect();
+  var ax = a.left + 20, ay = a.top + a.height / 2;
+  pev(fromEl, 'pointerdown', ax, ay);
+  await sleep(30);
+  pev(root, 'pointermove', ax + 16, ay + 8);   // 纵向 8px：越过 6px 阈值
+  // ⚠️ 起点一激活，"松手会发生什么"那一行就插进表的上方（表整体下移约一行）。
+  //    落点矩形必须**在激活之后**重新量 —— 用拖动前量的坐标会差那一行的高度，
+  //    于是拖到相邻行找不到落点（第一次写这条冒烟时就踩了）。
+  await sleep(80);
+  var b = toEl.getBoundingClientRect();
+  var bx = b.left + 20, by = b.top + b.height / 2;
+  pev(root, 'pointermove', bx, by);
+  await sleep(60);
+  pev(root, 'pointerup', bx, by);
+  await sleep(120);
+}
+
 /** 切到左导航某一项，并等这一类资料的内容真的渲染出来 */
 var KIND_PANE = {
   accounts: '.acct-panel',
@@ -657,6 +762,7 @@ var KIND_PANE = {
   registry: '[data-act="registry-view"]',
   companies: '.cmv-panel, .panel',
   suppliers: '[data-act="supplier-table"]',
+  colors: '[data-act="colors-panel"]',
   tools: '.tools-panel',
   health: '[data-act="health-pane"]',
 };
@@ -669,6 +775,7 @@ var KIND_GROUP = {
   companies: 'accounts',
   tools: 'accounts',
   goods: 'goods',
+  colors: 'goods',
   suppliers: 'goods',
   shipping: 'shipping',
   health: 'health',
@@ -1220,6 +1327,130 @@ async function main() {
       all('[data-act="supplier-table"] tbody tr[data-supplier-id]').length === 2 &&
         !document.querySelector('[data-supplier-id="8"]'),
       'rows=' + all('[data-act="supplier-table"] tbody tr[data-supplier-id]').length);
+
+    /* ── 颜色管理（2026-10-30 重新设计：标准色色卡 + 待归一点选合并）──
+       用户反馈两点：① 颜色太多时拖动定位麻烦；② 数字色号 / 平台原文没有真实色块，
+       不知道该并给谁。重设计后板分两区：
+         · 标准色（字典色）= 色卡，色块 = 真实 hex（可点取色器改），是合并目标；
+         · 待归一色名（数字色号 / 平台原文 / 异写）= 列表，没色块（"还没认"就是没色块）。
+       合并主路径：**点待归一行选中 → 点标准色卡**（不再靠拖小行）；拖拽保留为快捷。
+       断言覆盖：两区渲染 / 真实色块可见 / 用量 / 搜索 / 点选合并 / 拖卡合并 / 重拉板。 */
+    step('colors');
+    await gotoKind('colors');
+    await settle(function () {
+      return all('[data-std-card]').length === 1 && all('[data-loose-row]').length === 2;
+    }, 8000);
+    report('「产品管理」组内有「颜色」页签，点开渲染颜色板（标准色色卡 + 待归一列表）',
+      kindActive('colors') && isShown(document.querySelector('[data-act="colors-panel"]')),
+      'tab=' + kindActive('colors') + ' pane=' + isShown(document.querySelector('[data-act="colors-panel"]')));
+    report('板分两区：标准色 1 张（黑色）、待归一 2 行（黑、5）',
+      all('[data-std-card]').length === 1 && all('[data-loose-row]').length === 2,
+      'std=' + all('[data-std-card]').length + ' loose=' + all('[data-loose-row]').length);
+    report('待归一行的徽标分得清：未入字典 / 数字色号（数字色只能当源）',
+      flat(document.querySelector('[data-color="黑"] [data-loose-badge]')) === '未入字典' &&
+        flat(document.querySelector('[data-color="5"] [data-loose-badge]')) === '数字色号',
+      ['黑', '5'].map(function (n) {
+        return n + '=' + flat(document.querySelector('[data-color="' + n + '"] [data-loose-badge]'));
+      }).join(' '));
+    report('标准色卡展示**真实色块**（hex 文本 + 取色器都在；这是"知道并给谁"的前提）',
+      flat(document.querySelector('[data-color="黑色"] [data-std-hex]')) === '#3a3a3a' &&
+        !!document.querySelector('[data-color="黑色"] [data-std-swatch]'),
+      'hex=' + flat(document.querySelector('[data-color="黑色"] [data-std-hex]')));
+    report('用量列说清"谁在用"（款 / SKU / 订单），标准色与待归一都有',
+      flat(document.querySelector('[data-color="黑色"] [data-std-usage]')).indexOf('款 2 · 订单 3') === 0 &&
+        flat(document.querySelector('[data-color="黑"] [data-loose-usage]')).indexOf('款 1 · SKU 2 · 订单 1') === 0,
+      '黑色=' + flat(document.querySelector('[data-color="黑色"] [data-std-usage]')) +
+        ' 黑=' + flat(document.querySelector('[data-color="黑"] [data-loose-usage]')));
+
+    /* 2026-10-31 用户口径「带归一列表中需要加款图，不然数字没法知道是什么颜色」。
+       两半都要验：有图的色真取到缩略图；没图的色画**空占位**（不能拿灰块冒充"这就是这个色"）。 */
+    await settle(function () {
+      return !!document.querySelector('[data-loose-row="5"] [data-loose-img] img');
+    }, 4000);
+    report('待归一列表带款图：数字色号「5」按 imagePath 取到缩略图（否则「5」是红是蓝看不出来）',
+      !!document.querySelector('[data-loose-row="5"] [data-loose-img] img') &&
+        (calls('orderImageThumbBatch').slice(-1)[0] || []).indexOf('/tmp/smoke-color-5.png') >= 0,
+      'img=' + !!document.querySelector('[data-loose-row="5"] [data-loose-img] img') +
+        ' calls=' + JSON.stringify(calls('orderImageThumbBatch').slice(-1)));
+    report('没有款图的色画空占位（不拿中性灰假装是答案）',
+      !document.querySelector('[data-loose-row="黑"] [data-loose-img] img') &&
+        !!document.querySelector('[data-loose-row="黑"] [data-loose-img] .wb-thumb--empty'),
+      'img=' + !!document.querySelector('[data-loose-row="黑"] [data-loose-img] img'));
+
+    setVal(document.querySelector('[data-act="colors-search"]'), '黑');
+    await settle(function () { return all('[data-loose-row]').length === 1; }, 4000);
+    report('搜索按色名过滤（「黑」只剩 黑，数字色号 5 被滤掉；标准色 黑色保留）',
+      all('[data-loose-row]').length === 1 && !document.querySelector('[data-loose-row="5"]') &&
+        !!document.querySelector('[data-std-card="黑色"]'),
+      'loose=' + all('[data-loose-row]').length);
+    setVal(document.querySelector('[data-act="colors-search"]'), '');
+    await settle(function () { return all('[data-loose-row]').length === 2; }, 4000);
+
+    // 主路径：点待归一行选中 → 点标准色卡合并
+    var mergeCallsBefore = calls('mdColorMerge').length;
+    document.querySelector('[data-loose-row="黑"]').click();
+    await sleep(60);
+    report('点待归一行「黑」：进入选中态（提示挂在回执行，不额外占高）',
+      document.querySelector('[data-loose-row="黑"]').classList.contains('is-selected') &&
+        flat(document.querySelector('[data-act="colors-receipt"]')).indexOf('已选「黑」') >= 0,
+      'receipt=' + flat(document.querySelector('[data-act="colors-receipt"]')));
+    document.querySelector('[data-std-card="黑色"]').click();
+    await settle(function () { return calls('mdColorMerge').length > mergeCallsBefore; }, 6000);
+    await settle(function () { return !document.querySelector('[data-loose-row="黑"]'); }, 6000);
+    report('点标准色卡「黑色」：真合并（源行消失、保留卡用量累加，不是只记一条别名）',
+      !document.querySelector('[data-loose-row="黑"]') &&
+        flat(document.querySelector('[data-color="黑色"] [data-std-usage]')).indexOf('款 3 · SKU 2 · 订单 4') === 0,
+      'usage=' + flat(document.querySelector('[data-color="黑色"] [data-std-usage]')));
+    report('合并回执念出动了多少（用户事后唯一能核对的东西）',
+      flat(document.querySelector('[data-act="colors-receipt"]')).indexOf('已把「黑」并进「黑色」') === 0,
+      flat(document.querySelector('[data-act="colors-receipt"]')));
+    report('合并只发一次请求，且源 / 保留色名都对（点错方向会把保留名并掉）',
+      calls('mdColorMerge').length === mergeCallsBefore + 1 &&
+        (function () {
+          var c = calls('mdColorMerge');
+          var last = c[c.length - 1] || {};
+          return last.source === '黑' && last.target === '黑色';
+        })(),
+      JSON.stringify(calls('mdColorMerge').slice(-1)));
+    report('合并后重拉了颜色板（字典单例与板对齐，别的页面才看得见新名字）',
+      calls('mdColorBoard').length >= 2, 'calls=' + calls('mdColorBoard').length);
+
+    // 快捷路径：拖待归一行到标准色卡（数字色号 5 → 黑色；数字色只能当源）
+    var dragCallsBefore = calls('mdColorMerge').length;
+    await dragRow(document.querySelector('[data-loose-row="5"]'), document.querySelector('[data-std-card="黑色"]'));
+    await settle(function () { return calls('mdColorMerge').length > dragCallsBefore; }, 6000);
+    report('拖待归一行「5」到标准色卡「黑色」：拖拽仍是快捷合并路径（数字色当源）',
+      calls('mdColorMerge').length === dragCallsBefore + 1 &&
+        (function () {
+          var c = calls('mdColorMerge');
+          var last = c[c.length - 1] || {};
+          return last.source === '5' && last.target === '黑色';
+        })(),
+      JSON.stringify(calls('mdColorMerge').slice(-1)));
+
+    /* 2026-10-31 用户口径「标准色卡片尺寸可以小点，不要出现滚动条，要全部都展示出来」。
+       夹具里只有 1 张卡 ⇒ 这条断言恒绿。末尾灌 24 个标准色再重进本页（v-if 切走再切回 =
+       真的重新挂载并重拉板），量三件事：色卡区自己不出滚动条、面板不被撑出滚动、
+       最后一张卡仍在面板可视区内。 */
+    var stdBefore = all('[data-std-card]').length;
+    window.__smokeAddStandardColors(24);
+    await gotoKind('goods');
+    await gotoKind('colors');
+    await settle(function () { return all('[data-std-card]').length === stdBefore + 24; }, 6000);
+    var cardsEl = document.querySelector('.colors-cards');
+    var panelEl = document.querySelector('[data-act="colors-panel"]');
+    var stdCards = all('[data-std-card]');
+    var lastCard = stdCards[stdCards.length - 1];
+    report('25 个标准色一屏铺开：色卡区不自己滚，最后一张也在面板可视区内（全部展示出来）',
+      !!cardsEl && !!panelEl && !!lastCard &&
+        getComputedStyle(cardsEl).overflowY !== 'auto' && getComputedStyle(cardsEl).overflowY !== 'scroll' &&
+        panelEl.scrollHeight - panelEl.clientHeight <= 1 &&
+        lastCard.getBoundingClientRect().bottom <= panelEl.getBoundingClientRect().bottom + 1,
+      'cards=' + stdCards.length +
+        ' cardsOverflow=' + (cardsEl ? getComputedStyle(cardsEl).overflowY : 'null') +
+        ' panelScroll=' + (panelEl ? (panelEl.scrollHeight - panelEl.clientHeight) : 'null') +
+        ' lastBottom=' + (lastCard ? Math.round(lastCard.getBoundingClientRect().bottom) : 'null') +
+        ' panelBottom=' + (panelEl ? Math.round(panelEl.getBoundingClientRect().bottom) : 'null'));
 
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0,

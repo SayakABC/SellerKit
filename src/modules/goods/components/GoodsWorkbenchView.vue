@@ -47,6 +47,7 @@
           :product="currentProduct"
           :go-registry="goRegistry"
           @queue-groups="queueGroups = $event"
+          @images-adopted="emit('images-adopted')"
         />
       </section>
     </div>
@@ -86,6 +87,16 @@ defineProps<{
    * 「基础数据」模块后，同一条动线改成跨模块跳转（TitleBar「返回」送人回来），回调随之改名。
    */
   goRegistry: () => void;
+}>();
+
+const emit = defineEmits<{
+  /**
+   * 右栏把"存量补图补到了款主图"这件事报上来 —— 外壳只做转手，让 `GoodsView` 重拉整页。
+   *
+   * 为什么必须往上报：补的是左栏产品列表的数据（`pl_products.image_id`），
+   * 而左栏由自己的 `useProductList` 管；外壳**不取数**，只能把"该重拉了"这个信号递出去。
+   */
+  'images-adopted': [];
 }>();
 
 /**
@@ -167,7 +178,7 @@ function goPurchase(): void {
    行高 92 → 305）、图列被顶出视口（缩略图中心 y=889 > 视口 713）—— 认款唯一靠得住的依据点不到。
    当时只能把断点抬到 1280，代价是**默认窗口落进堆叠分支**：本该只改布局，却改掉了主形态。
 
-   当天下午那条左导航搬到主侧栏（`docs/notes/2026-10-17-sub-nav-to-sidebar.md`），212px 回来了：
+   当天下午那条左导航搬到主侧栏（`docs/notes/2026-10-30-ui-nav-and-tabs.md`），212px 回来了：
    默认 1200 窗口可用宽度 = 1200 − 侧栏 208 − 页内边距 36 = **956**（左 420 / 右 520，两栏都能干活）。
    侧排需要容器 ≥ 420 + 360 + 16 = 796 ⇒ 窗口 ≥ 796 + 208 + 36 = 1040；取 1180 是留余量，
    断点回到整合前的位置。

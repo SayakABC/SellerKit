@@ -45,11 +45,11 @@ function check(name, fn) {
 
 /** 造一张图（订单行挂在图上，`oi_order_items.image_id` 有外键） */
 dbRun(
-  `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+  `INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (1, 'sha1', 'fp1', 'u1', '/tmp/1')`,
 );
 dbRun(
-  `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+  `INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (2, 'sha2', 'fp2', 'u2', '/tmp/2')`,
 );
 
@@ -389,10 +389,13 @@ check('「全部确认无误」一次把剩下的待核对全部置 1', () => {
 });
 
 console.log('\n[7] 清空');
-check('clearAll 清掉订单（识别缓存同清）', () => {
+check('clearAll 清掉订单，但图片主数据（md_images）保留', () => {
+  const imgBefore = Number(dbGet(`SELECT COUNT(*) AS n FROM md_images`).n);
   odb.clearAll();
   assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), 0);
   assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items`).n), 0);
+  // 图片是主数据（产品主图 / 采集图共用），清订单不该带走它 —— 否则产品页会集体掉图
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM md_images`).n), imgBefore, '清订单不许删图片行');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -677,7 +680,7 @@ check('采集重推：整单替换，旧包裹一并清掉（不留空壳污染�
 });
 
 check('采集不能整单替换导入单（通道互斥，反向，且不改导入金额）', () => {
-  // imageId 传 null：`[7] clearAll` 已清掉 oi_images，用图 1 会先撞外键，测不到本节的守卫
+  // imageId 传 null：本用例只要"整单替换被拒"，图有没有都无关（无图订单行本来就走这条路径）
   insert({ orderNo: 'IMP-ONLY', imageId: null });
   assert.throws(
     () => odb.upsertCollectedOrder({ orderNo: 'IMP-ONLY', orderTime: '', bizStatus: '', amountCents: 1, lines: [] }),
@@ -705,7 +708,7 @@ check('采集不能整单替换导入单（通道互斥，反向，且不改导�
 console.log('\n[10] 套装部件（一件实物多个款色）');
 
 dbRun(
-  `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+  `INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (21, 'sha21', 'fp21', 'u21', '/tmp/21'), (22, 'sha22', 'fp22', 'u22', '/tmp/22'),
           (23, 'sha23', 'fp23', 'u23', '/tmp/23')`,
 );
@@ -724,13 +727,19 @@ const styleC = mkStyle('SM-C');
 const scA = mkSc(styleA, '红', 'SM-A-红');
 const scB = mkSc(styleB, '黑', 'SM-B-黑');
 const scC = mkSc(styleC, '蓝', 'SM-C-蓝');
+// 套装/单品的"图上款色"：R1 起色↔图是 1:1（挂在 `oi_style_colors.image_id`），
+// 所以三张图必须挂三个**不同**的款色（旧模型里图行自己带 style_color_id，可以三张同色）。
+// scD 只给套装行当"必须被排除的干扰项"，不参与任何期望值。
+const scD = mkSc(styleA, '绿', 'SM-A-绿');
 
-// 两条行都**先**让图挂上同一个单品款色（scA）：模拟"套装图整体被认成某个款"的真实残留。
+// 两条行都**先**让图挂上一个单品款色：模拟"套装图整体被认成某个款"的真实残留。
 // 套装行的期望值因此必须排除它 —— 这正是本节的判据。
 const bundleItem = insert({ orderNo: 'SET-BUNDLE', imageId: 21, rawFields: {}, color: '' });
 const singleItem = insert({ orderNo: 'SET-SINGLE', imageId: 22, rawFields: {}, color: '' });
 const otherItem = insert({ orderNo: 'SET-OTHER', imageId: 23, rawFields: {}, color: '' });
-dbRun(`UPDATE oi_images SET style_color_id = ? WHERE id IN (21, 22, 23)`, [scA]);
+dbRun(`UPDATE oi_style_colors SET image_id = 21 WHERE id = ?`, [scD]);
+dbRun(`UPDATE oi_style_colors SET image_id = 22 WHERE id = ?`, [scA]);
+dbRun(`UPDATE oi_style_colors SET image_id = 23 WHERE id = ?`, [scB]);
 
 check('无部件 ⇒ 回落图上的单品款色（套装表为空时行为与改造前一致）', () => {
   assert.deepStrictEqual(odb.itemStyleColorIds(singleItem), [scA]);
@@ -751,8 +760,12 @@ check('写部件：按录入顺序返回，展示字段可直接用', () => {
   assert.strictEqual(r.parts[1].qtyPerSet, 1);
 });
 
-check('⭐ 有部件 ⇒ 款色集合只含部件（图上仍挂着 scA，但只许出 2 个，不是 3 个）', () => {
-  assert.strictEqual(Number(dbGet(`SELECT style_color_id AS v FROM oi_images WHERE id = 21`).v), scA, '前置：图上确实仍挂着单品款色');
+check('⭐ 有部件 ⇒ 款色集合只含部件（图上仍挂着 scD，但只许出 2 个，不是 3 个）', () => {
+  assert.strictEqual(
+    Number(dbGet(`SELECT COALESCE(image_id, 0) AS v FROM oi_style_colors WHERE id = ?`, [scD]).v),
+    21,
+    '前置：图上确实仍挂着单品款色',
+  );
   const ids = odb.itemStyleColorIds(bundleItem);
   assert.deepStrictEqual(ids, [scA, scB]);
   assert.strictEqual(ids.length, 2, '不许把图上的单品款色并进来');
@@ -824,7 +837,7 @@ check('清空部件 ⇒ 改回单品，回落图款色、组合键变空串', ()
   const r = odb.replaceItemParts(otherItem, []);
   assert.strictEqual(r.ok, true, r.error);
   assert.deepStrictEqual(odb.listItemParts(otherItem), []);
-  assert.deepStrictEqual(odb.itemStyleColorIds(otherItem), [scA], '改回单品后应回落图款色');
+  assert.deepStrictEqual(odb.itemStyleColorIds(otherItem), [scB], '改回单品后应回落图款色');
   assert.strictEqual(odb.bundleKeyOf(otherItem), '');
 });
 
@@ -855,7 +868,7 @@ sdb.ensureShopSchema();
 dbRun(`INSERT INTO sk_shops (platform, name, name_key) VALUES ('ae', '套装店', '套装店')`);
 dbRun(`INSERT INTO pl_products (code, name) VALUES ('SM-A','单品款'), ('SM-SET','两件套')`);
 dbRun(
-  `INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path)
+  `INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path)
    VALUES (31, 'sha31', 'fp31', 'u31', '/tmp/31'), (32, 'sha32', 'fp32', 'u32', '/tmp/32')`,
 );
 const pidA = pdb.productIdByCode('SM-A');
@@ -1091,8 +1104,8 @@ const vtImg = { '5': 505, '7': 507, '9': 509 };
 function vtImageFor(color) {
   const id = vtImg[String(color)];
   if (!id) return null;
-  if (!dbGet(`SELECT 1 FROM oi_images WHERE id = ?`, [id])) {
-    dbRun(`INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/vt')`, [id, 'fp-vt-' + id, 'ufp-vt-' + id, 'u-vt-' + id]);
+  if (!dbGet(`SELECT 1 FROM md_images WHERE id = ?`, [id])) {
+    dbRun(`INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/vt')`, [id, 'fp-vt-' + id, 'ufp-vt-' + id, 'u-vt-' + id]);
   }
   return id;
 }
@@ -1183,7 +1196,7 @@ check('认款后拿货需求能按 款/色/码 统计到这两色（人工认款
 
 check('投影层与归类口径同一份：**无图**的行在利润 / 核对 / 拣货里同样带出款色', () => {
   // 守的是「一个数字两处实现」。改造后款色先落在**订单行**上，而改造前所有投影层都
-  // 只认 `oi_images.style_color_id`。若投影层不同步，同一行会"统计说已归类、列表说没归类"——
+  // 只认 `md_images.style_color_id`。若投影层不同步，同一行会"统计说已归类、列表说没归类"——
   // 真库实测这种行 9/75（`image.style_color_id = 0` 但订单行已归），症状是拿货页仍标
   // "未识别款 / 无供应商"，用户只会认为这一整轮改造没生效。
   const ship = odb.shippingRows(200).filter((r) => String(r.orderNo).startsWith('VT-'));
@@ -1281,6 +1294,65 @@ check('未命名 = 名字仍是平台原文（派生；此时 2 个都算待命�
   assert.strictEqual(c5.colorName, '5', '自动建的款色名应仍是平台原文');
   assert.strictEqual(c5.qty, 2, '件数应是 2（L + XL 各一件）');
   assert.strictEqual(c5.orderRows, 2, '行数应是 2');
+});
+
+console.log('\n[14.5] 命名板只算**这一批导入日**（与「待核对」同一批，不是全库）');
+
+// 键表 `oi_variant_keys` 是**跨批次的记忆**（只在 rememberVariantBinding / backfill 写）。
+// 不按导入日收口时，命名板会把十几天累积的键全铺出来（真库实测 59 个键横跨 10-05 → 10-28），
+// 而下面那张核对表只显示今天的导入日 —— 两处口径必须一样。
+check('跨批次的键不进板；同一个键的件数 / 行数也只算这一批', () => {
+  const d = new Date();
+  const pad = (n) => (n < 10 ? '0' + String(n) : String(n));
+  const todayKey = String(d.getFullYear()) + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+
+  // ① 另一件商品、导入日是三天前 ⇒ 它的键不该出现在「这一批」里
+  const OLD_ITEM = '1005019999999003';
+  dbRun(
+    `INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path)
+     VALUES (511, 'fp-old', 'ufp-old', 'u-old', '/tmp/old')`,
+  );
+  const oldRow = odb.insertOrder({
+    imageId: 511, orderNo: 'VT-OLD-1', shop: VT_SHOP, size: 'L', orderTime: '09/20/2026 10:00',
+    category: '', color: '', logo: '',
+    rawFields: { 订单号: 'VT-OLD-1', 产品ID: OLD_ITEM, 产品信息: '(产品属性:Color:2,Size:L)' },
+  });
+  odb.assignOrderStyle({ orderId: oldRow, styleCode: 'VTOLDSTYLE', color: '2' });
+  dbRun(`UPDATE oi_orders SET created_at = ? WHERE order_no = 'VT-OLD-1'`, ['2026-10-01 09:00:00']);
+
+  // ② 同一个键（同店 / 同商品 / 同色）、但导入日是三天前 ⇒ 不许算进今天的件数与行数
+  odb.insertOrder({
+    imageId: vtImageFor('5'), orderNo: 'VT-5-OLD', shop: VT_SHOP, size: 'M',
+    orderTime: '09/20/2026 10:00', category: '', color: '', logo: '', rawFields: vtRaw('5', 'M'),
+  });
+  dbRun(`UPDATE oi_orders SET created_at = ? WHERE order_no = 'VT-5-OLD'`, ['2026-10-01 09:00:00']);
+
+  // 反向（不筛）必须能看见它们 —— 否则"筛掉了"这件事可能是筛无限大，守卫就是空转
+  const all = odb.variantNamingBoard();
+  assert.ok(all.groups.some((g) => g.itemId === OLD_ITEM), '不筛时旧批次的键也应出现（守卫空转了）');
+  const allC5 = all.groups.find((g) => g.itemId === VT_ITEM).colors.find((c) => c.colorRaw === '5');
+  assert.strictEqual(allC5.qty, 3, `不筛时色 5 的件数应含旧批次（3），实际 ${allC5.qty}`);
+
+  const day = odb.variantNamingBoard(400, todayKey);
+  assert.ok(!day.groups.some((g) => g.itemId === OLD_ITEM), '旧批次的键漏进了「这一批」');
+  const c5 = day.groups.find((g) => g.itemId === VT_ITEM).colors.find((c) => c.colorRaw === '5');
+  assert.strictEqual(c5.qty, 2, `这一批的件数只算今天（2），实际 ${c5.qty}`);
+  assert.strictEqual(c5.orderRows, 2, `这一批的行数只算今天（2），实际 ${c5.orderRows}`);
+  // 只比**相对差**：本节之前还有别的用例造了当天的键（总数不是 2），
+  // 而旧批次只多出 1 个键（VT-5-OLD 那行挂的是已有键，不新增）。
+  assert.strictEqual(
+    day.unnamedKeys,
+    all.unnamedKeys - 1,
+    `旧批次的键应被筛掉（不筛 ${all.unnamedKeys} / 这一批 ${day.unnamedKeys}）`,
+  );
+
+  // 用完即清（后面的用例按"这组 2 个色"继续断言；键留着也无害：板按 EXISTS 只看有行的键）
+  dbRun(
+    `DELETE FROM oi_order_items WHERE order_id IN
+       (SELECT id FROM oi_orders WHERE order_no IN ('VT-OLD-1', 'VT-5-OLD'))`,
+  );
+  dbRun(`DELETE FROM oi_orders WHERE order_no IN ('VT-OLD-1', 'VT-5-OLD')`);
+  dbRun(`DELETE FROM md_images WHERE id = 511`);
 });
 
 check('改名成功：色名换成人的词，未命名计数 −1，编码不动', () => {
@@ -1492,7 +1564,7 @@ function mgRaw(item, color, size, no) {
 let mgImgSeq = 5000;
 function mgNextImage() {
   const id = mgImgSeq++;
-  dbRun(`INSERT INTO oi_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/mg')`, [id, 'fp-mg-' + id, 'ufp-mg-' + id, 'u-mg-' + id]);
+  dbRun(`INSERT INTO md_images (id, fingerprint, url_fingerprint, source_url, local_path) VALUES (?, ?, ?, ?, '/tmp/mg')`, [id, 'fp-mg-' + id, 'ufp-mg-' + id, 'u-mg-' + id]);
   return id;
 }
 function mgInsert(item, color, size, no) {

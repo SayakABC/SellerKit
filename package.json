@@ -66,6 +66,7 @@
     "classify:shot": "node --check scripts/classify-shot.mjs && node scripts/classify-shot.mjs",
     "shipping-rate:ui": "node --check scripts/shipping-rate-ui-smoke.mjs && node scripts/shipping-rate-ui-smoke.mjs",
     "shop-item:smoke": "tsc -p tsconfig.electron.json && electron scripts/shop-item-db-smoke.cjs",
+    "images:smoke": "tsc -p tsconfig.electron.json && electron scripts/master-data-db-smoke.cjs",
     "refresh:db-comments": "electron scripts/refresh-table-comments.cjs"
   },
   "dependencies": {

@@ -836,12 +836,14 @@ check('全新库：getShopItemRow 不炸（图片下载回填的单行读取走�
 
 const odb = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
 const oil = require(path.join(ROOT, 'dist', 'electron', 'order-image-land.js'));
+const { tableExists } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
 odb.ensureOrderSchema();
-pdb.ensureVariantSchema(); // pl_images 在这份里（断言"色图没落进 pl_images"要先有这张表）
+pdb.ensureVariantSchema(); // 图片主数据（md_images）由它建；断言「色图没落进产品表的旧落点」要在同一张表上做对照
+assert.strictEqual(tableExists('pl_images'), false, 'R1 之后只该有一张图片表（md_images）');
 
-/** 色图用例的复位：识别池全清（款 / 款色 / 图互不共享） */
+/** 色图用例的复位：识别池全清（款 / 款色 / 图互不共享；子表先删，别让外键挡住） */
 const resetRecog = () => {
-  for (const t of ['oi_images', 'oi_styles', 'oi_style_colors', 'oi_style_fingerprints']) {
+  for (const t of ['md_images', 'oi_style_colors', 'oi_style_fingerprints', 'oi_styles']) {
     dbRun(`DELETE FROM ${t}`);
   }
 };
@@ -855,25 +857,29 @@ const PNG_1PX = Buffer.from(
 const imgBuf = (tag) => Buffer.concat([PNG_1PX, Buffer.from('//' + tag)]);
 
 // ⭐ 夹具必须是**生产形状**：色图的 id 要经 `landOrderImageBytes` 这条**生产同一条**落库函数
-// 拿到（写 oi_images），而不是"手工插一行 oi_images"。后者只复刻了"函数期望的形状"，
+// 拿到（写 md_images），而不是"手工插一行 md_images"。后者只复刻了"函数期望的形状"，
 // 于是 handler 即便传回 pl_images 的 id，下面这些断言照样全绿 —— 审查 P0-1 就是这么漏掉的。
-/** 落一张已入库的图（走生产同一条落库函数），返回 oi_images 的 id */
+/** 落一张已入库的图（走生产同一条落库函数），返回 md_images 的 id */
 const insertImg = (tag) =>
   oil.landOrderImageBytes(imgBuf(tag), {
     urlFingerprint: 'u-' + tag,
     sourceUrl: 'https://ae01.alicdn.com/' + tag + '.jpg',
   }).imageId;
+/**
+ * 这张图当前绑在哪个款色上（`null` = 没绑）。
+ * R1：归属从「图行的 `style_color_id`」搬到「色行的 `image_id`」（1:1），所以反过来查色行。
+ */
 const styleColorOf = (imageId) => {
-  const r = dbGet(`SELECT style_color_id FROM oi_images WHERE id = ?`, [imageId]);
-  return r ? r.style_color_id : null;
+  const r = dbGet(`SELECT id FROM oi_style_colors WHERE image_id = ? LIMIT 1`, [imageId]);
+  return r ? Number(r.id) : null;
 };
 
-check('色图采纳：新图绑到新色（bound=true；oi_images.style_color_id 真落库）', () => {
+check('色图采纳：新图绑到新色（bound=true；oi_style_colors.image_id 真落库）', () => {
   resetRecog();
   const img = insertImg('fp-a');
   const r = odb.adoptStyleColorImageByCode('STYLE-A', '黑', img);
   assert.deepStrictEqual(r, { bound: true });
-  assert.ok(styleColorOf(img) > 0, '绑上后 oi_images.style_color_id 应有值（不能只返回 true 不写库）');
+  assert.ok(styleColorOf(img) > 0, '绑上后色行的 image_id 应有值（不能只返回 true 不写库）');
 });
 
 check('色图采纳只补空（图侧）：同一张图再绑任何色都不动它', () => {
@@ -920,23 +926,23 @@ check('色图采纳：空色名 / 空编码 / imageId=0 直接不绑（不抛、
 // ---- 下面三条钉的是「色图落在哪张表」以及由此成立的**按图找色闭环** ----
 //
 // 色图的全部价值 = 订单导入后能按图找到颜色（归类核对 / 拣货单 / 拿货单都走
-// `oi_order_items.image_id → oi_images.style_color_id`）。而"按图找色"的唯一入口是
+// `oi_order_items.image_id → md_images.style_color_id`）。而"按图找色"的唯一入口是
 // `order-download-image` 里的**内容指纹命中**（命中即复用那一行，连带它的 styleColorId）。
 // 色图只要落错表（pl_images），这条查询就永远看不到它 ⇒ 闭环一次都不闭，而回执照样报 bound:true。
 // 所以这里不能只验"adopt 返回什么"，必须验"落库函数把 id 落在哪张表 + 订单侧能不能命中"。
 
-check('色图落点 = oi_images（不是 pl_images）：生产落库函数返回的 id 在 oi_images 里、指纹与字节一致', () => {
+check('色图落点 = 唯一图片仓 md_images：生产落库函数返回的 id 在 md_images 里、指纹与字节一致', () => {
   resetRecog();
   const landed = oil.landOrderImageBytes(imgBuf('fp-land'), {
     urlFingerprint: 'u-land',
     sourceUrl: 'https://ae01.alicdn.com/land.jpg',
   });
-  const row = dbGet(`SELECT fingerprint FROM oi_images WHERE id = ?`, [landed.imageId]);
-  assert.ok(row, '落库函数返回的 id 必须能在 oi_images 查到 —— 落在别的表 = 按图找色永不命中');
+  const row = dbGet(`SELECT fingerprint FROM md_images WHERE id = ?`, [landed.imageId]);
+  assert.ok(row, '落库函数返回的 id 必须能在 md_images 查到 —— 落在别的表 = 按图找色永不命中');
   const fp = require('crypto').createHash('sha256').update(imgBuf('fp-land')).digest('hex');
   assert.strictEqual(row.fingerprint, fp, '内容指纹必须与字节一致（订单导入按它命中）');
-  const inPl = dbGet(`SELECT COUNT(*) AS n FROM pl_images WHERE fingerprint = ?`, [fp]);
-  assert.strictEqual(Number(inPl.n), 0, '色图不该落进 pl_images（那是产品主图的表）');
+  // R1：产品图与订单图共用这一张表（旧 `pl_images` 已退役），所以"落错表"这个分叉不可能再出现
+  assert.strictEqual(tableExists('pl_images'), false, '不该再有第二张图片表');
 });
 
 check('按图找色闭环：色图采纳后，订单导入**同内容不同 URL** 的图复用同一行并继承款色', () => {
@@ -959,200 +965,29 @@ check('按图找色闭环：色图采纳后，订单导入**同内容不同 URL*
   assert.strictEqual(styleColorOf(orderImg.imageId), boundSc, '订单按图拿到的那一行必须带着款色 —— 这就是按图找色');
 });
 
-check('反例：喂 pl_images 的 id 给色图采纳 ⇒ 不绑成功，且 oi_images 一行都不许改', () => {
+check('反例：不存在的 imageId 给色图采纳 ⇒ 不绑成功，且不产生任何绑定', () => {
   resetRecog();
-  // 产品域的图（= 曾经被误当成色图 id 的那个东西）
-  const pl = pdb.upsertImageRecord({ fingerprint: 'pl-fp-neg', localPath: '/tmp/pl-neg.webp', source: 'shop-item' });
-  const plId = Number(pl.imageId);
-  const snapshot = () => dbGet(`SELECT COUNT(*) AS n, COALESCE(SUM(style_color_id), 0) AS s FROM oi_images`);
+  const snapshot = () => dbGet(`SELECT COUNT(*) AS n, COALESCE(SUM(image_id), 0) AS s FROM oi_style_colors`);
   const before = snapshot();
-  const r = odb.adoptStyleColorImageByCode('STYLE-NEG', '黑', plId);
-  assert.strictEqual(r.bound, false, 'pl_images 的 id 不是 oi_images 的行 ⇒ 绝不能报成功');
-  assert.deepStrictEqual(snapshot(), before, 'oi_images 一行都不能被改动（P0-1 就是改了别人的订单图）');
+  const r = odb.adoptStyleColorImageByCode('STYLE-NEG', '黑', 999999);
+  assert.strictEqual(r.bound, false, '库里没有这张图 ⇒ 绝不能报成功');
+  assert.deepStrictEqual(snapshot(), before, '没绑上就不许留下半个款色行/绑定');
 });
 
-// -------------------------------------------------------------------------- 老库迁移（店铺地址两列）
+// -------------------------------------------------------------------------- 老库迁移（店铺地址两列，已退役）
 //
-// ⚠️ 单开一段放在收尾前：换库要 `closeDb()` + `initDb()`，而 `initDb` 是**单例**，
-//    换过去之后本段之外那些用例的 `reset()` 会对着只建了 sk_shops 的库执行 `DELETE FROM pl_shop_items`
-//    ⇒ 一片 "no such table"。所以迁移用例必须是最后一批。
-//
-// ⚠️ 夹具建的是**上一版的形状**（有 `platform_shop_id` / `shop_url`，没有 `shop_url_raw`）——
-//    只建"最新形状"就等于把迁移用例关掉（skill：夹具形状不是最旧的那个就是安慰剂）。
-//    更早的形状（地址两列都没有）另测一次。
-
-/** 上一版形状（2026-10-13 加过 shop_url 之后、本次拆列之前） */
-const DDL_PREV = `CREATE TABLE sk_shops (
-   id INTEGER PRIMARY KEY AUTOINCREMENT,
-   platform TEXT NOT NULL DEFAULT '',
-   name TEXT NOT NULL,
-   name_key TEXT NOT NULL,
-   platform_shop_id TEXT NOT NULL DEFAULT '',
-   shop_url TEXT NOT NULL DEFAULT '',
-   site TEXT NOT NULL DEFAULT '',
-   shop_set_id INTEGER NOT NULL DEFAULT 0,
-   status TEXT NOT NULL DEFAULT 'active',
-   opened_at TEXT NOT NULL DEFAULT '',
-   note TEXT NOT NULL DEFAULT '',
-   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   UNIQUE(platform, name_key)
- )`;
-
-/** 更早形状（`platform_shop_id` 也没有） */
-const DDL_OLDEST = `CREATE TABLE sk_shops (
-   id INTEGER PRIMARY KEY AUTOINCREMENT,
-   platform TEXT NOT NULL DEFAULT '',
-   name TEXT NOT NULL,
-   name_key TEXT NOT NULL,
-   site TEXT NOT NULL DEFAULT '',
-   shop_set_id INTEGER NOT NULL DEFAULT 0,
-   status TEXT NOT NULL DEFAULT 'active',
-   opened_at TEXT NOT NULL DEFAULT '',
-   note TEXT NOT NULL DEFAULT '',
-   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   UNIQUE(platform, name_key)
- )`;
-
-/**
- * 在独立库里建给定形状的 sk_shops，灌一行「有地址的老店」，跑 ensureShopSchema 后回观测值。
- * `insertSql` 跟着形状走 —— 更老的形状没有 `shop_url` 列，硬写会把自己绊倒
- * （`table sk_shops has no column named shop_url`）。
- */
-function migrateLegacy(ddl, insertSql) {
-  closeDb();
-  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sellerkit-shop-url-migrate-'));
-  initDb(path.join(legacyDir, 'legacy.db'));
-  dbRun(ddl);
-  dbRun(insertSql);
-  sdb.ensureShopSchema();
-  const shop = sdb.getShop(1);
-  return {
-    cols: dbQuery(`PRAGMA table_info(sk_shops)`).map((c) => String(c.name)),
-    row: dbGet(`SELECT shop_url, shop_url_raw FROM sk_shops WHERE name_key = '老店'`),
-    shown: shop ? shop.shopUrl : '<行不见了>',
-    count: dbGet(`SELECT COUNT(*) AS n FROM sk_shops`).n,
-  };
-}
-
-/** 上一版形状的种子行（地址列在） */
-const SEED_PREV = `INSERT INTO sk_shops (platform, name, name_key, shop_url)
-  VALUES ('ae', '老店', '老店', 'old.example.com/store/5')`;
-/** 更早形状的种子行（连地址列都没有 —— 生产里那种"没填过地址的老店"） */
-const SEED_OLDEST = `INSERT INTO sk_shops (platform, name, name_key) VALUES ('ae', '老店', '老店')`;
-
-check('迁移（上一版形状）：补 shop_url_raw 列 + 存量键回填 https ⇒ 老店当场可打开，行与原列不动', () => {
-  const r = migrateLegacy(DDL_PREV, SEED_PREV);
-  assert.ok(r.cols.includes('shop_url_raw'), '老库必须补上 shop_url_raw（CREATE TABLE IF NOT EXISTS 一个字都不改）');
-  assert.strictEqual(r.count, 1, '迁移不许丢行');
-  assert.strictEqual(r.row.shop_url, 'old.example.com/store/5', '匹配键原样（旧库的键本来就是归一形）');
-  assert.strictEqual(
-    r.row.shop_url_raw,
-    'https://old.example.com/store/5',
-    '存量键回填 https 前缀 —— 不回填的话老店的「打开店铺」还是报"链接地址无效"',
-  );
-  assert.strictEqual(r.shown, 'https://old.example.com/store/5', '读取面给的是可打开的原文');
-});
-
-check('迁移（更老形状）：三列一并补上，行数不变，地址两列留空（不造数据）', () => {
-  // ⭐ 这条同时是回填条件 `shop_url <> ''` 的**靶子**：去掉它，没地址的老店会被写成
-  //    `'https://'`（一个空壳地址，界面还真敢当链接点）⇒ 下面那条断言立刻红。
-  const r = migrateLegacy(DDL_OLDEST, SEED_OLDEST);
-  for (const c of ['platform_shop_id', 'shop_url', 'shop_url_raw']) {
-    assert.ok(r.cols.includes(c), `${c} 缺列必须补上`);
-  }
-  assert.strictEqual(r.count, 1, '迁移不许丢行');
-  assert.deepStrictEqual(
-    { k: r.row.shop_url, raw: r.row.shop_url_raw },
-    { k: '', raw: '' },
-    '从来没过地址的店，迁移不许凭空造一个地址出来',
-  );
-  assert.strictEqual(r.shown, '', '读取面也是空（界面显示「—」，不假装能点）');
-});
-
-/** 本次迁移**之后**的形状（含 shop_url_raw）—— 模拟"这台机器已经跑过一次迁移" */
-const DDL_MIGRATED = `CREATE TABLE sk_shops (
-   id INTEGER PRIMARY KEY AUTOINCREMENT,
-   platform TEXT NOT NULL DEFAULT '',
-   name TEXT NOT NULL,
-   name_key TEXT NOT NULL,
-   platform_shop_id TEXT NOT NULL DEFAULT '',
-   shop_url TEXT NOT NULL DEFAULT '',
-   shop_url_raw TEXT NOT NULL DEFAULT '',
-   site TEXT NOT NULL DEFAULT '',
-   shop_set_id INTEGER NOT NULL DEFAULT 0,
-   status TEXT NOT NULL DEFAULT 'active',
-   opened_at TEXT NOT NULL DEFAULT '',
-   note TEXT NOT NULL DEFAULT '',
-   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-   UNIQUE(platform, name_key)
- )`;
-
-/**
- * 在"已迁移形状"的库里灌若干行（行 = `[nameKey, shopUrl, shopUrlRaw]`），再跑 ensureShopSchema，
- * 返回逐行的观测值。
- *
- * ⚠️ 这个夹具存在的理由：**"迁移只跑一次"是本次唯一无法用"跑迁移"来测的性质** ——
- *    凡是靠"建缺列的旧库 → 跑 ensure"的用例，回填都在**进分支那一次**完成，
- *    之后再 ensure 多少次都不进分支，断言"没被改写"必然恒绿（空转）。
- *    只有先造出"列已在、值已是迁移后状态"的库，才谈得上验"它不再动手"。
- */
-function alreadyMigrated(rows) {
-  closeDb();
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sellerkit-shop-url-migrated-'));
-  initDb(path.join(d, 'migrated.db'));
-  dbRun(DDL_MIGRATED);
-  for (const [nameKey, key, raw] of rows) {
-    dbRun(`INSERT INTO sk_shops (platform, name, name_key, shop_url, shop_url_raw) VALUES ('ae',?,?,?,?)`, [
-      nameKey,
-      nameKey,
-      key,
-      raw,
-    ]);
-  }
-  sdb.ensureShopSchema();
-  sdb.ensureShopSchema(); // 连跑两次：验的是"重复 ensure 也不动手"
-  const read = (nameKey) => dbGet(`SELECT shop_url, shop_url_raw FROM sk_shops WHERE name_key = ?`, [nameKey]);
-  return { read, shown: (nameKey) => {
-    const id = dbGet(`SELECT id FROM sk_shops WHERE name_key = ?`, [nameKey]).id;
-    const s = sdb.getShop(id);
-    return s ? s.shopUrl : '<行不见了>';
-  } };
-}
-
-check('迁移只做一次：列已在的库不再回填 —— 清空的行不许长回来、用户改过的原文不许被改写', () => {
-  const db = alreadyMigrated([
-    ['清过地址的店', '', ''],
-    ['用户改过原文的店', 'old.example.com/user', 'http://user.example.com'],
-    ['键在原文空的老行', 'old.example.com/gap', ''],
-  ]);
-  assert.deepStrictEqual(
-    db.read('清过地址的店'),
-    { shop_url: '', shop_url_raw: '' },
-    '用户清空地址（两列同时为空）后，任何一次 ensure 都不许把地址写回来',
-  );
-  assert.strictEqual(
-    db.read('用户改过原文的店').shop_url_raw,
-    'http://user.example.com',
-    '回填不许覆盖已有原文（否则用户填的 http 会被悄悄改成 https+键）',
-  );
-  // 列已在 = 本次迁移早跑过 ⇒ 不再回填（这条是"只做一次"的直接判据；把回填挪出缺列分支即红）
-  assert.strictEqual(
-    db.read('键在原文空的老行').shop_url_raw,
-    '',
-    '列已存在的库不再回填 —— 迁移只做一次，否则每次 ensure 都在改用户数据',
-  );
-  // 回落链：raw 缺失时读取面补协议（老行/Raw 空的行仍可打开）
-  assert.strictEqual(db.shown('键在原文空的老行'), 'https://old.example.com/gap', 'raw 空 ⇒ 按键补 https 兜底');
-  assert.strictEqual(db.shown('清过地址的店'), '', '两列都空 ⇒ 空（界面显示「—」，不假装能点）');
-});
+// **本段「建老形状旧库 → 跑 ensureShopSchema」的用例已随「未正式发布、无存量库」退役（2026-10-30）**：
+// `electron/shop-db.ts` 里整表合并与地址两列（`platform_shop_id` / `shop_url` / `shop_url_raw`）的
+// 补列 + 回填步骤都已删除（见该文件头「迁移（shop.main）」段）。现在 `SCHEMA` 把新库一次建到当前
+// 形状，对老形状**不再承诺升级** —— 留着旧夹具等于测一个不存在的分支，而且它会在
+// `uq_sk_shops_email` 索引上先撞 `no such column: email`（红得莫名其妙，不是它想验的东西）。
+// 地址两列的**当前语义**（匹配键 vs 可打开原文 / 裸域名补 https / 清空 / 读取面回落）由前面那组
+// URL 用例覆盖；补列机制本身由 `shop:smoke` 的 `shop.columns` 用例覆盖。
 
 // -------------------------------------------------------------------------- 存量回填（尺码归一 v1）
 //
-// 「迁移只做一次」在本仓有前科（见上面 `alreadyMigrated` 的长注释）：凡是靠"建旧形状的库 → 跑迁移"
-// 的用例，回填都在进分支那一次完成，之后断言"没被改写"必然恒绿。本域的迁移是**版本化**的
+// 「迁移只做一次」在本仓有前科：凡是靠"建旧形状的库 → 跑迁移"的用例，回填都在进分支那一次完成，
+// 之后断言"没被改写"必然恒绿。本域的迁移是**版本化**的
 // （`migrate('shop-item.main', …)`），所以夹具能直接造出"数据已在、版本未记"的形状 ——
 // 这比造老表结构更贴近真实升级路径（老库就是"有数据、没这个版本的记录"）。
 

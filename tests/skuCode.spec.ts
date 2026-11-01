@@ -32,6 +32,15 @@ describe('skuCode', () => {
     expect(renderSkuCode('{code}--{color}', seed())).toBe('SUST-001-黑色');
   });
 
+  it('{color} 渲染成**字典颜色 ID**（色名会被归类改名，id 不会）', () => {
+    expect(renderSkuCode('{code}-{color}-{size}', seed({ colorId: 3 }))).toBe('SUST-001-3-L');
+  });
+
+  it('拿不到 id（不在字典 / 字典没载入）⇒ 回落色名，不留成 S1--L 这种残码', () => {
+    expect(renderSkuCode('{code}-{color}-{size}', seed({ colorId: 0 }))).toBe('SUST-001-黑色-L');
+    expect(renderSkuCode('{code}-{color}-{size}', seed())).toBe('SUST-001-黑色-L');
+  });
+
   it('不认识的占位符**原样保留**（悄悄吃掉会变成"看着对、其实少一截"的编码）', () => {
     expect(renderSkuCode('{code}-{style}', seed())).toBe('SUST-001-{style}');
   });

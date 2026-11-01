@@ -10,7 +10,7 @@
 /** 可用的占位符（顺序 = UI 上的提示顺序） */
 export const SKU_CODE_TOKENS = [
   { key: '{code}', label: '款号' },
-  { key: '{color}', label: '颜色' },
+  { key: '{color}', label: '颜色ID' },
   { key: '{size}', label: '尺码' },
   { key: '{index}', label: '序号' },
 ] as const;
@@ -25,6 +25,15 @@ export interface SkuCodeSeed {
   key: string;
   styleCode: string;
   color: string;
+  /**
+   * 该色在 `md_colors` 里的 id（2026-10-30 用户口径「SKU编码把color修改为颜色ID」）。
+   *
+   * `{color}` 渲染的是**它**，不是色名：色名是会被「归类」改写的标签（`藏蓝` → `藏青`），
+   * 改完编码就跟实际色对不上；id 是主数据身份，改名不动。
+   * 0 / 缺省 = 不在字典（还没归类的异写色、或字典没载入）⇒ **回落色名**，
+   * 不能因为拿不到 id 就把这一段留空（那会生成 `S1--L` 这种残码）。
+   */
+  colorId?: number;
   size: string;
   /** 1-based，渲染成两位（01、02…） */
   index: number;
@@ -48,13 +57,19 @@ export interface SkuCodeDraft {
 export function renderSkuCode(rule: string, seed: SkuCodeSeed): string {
   const out = normalizeRule(rule)
     .replace(/\{code\}/g, String(seed.styleCode ?? '').trim())
-    .replace(/\{color\}/g, String(seed.color ?? '').trim())
+    .replace(/\{color\}/g, colorToken(seed))
     .replace(/\{size\}/g, String(seed.size ?? '').trim())
     .replace(/\{index\}/g, String(Math.max(1, Math.round(seed.index))).padStart(2, '0'));
   return out
     .replace(/([-\s_/]+)\1+/g, '$1') // `--` / `  ` ⇒ 一个
     .replace(/^[-\s_/]+|[-\s_/]+$/g, '') // 首尾的分隔符没有意义
     .trim();
+}
+
+/** `{color}` 的取值：字典 id 优先，拿不到就回落色名（见 `SkuCodeSeed.colorId` 的说明） */
+function colorToken(seed: SkuCodeSeed): string {
+  const id = Number(seed.colorId ?? 0);
+  return id > 0 ? String(id) : String(seed.color ?? '').trim();
 }
 
 function normalizeRule(rule: string): string {

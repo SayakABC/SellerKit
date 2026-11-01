@@ -2,7 +2,7 @@
 // src/modules/shop-accounts/components/AccountsPanel.vue
 // 「基础数据 › 店铺」—— 合并后的店铺 + 账号唯一列表（一行 = 一家店铺，sk_shops 物理合并）。
 //
-// 2026-10-22 重设计（docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md §3.2/§3.3）：
+// 2026-10-22 重设计（docs/archive/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md §3.2/§3.3）：
 //   ① 列固定为 店铺 / 邮箱 / 企业 / 手机号 / 支付宝 / 紫鸟 / ERP / 操作 —— 删掉平台列
 //      （界面只管理速卖通）与开店时间列（详情进编辑器看，列表不占宽）；
 //      2026-10-25 起「状态」不再单独占列，跟店名一起放在店铺格里（退店行还带保证金到账时间）；

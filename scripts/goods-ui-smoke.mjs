@@ -67,6 +67,17 @@ const FAKE_BRIDGE = `<script>
     { id: 12, productId: 1, code: '', name: '黑 M', color: '黑', size: 'M', weightG: 0, status: 'active' },
     { id: 21, productId: 2, code: '', name: '白 XL', color: '白', size: 'XL', weightG: 400, status: 'active' },
   ];
+  // 颜色字典桩的**可变**种子（真种子见 electron/master-data-db.ts 的 COLOR_SEEDS）。
+  // 「＋ 新增颜色」会往这里 push，下一次 mdColorList 就能查到 —— 与真进程同一个闭环。
+  var DICT_COLORS = [
+    ['黑色', '#3a3a3a'], ['白色', '#f5f5f5'], ['灰色', '#9a9a9a'], ['深灰', '#6b6b6b'],
+    ['浅灰', '#c4c4c4'], ['藏青', '#2f3b5e'], ['藏蓝', '#2f3b5e'], ['军绿', '#5b6b46'],
+    ['墨绿', '#1d4b3a'], ['蓝色', '#3b6fd4'], ['天蓝', '#7fb6e8'], ['卡其', '#c3b091'],
+    ['红色', '#d64545'], ['酒红', '#7d2f3a'], ['粉色', '#e89ab6'], ['紫色', '#8b5ec9'],
+    ['香芋紫', '#b3a1c9'], ['绿色', '#3d9a5c'], ['黄色', '#e8c23d'], ['橙色', '#e8853d'],
+    ['棕色', '#8a6a4f'], ['咖啡', '#5d4231'], ['米色', '#d9c9a8'], ['米白', '#efe9dc'],
+    ['肤色', '#e8c4a8'], ['牛仔', '#4a6a8a'], ['印花多色', ''],
+  ];
 
   // 进价（C2 起）是**产品行自己的字段** costCents（列表/抽屉/导出都读它），不再有独立的款级价目表 —
   // 所以这里没有 COSTS 夹具：本页的「当前进价」由 productUpsert 直接写在 PRODUCTS 行上（见 cost-save-in-drawer 步）。
@@ -202,7 +213,7 @@ const FAKE_BRIDGE = `<script>
   // 「缩略图只合批取一次」的断言是按"请求里含订单图那张路径"过滤的，两条通道共用同一张
   // 虚构路径会让抽屉每开一次都算进队列的计数（1 → 6），红的却是队列那条断言。
   var STYLE_IMG = '/tmp/smoke-order-images/style-black.webp';
-  /* 订单域「哪些色名底下挂着那张款色图」—— 图挂在**款色行**上（oi_images.style_color_id），
+  /* 订单域「哪些色名底下挂着那张款色图」—— 图挂在**款色行**上（oi_style_colors.image_id，1:1），
      色行改名时 id 不变、图跟着走。这是真机的结构，不是便利写法：
        · 只返回一张静态图 ⇒ 分不出"按色名查"与"图跟着色行"两种实现；
        · 色行改名却不搬图 ⇒ 会掩盖"产品侧改了名、订单域没改"这个真实故障（2026-10-23 两次实报）。
@@ -251,6 +262,8 @@ const FAKE_BRIDGE = `<script>
     // 否则"主图下载失败"漏进后面的步骤，制造与 P4 无关的假失败。
     window.__smokeImgFail = false;
     window.__smokeColorMode = '';
+    // 字典取不到的样本（验"没有 md_colors 时仍能编辑，只是常用色回落内置词表"）
+    window.__smokeNoDict = false;
     for (var k in calls) delete calls[k];
   };
 
@@ -384,6 +397,67 @@ const FAKE_BRIDGE = `<script>
       return { success: true, data: { id: p.id, created: false } };
     },
     'productDbEnsure': function () { return { success: true, data: { ok: true } }; },
+    /* ---- 主数据字典（颜色 / 尺码只读面）----
+       为什么桩里要有：SKU 矩阵那排「常用色」自 2026-10-30 起由 md_colors 驱动，
+       不是界面里写死的 10 个。桩不提供它就只走到 COMMON_COLORS 兜底 ——
+       于是"批量归到字典写法（黑色）"这条断言会红在一个与实现无关的地方。
+       色值取真种子（electron/master-data-db.ts 的 COLOR_SEEDS），
+       否则"藏青 → rgb(47,59,94)"这类断言在冒烟里会与真机不一致。
+       ⚠️ 本段是注入脚本的模板串：注释里不许出现反引号，否则整段会被截断（见 sku-color-merge）。 */
+    'mdColorList': function () {
+      if (window.__smokeNoDict) return { success: false, error: 'no dict' };
+      return {
+        success: true,
+        data: {
+          colors: DICT_COLORS.map(function (s, i) {
+            return { id: i + 1, name: s[0], hex: s[1], sortOrder: i + 1, status: 'active' };
+          }),
+        },
+      };
+    },
+    // 「＋ 新增颜色」：字典是**可变**的（DICT_COLORS），新增后下一次 mdColorList 能查到。
+    // 与主进程同口径：空名 / 纯数字色号拒绝；同名幂等（created:false，不报错）。
+    'mdColorCreate': function (p) {
+      rec('mdColorCreate', p);
+      var name = String((p && p.name) || '').trim();
+      if (!name) return { success: false, error: '颜色名不能为空' };
+      if (/^\\d+$/.test(name)) return { success: false, error: '数字色号不是颜色名' };
+      for (var i = 0; i < DICT_COLORS.length; i++) {
+        if (DICT_COLORS[i][0] === name) {
+          return {
+            success: true,
+            data: {
+              color: { id: i + 1, name: name, hex: DICT_COLORS[i][1], sortOrder: i + 1, status: 'active' },
+              created: false,
+            },
+          };
+        }
+      }
+      DICT_COLORS.push([name, '']);
+      var id = DICT_COLORS.length;
+      return {
+        success: true,
+        data: {
+          color: { id: id, name: name, hex: '', sortOrder: id, status: 'active' },
+          created: true,
+        },
+      };
+    },
+    'mdSizeList': function () {
+      var seed = [['XS', ''], ['S', ''], ['M', ''], ['L', ''], ['XL', ''], ['2XL', 'XXL'],
+        ['3XL', 'XXXL,3X'], ['4XL', 'XXXXL,4X'], ['5XL', 'XXXXXL,5X'], ['均码', 'F,FREE,FREESIZE']];
+      return {
+        success: true,
+        data: {
+          sizes: seed.map(function (s, i) {
+            return {
+              id: i + 1, name: s[0], sortOrder: i + 1,
+              sizeGroup: s[0] === '均码' ? '均码' : 'S-5XL', aliases: s[1],
+            };
+          }),
+        },
+      };
+    },
 
     /* ---- 产品表单 upsert（编辑抽屉的**即时保存**走它）---- */
     // 桩必须**真的改夹具对象**：只记调用不改数据的话，"离开输入框就落库 → 列表/表单是新值"
@@ -1202,6 +1276,41 @@ async function clickText(sel, text, timeout) {
   }
 }
 
+/* ---- SKU 矩阵「颜色工作台」的测试小工具（2026-10-30 起色名只读）--------------
+   色名不能再手打，改色/加色只有两条路：
+     ① 点「常用色」chip —— 没有选中 = 加一行；有选中 = 把那几行归到这个名；
+     ② 按住色行拖到 chip 上（与 ① 同一个 classify / merge 纯函数）。
+   字典里没有的写法先走「＋ 新增颜色」写进字典，chip 才会出现（与真机同一条闭环）。 */
+function mxChip(name) {
+  return document.querySelector('.wb-drawer [data-act="ed-common"][data-color="' + name + '"]');
+}
+/** 颜色行的只读色名（data-color 是唯一读数入口 —— 不再是 input.value） */
+function mxNameEls() { return all('.wb-drawer [data-act="ed-color"]'); }
+function mxNames() {
+  return mxNameEls().map(function (e) { return e.getAttribute('data-color') || ''; });
+}
+function mxRows() { return all('.wb-drawer [data-act="ed-row"]').length; }
+/** 点第 i 行的色名 = 选中它（色名是文本，点它不会弹任何输入框） */
+async function tapColorRow(i) {
+  var el = mxNameEls()[i];
+  if (!el) return false;
+  el.click();
+  await settle(function () { return all('.wb-drawer .mx-color.is-sel').length >= 1; }, 2000);
+  return true;
+}
+/** 字典里没有这个色名 ⇒ 走「＋ 新增颜色」写进字典（已有 chip 就直接返回） */
+async function ensureDictColor(name) {
+  if (mxChip(name)) return true;
+  var add = document.querySelector('.wb-drawer [data-act="ed-color-add"]');
+  if (!add) return false;
+  add.click();
+  await waitFor(function () { return !!document.querySelector('.wb-drawer [data-act="ed-color-add-input"]'); }, 2000);
+  setVal(document.querySelector('.wb-drawer [data-act="ed-color-add-input"]'), name);
+  document.querySelector('.wb-drawer [data-act="ed-color-add-ok"]').click();
+  await settle(function () { return !!mxChip(name); }, 4000);
+  return !!mxChip(name);
+}
+
 /**
  * 夹具复位（对应假桥段的 window.__smokeReset）。
  *
@@ -1313,7 +1422,7 @@ async function narrowViewportChecks() {
   // 判据真的是"两端同时为零"，而不是跟着其中一个开关走。
   // ⚠️ 这条断言也是"dist 里残留变异"的照妖镜：把 firstRun.ts 的 && 改成 || 再 build、
   //    跑完记得**再 build 回来** —— 否则 dist 里留着变异体，这一遍会挂着一条 FAIL
-  //    （2026-10-08 实测踩到，见 docs/notes/2026-10-08-goods-ux-refactor-r0-r3.md §2）。
+  //    （2026-10-08 实测踩到，见 docs/notes/2026-10-30-goods-ux-refactor.md §2）。
   report('窄窗口下零款 + 队列非空 → 首启引导卡不出现',
     !document.querySelector('[data-act="first-run-card"]'),
     '队列指标条=[' + flat(document.querySelector('[data-act="map-stats"]')) + ']');
@@ -1415,6 +1524,31 @@ async function defaultWindowReachChecks() {
   reportReachable('队列行缩略图可达（点开看原图）', '[data-act="pending-table"] [data-act="q-thumb"]');
   // ⑤ 左栏的关键入口
   reportReachable('左栏「新增款」可达', '[data-act="new-product"]');
+  // ⑤-b 新增产品的款编码：系统发号 + 只读（2026-10-30 用户口径「款编码自动生成，不要手动填写」）。
+  //     判据必须同时有 value 与 readOnly：只钉「有值」的话，一个仍可编辑的手填框也照样绿。
+  var newProductBtn = document.querySelector('[data-act="new-product"]');
+  if (newProductBtn) newProductBtn.click();
+  await settle(function () {
+    var c = document.querySelector('.wb-drawer [data-act="ed-code"]');
+    return !!c && c.value === 'STYLE-042';
+  }, 6000);
+  var autoCode = document.querySelector('.wb-drawer [data-act="ed-code"]');
+  report('新增产品：款编码**打开即自动发号**且只读（发号器与建款向导同一个，不手填）',
+    !!autoCode && autoCode.value === 'STYLE-042' && autoCode.readOnly,
+    'code=' + (autoCode ? autoCode.value : 'missing') +
+      ' readonly=' + (autoCode ? String(autoCode.readOnly) : 'n/a'));
+  report('新增产品：编码旁标「自动生成」（人不用猜这格为什么不能打字）',
+    !!document.querySelector('.wb-drawer [data-act="ed-code-auto"]'));
+  // 只发了号、什么都没填就关 ⇒ 不该弹「这个新产品还没创建」（自动值不算"人填过东西"）
+  var autoClose = document.querySelector('.wb-drawer .ed-x');
+  if (autoClose) autoClose.click();
+  await settle(function () {
+    return !document.querySelector('.wb-drawer') &&
+      !document.querySelector('.wb-mask .wb-dialog__head');
+  }, 4000);
+  report('新增产品：只发号就关**不弹**「还没创建」（自动值不该被算成用户填过东西）',
+    !document.querySelector('.wb-drawer') &&
+      !document.querySelector('.wb-mask .wb-dialog__head'));
   // ⚠️ 2026-10-25（P2 · S4）：行首那个 ▸ 展开钮已下线（单击行 = 选中）。可达性改钉**行尾的
   //    「编辑」** —— 它是档案（供应商 / 类目 / 备注 / 删除）唯一的人工入口，点不到就等于撤了能力。
   reportReachable('左栏产品行「编辑」可达（档案入口；默认窗口下必须真的能点）',
@@ -1988,22 +2122,26 @@ async function main() {
       'big=' + bigSrc.slice(0, 24) + ' thumb=' + window.__smokeImg.thumb.slice(0, 24));
     document.querySelector('[data-act="ed-viewer-close"]').click();
     await settle(function () { return !document.querySelector('[data-act="ed-viewer"]'); }, 4000);
-    // ⭐ 改色名不该把图弄丢（2026-10-23 用户报「并入矩阵后改颜色，图片就没了」）。
-    //   色图在订单域按「款编码 + 色名」查，而色名是**标签**：敲一个字查询就落空，
-    //   旧实现顺手把 row.imageUrl 抹成空 ⇒ 图当场消失（库里其实还挂在款色上）。
-    //   这里改成库里**没有图**的名字，图必须还在（查不到 = 没结论，不是"这张图作废"）；
-    //   等满防抖（400ms）再看一次，是为了钉住"后台重查回来也不许清空"。
-    var colorInput = document.querySelector('.wb-drawer [data-act="ed-color"]');
-    colorInput.value = '深蓝';
-    colorInput.dispatchEvent(new Event('input'));
+    // ⭐ 归类改色名不该把图弄丢（2026-10-23 用户报「并入矩阵后改颜色，图片就没了」）。
+    //   色图在订单域按「款编码 + 色名」查，而色名是**标签**：换一个库里没有图的名字，
+    //   旧实现顺手把 row.imageUrl 抹成空 ⇒ 图当场消失（库里其实还挂在原来那个色上）。
+    //   2026-10-30 色名只读 ⇒ 改名改为「点这一行选中 → 点常用色里的另一个名字（白色）」。
+    var rowsBeforeRename = mxRows();
+    await tapColorRow(0);
+    mxChip('白色').click();
+    await settle(function () { return mxNames()[0] === '白色'; }, 4000);
     await settle(function () { return false; }, 700);
     var thumbAfterRename = document.querySelector('.wb-drawer [data-act="ed-row-thumb"] img');
-    report('改色名后行头色图仍在（防抖重查查不到，也不许抹掉；旧实现这里 src 为空）',
+    report('归类改色名后行头色图仍在（按新名字重查查不到，也不许抹掉；旧实现这里 src 为空）',
       !!thumbAfterRename && thumbAfterRename.getAttribute('src') === window.__smokeImg.thumb,
       'src=' + (thumbAfterRename ? String(thumbAfterRename.getAttribute('src')).slice(0, 24) : 'missing'));
-    colorInput.value = '黑';
-    colorInput.dispatchEvent(new Event('input'));
-    await settle(function () { return false; }, 700);
+    // 回滚：批量归类自带「撤销」，把色名搬回「黑」——后面几步都按这个色名对齐夹具
+    var renameUndo = document.querySelector('.wb-drawer [data-act="ed-bulk-undo"]');
+    if (renameUndo) renameUndo.click();
+    await settle(function () { return mxNames().join('/') === '黑' && mxRows() === rowsBeforeRename; }, 4000);
+    report('归类的「撤销」把色名搬回「黑」（矩阵回到原样，本步只是验图）',
+      mxNames().join('/') === '黑' && mxRows() === rowsBeforeRename,
+      'names=' + mxNames().join('/') + ' rows=' + mxRows());
     var mWeight = document.querySelectorAll('.wb-drawer [data-act="ed-weight"]')[1];
     mWeight.value = '333';
     mWeight.dispatchEvent(new Event('input'));
@@ -2076,7 +2214,8 @@ async function main() {
         JSON.stringify(all('.wb-drawer [data-act="ed-weight"]').map(function (i) { return i.value; })) === JSON.stringify(['', '']),
       'weights=' + JSON.stringify(all('.wb-drawer [data-act="ed-weight"]').map(function (i) { return i.value; })));
     // Enter 跳格：加一色 ⇒ 两行；从第一行 L 的克重格按 Enter，焦点该落到第二行 L（同列下一格）
-    document.querySelector('.wb-drawer [data-act="ed-add"]').click();
+    // 2026-10-30 起「＋ 颜色」按钮撤了（色名只读，加色统一走上面的「常用色」——点一下加一行）
+    mxChip('白色').click();
     await settle(function () { return document.querySelectorAll('.wb-drawer [data-act="ed-weight"]').length === 4; }, 4000);
     var firstL = all('.wb-drawer [data-act="ed-weight"]').filter(function (i) {
       return i.getAttribute('data-cell-row') === '0' && i.getAttribute('data-cell-size') === 'L';
@@ -2111,7 +2250,8 @@ async function main() {
     await waitFor(function () {
       return document.querySelectorAll('.wb-drawer [data-act="ed-weight"]').length >= 2;
     }, 6000);
-    document.querySelector('.wb-drawer [data-act="ed-add"]').click();
+    // 加一色：点「常用色」（2026-10-30 起这是唯一入口）
+    mxChip('白色').click();
     await settle(function () {
       return document.querySelectorAll('.wb-drawer [data-act="ed-weight"]').length === 4;
     }, 4000);
@@ -2310,13 +2450,15 @@ async function main() {
     await waitFor(function () {
       return document.querySelectorAll('.wb-drawer [data-act="ed-weight"]').length >= 2;
     }, 6000);
-    for (var ac = 0; ac < 7; ac++) {
-      document.querySelector('.wb-drawer [data-act="ed-add"]').click();
-      await settle(function () { return false; }, 100);
+    // 2026-10-30 色名只读 ⇒ 加色只能点「常用色」（点一下 = 加一行）。
+    // 需要 8 色：夹具已有「黑」+ 下面 7 个字典色（「藏青」留给色块/行色条那两条断言）。
+    var compactColors = ['藏青', '白色', '灰色', '蓝色', '红色', '卡其', '米色'];
+    for (var ac = 0; ac < compactColors.length; ac++) {
+      mxChip(compactColors[ac]).click();
+      await settle(function () { return mxRows() === ac + 2; }, 3000);
     }
-    var colorInputs = all('.wb-drawer [data-act="ed-color"]');
-    setVal(colorInputs[colorInputs.length - 1], '藏青');
-    await settle(function () { return false; }, 200);
+    report('（造数）点 7 个字典色 ⇒ 8 行（每点一下加一行，不再需要「＋ 颜色」再敲字）',
+      mxRows() === 8, 'rows=' + mxRows());
     // 常用码：只补缺的（夹具已有 L / M）
     var sizeBefore = all('.wb-drawer [data-act="ed-size"]').map(function (i) { return i.value; });
     document.querySelector('.wb-drawer .mx-preset > summary').click();
@@ -2348,8 +2490,12 @@ async function main() {
     })();
     report('⭐ 8 色 5 码时一屏能看见 ≥ 7 行组合（旧版色卡布局实测只有 3 行 —— "挤、重叠"的来源）',
       geo.rows >= 7, 'visibleRows=' + geo.rows + ' spec=' + geo.spec + ' table=' + geo.table);
-    report('规格区高度 ≤ 200px（色卡布局是 330px；这一块一旦长回来，矩阵立刻被挤没）',
-      geo.spec > 0 && geo.spec <= 200, 'spec=' + geo.spec);
+    // 规格区高度：2026-10-30 字典接管了「常用色」（27 色，原来是写死的 10 个）⇒ 这一块必然比旧版高；
+    // 同日晚些又添了末尾的「＋ 新增颜色」锚点（35 颗 chip 之后再占小半行）⇒ 上限 200 → 250 → 300。
+    // 判据仍然是"别长回色卡布局的 330px"，而"矩阵还能看见几行"
+    // 由上面那条 ≥7 行单独守 —— 两条一起看才既不恒绿、也不误伤字典本身的大小。
+    report('规格区高度 ≤ 300px（27 色字典调色板 + 8 色 + 末尾「＋ 新增颜色」；色卡布局是 330px，长回去就会挤没矩阵）',
+      geo.spec > 0 && geo.spec <= 300, 'spec=' + geo.spec);
     // 克重框**必须是 text**：「type=number」的框被滚轮滚过就改值，而矩阵里这种框占了大半张表 ——
     // 用户想往下滚两行，指针停在哪个格上哪个格的克重就被改（"页面自己乱动"）。
     // 只断言 type（合成 WheelEvent 改不动 number 框的值，断言 value 是恒真的假守卫）。
@@ -2389,7 +2535,7 @@ async function main() {
       occluded.bad.length === 0,
       'checked=' + occluded.n + ' blocked=' + occluded.bad.slice(0, 4).join(' | '));
     // 色块：没有色图的色名要填近似色（藏青 = #2f3b5e）
-    var zqInput = all('.wb-drawer [data-act="ed-color"]').filter(function (i) { return i.value === '藏青'; })[0];
+    var zqInput = mxNameEls().filter(function (i) { return i.getAttribute('data-color') === '藏青'; })[0];
     var zqChip = zqInput ? zqInput.closest('.mx-color') : null;
     var zqSwatch = zqChip ? zqChip.querySelector('.wb-thumb--empty') : null;
     var zqBg = zqSwatch ? getComputedStyle(zqSwatch).backgroundColor : '';
@@ -2434,12 +2580,15 @@ async function main() {
     report('⭐ 格内控件不被挤扁（克重框 ≥ 40px）且一格只有一个控件 —— 两件挤在 78px 里就点不中、数字看不全',
       squeezed === 0 && wInputs.length >= 2 && wCells.length >= 2 && extraControls === 0,
       'squeezed=' + squeezed + ' inputs=' + wInputs.length + ' cells=' + wCells.length + ' extra=' + extraControls);
-    // 认不出的色名：只点小橙点，不许整卡铺橙底（7 个色里 5 个不在词表时整屏像报错）
-    var flagTarget = all('.wb-drawer [data-act="ed-color"]')[0];
-    setVal(flagTarget, '4');
+    // 认不出的色名：只点小橙点，不许整卡铺橙底（8 个色里 1 个认不出）。
+    // 2026-10-30 色名只读 ⇒ 「4 号色 / Black」这类写法只能从采集并入或「＋ 新增颜色」进字典。
+    // 这里用英文色名（词表是中文的、认不出）走一遍「新增颜色」，再把这一行归到它。
+    await ensureDictColor('Black');
+    await tapColorRow(0);
+    mxChip('Black').click();
     await settle(function () {
       return !!document.querySelector('.wb-drawer .mx-color.is-flagged .mx-dot');
-    }, 3000);
+    }, 4000);
     var flagChip = document.querySelector('.wb-drawer .mx-color.is-flagged');
     var plainChip = all('.wb-drawer .mx-color').filter(function (c) { return !c.classList.contains('is-flagged'); })[0];
     report('认不出的色名只点一枚小橙点（不再整卡铺橙底 —— 那会让整屏像报错）',
@@ -2458,12 +2607,15 @@ async function main() {
         colorsCs.overflowY !== 'auto' && colorsCs.overflowY !== 'scroll',
       'colors=' + colorCount + ' h=' + (colorsEl ? colorsEl.scrollHeight + '/' + colorsEl.clientHeight : 'missing') +
         ' overflowY=' + (colorsCs && colorsCs.overflowY));
-    // 常用色里要有"这个款已经设置过的颜色"（藏青不在 10 个字典色里）
-    var zqPc = document.querySelector('.wb-drawer [data-act="ed-common"][data-color="藏青"]');
-    var dictPc = document.querySelector('.wb-drawer [data-act="ed-common"][data-color="黑"]');
-    report('⭐ 常用色里加上了已设置的颜色（藏青在列，且是"已在矩阵里"的打勾态）',
-      !!zqPc && zqPc.classList.contains('is-in') && !!dictPc,
-      'zq=' + !!zqPc + ' isIn=' + (zqPc ? zqPc.classList.contains('is-in') : 'n/a') + ' dict=' + !!dictPc);
+    // 常用色 = 字典色 + 这个款已经设置过的色（2026-10-30 起字典接管了"常用色"这一排）。
+    // 「藏青」来自字典（真种子第 6 色）且已加进矩阵 ⇒ 打勾；
+    // 原来那条"字典里没有的「4」也在列"改成反向证据：矩阵里的「黑」归类成「Black」之后，
+    // 「黑」既不在字典也不在矩阵 ⇒ **这一排里不再有它**（证明这一排是派生出来的，不是快照）。
+    var zqPc = mxChip('藏青');
+    var pcInNow = all('.wb-drawer [data-act="ed-common"].is-in');
+    report('⭐ 常用色 = 字典色 + 本款已设置的色（8 个打勾；离开矩阵的「黑」也立刻从这一排消失）',
+      !!zqPc && zqPc.classList.contains('is-in') && !mxChip('黑') && pcInNow.length === 8,
+      'zq=' + !!zqPc + ' black=' + !!mxChip('黑') + ' in=' + pcInNow.length);
     // 收尾：不保存
     document.querySelector('.wb-drawer .ed-x').click();
     await settle(function () { return !!document.querySelector('[data-act="confirm-dialog"]'); }, 4000);
@@ -2484,27 +2636,30 @@ async function main() {
     // ① 常用色一排在最上面，已经在矩阵里的打勾变灰；每项自带色块
     var pcs = all('.wb-drawer [data-act="ed-common"]');
     var pcIn = pcs.filter(function (b) { return b.classList.contains('is-in'); });
-    var navyPc = document.querySelector('.wb-drawer [data-act="ed-common"][data-color="藏青"]');
-    var navyDot = navyPc ? getComputedStyle(navyPc.querySelector('.mx-pc__dot')).backgroundColor : '';
+    var navyPc = mxChip('藏青');
+    var navyDot = navyPc ? getComputedStyle(navyPc.querySelector('.cp__dot')).backgroundColor : '';
     report('⭐ 常用色排在「颜色」上面，已经在矩阵里的打勾（「黑」）',
       pcs.length >= 8 && pcIn.length === 1 && flat(pcIn[0]).indexOf('黑') >= 0,
       'n=' + pcs.length + ' in=[' + pcIn.map(function (b) { return flat(b); }).join(',') + ']');
     report('常用色自带色块（藏青 → rgb(47, 59, 94)）—— 不是又一排汉字',
       navyDot === 'rgb(47, 59, 94)', 'dot=' + navyDot);
     // ② 点一下加一色；已经在矩阵里的**不再加第二行**（两行同名色保存时必被拦）
-    var rowsBefore = all('.wb-drawer [data-act="ed-row"]').length;
+    //    2026-10-30 起这一排不再有"多选"开关：点已在矩阵里的色 = 选中那一行（勾 + 批量条出现）。
+    var rowsBefore = mxRows();
     navyPc.click();
-    await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === rowsBefore + 1; }, 3000);
-    var rowsAfterPick = all('.wb-drawer [data-act="ed-row"]').length;
-    navyPc.click();
-    await settle(function () { return false; }, 200);
-    report('点常用色加一行；已经在矩阵里的再点**不加第二行**（只把焦点递过去）',
-      rowsAfterPick === rowsBefore + 1 &&
-        all('.wb-drawer [data-act="ed-row"]').length === rowsAfterPick &&
-        (document.activeElement || {}).getAttribute &&
-        document.activeElement.getAttribute('data-act') === 'ed-color',
-      'rows=' + rowsBefore + '→' + rowsAfterPick + '→' + all('.wb-drawer [data-act="ed-row"]').length +
-        ' focus=' + ((document.activeElement || {}).getAttribute ? document.activeElement.getAttribute('data-act') : '?'));
+    await settle(function () { return mxRows() === rowsBefore + 1; }, 3000);
+    var rowsAfterPick = mxRows();
+    mxChip('藏青').click();
+    await settle(function () { return all('.wb-drawer .mx-color.is-sel').length === 1; }, 3000);
+    report('点常用色加一行；已经在矩阵里的再点**不加第二行**，而是选中那一行（勾 + 批量条出现）',
+      rowsAfterPick === rowsBefore + 1 && mxRows() === rowsAfterPick &&
+        all('.wb-drawer .mx-color.is-sel').length === 1 &&
+        !!document.querySelector('.wb-drawer .mx-batch'),
+      'rows=' + rowsBefore + '→' + rowsAfterPick + '→' + mxRows() +
+        ' sel=' + all('.wb-drawer .mx-color.is-sel').length);
+    // 清掉选中：下一步是**单行**拖动（有选中会变整组拖，语义不同）
+    document.querySelector('.wb-drawer [data-act="ed-select-clear"]').click();
+    await settle(function () { return all('.wb-drawer .mx-color.is-sel').length === 0; }, 3000);
     // ③ 造一个"有得搬"的合并：黑 只留 L，藏青 只留 M（克重 250）
     // ⚠️ 取消一个组合现在是**两段式**（2026-10-25 一格只剩一个输入框）：
     //    先清值（组合还在，只是"待填"），再按 Delete 才真移除。
@@ -2575,7 +2730,8 @@ async function main() {
       !!mergeSaveBtn && flat(mergeSaveBtn).indexOf('有 1 处待保存') >= 0,
       'btn=' + (mergeSaveBtn ? flat(mergeSaveBtn) : 'missing'));
     // ⑤ 纯点击不许合并：down + up 不移动 = 一次点击
-    document.querySelector('.wb-drawer [data-act="ed-common"][data-color="白"]').click();
+    // （2026-10-30 起这一排由字典驱动，色名是「白色」不是旧的硬编码「白」）
+    document.querySelector('.wb-drawer [data-act="ed-common"][data-color="白色"]').click();
     await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === rowsBefore + 1; }, 3000);
     var clickChips = all('.wb-drawer .mx-color');
     var cr = clickChips[1].getBoundingClientRect();
@@ -2624,12 +2780,14 @@ async function main() {
         return c.querySelectorAll('.mx-color__img').length;
       }).join(',');
     }
-    // ① 把这一行的色名改成「藏蓝」（订单/平台常见写法，**不在**常用色表里，但表里有「藏青」）
-    var cIn0 = document.querySelector('.wb-drawer [data-act="ed-color"]');
-    var rowsStart = all('.wb-drawer [data-act="ed-row"]').length;
+    // ① 把这一行归到「藏蓝」（订单/平台常见写法）。2026-10-30 色名只读 ⇒ 字典里没有的写法
+    //    先走「＋ 新增颜色」写进字典，再点这一行选中 → 点新 chip 归类。
+    var rowsStart = mxRows();
     var weightsStart = all('.wb-drawer .mx-weight').map(function (i) { return i.value; }).join(',');
-    setVal(cIn0, '藏蓝');
-    await settle(function () { return false; }, 250);
+    await ensureDictColor('藏蓝');
+    await tapColorRow(0);
+    mxChip('藏蓝').click();
+    await settle(function () { return mxNames()[0] === '藏蓝'; }, 3000);
     var navyPc = pcOf('藏青');
     // 2026-10-25 起"已设置的色"也会出现在这一排（用户口径「常用色需要增加已设置的颜色」），
     // 所以"打勾的数量"不再是 0：藏蓝 在矩阵里 ⇒ 只有它自己打勾，字典色「藏青」不许冒充。
@@ -2650,31 +2808,33 @@ async function main() {
     rootEl2.dispatchEvent(pevP('pointermove', nr.left + nr.width / 2, nr.top + nr.height / 2));
     await settle(function () { return false; }, 60);
     report('⭐ 拖动中：常用色整排变成落点，悬停的那一个实心高亮（原来只能瞄下面的小 chip）',
-      !!document.querySelector('.wb-drawer .mx-palette--dragging') && srcDashed &&
-        navyPc.classList.contains('is-drop'),
-      'palette=' + !!document.querySelector('.wb-drawer .mx-palette--dragging') +
-        ' src=' + srcDashed + ' drop=' + navyPc.classList.contains('is-drop'));
+      !!document.querySelector('.wb-drawer .cp--dragging') && srcDashed &&
+        pcOf('藏青').classList.contains('is-drop'),
+      'palette=' + !!document.querySelector('.wb-drawer .cp--dragging') +
+        ' src=' + srcDashed + ' drop=' + pcOf('藏青').classList.contains('is-drop'));
     rootEl2.dispatchEvent(pevP('pointerup', nr.left + nr.width / 2, nr.top + nr.height / 2));
     await settle(function () { return false; }, 250);
     var hint1 = document.querySelector('.wb-drawer [data-act="ed-merge-hint"]');
     report('⭐ 拖到没打勾的常用色 = 原地改名（落库色名取常用色的写法「藏青」）',
       !!hint1 && flat(hint1).indexOf('藏蓝') >= 0 && flat(hint1).indexOf('藏青') >= 0 &&
         flat(hint1).indexOf('落库色名') >= 0 &&
-        document.querySelector('.wb-drawer [data-act="ed-color"]').value === '藏青',
-      'hint=' + (hint1 ? flat(hint1) : 'missing') +
-        ' color=' + document.querySelector('.wb-drawer [data-act="ed-color"]').value);
+        mxNames()[0] === '藏青',
+      'hint=' + (hint1 ? flat(hint1) : 'missing') + ' color=' + mxNames()[0]);
     report('改名不是删了重建：行数不变、克重一格都没动（SKU 与编码跟着走）',
-      all('.wb-drawer [data-act="ed-row"]').length === rowsStart &&
+      mxRows() === rowsStart &&
         all('.wb-drawer .mx-weight').map(function (i) { return i.value; }).join(',') === weightsStart &&
-        document.querySelector('.wb-drawer [data-act="ed-color"]').value === '藏青',
-      'rows=' + all('.wb-drawer [data-act="ed-row"]').length + '/' + rowsStart +
+        mxNames()[0] === '藏青',
+      'rows=' + mxRows() + '/' + rowsStart +
         ' weights=' + all('.wb-drawer .mx-weight').map(function (i) { return i.value; }).join(','));
     report('归类后常用色立刻打勾（同一份判据：打勾 = 拖上去会并进已有行）',
-      navyPc.classList.contains('is-in') && !pcOf('黑').classList.contains('is-in'),
-      'navy=' + navyPc.className + ' black=' + pcOf('黑').className);
-    // ③ 拖到已打勾的常用色上 —— 并进那一行（先把「黑」加回来造出目标行）
+      pcOf('藏青').classList.contains('is-in') && !pcOf('白色').classList.contains('is-in'),
+      'navy=' + pcOf('藏青').className + ' white=' + pcOf('白色').className);
+    // ③ 拖到已打勾的常用色上 —— 并进那一行（先造出目标行「黑」）。
+    //    ⚠️ 2026-10-30 色名只读：不能"加一行再打名字"，改成「＋ 新增颜色」把「黑」写进字典
+    //    再点它加一空行 —— 落库色名因此就是字典写法「黑」，本步收尾才能回到"净变化为零"。
+    await ensureDictColor('黑');
     pcOf('黑').click();
-    await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === rowsStart + 1; }, 3000);
+    await settle(function () { return mxRows() === rowsStart + 1; }, 3000);
     var chipNavy = all('.wb-drawer .mx-color')[0];
     var cn = chipNavy.getBoundingClientRect();
     var blackPc = pcOf('黑');
@@ -2685,13 +2845,13 @@ async function main() {
     rootEl2.dispatchEvent(pevP('pointermove', br.left + br.width / 2, br.top + br.height / 2));
     await settle(function () { return false; }, 60);
     rootEl2.dispatchEvent(pevP('pointerup', br.left + br.width / 2, br.top + br.height / 2));
-    await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === rowsStart; }, 3000);
+    await settle(function () { return mxRows() === rowsStart; }, 3000);
     var hint2 = document.querySelector('.wb-drawer [data-act="ed-merge-hint"]');
-    var mergedNames = all('.wb-drawer [data-act="ed-color"]').map(function (i) { return i.value; }).join('/');
+    var mergedNames = mxNames().join('/');
     report('⭐ 拖到已打勾的常用色 = 并进那一行（两行变一行，落库色名仍是常用色「黑」）',
-      all('.wb-drawer [data-act="ed-row"]').length === rowsStart && mergedNames === '黑' &&
+      mxRows() === rowsStart && mergedNames === '黑' &&
         !!hint2 && flat(hint2).indexOf('归到') >= 0 && flat(hint2).indexOf('只留一张色图') >= 0,
-      'rows=' + all('.wb-drawer [data-act="ed-row"]').length + ' names=' + mergedNames +
+      'rows=' + mxRows() + ' names=' + mergedNames +
         ' hint=' + (hint2 ? flat(hint2) : 'missing'));
     // 合并后克重取有值的一方（目标行是新建的空白行，不许把量好的 320 清零）
     report('合并保留已量的克重（新建的空目标行不覆盖 320）',
@@ -2739,11 +2899,10 @@ async function main() {
     // ── 色名的抓手与落点（2026-10-25 用户口径「拖动区域太小，操作太不方便」）──
     // 实测取证：整条 chip 125px 里**只有 26px 的色图能按**（色名是 input，被 onChipDown 主动排除），
     // 而落点胶囊 42x22、与颜色行只隔 6px —— 人手一次 20px 的偏差就拖空，表现就是"拖不动"。
-    // 这一步守四件事：
-    //   ① 抓手扩到整条 chip（按住色名**竖向**拖也算），横向拖仍是选文字；
+    // 这一步守三件事（2026-10-30 起③候选浮层整体撤掉，见下面）：
+    //   ① 抓手扩到整条 chip（色名已只读，横/竖向拖都是拖行 —— 没有文字选择要保护）；
     //   ② 落点从"点中矩形"改成"离谁最近"（放宽 16/12px）：落在胶囊上方 10px 的空白里也算；
-    //   ③ 不想拖的人有候选列表：点进色名挑一个词即归类/合并（零手势）；
-    //   ④ 两条路走的是同一个 classifyInto / mergeColorInto，不许各写一套落库语义。
+    //   ③ 不想拖的人走「点行选中 → 点常用色 / 合并为一行」，与拖动同一个 classify / merge 纯函数。
     step('sku-drag-grab');
     var grabUpsertBefore = calls('productVariantUpsert').length;
     openEditorOf(0);
@@ -2757,6 +2916,22 @@ async function main() {
         pointerId: 1, isPrimary: true, pointerType: 'mouse',
       });
     }
+    // ── SKU 编码的 {color} 段 = 字典颜色 ID（2026-10-30 用户口径「SKU编码把color修改为颜色ID」）──
+    // 字典里此刻已经有「黑」（上一步「＋ 新增颜色」写进去的）⇒ 预览必须出数字。
+    // 为什么不能只靠单测：色名 → id 的取值来自模块级字典单例（colorDict），
+    // 抽屉漏了预载字典时单测照样绿、界面上却仍是色名（第一帧色名、载入后跳成 ID 更糟）。
+    var idRule = document.querySelector('.wb-drawer [data-act="ed-code-rule"]');
+    setVal(idRule, '{code}-{color}-{size}');
+    idRule.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle(function () { return false; }, 250);
+    var idPrevEl = document.querySelector('.wb-drawer [data-act="ed-code-preview"]');
+    var idPrevText = idPrevEl ? flat(idPrevEl) : 'missing';
+    report('⭐ SKU 编码的 {color} 段渲染成字典**颜色 ID**（数字），不是会被归类改名的色名',
+      /S1-\\d+-L/.test(idPrevText), 'preview=' + idPrevText);
+    var idHintEl = document.querySelector('.wb-drawer .ed-coderule__hint');
+    report('编码提示把 {color} 标成「颜色ID」（不写清就会有人以为填的是色名）',
+      !!idHintEl && flat(idHintEl).indexOf('颜色ID') >= 0,
+      'hint=' + (idHintEl ? flat(idHintEl) : 'missing'));
     var gRoot = document.querySelector('.wb-drawer .mx');
     var gChip = all('.wb-drawer .mx-color')[0];
     var gImgBox = gChip.querySelector('.mx-color__img').getBoundingClientRect();
@@ -2767,7 +2942,8 @@ async function main() {
       'img=' + Math.round(gImgBox.width) + 'x' + Math.round(gImgBox.height));
     report('落点胶囊加高到 24px（原来 22：点在上下边缘就脱靶）',
       Math.round(gNavyBox.height) >= 24, 'h=' + Math.round(gNavyBox.height));
-    // ① 色名框里**横向**拖 = 拖选文字，绝不能被当成"拖这一行"
+    // ① 色名已**只读**（2026-10-30）⇒ 没有"拖选文字"要保护了，按住它**横向**拖也是拖这一行
+    //    （旧版这里断言"横向拖 ≠ 拖行"，前提是有 input 里的文字可选；前提没了，判据反过来）。
     var gName = gChip.querySelector('[data-act="ed-color"]');
     var gn = gName.getBoundingClientRect();
     gName.dispatchEvent(gPe('pointerdown', gn.left + 10, gn.top + gn.height / 2));
@@ -2776,8 +2952,8 @@ async function main() {
     var hDragStarted = !!document.querySelector('.wb-drawer .mx-color.is-src');
     gRoot.dispatchEvent(gPe('pointerup', gn.left + 34, gn.top + gn.height / 2 + 2));
     await settle(function () { return false; }, 80);
-    report('色名框里横向拖 ≠ 拖行（那是选文字：抓手变大不能以"选不了字"为代价）',
-      !hDragStarted, 'is-src=' + hDragStarted);
+    report('色名只读 ⇒ 按住它横向拖也是拖这一行（没有文字可选，整条 chip 都是抓手）',
+      hDragStarted, 'is-src=' + hDragStarted);
     // ② 同一处**竖向**拖 = 拖这一行
     gName.dispatchEvent(gPe('pointerdown', gn.left + 10, gn.top + gn.height / 2));
     gRoot.dispatchEvent(gPe('pointermove', gn.left + 11, gn.top + gn.height / 2 - 18));
@@ -2785,6 +2961,15 @@ async function main() {
     var vDragStarted = !!document.querySelector('.wb-drawer .mx-color.is-src');
     report('⭐ 在色名上竖着拖 = 拖这一行（整条 chip 都是抓手，不必先瞄准左边那张小色图）',
       vDragStarted, 'is-src=' + vDragStarted);
+    // ②b 拖动期间**原生文本选择被拦住**（2026-10-30 用户实报「多选拖动的时候文字会被选中」）。
+    //     色名只读后整条 chip 都是抓手，按住它移动会起一段浏览器"刷蓝"选择、拖过整页时选区
+    //      会跨到常用色那排 —— 功能没坏，但看着像界面出故障。判据是 selectstart 被 preventDefault。
+    //     注意此刻仍处于拖动中（pointerdown 已发、pointerup 要到 ③ 才发）。
+    var selEvent = new Event('selectstart', { bubbles: true, cancelable: true });
+    gName.dispatchEvent(selEvent);
+    await settle(function () { return false; }, 60);
+    report('拖动中 selectstart 被拦下（defaultPrevented=true ⇒ 拖过整页也不会刷出一片蓝）',
+      selEvent.defaultPrevented, 'prevented=' + selEvent.defaultPrevented);
     // ③ 落点容错：松手在胶囊**上方 10px 的空白** —— 旧实现用 elementFromPoint，那里什么都没有
     gRoot.dispatchEvent(gPe('pointermove', gNavyBox.left + gNavyBox.width / 2, gNavyBox.top - 10));
     await settle(function () { return false; }, 80);
@@ -2794,63 +2979,31 @@ async function main() {
     gRoot.dispatchEvent(gPe('pointerup', gNavyBox.left + gNavyBox.width / 2, gNavyBox.top - 10));
     await settle(function () { return false; }, 300);
     report('松手在那一圈空白里照样归类（不是"拖到了但没反应"）',
-      document.querySelector('.wb-drawer [data-act="ed-color"]').value === '藏青',
-      'color=' + document.querySelector('.wb-drawer [data-act="ed-color"]').value);
-    // ④ 候选列表（不拖的那条路）：加一行、改成字典外的写法，再点进色名挑"合并两行"
+      mxNames()[0] === '藏青', 'color=' + mxNames()[0]);
+    // ③ 不拖的那条路（2026-10-30 替代候选浮层）：点行选中 → 点常用色 / 「合并为一行」。
+    //    候选浮层整体撤掉：色名只读之后"点进色名挑词"没了输入框可挂；
+    //    而且点行 = 选中之后，常用色那排本身就是"候选列表"（还自带色块与落点高亮）。
+    //    造数：加一行「黑」（字典里已有 ⇒ 直接点 chip 加行），归到字典外写法「墨黑」。
+    await ensureDictColor('墨黑');
     gPc('黑').click();
-    await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === 2; }, 3000);
-    var gName1 = all('.wb-drawer [data-act="ed-color"]')[1];
-    if (gName1) setVal(gName1, '墨黑');
-    await settle(function () { return false; }, 200);
-    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-    await settle(function () { return false; }, 150);
-    var gName0 = document.querySelector('.wb-drawer [data-act="ed-color"]');
-    gName0.focus();
-    await settle(function () { return !!document.querySelector('[data-act="ed-color-suggest"]'); }, 2000);
-    var gSug = document.querySelector('[data-act="ed-color-suggest"]');
-    var gItems = all('[data-act="ed-color-suggest-item"]');
-    var gLabels = gItems.map(function (b) {
-      var n = b.querySelector('.mx-suggest__name');
-      return n ? flat(n) : '?';
-    });
-    var gNotes = gItems.map(function (b) {
-      var n = b.querySelector('.mx-suggest__note');
-      return n ? flat(n) : '?';
-    });
-    report('⭐ 点进色名就给出候选（不想拖的人有第二条路）：常用色 + 其它行，且不列自己',
-      !!gSug && gItems.length >= 8 && gLabels.indexOf('墨黑') >= 0 && gLabels.indexOf('藏青') < 0,
-      'n=' + gItems.length + ' labels=' + gLabels.join('/'));
-    report('候选里写明"会发生什么"：分组（归到常用色 / 并入其它颜色）+ 归类 / 合并两行',
-      gNotes.some(function (t) { return t.indexOf('归类') >= 0; }) &&
-        gNotes.some(function (t) { return t.indexOf('合并两行') >= 0; }) &&
-        document.querySelectorAll('.mx-suggest__group').length >= 2,
-      'notes=' + gNotes.join('|') + ' groups=' + document.querySelectorAll('.mx-suggest__group').length);
-    // ⑤ 点浮层外的空白 ⇒ 收起（那里不可聚焦、input 不会 blur —— 光靠 blur 会让菜单一直飘着）
-    document.querySelector('.wb-drawer .ed-main__bar').dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, cancelable: true, clientX: 6, clientY: 6, pointerId: 1, isPrimary: true, pointerType: 'mouse',
-    }));
-    await settle(function () { return !document.querySelector('[data-act="ed-color-suggest"]'); }, 1500);
-    report('点浮层外的空白也收起（焦点没转移、input 没 blur 的情形也算"走了"）',
-      !document.querySelector('[data-act="ed-color-suggest"]'),
-      'suggest=' + !!document.querySelector('[data-act="ed-color-suggest"]'));
-    // 重新打开：焦点还在这个框上（刚才只是关了浮层）⇒ 点一下也要能再弹出来
-    gName0.click();
-    await settle(function () { return !!document.querySelector('[data-act="ed-color-suggest"]'); }, 2000);
-    report('关掉后再点同一个色名框 = 重新给出候选（焦点没变，不会再触发 focus，只能靠 click）',
-      !!document.querySelector('[data-act="ed-color-suggest"]'),
-      'suggest=' + !!document.querySelector('[data-act="ed-color-suggest"]'));
-    var gRowItem = all('[data-act="ed-color-suggest-item"]')
-      .filter(function (b) { return b.getAttribute('data-suggest-kind') === 'row'; })[0];
-    if (gRowItem) gRowItem.click();
-    await settle(function () { return all('.wb-drawer [data-act="ed-row"]').length === 1; }, 3000);
-    var gAfterRows = all('.wb-drawer [data-act="ed-row"]').length;
-    var gHint = document.querySelector('.wb-drawer [data-act="ed-merge-hint"]');
-    report('⭐ 点候选"合并两行" = 真的合并（与拖动走同一个 mergeColorInto，不是两套逻辑）',
-      gAfterRows === 1 && !!gHint && flat(gHint).indexOf('并入') >= 0,
-      'rows=' + gAfterRows + ' hint=' + (gHint ? flat(gHint) : 'missing'));
-    report('选完候选即收起（浮层不留在矩阵上挡视线）',
-      !document.querySelector('[data-act="ed-color-suggest"]'),
-      'suggest=' + !!document.querySelector('[data-act="ed-color-suggest"]'));
+    await settle(function () { return mxRows() === 2; }, 3000);
+    await tapColorRow(1);
+    gPc('墨黑').click();
+    await settle(function () { return mxNames().join('/') === '藏青/墨黑'; }, 3000);
+    report('⭐ 点行选中 → 点常用色 = 归类（不拖也有第二条路；与拖动同一个 classifyInto）',
+      mxRows() === 2 && mxNames().join('/') === '藏青/墨黑',
+      'rows=' + mxRows() + ' names=' + mxNames().join('/'));
+    // 选中两行点「合并为一行」：目标 = 第一个选中行（藏青），与拖动同一个 mergeColorInto
+    await tapColorRow(0);
+    await tapColorRow(1);
+    await settle(function () { return all('.wb-drawer .mx-color.is-sel').length === 2; }, 2000);
+    document.querySelector('.wb-drawer [data-act="ed-merge-sel"]').click();
+    await settle(function () { return mxRows() === 1; }, 3000);
+    var gHint = document.querySelector('.wb-drawer [data-act="ed-merge-hint"]') ||
+      document.querySelector('.wb-drawer .mx-bar__undo-text');
+    report('⭐ 选中两行点「合并为一行」= 真的合并（与拖动同一个 mergeColorInto，不是两套逻辑）',
+      mxRows() === 1 && mxNames()[0] === '藏青' && !!gHint && flat(gHint).indexOf('并入') >= 0,
+      'rows=' + mxRows() + ' hint=' + (gHint ? flat(gHint) : 'missing'));
     // 收尾：不保存
     document.querySelector('.wb-drawer .ed-x').click();
     await settle(function () {
@@ -2862,6 +3015,139 @@ async function main() {
       !document.querySelector('.wb-drawer') && calls('productVariantUpsert').length === grabUpsertBefore,
       'upsert +' + (calls('productVariantUpsert').length - grabUpsertBefore));
 
+    // ── 点击选中 + 批量归类 / 批量拖动 / 批量合并（2026-10-30 用户口径
+    //    「可以改成可多选，点击选中，批量拖动到常用色中选择颜色」）──
+    // 为什么值得单独一步：单个拖是"一次收一个异写"，真实节奏是"一批异写一起收口"；
+    // 批量若只在前端循环一遍、不按**当前色名**重新定位下标，就会在第一次归并后改错行。
+    // 这一步守五件事：
+    //   ① 选中**没有开关**：每色前的勾常显，点行（或勾）即选中，批量条随选中出现；
+    //   ② 勾选后拖到常用色 = **整组**归类（拖动中就要说清"松手会把 2 色归到哪个名字"）；
+    //   ③ 勾选后点「合并为一行」= 其余色并进**第一个选中行**；
+    //   ④ 批量操作带「撤销」，一键把整批搬回去（批量比单个更容易误伤）；
+    //   ⑤ 批量步不落库（与单个归类同口径：只在保存那一刻写）。
+    step('sku-batch-classify');
+    var batchUpsertBefore = calls('productVariantUpsert').length;
+    openEditorOf(0);
+    await waitFor(function () { return !!document.querySelector('.wb-drawer [data-act="ed-color"]'); }, 6000);
+    function bxSel() { return all('.wb-drawer [data-act="ed-sel"]'); }
+    function bxCount() {
+      var el = document.querySelector('.wb-drawer .mx-batch__count');
+      return el ? flat(el) : 'missing';
+    }
+    function bxNames() { return mxNames().join('/'); }
+    function bxRows() { return mxRows(); }
+    function bxUndoText() {
+      var el = document.querySelector('.wb-drawer .mx-bar__undo-text');
+      return el ? flat(el) : 'missing';
+    }
+    // 造数：库里这一款只有「黑」一色，先点常用色补出第二行，再把它归到平台异写「藏蓝」
+    // （色名只读 ⇒ 藏蓝 先走「＋ 新增颜色」进字典；批量归类的对象正是这种"平台异写"）。
+    report('⭐ 勾**常显**（不再有"多选"开关）：没选中时是空框、批量条不出现',
+      bxSel().length === 1 && !document.querySelector('.wb-drawer .mx-batch'),
+      'boxes=' + bxSel().length + ' batch=' + !!document.querySelector('.wb-drawer .mx-batch'));
+    report('⭐ 常用色由字典驱动：矩阵里只有「黑」，字典写法「黑色 / 白色」照样在列（不是前端写死的 10 个）',
+      !!mxChip('黑色') && !!mxChip('白色'),
+      'black=' + !!mxChip('黑色') + ' white=' + !!mxChip('白色'));
+    mxChip('藏青').click();
+    await settle(function () { return bxRows() === 2; }, 3000);
+    await ensureDictColor('藏蓝');
+    await tapColorRow(1);
+    mxChip('藏蓝').click();
+    await settle(function () { return bxNames() === '黑/藏蓝'; }, 3000);
+    var bxRowsBefore = bxRows();
+    report('（造数）两行异写：黑 / 藏蓝 —— 批量要一次把两行都收口',
+      bxRowsBefore === 2 && bxNames() === '黑/藏蓝', 'rows=' + bxRowsBefore + ' names=' + bxNames());
+    // ① 点行选中（没有开关这一步了）：批量条随第一次点击出现
+    await tapColorRow(0);
+    await tapColorRow(1);
+    await settle(function () { return bxCount() === '已选 2 色'; }, 3000);
+    report('⭐ 点两个色：「已选 2 色」+ 两条 chip 同时亮起、批量条出现（点行即选中，不需要先开模式）',
+      bxCount() === '已选 2 色' && all('.wb-drawer .mx-color.is-sel').length === 2 &&
+        !!document.querySelector('.wb-drawer .mx-batch'),
+      'count=' + bxCount() + ' sel=' + all('.wb-drawer .mx-color.is-sel').length);
+    // ② 整组拖到「常用色 黑色」= 批量归类
+    var bxRoot = document.querySelector('.wb-drawer .mx');
+    var bxChip0 = all('.wb-drawer .mx-color')[0];
+    var bxC0 = bxChip0.getBoundingClientRect();
+    var bxPcBlack = document.querySelector('.wb-drawer [data-act="ed-common"][data-color="黑色"]');
+    var bxB0 = bxPcBlack.getBoundingClientRect();
+    function bxPe(type, x, y) {
+      return new PointerEvent(type, {
+        bubbles: true, cancelable: true, clientX: x, clientY: y,
+        pointerId: 1, isPrimary: true, pointerType: 'mouse',
+      });
+    }
+    // ⚠️ 起手点必须落在**色图**上（左起 18px 是多选勾，勾自己 stop 了 pointerdown，
+    //    按在那儿只会切换选中，不会起拖 —— 这也是真实手感：勾是勾、拖动抓色图）。
+    bxChip0.dispatchEvent(bxPe('pointerdown', bxC0.left + 24, bxC0.top + bxC0.height / 2));
+    bxRoot.dispatchEvent(bxPe('pointermove', bxC0.left + 40, bxC0.top + bxC0.height / 2));
+    await settle(function () { return false; }, 60);
+    var bxGroupHint = document.querySelector('.wb-drawer [data-act="ed-drop-hint"]');
+    report('⭐ 从已选中的某一行起手拖动 = 整组（拖动中就说清"拖到常用色 = 整组归类"）',
+      bxChip0.classList.contains('is-src') && !!bxGroupHint &&
+        flat(bxGroupHint).indexOf('整组归类') >= 0,
+      'src=' + bxChip0.classList.contains('is-src') + ' hint=' + (bxGroupHint ? flat(bxGroupHint) : 'missing'));
+    bxRoot.dispatchEvent(bxPe('pointermove', bxB0.left + bxB0.width / 2, bxB0.top + bxB0.height / 2));
+    await settle(function () { return false; }, 60);
+    var bxDropHint = document.querySelector('.wb-drawer [data-act="ed-drop-hint"]');
+    report('悬停常用色时提示是**整组**的落点（"把 2 色归到「黑色」"，不是只报一行）',
+      bxPcBlack.classList.contains('is-drop') && !!bxDropHint &&
+        flat(bxDropHint).indexOf('把 2 色归到「黑色」') >= 0,
+      'drop=' + bxPcBlack.classList.contains('is-drop') + ' hint=' + (bxDropHint ? flat(bxDropHint) : 'missing'));
+    bxRoot.dispatchEvent(bxPe('pointerup', bxB0.left + bxB0.width / 2, bxB0.top + bxB0.height / 2));
+    await settle(function () { return bxRows() === 1 && bxNames() === '黑色'; }, 3000);
+    report('⭐ 拖到常用色 = 两色批量归成一行「黑色」（落库名取字典写法，勾选自动清空）',
+      bxRows() === 1 && bxNames() === '黑色' && all('.wb-drawer .mx-color.is-sel').length === 0 &&
+        bxUndoText().indexOf('已把 2 色归到「黑色」') >= 0,
+      'rows=' + bxRows() + ' names=' + bxNames() + ' undo=' + bxUndoText());
+    // ④ 撤销整批
+    var bxUndoBtn = document.querySelector('.wb-drawer [data-act="ed-bulk-undo"]');
+    report('批量归类给一条带「撤销」的回执（批量误伤面更大，必须能整批收回）',
+      !!bxUndoBtn, 'undo=' + bxUndoText());
+    if (bxUndoBtn) bxUndoBtn.click();
+    await settle(function () { return bxRows() === bxRowsBefore && bxNames() === '黑/藏蓝'; }, 3000);
+    report('⭐ 撤销把整批搬回去（两行、原名都在；勾选同时清空——旧下标不残留）',
+      bxRows() === bxRowsBefore && bxNames() === '黑/藏蓝' &&
+        all('.wb-drawer .mx-color.is-sel').length === 0,
+      'rows=' + bxRows() + ' names=' + bxNames() + ' sel=' + all('.wb-drawer .mx-color.is-sel').length);
+    // ③ 「合并为一行」按钮：目标 = 第一个选中行（黑）
+    await tapColorRow(0);
+    await tapColorRow(1);
+    await settle(function () { return bxCount() === '已选 2 色'; }, 3000);
+    var bxMergeBtn = document.querySelector('.wb-drawer [data-act="ed-merge-sel"]');
+    report('「合并为一行」只在选了 2 色以上时可点（一色合并没有意义）',
+      !!bxMergeBtn && !bxMergeBtn.disabled,
+      'btn=' + (bxMergeBtn ? flat(bxMergeBtn) + ' disabled=' + !!bxMergeBtn.disabled : 'missing'));
+    if (bxMergeBtn) bxMergeBtn.click();
+    await settle(function () { return bxRows() === 1 && bxNames() === '黑'; }, 3000);
+    report('⭐ 点「合并为一行」= 其余色并进第一个选中行（两行变一行，色名保持「黑」）',
+      bxRows() === 1 && bxNames() === '黑' && bxUndoText().indexOf('已把 1 色并入「黑」') >= 0,
+      'rows=' + bxRows() + ' names=' + bxNames() + ' undo=' + bxUndoText());
+    var bxUndo2 = document.querySelector('.wb-drawer [data-act="ed-bulk-undo"]');
+    if (bxUndo2) bxUndo2.click();
+    await settle(function () { return bxRows() === bxRowsBefore && bxNames() === '黑/藏蓝'; }, 3000);
+    // 全选 / 取消选择（批量条只在有选中时出现 ⇒ 先点一行让它出来）
+    await tapColorRow(0);
+    document.querySelector('.wb-drawer [data-act="ed-select-all"]').click();
+    await settle(function () { return bxCount() === '已选 2 色'; }, 3000);
+    report('「全选」一次勾上全部颜色（十几个色时不该逐个点）', bxCount() === '已选 2 色', 'count=' + bxCount());
+    document.querySelector('.wb-drawer [data-act="ed-select-clear"]').click();
+    await settle(function () { return !document.querySelector('.wb-drawer .mx-batch'); }, 3000);
+    report('⭐「取消选择」清空勾选、批量条随之收起（勾常显但不再亮起，可以接着选下一批）',
+      all('.wb-drawer .mx-color.is-sel').length === 0 && !document.querySelector('.wb-drawer .mx-batch') &&
+        bxSel().length === bxRowsBefore,
+      'sel=' + all('.wb-drawer .mx-color.is-sel').length + ' batch=' + !!document.querySelector('.wb-drawer .mx-batch'));
+    // 收尾：不保存（归到「藏蓝」是未保存改动，应弹确认框）
+    document.querySelector('.wb-drawer .ed-x').click();
+    await settle(function () {
+      return !document.querySelector('.wb-drawer') || !!document.querySelector('[data-act="confirm-dialog"]');
+    }, 4000);
+    if (document.querySelector('[data-act="confirm-dialog"]')) await clickText('[data-act="confirm-ok"]', '放弃');
+    await settle(function () { return !document.querySelector('.wb-drawer'); }, 4000);
+    report('批量归类 / 批量合并步不落库（收尾放弃后没有一次 SKU 写入）',
+      !document.querySelector('.wb-drawer') && calls('productVariantUpsert').length === batchUpsertBefore,
+      'upsert +' + (calls('productVariantUpsert').length - batchUpsertBefore));
+
     // ── 改色名要同步到订单域的款色（2026-10-23 用户实报「改颜色，图片就没了」）──
     // 色图按「款编码 + 色名」查，只改产品侧名字 ⇒ 图查不到（重开抽屉空）。三条判据：
     //   ① 只是改了名字（还没保存）→ 一次 styleColorRename 都不能有（不保存不动订单域）；
@@ -2872,9 +3158,11 @@ async function main() {
     await waitFor(function () {
       return !!document.querySelector('.wb-drawer [data-act="ed-color"]');
     }, 6000);
-    var renInput = document.querySelector('.wb-drawer [data-act="ed-color"]');
-    renInput.value = '深蓝';
-    renInput.dispatchEvent(new Event('input'));
+    // 2026-10-30 色名只读 ⇒ 改名走「新增颜色（深蓝）→ 选中这一行 → 点新 chip 归类」
+    await ensureDictColor('深蓝');
+    await tapColorRow(0);
+    mxChip('深蓝').click();
+    await settle(function () { return mxNames()[0] === '深蓝'; }, 4000);
     await settle(function () { return false; }, 500);
     report('只改名字（没点保存）→ 不动订单域的色行（款色改名必须是保存那一刻的动作）',
       calls('styleColorRename').length === 0, 'calls=' + calls('styleColorRename').length);
@@ -2902,10 +3190,11 @@ async function main() {
     report('保存后（库里已是新色名）行头色图仍在 —— 图按 SKU id 续，不是按色名重查',
       !!thumbAfterSave && thumbAfterSave.getAttribute('src') === window.__smokeImg.thumb,
       'src=' + (thumbAfterSave ? String(thumbAfterSave.getAttribute('src')).slice(0, 24) : 'missing'));
-    // 改回去：夹具要回到'黑'（后面 export 步等的是这个过程的数据），顺带钉住 from 是"当下的真实值"
-    var renBack = document.querySelector('.wb-drawer [data-act="ed-color"]');
-    renBack.value = '黑';
-    renBack.dispatchEvent(new Event('input'));
+    // 改回去：夹具要回到'黑'（后面 export 步等的是这个过程的数据），顺带钉住 from 是"当下的真实值"。
+    // 字典里有「黑」chip（它现在不在矩阵里，不是打勾态）⇒ 点它即可把这一行归回「黑」。
+    await tapColorRow(0);
+    mxChip('黑').click();
+    await settle(function () { return mxNames()[0] === '黑'; }, 4000);
     await settle(function () { return false; }, 500);
     document.querySelector('.wb-drawer [data-act="ed-sku-save"]').click();
     await waitFor(function () { return calls('styleColorRename').length >= 2; }, 6000);
@@ -2941,14 +3230,15 @@ async function main() {
     await settle(function () { return !!document.querySelector('.wb-drawer [data-act="ed-import-apply"]'); }, 3000);
     document.querySelector('.wb-drawer [data-act="ed-import-apply"]').click();
     await waitFor(function () {
-      return all('.wb-drawer [data-act="ed-color"]').some(function (i) { return i.value === '红'; });
+      return mxNames().indexOf('红') >= 0;
     }, 8000);
     report('并入带来的颜色是**新行**（没有 pl_variants.id，保存时只会走"新增"）',
-      all('.wb-drawer [data-act="ed-color"]').map(function (i) { return i.value; }).indexOf('红') >= 0,
-      JSON.stringify(all('.wb-drawer [data-act="ed-color"]').map(function (i) { return i.value; })));
-    var redInput = all('.wb-drawer [data-act="ed-color"]').filter(function (i) { return i.value === '红'; })[0];
-    redInput.value = '深红';
-    redInput.dispatchEvent(new Event('input'));
+      mxNames().indexOf('红') >= 0, JSON.stringify(mxNames()));
+    // 改名：新增颜色「深红」→ 选中「红」那一行 → 点新 chip 归类（色名只读后的唯一改名路径）
+    await ensureDictColor('深红');
+    await tapColorRow(mxNames().indexOf('红'));
+    mxChip('深红').click();
+    await settle(function () { return mxNames().indexOf('深红') >= 0; }, 4000);
     await settle(function () { return false; }, 700);
     var renBefore = calls('styleColorRename').length;
     document.querySelector('.wb-drawer [data-act="ed-sku-save"]').click();
@@ -3589,6 +3879,8 @@ async function main() {
     await sleep(30);
     // 场景：这次认款顺带采纳了 2 张款主图（真值来自主进程；这里只验界面回执说不说）
     window.__smokeAdopt = 2;
+    // 左栏产品列表的取数次数：补了款主图必须重拉（后端写进去了、界面没重拉 ⇒ 用户仍看到白图）
+    var productListBefore = calls('productList').length;
     await clickText('.wb-mask .wb-dialog__foot button', '关联这 2 项');
     await waitFor(function () { return calls('productSkuMap').length >= 1; }, 6000);
     var maps = calls('productSkuMap');
@@ -3606,17 +3898,25 @@ async function main() {
 
     // ── 认款顺手采纳款主图：回执必须把那件事说出来 ─────────────────────
     // 「采纳了几张」这个数的**来历**由两层守：product:sku:smoke（挑哪个款、挑哪张图）+
-    // ipc:shape:smoke（真复制文件、真登记 pl_images、真写 image_id）。这里只钉界面那一环：
-    // 主进程回了 2，用户就得在回执里看到"并把 2 张订单图设为款主图"—— 否则它写的是
+    // ipc:shape:smoke（真复制文件、真登记 md_images、真写 image_id）。这里只钉界面那一环：
+    // 主进程回了 2，用户就得在回执里看到"并把 2 张商品图设为款主图"—— 否则它写的是
     // **产品主数据**，用户只会觉得"我的产品页怎么多了张图，谁动的？"
+    // ⚠️ 文案是「商品图」不是「订单图」：认款补图有两档（本地订单图 + 采集商品远程图），
+    //    回执用一个数报两档之和，说成"订单图"会在采集商品上撒谎（2026-10-30）。
     // ⚠️ 等待条件**不能**写"含 新增 2 条"：上一步（直连）也发过一次同样的回执，虚拟时间下
     //    它可能还没过期 ⇒ 条件立刻为真、读到的是**上一步**的回执（adopted 那句于是恒缺）。
     //    条件必须指向"这一次才可能出现的那句话"，判定才留给 report（settle 不抛 → 可读 FAIL）。
     var adoptToast = null;
     await settle(function () { adoptToast = lastToastWith('款主图'); return !!adoptToast; }, 6000);
     report('认款回执报出采纳了几张款主图（写的是主数据，不能不说一声）',
-      !!adoptToast && adoptToast.indexOf('并把 2 张订单图设为款主图') >= 0,
+      !!adoptToast && adoptToast.indexOf('并把 2 张商品图设为款主图') >= 0,
       adoptToast || JSON.stringify(toastText()));
+    // 另一半：后端采纳了，**左栏必须重拉**。只验 toast 会让"写进去了但界面没变"恒绿 ——
+    // 那正是 2026-10-30「认款后产品图片还是没更新」的真症状：值是新的，画面上还是白图。
+    await settle(function () { return calls('productList').length > productListBefore; }, 6000);
+    report('补了款主图 → 左栏产品列表真的重拉（补图后不回写，左栏就一直是白图）',
+      calls('productList').length > productListBefore,
+      'before=' + productListBefore + ' after=' + calls('productList').length);
 
     // ── 写入后队列**重拉**：已关联的组必须真的消失 ─────────────────────
     step('queue-reload');
@@ -4658,12 +4958,14 @@ async function main() {
       })(),
       'name=' + (document.querySelector('[data-act="iw-name"]') || {}).value);
     var wSkuRows = all('[data-act="iw-sku-row"]');
+    // 色名只读（2026-10-30）⇒ 当前色名挂在 data-color 上（与产品抽屉同一条锚点约定）
+    var iwColors = function () {
+      return all('[data-act="iw-sku-color"]').map(function (e) { return e.getAttribute('data-color') || ''; }).join('/');
+    };
     report('SKU 矩阵预填：2 色 × 2 码（色名来自采集详情；主进程落库时已按 props 解析成规范形）',
-      wSkuRows.length === 2 &&
-      all('[data-act="iw-sku-color"]').map(function (i) { return i.value; }).join('/') === '黑/4' &&
+      wSkuRows.length === 2 && iwColors() === '黑/4' &&
       all('[data-act="iw-sku-size"]').map(function (i) { return i.value; }).join('/') === 'L/M',
-      'rows=' + wSkuRows.length +
-        ' colors=' + all('[data-act="iw-sku-color"]').map(function (i) { return i.value; }).join('/') +
+      'rows=' + wSkuRows.length + ' colors=' + iwColors() +
         ' sizes=' + all('[data-act="iw-sku-size"]').map(function (i) { return i.value; }).join('/'));
     // ⭐ 矩阵的**空格**语义：采集到的是"黑只有 L、4 只有 M" ⇒ 只有 2 格是"在卖"，
     //    另外 2 格是空格（直接敲数才加入）。2026-10-25 起一格只有一个输入框（勾选框并进去了），
@@ -4728,7 +5030,7 @@ async function main() {
       }
       // 位移 30px 但不出这一个 chip：落点仍是源行自己 ⇒ dragOver 为空 ⇒ 松手什么都不做。
       // 这样只验"能不能起拖"，不拿数据开玩笑。
-      var colorsBeforeDrag = all('[data-act="iw-sku-color"]').map(function (i) { return i.value; }).join('/');
+      var colorsBeforeDrag = iwColors();
       dragThumb.dispatchEvent(pevDrag('pointerdown', dragX, dragY));
       dragColorsBox.dispatchEvent(pevDrag('pointermove', dragX + 12, dragY));
       dragColorsBox.dispatchEvent(pevDrag('pointermove', dragX + 30, dragY + 2));
@@ -4741,10 +5043,8 @@ async function main() {
       report('⭐ 从色图上按住就能拖（色图裹在 button 里，按钮不能被当成"该让位"的控件）',
         startedFromImg, 'is-src=' + startedFromImg + ' target=' + ((dragThumb.querySelector('img') || {}).tagName || '?'));
       report('这次拖动没改数据、也没弹出大图（松手落在源行自己身上 = 什么都不做）',
-        all('[data-act="iw-sku-color"]').map(function (i) { return i.value; }).join('/') === colorsBeforeDrag &&
-          !document.querySelector('[data-act="iw-sku-viewer"]'),
-        'colors=' + all('[data-act="iw-sku-color"]').map(function (i) { return i.value; }).join('/') +
-          ' viewer=' + !!document.querySelector('[data-act="iw-sku-viewer"]'));
+        iwColors() === colorsBeforeDrag && !document.querySelector('[data-act="iw-sku-viewer"]'),
+        'colors=' + iwColors() + ' viewer=' + !!document.querySelector('[data-act="iw-sku-viewer"]'));
     } else {
       report('向导里应至少有一个色图按钮（"从色图起拖"这条保底路径没有落点）', false, 'thumb=missing');
     }
@@ -4761,13 +5061,15 @@ async function main() {
     await settle(function () { return !document.querySelector('[data-act="iw-save"]').disabled; }, 4000);
     report('选了供应商后保存可点', !document.querySelector('[data-act="iw-save"]').disabled, '');
     // 把数字色号改成标准色名 → 高亮当场消失（促确认是活判据，不是贴上去的静态样式）。
-    // ⚠️ 色名输入 2026-10-17 搬到了上面的「规格」卡片里（不再在矩阵 tr 内），
-    //    所以定位走"被高亮的卡片里的那个输入框"；矩阵行的高亮照旧（同一判据两个显示位置）。
-    setVal(document.querySelector('.iw-sku .is-flagged [data-act="iw-sku-color"]'), '黑');
+    // ⚠️ 色名 2026-10-30 起**只读**：改色名 = 点色名选中这一行 → 点常用色「黑」归类
+    //    （矩阵里已有「黑」行 ⇒ 并进它，两行变一行；与产品抽屉同一条动线）。
+    document.querySelector('.iw-sku .is-flagged [data-act="iw-sku-color"]').click();
+    await settle(function () { return !!document.querySelector('.iw-sku .mx-color.is-sel'); }, 2000);
+    document.querySelector('.iw-sku [data-act="iw-sku-common"][data-color="黑"]').click();
     await settle(function () { return document.querySelectorAll('.iw-sku tr.is-flagged').length === 0; }, 4000);
-    report('把数字色号改成标准色名后高亮消失（人对色号有最终裁判权）',
-      document.querySelectorAll('.iw-sku tr.is-flagged').length === 0,
-      'flagged=' + document.querySelectorAll('.iw-sku tr.is-flagged').length);
+    report('把数字色号归成标准色名后高亮消失（人对色号有最终裁判权）',
+      document.querySelectorAll('.iw-sku tr.is-flagged').length === 0 && iwColors() === '黑',
+      'flagged=' + document.querySelectorAll('.iw-sku tr.is-flagged').length + ' colors=' + iwColors());
     // 克重人补：矩阵里那两格各一个数字输入框（黑/L、黑/M）。**填一个、留一个** ——
     // 只喂一个输入的话，"没填的也被写成某个值"这种错永远看不出来。
     // ⚠️ 必须按"存在的格"取下标（data-cell-on）：空格也是真输入框了，

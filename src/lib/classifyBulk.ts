@@ -98,3 +98,71 @@ export function pickColorFor(
   if (palette.length === 1) return palette[0];
   return '';
 }
+
+// ───────────────────────────────────────── 批量定色（2026-10-30）
+
+/**
+ * 批量定色弹层要的一行（父层按**勾选行**投影出来）。
+ *
+ * `palette` 是这一行**当前款**的色卡（`colorsFor(styleCode)`），不是字典全集：
+ * 归类页落库的是「款 + 色」的款色，颜色不在色卡里落不下去（宿主会顺手给它造一个新款色）。
+ */
+export interface BulkColorRow {
+  id: number;
+  orderNo: string;
+  /** 当前草稿款（空串 = 还没点名款 ⇒ 连色卡都没有） */
+  styleCode: string;
+  /** 当前草稿色（可能是还没保存的改动） */
+  color: string;
+  palette: string[];
+}
+
+/** 一种候选色在"这批勾选行"里的覆盖情况（弹层里的一张卡片） */
+export interface BulkColorOption {
+  name: string;
+  /** 真的会被改写的行数（色卡有这个色、且当前不是它） */
+  change: number;
+  /** 色卡有这个色、本来就是它的行数（不用写库） */
+  same: number;
+  /** 色卡里没有这个色的行数（不动它 —— 那是"得先去产品管理加色"） */
+  miss: number;
+  /** `miss` 里还没点名款的那几行（连色卡都谈不上，与"色卡没这个色"要分开说） */
+  noStyle: number;
+  /** `miss` 行的订单号（弹层只取前几条做 title） */
+  missNos: string[];
+}
+
+/**
+ * 候选色 = 这批行各自款色卡的**并集**（保持首次出现顺序 —— 色卡的顺序就是产品页里人排的顺序）。
+ *
+ * 为什么不按"能改的行数"排序：每次勾选变化都会让卡片跳位置，而这一层要回答的是
+ * "这批货有哪几个色可选"，不是排行榜。
+ *
+ * ⚠️ `change` 与 `same` 分开算：`change = 0` 的色**点不动**（点了也只是把同一批行再写一遍），
+ *    但必须仍然列出来 —— 用户要能看到"这批里 3 行已经是白了"，否则他会以为色卡读错了。
+ */
+export function colorOptionsOf(rows: BulkColorRow[]): BulkColorOption[] {
+  const names: string[] = [];
+  for (const r of rows) {
+    for (const c of r.palette) {
+      const name = String(c ?? '').trim();
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names.map((name) => {
+    const op: BulkColorOption = { name, change: 0, same: 0, miss: 0, noStyle: 0, missNos: [] };
+    for (const r of rows) {
+      const code = String(r.styleCode ?? '').trim();
+      if (!code || !r.palette.includes(name)) {
+        op.miss += 1;
+        if (!code) op.noStyle += 1;
+        op.missNos.push(String(r.orderNo || `#${r.id}`));
+        continue;
+      }
+      if (String(r.color ?? '') === name) op.same += 1;
+      else op.change += 1;
+    }
+    return op;
+  });
+}
+

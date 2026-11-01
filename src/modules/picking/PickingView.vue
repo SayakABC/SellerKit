@@ -302,6 +302,18 @@
                        本组件不认识 `purchase*` 写通道，也不该把确认弹层再实现一遍。
                        忽略按**款色**整组生效（`ignoreKey` 里没有码）⇒ 动作挂在款色行上。 -->
                   <span class="pu-srow__acts">
+                    <!-- 指定厂家：拖拽落点只有"有清单行/有拿货单"的厂家，没拿过货的厂家没有格子
+                         ⇒ 无厂家的款只能在这里指定。粒度是款级（`pl_products.supplier_id`），
+                         载荷带该款款色数，宿主才能把"整款一起走"说全。 -->
+                    <button
+                      v-if="assignAction && !r.ignored && !r.supplierId && r.styleCode"
+                      type="button"
+                      class="wb-link"
+                      :data-act="`pk-assign-${r.key}`"
+                      @click="emit('assign-supplier', { styleCode: r.styleCode, styleName: r.styleName, colors: colorsOfStyle(r.styleCode) })"
+                    >
+                      指定厂家
+                    </button>
                     <button
                       v-if="rowAction && !r.ignored"
                       type="button"
@@ -638,6 +650,10 @@ import type { IgnoreRow, PurchaseOrder, TakenRow } from '@/types';
  * `fixAction` = 「未归类」提示条里给「选产品并归款」（宿主提供写通道，本组件只发商品ID 意图）。
  *   为什么单独一个开关：这条动作改的是**产品域的映射**（`pl_sku`），不是拿货数据；
  *   宿主没接时按钮不渲染（否则又是一个点不动的假控件）。
+ * `assignAction` = 「未指定厂家」的款色行给一个「指定厂家」入口（宿主提供写通道，本组件只发意图）。
+ *   为什么必须有：拖拽的落点只来自**有清单行/有拿货单**的厂家，而"还没拿过货的厂家"根本没有格子
+ *   ⇒ 无厂家的款色只能拖到别家、不能指定给新厂家（用户实报"指定不了"）。
+ *   与 `moveAction` 同一件事的另一半（都是改 `pl_products.supplier_id`），所以粒度也是**款级**。
  */
 const props = withDefaults(
   defineProps<{
@@ -651,6 +667,7 @@ const props = withDefaults(
     supplierPhones?: Record<number, string>;
     moveAction?: boolean;
     fixAction?: boolean;
+    assignAction?: boolean;
   }>(),
   {
     embedded: false,
@@ -663,6 +680,7 @@ const props = withDefaults(
     supplierPhones: () => ({}),
     moveAction: false,
     fixAction: false,
+    assignAction: false,
   }
 );
 
@@ -684,6 +702,8 @@ const props = withDefaults(
  *      宿主只有知道"这一款一共几个款色一起走"，才能把话说全（否则用户以为只拖走了看见的那一行）。
  * `fix-unclassified` 「未归类」行上「选产品并归款」的意图（载荷 = 商品ID / 件数 / 店铺）。
  *   写库在宿主（产品域映射 `pl_shop_sku`）；本组件只把"要修哪一条"说清。
+ * `assign-supplier` 「未指定厂家」行上「指定厂家」的意图（载荷 = 款编码 / 款名 / 该款几个款色）。
+ *   写库在宿主（`pl_products.supplier_id`；款级），与 `move-supplier` 共用同一条写通道。
  */
 const emit = defineEmits<{
   (e: 'go-import'): void;
@@ -705,6 +725,7 @@ const emit = defineEmits<{
     }
   ): void;
   (e: 'fix-unclassified', intent: { itemId: string; pieces: number; shops: string[] }): void;
+  (e: 'assign-supplier', intent: { styleCode: string; styleName: string; colors: number }): void;
 }>();
 
 /** 空态图标（内联 SVG，跟随 currentColor） */
@@ -1156,6 +1177,12 @@ function onTileDrop(e: DragEvent, c: SupplierCard): void {
     toSupplierId: c.supplierId,
     colors: src ? src.rows.filter((r) => r.styleCode === code).length : 0,
   });
+}
+
+/** 该款在清单里一共几个款色（款级写库要带上它，宿主才能说全"整款一起走"） */
+function colorsOfStyle(styleCode: string): number {
+  if (!styleCode) return 0;
+  return supplierCards.value.reduce((n, c) => n + c.rows.filter((r) => r.styleCode === styleCode).length, 0);
 }
 
 function todayLocal(): string {

@@ -13,6 +13,363 @@
 
 ## [Unreleased]
 
+### Changed · 颜色板：标准色卡缩小不滚、待归一每行加款图、色名列收窄（2026-10-31）
+
+- **动机（用户口径）**：「标准色卡片尺寸可以小点，不要出现滚动条，要全部都展示出来，带归一列表中需要加款图，
+  不然数字没法知道是什么颜色，带归一列表的的色名列太宽了，看起来不太协调」。
+- **标准色卡缩小、一屏展示**：卡片从「28px 色块 + 三行文字（约 68px）」压成「20px 色块 + 两行小字（约 42px）」，
+  网格起宽 180 → 140px；`.colors-cards` 去掉自身的 `overflow: auto` —— 色卡区按内容铺开、不自己滚，
+  高度全让给下面的待归一名单（名单仍独立滚动）。面板 `overflow: hidden`：实测差 2px 时 `auto` 就会画出滚动条。
+- **待归一每行加款图**：板行新增 `imagePath` —— [`color-merge.ts`](electron/color-merge.ts) 从
+  `oi_style_colors.image_id` 取**同色 `image_id` 最小的一行**（确定、可复现），经 `md.imageLocalPathMap()`
+  批量解析本地路径；渲染层用 `orderImageThumbBatch` 取 64px 缩略图，没图的色画虚线空占位
+  （不拿中性灰假装是答案），取图失败不挡合并。数字色号（`5` / `9` …）靠它才认得出颜色。
+  （真库只读取证：`1` 5/5、`2` 6 行中 5 行、`9` 4/4、`白色` 8/8 有图。）
+- **色名列收窄**：`width: 1%` + 首列 nowrap（按内容宽），原来 46% 的留白让给用量列；新增 `款图` 列 44px。
+- **2px 溢出的真因**：待归一空态 `.wb-empty.colors-pad` 作为 flex 子项 `min-height: auto` 按内容顶住
+  不肯缩，把面板撑出 3px（`overflow: hidden` 下表现为内容被切）。给 `.colors-pad` 补
+  `flex: 1 1 auto; min-height: 0; overflow: auto` 后两遍视口 `panelScroll=0`。
+- **验证**：`npm run build` / `npx vue-tsc --noEmit` / `npm run lint`（0 error）/ `npm run verify` /
+  `npm run verify:docs` 全绿；`npm run master-data:ui` ALL PASS（新增「款图取到」「无图画空占位」
+  「25 个标准色一屏铺开」三条）；`npm run ipc:shape:smoke` 96 项全过（板行形状含 `imagePath`）。
+  主进程有改动，需重启 `npm run dev`。
+
+### Added · 「基础数据 › 产品管理 › 颜色」：同色异名可合并，合并真改款色 / SKU / 别名（2026-10-30）
+
+- **动机（用户口径）**：「当前颜色的管理页面还没有，现状是存在相同的颜色，只是名称不一样，要支持颜色合并」。
+  色名在业务表里是文本（`oi_style_colors.color` / `pl_variants.color`），字典 `md_colors` 只是"常用色清单"，
+  没有任何约束保证它们指向同一个词 —— 真库里 `黑 / 黑色`、`白 / 白色`、`灰 / 灰色`、`红 / 红色`、`蓝 / 蓝色`、
+  `black / 黑色` 各自成行，于是"黑色卖了多少"被拆成两三个数。
+- **2026-10-30 重新设计（用户反馈两点）**：① 颜色太多时拖动定位麻烦；② 数字色号 / 平台原文色名
+  没有真实色块，不知道该并给谁。解法：板拆成上下两区 ——
+  - **标准色**（字典里的色，合并目标）：用**色卡**展示，色块 = 真实 hex（点色块可取色器改）；色卡是大目标，
+    合并靠「点一下待归一行 → 点一下标准色卡」，不再靠拖小行。
+  - **待归一色名**（数字色号 / 平台原文 / 未入字典的异写）：列表，每行只带用量与徽标，**没有色块**
+    （"还没认出来"就是没色块，不给中性灰兜底假装是答案）。
+  - 合并手势：点待归一行选中 → 点任一标准色卡即合并；拖拽保留为**快捷**方式（拖待归一行到标准色卡）。
+  - 新增标准色时可取色器选真实 hex（`md-color-create` 接受 `hex`）；已有标准色的色块可点取色器单独修
+    （`md-color-update-hex`，只改 hex 不改名字 —— 名字是业务身份）。
+- **合并真改数据**（编排层 [`color-merge.ts`](electron/color-merge.ts)，一个事务内六步，跨主数据 /
+  订单 / 产品三域）：`md_color_aliases` 改指 + **新增**一条全局别名 `源 → 保留`（下次导入平台色直接归一）
+  → 删源字典行 → `oi_color_aliases` 同改 → 款色同款撞名**先搬引用（订单行 / 变体键 / 套装部件）再删源行**
+  （`image_id` 只补空），无撞名则原地改色名 → SKU 同产品同尺码撞名**先删源行再补** `weight_g` / `code`
+  （顺序反了会撞 `code` 全局唯一索引），无撞名则改 `color` 与 `name`。
+- **不变量**：`code` 一律不动（拣货 / 编码规则已引用）；`oi_order_items.color` 平台原文不动（"未认色"是派生态）；
+  数字色号只能当源、不能当保留名（与 `md-color-create` 同一条校验）。拒绝路径（空名 / 同色 / 数字保留名 /
+  源色不存在）全在写之前判定。
+- **回执**只列真的动过的项（款色改名 / 并掉、SKU 改名 / 并掉、订单改指、变体键、套装部件、别名、字典移除）；
+  合并后重拉颜色板 + 刷新字典单例，其他页面的色卡立即看到新名字。
+- **验证**：`npm run build` / `npx vue-tsc --noEmit` / `npm test`（1139 例）/ `npm run lint`（0 error）/
+  `npm run verify` / `npm run verify:docs` 全绿；`npm run master-data:ui` ALL PASS；
+  `npm run images:smoke` / `npm run ipc:shape:smoke`（95 项，含 ⑬d `md-color-update-hex`）/
+  `npm run order:smoke` / `npm run today:ui` 全通过。
+
+### Fixed · 认款后的存量主图：打开「款与商品」自动补，不用重新认款（2026-10-30）
+
+- **动机（用户口径）**：「认款后产品图片还是没更新」。上一批修的是**认款写入那一刻**的补图，
+  升级前已经 `confirmed` 的映射不会自己跑一遍 —— 用户重启后看到的仍是白图。
+- **实现**：
+  - [`product-db.ts`](electron/product-db.ts) 新增 `confirmedMapPairs()`：全库已确认映射的
+    (款, 商品ID) 配对；只认真映射行（`skuMappingSql` 排除 `shop-import` 池行与 `shop_id = 0`），
+    商品ID 归一后再去重，出参按 `productId + itemId` 升序（「一款只补一张」可复现）。
+  - [`product-handlers.ts`](electron/product-handlers.ts) 新增 `product-sku-repair-images` 通道：
+    第一档本地图（`adoptOrderImages`）+ 第二档远程采集图（挑选 → 下载入库 → 采纳），
+    单轮上限 `MAX_REMOTE_ADOPTS = 40`，回执 `{ adopted, pending }`（`pending` 是补完后仍缺的款数）。
+    下载/回填/采纳语义与认款补图共用 `runRemoteAdoptions`，只写一份。
+  - 渲染层 [`useSkuPool.ts`](src/modules/goods/useSkuPool.ts) 在打开「款与商品」与页级「刷新」时
+    自动跑一轮；补到图就 toast，并经 `images-adopted` 事件让外壳重拉同屏两栏。
+    认款写入时若 `adopted > 0` 也发同一个事件 —— 否则后端写进 `pl_products.image_id` 了，
+    左栏产品列表仍停在旧数据（用户看到的正是「回执说设了主图、列表还是白图」）。
+- **不覆盖人的选择**：仍只补 `pl_products.image_id = 0`；下载后会再走一次
+  `adoptProductImageIfEmpty`，与认款补图同构。
+- **「从采集商品导入」为空不是漏查**：候选按「该款最新一条 confirmed 映射」过滤，
+  只显示认到**当前款**的采集行。真库 9822（STYLE-001）有 11 条，9823（STYLE-002）
+  从未认款 ⇒ 0 条是正确行为。空态文案已点明当前款并说明「认到别款的不显示」。
+- **验证**：`npm run product:sku:smoke`（新增 `confirmedMapPairs` 取数 1 条）、
+  `npm run ipc:shape:smoke`（新增 ⑥+ 段 4 条：补图/只补空/limit 透传）、
+  `npm run goods:ui`（新增「补了主图 → 左栏产品列表重拉」断言通过；脚本另有 1 条
+  「颜色」页签的旧断言未随颜色功能更新，与本次无关）、`npx vue-tsc --noEmit`、
+  `npm run build`、`npm run verify`、`npm run verify:docs` 全绿；
+  真库副本上跑真 handler：9806 / 9811 / 9818 / 9822 四个缺图款全部补上
+  （`adopted = 4`、`pending = 0`），采集行 `image_id` 同步回填、落盘文件齐全。
+
+### Fixed · 「款与商品」认款后主图还是没有：把采集商品的远程图下载入库再采纳（2026-10-30）
+
+- **动机（用户口径）**：「现在款与商品认款后主图还是没有」。上一批修的是**归类核对**那条路
+  （`order-db.assignOrderStyle`）；「款与商品」走的是 `product-sku-map` → `adoptOrderImages`，
+  那条路只发**本地**图。
+- **根因（真库取证）**：采集商品的主图只有远程地址 —— 71 条 `pl_shop_items` **全部**
+  `image_id = 0` 且 `image_url` 有值（界面直接拿远程 URL 显示），而 `pendingProductImages`
+  要求 `localPath` 非空 ⇒ 没有图可采纳。有映射但没主图的款：9806 / 9811 / 9818 / 9822。
+- **实现**：
+  - [`product-db.ts`](electron/product-db.ts) 新增 `pendingRemoteProductImages()`：纯选择层、不做网络；
+    规则与第一档同口径 —— 只补空（`pl_products.image_id = 0`）、**一款一张**
+    （`productId + itemId` 升序确定性取第一张）、只挑还没入库的采集行（`image_id = 0` 且有 URL）。
+  - [`product-handlers.ts`](electron/product-handlers.ts) 新增 `adoptShopItemRemoteImages()`：
+    复用已有 `fetchImageToLibrary`（下载 → `landImageBytes` → 清临时文件），并发 4、
+    单次最多 `MAX_REMOTE_ADOPTS = 40` 张；下载后回填采集行 `image_id`（下次列表直接命中本地图），
+    再走 `adoptProductImageIfEmpty`（**只补空**，第一档刚落图时会自动跳过）。
+    单张失败只跳过它自己，映射写入照旧成功。
+- **不推翻人的选择**：`product-sku-map` 新增 `adoptImages?: boolean`（缺省 `true`）。
+  「建档并关联」向导在用户取消勾选「采纳为款主图」时传 `false` —— 否则第 ③ 步认款已经
+  悄悄采纳了，第 ④ 步的 `adoptMain = false` 形同虚设。preload 侧按 `=== false` 判，
+  不传这个键的老调用方仍按采纳处理。
+- **存量**：本修复只在认款写入时触发；已有映射的款**再认一次 / 改绑一次**（或「恢复」）就会补上。
+  已有主图的款永远不会被换掉。
+- **验证**：`npm run product:sku:smoke`（新增「采集商品只有远程图」的 4 条挑选规则）、
+  `npm run ipc:shape:smoke`（新增 `adoptImages: false` 真 handler 断言：`adopted = 0` 且
+  `pl_products.image_id` 仍为 0）、`npx vue-tsc --noEmit`、`npm run verify` 全绿。
+
+### Changed · 「颜色叫什么」只列还没认的颜色；撤下「可能是同一件货」（2026-10-30）
+
+- **动机（用户口径）**：命名板「只展示订单中没有认颜色的数据，目的只为了能认款和色，为之后的拿货统计做准备」；
+  「可能是同一件货」——「现在的推荐完全不准，你看看是不是需要去掉」。
+- **命名板只列待办**：[`VariantNamingCard.vue`](src/modules/today/tabs/VariantNamingCard.vue) 里已起过名的色
+  **不再渲染**（组内只铺未认的色格，组头也改成「N 个没起名」），因此删掉了「查看全部颜色」那个开关。
+  这块现在是**待办清单**而不是色名编辑器：要改已经起过的名，走「基础数据 › 产品管理」。
+  选中态也只在未认的色格上停留（`selected` 加了 `!named` 条件），避免"给一格已经起过名的色改名"这种看不见的写库。
+- **「可能是同一件货」撤下**：[`ClassifyPanel.vue`](src/modules/today/tabs/ClassifyPanel.vue) 不再挂
+  [`StyleMergeCard.vue`](src/modules/today/tabs/StyleMergeCard.vue)。它的"推荐"其实只是「同一厂家下 ≥2 个款」
+  （真库 5 号厂家挂了 8 个款）—— 一屏 8 行全摆出来让人自己判断，比不摆更费注意力。
+  组件、IPC（`orderStyleMergeBoard` / `orderStyleMerge` / `orderStyleUnmerge`）与库表**都保留**：
+  真库 0 条合并记录，不存在"想拆拆不掉"的问题；将来有可信判据再接回来（模板里有注释挡着）。
+- **验证**：`node --check` / `npm run build` / `npx vue-tsc --noEmit` / `npm test`（1139 例）/ `npm run lint`
+  （0 error，625 存量 warning）/ `npm run verify:docs` 全绿；`npm run today:ui` **359 PASS**
+  （新增「只列待办：903 / 905 都不在 DOM 里」与「已撤下：没有这块也不再请求候选」两条反向断言，
+  删掉原来 10 条款合并断言与 1 条其几何守卫）。
+
+### Changed · 「颜色叫什么」改成点选起名（2026-10-30）
+
+- **动机（用户口径）**：「归类核对页面的颜色叫什么也修改成编辑产品页的 SKU 编辑的方式」。
+  改前每个色格一个自由输入框，色名会漂成「黑 / 黑色 / Black」三行 —— 而色名要进拿货单与统计，
+  同一件货在两张纸上分成三行。
+- **新形态**：[`VariantNamingCard.vue`](src/modules/today/tabs/VariantNamingCard.vue) 卡片顶部常驻一排
+  **常用色**（复用通用组件 `ColorPalette`，与产品页 SKU 矩阵同一个）。点一个色格 = 选中它，
+  色卡条改口成「正在给「5」起名」；点色卡即改名并保存，**存完自动跳到同组下一个未命名的色**，
+  本组填完交下一组的第一个；把色格**拖到色卡上**松手也能起名（与产品页同一套 pointer 手势，
+  拖完吞掉随后的那一次 click）。末尾「＋ 新增颜色」只写颜色字典，不给色格改名。
+- **点之前就知道会不会被拒**：色卡按**款**打勾（同 `styleCode` 下已有这个名字即打勾），
+  正对主进程 `renameStyleColor` 只拦"同款重名"那条边界；被拒时**主进程原话**显示在那一格，
+  且**不跳选中**（跳走等于把错误甩在身后）。
+- **不改的东西**：落库仍只送 `{styleColorId, name}`（款名/编码/平台原文由主进程回读）；
+  款名 / 厂家那一层（组头）原样；「可跳过」口径不变 —— 不起名不影响统计与拿货。
+- **验证**：`node --check` / `npm run build` / `npx vue-tsc --noEmit` / `npm test`（1139 例）/ `npm run lint`
+  （0 error，625 存量 warning）/ `npm run verify:docs` 全绿；`npm run today:ui` **368 PASS**
+  （命名板段 7 → 11 条，新增：色格内没有任何输入框、未选中时只提示、点格改口、色卡按款打勾、
+  被拒不跳选中、拖到空白处不改名且吞 click、拖到色卡落库）；`npm run goods:ui` **447 PASS**（三窗口遍）。
+
+### Fixed · 认款后产品没图时，采纳当前款色的图（2026-10-30）
+
+- **动机（用户口径）**：「认款后，如果产品没有图片的时候，没有把当前款的图片给产品」。
+  认款（归类核对里点名归款 / 批量定款）会把这单的图绑到款色，但产品主图一直是空的；
+  只有「给商品ID 配产品映射」那条路会顺手采纳订单图（`product-handlers.ts:556` 的 `adoptOrderImages`）。
+- **实现**：[`order-db.ts`](electron/order-db.ts) 的 `assignOrderStyle` 在归属事务提交后，用**该款色当前生效的图**
+  调 `adoptProductImageIfEmpty`（`pl_products.image_id` 只在 0 时写）。源优先取本次订单图
+  （`setImageStyleColor` 刚绑上去的那张）；订单本身没图时取款色已有的图 —— 也就是用户看到的「当前款的图片」。
+- **边界**：① **只补空、不覆盖**（人挑过的主图优先）；② 失败不外抛（归属 / 款色 / 回流已提交，坏一张图
+  不能让人以为"没保存"）；③ 款色也没图或产品库没这个编码 ⇒ 静默跳过，下次认款再试。
+- **验证**：`npm run product:sku:smoke`（新增 1 例覆盖「订单图采纳 / 已有主图不覆盖 / 订单没图时采纳款色图」）、
+  `npm run order:smoke`、`npm test`（1139 例）、`npx vue-tsc --noEmit` 全绿。
+
+### Changed · 新增产品时款编码自动发号（2026-10-30）
+
+- **动机（用户口径）**：「新增产品时，款编码自动生成，不要手动填写」。编码是订单 / 采购 / 成本三域的
+  关联锚点，手打只是在抄系统该发的那串号，还多了打错 / 重号的机会。
+- **实现**：[`ProductEditorDrawer.vue`](src/modules/goods/components/ProductEditorDrawer.vue) 新增模式打开即调
+  （`ProductEditorDrawer.vue:659` 的 `loadCreateCode`）
+  `api.nextCode()`（主进程 `product-next-code` → `order-db#nextStyleCode`，编码池 = `oi_styles ∪ pl_products`），
+  填进编码框并**只读**展示；编辑模式原本就只读。发号失败时字段下方给出原因与「重新生成」出口。
+  发号器与建款向导（`ShopItemWizard.vue:208`）共用同一个 —— 渲染层不自行 `max+1`（会漏掉订单识别已占用的序号）。
+- **撞号兜底**：抽屉打开后别处（订单识别 / 另一处建档）可能先占了同号。新增保存撞唯一键时自动重新发号，
+  toast 报「已重新发号为 …，再按一次保存」—— 编码只读、没有手改出口，不自动换号就会变成反复保存、反复失败。
+- **关闭确认**：`createTouched` 不再把 `form.code` 算作"填过东西"（它打开就有值），否则每次点 ✕ 都会弹
+  「这个新产品还没创建」（见 `ProductEditorDrawer.vue:845` 的注释与判据）。
+- **验证**：`npx vue-tsc --noEmit` / 单文件 `eslint` / `npm test`（1139 例）/ `npm run verify` / `npm run build` 全绿；
+  `npm run goods:ui` 三窗口遍全绿，并新增 3 条断言：打开即发号且 `readOnly`、旁边标「自动生成」、
+  只发号就关**不弹**"还没创建"（`scripts/goods-ui-smoke.mjs:1527`）。
+
+### Added · 归类核对：批量定色弹层（2026-10-30）
+
+- **动机**：色卡托盘是快路径（勾中的行款式一致 ⇒ 一张色卡，点一下就走）；卡住的是**混款** ——
+  同一个色名在有的款色卡里、在有的款色卡里没有。托盘只按"有没有这个色"逐行处理，人看不到
+  "这一下会改几行、几行会不动"，于是要点完才知道结果。
+- **入口**：勾选后在底部动作条「批量定款…」旁多一个「批量定色…」（`data-act="cl-bulk-color"`）。
+- **弹层内容**：候选色 = 这批行各自款色卡的**并集**（保持首次出现顺序）；每种色**点之前**就摆出覆盖数
+  「改 N 行 · 已是 M · 另 K 行不适用」，`change = 0` 的色仍然列出但**点不动**（"已经是它"要看得见）；
+  底部说明"只改款色卡里有这个色的行，卡里没有的要先去产品管理加色"。不在这里选款、也不在这里给款加色。
+- **落库**：与托盘**同一个入口** `applyTrayColor(color, ids)`（串行 `saveOne({ silent, defer })` + 一次 `bump()`，
+  四类回执照旧），弹层只 emit 一个色名、落库后自动关闭。
+- **纯函数**：[`colorOptionsOf`](src/lib/classifyBulk.ts) 负责覆盖账（`change` / `same` / `miss` / `noStyle` +
+  `missNos`），单测 5 条钉住"并集顺序 / 改了就不重复写 / 色卡外与没定款分开数 / change=0 仍列出"。
+- **验证**：`today:ui` 增 9 条（动作条有入口；弹层头报「已选 2 行 · 1 个款」；覆盖数；不改的色点不动；
+  未选色时确定不可用；按钮报「定色并保存（1 行）」；只写 P-42、P-43 一字不写；回执点名"1 行还没点名款"；
+  落库后自动关闭）。
+
+### Added · 归类核对：色卡托盘 + 拖图定色（2026-10-30）
+
+- **动机（用户口径）**：归类核对页要能「把某行的图直接拖到色卡上定色」。这一页的落点是「款 + 色」的款色，
+  逐行点款、再点色、再保存路径太长；一排常驻色卡 + 拖放，把"定色"压成一次手势。
+- **托盘列哪些色**：**本页各行 `styleCode` 的款色卡并集**，不是 27 个字典色 —— 颜色不在该款色卡里就落不下去
+  （宿主 `ensureStyleColor` 会顺着它给这个款新建一个色，本页不该凭空造款色）。取 `styleCode` 而非草稿：
+  `draftOf` 在 computed 里新建草稿会自激。
+- **交互**：托盘挂在页头与表格之间（仅待核对、本页有行时渲染；不吸顶，避免压扁 `cl-list` 弹性区）。
+  点色卡 = 给勾选行定色并保存（没勾选时只提示下一步，不写库）；拖图 = 行头缩略图按住 →
+  越过 6px 阈值 → 落到某颗色卡上松手，只给那一行定色。缩略图同时是「点击看大图」与拖动抓手，
+  拖后那一下的 click 被吞掉；拖动期间捕获阶段 `selectstart` 一律 `preventDefault`（与产品页同一条教训）。
+- **统一写入口**：点与拖共用 `applyTrayColor(color, ids)`（串行 `saveOne({ silent, defer })` + 一次 `bump()`），
+  回执分四类计数：已保存 / 本来就同色 / 还没点名款 / 款色卡里没有这个色。
+- **验证**：`today:ui` 增 9 条（托盘 = 黑/白且不含别款的「蓝」；每颗带 `data-cl-tray`；无勾选点色卡不写库；
+  勾 2 行点色卡 ⇒ 两次 `orderStyleAssign` 带 `S1 + 黑`；回执「已把 2 行定到「黑」并保存」；
+  拖 P-44 到「白」⇒ 单行落库；拖动中 `is-dragging` + `is-drop`；拖后 click 被吞、大图没开）。
+
+### Changed · SKU 编码的 `{color}` 段改为颜色 ID（2026-10-30）
+
+- **动机（用户口径）**：「SKU编码把color修改为颜色ID」。色名是**会被改写的标签** —— 归类把 `藏蓝` 改成 `藏青`
+  之后，按色名生成的编码就跟实际色对不上；`md_colors.id` 是主数据身份，改名不动它。
+- **实现**：`colorDict.ts` 的 `ColorDictItem` 带上 `id`，新增 `colorIdOf(color)`（`0` = 不在字典）；
+  `skuCode.ts` 的 `SkuCodeSeed` 增可选 `colorId`，`renderSkuCode` 经 `colorToken` 渲染 `{color}`
+  （id > 0 用 id）。占位符标签改「颜色ID」，输入框 title 一并改。`ProductEditorDrawer.vue` 的 `codeSeeds`
+  带上 `colorId`（读模块级字典单例 ⇒ 字典后到会自动重算预览），`onMounted` 补 `loadColorDict()`
+  （预载，避免第一帧按色名算、载入后再跳成 ID）。
+- **回落**：拿不到 id（还没归类的异写色 / 字典没载入 / 内置兜底 `COMMON_COLORS` 没有真实行）⇒ 回落色名，
+  不能因为没 id 就留空（那会生成 `S1--L` 这种残码）。
+- **验证**：`tests/skuCode.spec.ts` 增两条（id=3 ⇒ `SUST-001-3-L`；无 id ⇒ 回落 `黑色`）；
+  `goods:ui` 的 `sku-drag-grab` 段增两条 —— 字典里已有「黑」时预览必须是数字（`S1-29-L`），
+  提示里 `{color}` 标成「颜色ID」（三窗口遍全绿）。
+
+### Fixed · 整站图片全黑：图片路径固化了临时目录（2026-10-30）
+
+- **症状**：用户报「为什么现在所有的图片又不显示了」—— 产品库、订单列表、拿货单、款色代表图，
+  凡走 `md_images` 的图**全部空白**。
+- **根因**：R1 的旧图迁移（`legacy-image-migration.ts`）是在**临时 userData**（`/tmp/sk-apply`）里跑的，
+  数据库随后被拷回真 userData，但 `md_images.local_path` 里记下的绝对路径前缀**固化了 `/tmp/sk-apply/images/`**。
+  真库 101/101 条都是这个前缀，`/tmp` 被系统清理后全部指向不存在的文件 ⇒ `order-image-thumb` 的
+  `resolveThumbPath`（`realpathSync` 失败）一律返回 `null` ⇒ 界面全是空占位。
+  **字节一个没丢**：101 个文件都在 `userData/images/` 里，文件名 = 内容指纹，与库里的 basename 101/101 完全对应。
+- **修复**：① 数据修复 —— 真库 101 条 `local_path` 前缀换成 `<userData>/images/`（先 `.backup`，
+  修完逐条 `fs.exists` 校验 101/101 命中）；② 代码兜底 —— `imageLocalPath` / `imageLocalPathMap`
+  读取时走 `resolveImagePath`（原位不存在就按 basename 到唯一图片目录找一次，仍找不到才原样返回），
+  这样以后再遇到"换机 / 恢复旧备份 / 迁移用临时目录"也不会整站变黑。
+- **为什么没在读取时写回库**：列表查询是只读路径，顺手 `UPDATE` 会把"看一眼产品列表"变成事务；
+  脏前缀的正确清理是一次性的数据修复。
+- **验证**：`tsc -p tsconfig.electron.json` / `images:smoke` / `verify` 全绿；真库逐条路径 `fs.exists` 101/101。
+
+### Fixed · 拖动色名时误选中文字（2026-10-30）
+
+- **症状（用户口径）**：「多选拖动的时候会出现文字被选中的情况，虽然不影响功能但用户体验不好」。
+- **根因**：色名改成只读文本后整条 chip 都是拖动抓手，按住它移动会起一段浏览器原生的"刷蓝"选择；
+  多选整组拖过整页时选区还会跨到上面那排常用色。功能本身没坏 —— 纯粹是拖动手势与文本选择的冲突。
+- **修复**（`SkuMatrixEditor.vue`）：`onChipDown` 按下即锁（不等 6px 阈值 —— 原生选择是从"按下 + 移动"
+  起算的），锁期间在捕获阶段对 `selectstart` `preventDefault`，并清掉已有旧选区；松手 /
+  pointercancel / 窗口失焦（`abortDrag`）/ 组件卸载一律解锁。
+  **不用** `pointerdown.preventDefault()`：它会连带抑制兼容的 mousedown/click，点选就失效了；
+  **不用** CSS `user-select: none`：选择已经开始后改样式收不回来。
+- **冒烟**：`goods:ui` 的 `sku-drag-grab` 段增一条 —— 拖动中派发 `selectstart` 必须
+  `defaultPrevented=true`（三窗口遍全绿）。
+
+### Added · R1d：色名只读 + 点选归类 + 通用「常用色」组件（产品编辑页 / 归类核对页共用）（2026-10-30）
+
+- **动机（用户口径）**：「编辑产品中的颜色修改为不能修改，可以改成可多选，点击选中，批量拖动到常用色中选择颜色，
+  如果不存在颜色，可以在常用色后面新增颜色，这可以做成通用的页面或方法，可供产品编辑页和归类核对页使用」。
+- **色名只读、点行即选中**（`SkuMatrixEditor.vue`）：色名输入框撤掉（改色名的唯一路径 = 归类 / 合并，落库色名因此
+  永远取字典写法，界面不再产出第四种异写）；点颜色 chip 任意处 = 选中/取消（Shift 连选保留），
+  R1c 的「多选」显式开关一并撤掉（选中态本身已经可见，开关是第二套规则）。色名只读后整条 chip 都是拖动抓手，
+  不再有"input 里选文字"要保护；候选词浮层（suggest）整体删除 —— 点行选中之后，「常用色」那排本身就是候选列表。
+- **通用组件 `src/core/components/ColorPalette.vue`**：色点胶囊条（字典色 + 本矩阵已用色追加）、打勾 = 已在矩阵、
+  拖动落点高亮、末尾「＋ 新增颜色」inline 编辑器（Enter 确定 / Esc 取消，失败就地报错）。两个页面只接
+  「点 / 拖之后做什么」：产品矩阵 = 加行 / 归类 / 落点；归类核对页 = 写草稿色。共享服务
+  `src/core/services/colorDict.ts` 单例承载字典（失败回落 `COMMON_COLORS`），两个页面读到的是同一份。
+- **`md-color-create` 写通道**（`electron/master-data-handlers.ts`）：「＋ 新增颜色」的唯一落库路径；
+  空名 / 超 40 字 / **纯数字色号**拒绝（数字色是"还没定色"的证据，放进来"未分类"就变主数据了）；
+  同名幂等（`created:false` 返回既有行）。preload 消毒 + `types.ts` / `ipc.ts` 登记照旧四件套。
+- **归类核对页颜色格去下拉**（`ClassifyPanel.vue`）：有款色卡的行 = 「色点 + 当前色名」按钮（`data-color` 带当前值），
+  点开 Teleport 到 body 的小弹层复用 `ColorPalette`（compact，不开新增 —— 加款色是产品页的职责）；
+  没点名款 / 款还没录色的行仍是自由输入 + datalist 建议（不是下拉）。弹层带「清空颜色」，Esc / 遮罩关闭。
+- **回执互斥**（冒烟抓到的真问题）：单条归类/合并回执（8s）与批量「撤销」回执（12s）共用一行位置，此前旧的批量回执
+  会把新回执盖掉 ⇒ 现在**最新一条优先**（`flashHint` 清 `undoBulk`、`markBulk` 清 `mergeHint`）。这不只是显示：
+  `undoBulk` 存的是批量前的整矩阵快照，中间又动过别的再点撤销会把新改动一起抹掉 —— 让位顺带堵掉了这条路。
+- **冒烟适配**：`goods:ui` 颜色断言整体改写（`mxChip/mxNames/tapColorRow/ensureDictColor` 帮助函数；
+  改名走「点行选中 → 点常用色」；假桥 `mdColorCreate` 桩与真进程同闭环）；`today:ui` 颜色格
+  SELECT → 按钮 + 弹层流程（`clPickColor / clClearColor`；回车保存改派在行内勾选框上 —— 按钮上的 Enter
+  被组件刻意忽略，原生 Enter=点击会误开弹层）；`ipc:shape:smoke` 增 ⑬b 段 5 条（新增成功 / 同名幂等 /
+  空名与数字色被拒 / list 可查），68 → 74 项。假桥模板串里一处 `\d` 没双重转义（实际匹配字母 d）被 lint 抓出，已修。
+- **门禁实测**：`build` / `verify` / `verify:docs` / `lint`（0 error）/ `test`（1132 passed）/ `images:smoke` /
+  `schema:smoke` / `ipc:shape:smoke`(74) / `goods:ui`（宽 + 默认窗口 + 窄三遍）/ `today:ui` 全绿。
+
+### Added · R1c：颜色/尺码字典 IPC + SKU 矩阵「颜色工作台」（2026-10-30）
+
+- **字典只读 IPC**（`electron/master-data-handlers.ts`）：`md-color-list` / `md-size-list`，走 `handle` 契约（只返数据，
+  异常由 IPC 层包成 `{success:false}`）；`main.ts` / `preload.ts` / `src/types.ts` / `src/core/services/ipc.ts` 四处登记，
+  `src/core/services/ipc.ts` 侧是唯一渲染层入口。**写入仍然只有业务路径**（`ensureColorId` / `ensureSizeId` / `setColorAlias`）——
+  字典没有"界面上直接改主数据"的入口，避免一个色在字典与 `pl_variants` 文本列各写一半
+  （同日 R1d 起开了唯一一个界面写入口 `md-color-create`，见上条）。
+- **常用色由字典驱动**（`SkuMatrixEditor.vue`）：原来前端写死 10 个（`COMMON_COLORS`），现在渲染 `md_colors` 的 27 个
+  （`sort_order,id`），矩阵里字典没有的异写（`藏蓝` / `4` / 英文名）照旧追加在这一排后面 ⇒ 这一排同时回答
+  "还差哪些标准色没加"与"这些异写该归到哪个标准名"。字典取不到时回落 `COMMON_COLORS`（离线 / 首启不至于没有色卡）。
+- **「颜色工作台」：多选 + 批量归类 / 批量合并**。多选是**显式开关**（默认一个勾都不出现 —— 否则第一次点色名会被当成"选中"），
+  勾选支持 Shift 连选，选中后出现批量条（`已选 N 色` / 合并为一行 / 全选 / 取消选择）。从任一已选行起手拖动 = **整组**：
+  拖到「常用色」= 归类（落库色名取字典写法），拖到另一色 = 合并；拖动中的落点提示会说清"把 2 色归到「黑色」"。
+  落库语义仍是既有纯函数 `classifyMatrixColor` / `mergeMatrixColor` —— 批量只是**循环**，不新增任何写规则；
+  批量动作一律走 `markBulk`（12 秒「撤销」，与整行 / 整列开关同一条回执位），退出多选 / 任何行结构变化都清空勾选。
+- **修掉一处"写后立刻读"**（本次冒烟抓到的真 bug）：`matrix` 是 `defineModel`，props 模式下 `matrix.value = x` 只是 emit，
+  父组件的 prop 要等下一帧才回写 ⇒ 批量循环里每归一次就读回 `matrix.value` 会拿到**旧矩阵**，第二色会把第一色的结果整个覆盖
+  （实测：两色批量只归了后一个）。改为累加在**局部变量**上、最后一次写回；`addSize` 的焦点下标是同一类读后写（焦点落在倒数第二码），一并修。
+- **调色板不加下拉，靠收紧密度放 27 色**：高度仍是 24px（这是拖动的靶子，压扁就脱靶），改压字号 / 内边距 / 色点
+  （27 色正好两行）；「颜色」标签旁新增「多选 / 退出多选」开关。版式守卫的像素上限从 200 → 250 并写明理由 ——
+  矩阵可见性另由「≥7 行组合可见」那条守卫独立承担，不靠这一个像素数兜。
+- **新增冒烟**：`goods:ui` 增 `sku-batch-classify` 步（显式开关 / 整组拖动落点文案 / 归一成字典写法 / 撤销搬回两行 /
+  全选 / 合并为一行 / 退出多选 / 批量步零写入）；`ipc:shape:smoke` 增 ⑬ 段 10 条（通道在册、camelCase 形状、`sortOrder` 升序、
+  字典**不含**「未分类」与数字色、「别名」是逗号字符串），58 → 68 项。`pickCommon` 在多选且已选时改为批量归类（点常用色 = 归类）。
+- **文案守卫**：`tests/uxEntryNames.spec.ts` 新增豁免「常用色」（拖动提示里"拖到上面「常用色」"指的是同屏那一排色卡的标签字，
+  不是导航入口；存在性由 `goods:ui` 钉）。
+- **门禁实测**：`build` / `verify` / `verify:docs` / `lint`（0 error）/ `test`（1132 passed）/ `images:smoke` /
+  `ipc:shape:smoke`(68) / `goods:ui`（宽 + 默认窗口 + 窄三遍）全绿。
+
+### Changed · R1（S0a）主数据落地：三张图片表收口成唯一 `md_images`，颜色/尺码进字典（2026-10-30）
+
+- **动机（用户口径）**：图片/颜色/尺码是主数据，业务表只该存 id。旧实现有三张图片表（产品域 `pl_images`、
+  订单域 `oi_images`、商品覆盖图 `pl_item_images`）、两套落盘目录（`product-images/` 与 `order-images/`，只有后者进备份），
+  同指纹的图存成两份字节、两张表的 `AUTOINCREMENT` 各自从 1 起 ⇒ id 必然撞车（`order-image-land.ts` 记录的那次 P0：
+  "色图绑定成功"实际改掉的是另一张表的订单图）。颜色则散在 `oi_style_colors.color` / `pl_variants.color` /
+  `oi_color_aliases` 三套词表。
+- **新增主数据域**（`electron/master-data-db.ts`）：`md_images`（内容 SHA-256 唯一）/ `md_colors` / `md_sizes` /
+  `md_color_aliases`；**唯一落盘入口** `landImageBytes`（两级去重：URL 规范化指纹 → 内容指纹；单图 10MB 上限；
+  按文件头判格式），文件统一落 `userData/images/<sha256><ext>`，备份 / 体检 / 孤图清理 / 缩略图白名单都只认这一个目录。
+  `registerImageRow` 只登记"已经在 `images/` 里"的图（不写文件）。种子 27 色 + 10 码（`XXL→2XL` / `F→均码` 等别名），
+  **`未分类` 与平台数字色（`1`..`15`）不入字典** —— 那是"还没定色"的证据，不是主数据。
+- **删旧实现**：`pl_images` / `pl_item_images` / `oi_images` 的 DDL 与读写全删，以及 `oi_images` 上的识别流水线字段
+  （`status` / `result_json` / `error` / `style_color_id`，识别链已于 2026-10-28 整条退役）。
+  `oi_order_items` 旧 DDL 上的 `REFERENCES oi_images(id) ON DELETE CASCADE` 一并拆除 —— 父表删掉后它会让**所有**带图的
+  订单插入失败，而报错指向图片表、排查方向整个反掉。拆除顺序受两个 SQLite 硬约束约束（`PRAGMA foreign_keys` 在事务内是
+  no-op；`ALTER TABLE ... RENAME` 会改写别的表指向它的外键）⇒ `retireLegacyImageTables()` 只能「建新表 → 拷数据 → DROP → RENAME」。
+  旧图**改为「搬完再拆」**（2026-10-30 修订，原口径"零迁移"是按「未正式发布、无存量库」定的）：真库实测有 101 行
+  `oi_images` + 12 行 `pl_images` + **92 条「图 → 款色」绑定**，直接 DROP 等于把人工定款定色的积累清零。
+  新增一次性过渡件 `electron/legacy-image-migration.ts`（拆旧表前调用，窗口结束后可整文件删除）：
+  经 `landImageBytes` 搬进唯一 `images/` 仓（同内容收敛：113 行 → 101 张）、改写订单行 / 产品行 / 采集行的 `image_id`、
+  款色代表图按 `updated_at DESC` 落 1:1（同色多图其余留作普通图片）。两个坑记在这里：
+  ① 旧 `oi_order_items.image_id` 带 `REFERENCES oi_images` 外键 ⇒ **必须等重建表之后**才能改写，否则 `FOREIGN KEY constraint failed`；
+  ② 新旧 id 都从 1 起自增 ⇒ 逐条 `WHERE image_id = 旧id` 会把刚改好的行再改一次（真库 11 个带图产品被改 18 行），
+  改成「先全置负数、再落正数」的两阶段改写。
+- **款色代表图改为 1:1**：代表图从 `oi_images.style_color_id` 搬到 `oi_style_colors.image_id`。真库取证支持这条：
+  (店铺,商品ID,图片) 58 组 ⇔ (店铺,商品ID,Color) 58 组，图片→多色 0、色→多图 0。读取口径统一为
+  `ITEM_STYLE_COLOR_ID`（**行上的 `style_color_id` 优先、图上的代表款色回落**），拣货 / 拿货 / 利润五处共用这一份。
+- **跨域边登记**：`order-db` / `product-db` → `master-data-db` 两条边写进 `scripts/check-cross-domain-edges.mjs` 并注明理由
+  （这两个域现在只做"读 `local_path`"与"登记委托 `registerImageRow`"，二进制落盘仍只有 `landImageBytes` 一处）。
+- **新增门禁 `images:smoke`**（`scripts/master-data-db-smoke.cjs`，25 项 + 旧图搬迁 1 项）：唯一目录 / 两级去重（同图不同 URL 复用同一行 ——
+  "按图找色"的命入口）/ 拒绝路径（空、非图片、超 10MB）/ `registerImageRow` 不覆盖既有行 / 字典精确匹配不猜 /
+  别名全局 vs 款级 / 播种幂等 + 清库后自愈。
+- **两处冒烟口径按被测语义更新（不是"修红断言"）**：
+  ① `schema:smoke` [C] 的老库夹具改回**真表名** `oi_images`（v3 冻结 DDL 里写的就是它，拿 `md_images` 顶替会撞
+  `no such table: main.oi_images`）；② [H] 的"存量收口自动归款"断言改为 `07aaac3` 回退后的语义 ——
+  没有人工映射时行留 `style_color_id=0`、不许自动长款色；③ `picking:smoke` [7] 由"同图两色各归各色"改为
+  "同一张图只有一个色结论"（1:1 之后前者不可达）。
+- **明确不做（拆为 R1b / R2 / R4 / R5）**：`oi_style_colors.color → color_id`、`pl_variants` 加 `color_id`/`size_id` 并停写文本列、
+  `oi_color_aliases` 并入 `md_color_aliases`（都要改唯一键，跟 R2 的键改造同属一套事实）；删 `oi_styles`、`pl_variants` 文本列、
+  `pl_shop_sku` 的键改造各自留到 R2/R4/R5。
+- **门禁实测**：`build` / `verify`（跨域边 13 条在册）/ `verify:docs` / `lint`（0 error）/ `test`（1132 passed）/ `order:smoke` /
+  `product:smoke` / `product:sku:smoke` / `style:smoke` / `shop-item:smoke` / `picking:smoke` / `ipc:shape:smoke`(58) /
+  `schema:smoke` / `images:smoke`(25) 全绿。
+
 ### Docs · 删 3 份零引用孤儿 + 归档 11 份完结文档：`docs/` 90 → 87（2026-10-30）
 
 - **动机**：上一轮把 145 篇按天笔记蒸馏成 37 篇后，「多」集中到了 `plans/`(23) + `reviews/`(14) —— 它们不是同一类东西：
@@ -30,7 +387,7 @@
 - **归档而非删除**（11 份 → `docs/archive/{plans,reviews,baseline,requirements}/`）：直接删会让 `CHANGELOG` 里 23 处
   历史引用悬空；而 `check-doc-links.mjs` 的 `SKIP_DIRS` 含 `archive`（脚本头部「已知覆盖边界」已写明），归档件不再被扫描。
   ⚠️ 同轮发现一个**反直觉点**：`walk()` 从仓库根就跳过 `archive`，因此 `archive/` 下的文件**不在后缀索引里** ——
-  「裸写 `plans/X.md` 靠后缀匹配兜底」在这里不成立，必须显式改成 `archive/plans/X.md`（或 `../archive/...` 相对链接）。
+  「只写文件名、不带目录」靠后缀匹配兜底的那套写法在这里不成立，必须显式带上 `archive/` 前缀（或写 `../archive/...` 相对链接）。
   第一轮脚本按后缀假设只改了带 `docs/` 前缀的写法，门禁当场报出 20 余条悬空，才补了第二轮。
 - **指路型改指 / 事实型不改指**：`CHANGELOG` 那 23 处全是「见 X」的指路句，改指归档路径成立；另扫了一遍
   「新增 / 新建 / 创建」类事实句，命中的唯一一处指向的是**未归档**的 `GOODS_UX_REFACTOR_PLAN`，无需处理。

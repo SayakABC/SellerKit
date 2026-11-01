@@ -59,6 +59,10 @@ import type {
   ProductStatus,
   ProductListItem,
   ProductUpsertInput,
+  MdColorItem,
+  MdSizeItem,
+  ColorBoardItem,
+  ColorMergeOutcome,
   ProductSummary,
   ProductImportRowInput,
   ProductImportOutcome,
@@ -183,13 +187,6 @@ export interface ElectronApi {
   netRequest(payload: NetRequestPayload): Promise<ApiResult<NetRequestResult>>;
   // 订单归类模块（SQLite 指纹库 / 订单 / 主图）
   orderDbEnsure(): Promise<ApiResult<unknown>>;
-  orderImageFind(fingerprint: string): Promise<ApiResult<OrderImageRecord | null>>;
-  orderImageSave(payload: {
-    id: number;
-    status: 'done' | 'error';
-    resultJson?: string;
-    error?: string;
-  }): Promise<ApiResult<unknown>>;
   orderInsert(order: OrderRecord): Promise<ApiResult<{ id: number }>>;
   orderGroupStats(dimensions: string[]): Promise<ApiResult<GroupStat[]>>;
   /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total } */
@@ -257,8 +254,8 @@ export interface ElectronApi {
   }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
   /** 款选项列表（「归属款」下拉的数据源）：**产品库全集** + 每项的可选颜色 */
   orderStyleList(): Promise<ApiResult<StyleRecord[]>>;
-  /** 命名板（P3）：按 listing 分组的色键，未命名在前。只读。 */
-  orderVariantNaming(): Promise<ApiResult<VariantNamingBoard>>;
+  /** 命名板（P3）：按 listing 分组的色键，未命名在前。只读。`importDate` = 这一批的导入日 */
+  orderVariantNaming(payload?: { importDate?: string }): Promise<ApiResult<VariantNamingBoard>>;
   /** 给一个款色起名 —— 命名板唯一的写入口（同款重名/空名/超长由主进程拒绝） */
   /** 款的基本信息（命名板组头）：款名 + 厂家一次保存。`0` 厂家 = 清空。 */
   orderStyleBasics(payload: {
@@ -475,6 +472,26 @@ export interface ElectronApi {
   companyProfileDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
   // ---- 产品库（产品主数据；编码为跨域关联锚点，与 oi_styles.code 同口径）----
   productDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+  // ---- 主数据字典（颜色 / 尺码）----
+  mdColorList(): Promise<ApiResult<{ colors: MdColorItem[] }>>;
+  /** 新增颜色（幂等：同名返回既有行；纯数字色号会被拒绝） */
+  mdColorCreate(payload: {
+    name: string;
+    hex?: string;
+  }): Promise<ApiResult<{ color: MdColorItem | null; created: boolean }>>;
+  /** 更新某个字典色的色块 hex（只改显示，不改名字） */
+  mdColorUpdateHex(payload: {
+    id: number;
+    hex: string;
+  }): Promise<ApiResult<{ color: MdColorItem | null }>>;
+  /** 颜色板（字典 ∪ 业务表里出现过的色名 + 用量） */
+  mdColorBoard(): Promise<ApiResult<{ rows: ColorBoardItem[] }>>;
+  /** 颜色合并（真改业务数据；保留名不许是数字色号） */
+  mdColorMerge(payload: {
+    source: string;
+    target: string;
+  }): Promise<ApiResult<{ result: ColorMergeOutcome }>>;
+  mdSizeList(): Promise<ApiResult<{ sizes: MdSizeItem[] }>>;
   productList(payload?: {
     search?: string;
     status?: ProductStatus | '';
@@ -529,6 +546,8 @@ export interface ElectronApi {
   }): Promise<ApiResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>>;
   productSkuMap(payload: {
     rows: SkuMapInputPayload[];
+    /** 是否顺手采纳商品图（缺省 true；向导取消勾选时传 false） */
+    adoptImages?: boolean;
   }): Promise<
     ApiResult<{
       created: number;
@@ -539,6 +558,11 @@ export interface ElectronApi {
     }>
   >;
   productSkuInvalidate(payload: { id: number }): Promise<ApiResult<{ changed: boolean }>>;
+
+  /** 存量补图（只补空、不覆盖；打开「款与商品」时顺带跑一轮） */
+  productSkuRepairImages(payload?: {
+    limit?: number;
+  }): Promise<ApiResult<{ adopted: number; pending: number }>>;
   // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
   productVariantList(payload: {
     productIds: number[];
@@ -1386,6 +1410,51 @@ export function productDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
   return ipc.productDbEnsure();
 }
 
+/** 主数据：颜色字典（启用中，按 sort_order；hex 空串 = 无标准色值） */
+export function mdColorList(): Promise<ApiResult<{ colors: MdColorItem[] }>> {
+  return ipc.mdColorList();
+}
+
+/**
+ * 主数据：新增颜色（「常用色」末尾的「＋ 新增颜色」）。
+ * 只写字典，不给当前款加色；同名幂等（`created=false`）。
+ */
+export function mdColorCreate(payload: {
+  name: string;
+  hex?: string;
+}): Promise<ApiResult<{ color: MdColorItem | null; created: boolean }>> {
+  return ipc.mdColorCreate(payload);
+}
+
+/** 更新某个字典色的色块 hex（只改显示，不改名字；空串 = 没有标准色值） */
+export function mdColorUpdateHex(payload: {
+  id: number;
+  hex: string;
+}): Promise<ApiResult<{ color: MdColorItem | null }>> {
+  return ipc.mdColorUpdateHex(payload);
+}
+
+/** 颜色板：字典色 + 只在业务表里出现的色名（「颜色」页签的列表） */
+export function mdColorBoard(): Promise<ApiResult<{ rows: ColorBoardItem[] }>> {
+  return ipc.mdColorBoard();
+}
+
+/**
+ * 颜色合并：把源色整体并进保留色。
+ * ⚠️ 真改业务数据（款色 / SKU / 别名归到保留色），不是只记别名。
+ */
+export function mdColorMerge(payload: {
+  source: string;
+  target: string;
+}): Promise<ApiResult<{ result: ColorMergeOutcome }>> {
+  return ipc.mdColorMerge(payload);
+}
+
+/** 主数据：尺码字典（启用中，含别名） */
+export function mdSizeList(): Promise<ApiResult<{ sizes: MdSizeItem[] }>> {
+  return ipc.mdSizeList();
+}
+
 /** 产品列表（关键字 / 状态 / 厂家过滤 + 分页；按编码升序） */
 export function productList(payload?: {
   search?: string;
@@ -1488,6 +1557,7 @@ export function productSkuQueue(payload?: {
 /** 批量关联 / 改绑（单事务；行级失败逐行报回） */
 export function productSkuMap(payload: {
   rows: SkuMapInputPayload[];
+  adoptImages?: boolean;
 }): Promise<
   ApiResult<{
     created: number;
@@ -1503,6 +1573,13 @@ export function productSkuMap(payload: {
 /** 标失效（商品ID 会变；不物理删除） */
 export function productSkuInvalidate(id: number): Promise<ApiResult<{ changed: boolean }>> {
   return ipc.productSkuInvalidate({ id });
+}
+
+/** 存量补图（只补空、不覆盖；`pending` = 本轮之后仍缺主图的款数） */
+export function productSkuRepairImages(payload?: {
+  limit?: number;
+}): Promise<ApiResult<{ adopted: number; pending: number }>> {
+  return ipc.productSkuRepairImages(payload);
 }
 
 /** 按款批量拉 SKU（pl_variants） */

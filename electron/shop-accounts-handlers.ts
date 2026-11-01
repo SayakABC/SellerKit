@@ -1,5 +1,5 @@
 // electron/shop-accounts-handlers.ts
-// 「店铺账号」合并域 IPC（店铺与账号是同一行；见 docs/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md）。
+// 「店铺账号」合并域 IPC（店铺与账号是同一行；见 docs/archive/plans/SHOP_ACCOUNT_REDESIGN_PLAN.md）。
 //   shop-account-db-ensure   幂等建表 / 迁移（视图首次激活时调用）
 //   shop-account-list        合并列表（含企业 / 手机号 / 支付宝 / 工具账号；永不含明文密码）
 //   shop-account-get         单行详情（含解密敏感字段，仅编辑 / 复制时使用）

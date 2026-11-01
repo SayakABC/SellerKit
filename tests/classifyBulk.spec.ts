@@ -6,7 +6,14 @@
 //     全按「款 + 色」匹配，错了不会报错、只会**少件**。
 // 两者都是"批量"这个动作的放大效应：错一行是错一行，错一批就是一批。
 import { describe, expect, it } from 'vitest';
-import { groupByProduct, pickColorFor, productKeyOf, type BulkGroupView } from '@/lib/classifyBulk';
+import {
+  colorOptionsOf,
+  groupByProduct,
+  pickColorFor,
+  productKeyOf,
+  type BulkColorRow,
+  type BulkGroupView,
+} from '@/lib/classifyBulk';
 import type { OrderRecord } from '@/types';
 
 /** 只造这些规则读得到的字段（其余用不到，硬凑满 OrderRecord 会让夹具掩盖真实依赖） */
@@ -151,5 +158,60 @@ describe('pickColorFor：批量时替人把颜色对上（对不上就不动它�
     // 色卡是主数据，理论上不该有空串；真出现时宁可不猜（返回空让用户处理）
     const o = row({ id: 1, color: '青', styleColor: '' });
     expect(pickColorFor(o, [''])).toBe('');
+  });
+});
+
+describe('colorOptionsOf：批量定色的覆盖账（点之前就要知道会改几行）', () => {
+  /** 只造这个规则读得到的字段 */
+  function cRow(p: Partial<BulkColorRow> & { id: number }): BulkColorRow {
+    return { orderNo: `NO${p.id}`, styleCode: '', color: '', palette: [], ...p };
+  }
+
+  it('候选色 = 各款色卡的**并集**，顺序按首次出现（不是字典序，也不是排行榜）', () => {
+    const opts = colorOptionsOf([
+      cRow({ id: 1, styleCode: 'S1', palette: ['黑', '白'] }),
+      cRow({ id: 2, styleCode: 'S2', palette: ['蓝', '黑'] }),
+    ]);
+    expect(opts.map((o) => o.name)).toEqual(['黑', '白', '蓝']);
+  });
+
+  it('`change` 与 `same` 分开算：已是这个色的行不该被重复写一遍', () => {
+    const opts = colorOptionsOf([
+      cRow({ id: 1, styleCode: 'S1', color: '黑', palette: ['黑', '白'] }),
+      cRow({ id: 2, styleCode: 'S1', color: '白', palette: ['黑', '白'] }),
+    ]);
+    const black = opts.find((o) => o.name === '黑')!;
+    expect(black.change).toBe(1);
+    expect(black.same).toBe(1);
+    expect(black.miss).toBe(0);
+  });
+
+  it('色卡里没有这个色 / 还没点名款 ⇒ 都算"不适用"，但 `noStyle` 单独数出来', () => {
+    // 这三行分别代表：能改、色卡没有、连款都没有。混在一起就会把"先去定款"说成"去加色"。
+    const opts = colorOptionsOf([
+      cRow({ id: 1, orderNo: 'A1', styleCode: 'S1', palette: ['黑'] }),
+      cRow({ id: 2, orderNo: 'A2', styleCode: 'S9', palette: [] }),
+      cRow({ id: 3, orderNo: 'A3', styleCode: '', palette: [] }),
+    ]);
+    const black = opts.find((o) => o.name === '黑')!;
+    expect(black.change).toBe(1);
+    expect(black.miss).toBe(2);
+    expect(black.noStyle).toBe(1);
+    expect(black.missNos).toEqual(['A2', 'A3']);
+  });
+
+  it('全都已经是这个色 ⇒ 仍然列出来，但 change = 0（弹层据此把它做成点不动）', () => {
+    const opts = colorOptionsOf([
+      cRow({ id: 1, styleCode: 'S1', color: '黑', palette: ['黑'] }),
+      cRow({ id: 2, styleCode: 'S1', color: '黑', palette: ['黑'] }),
+    ]);
+    expect(opts).toHaveLength(1);
+    expect(opts[0].change).toBe(0);
+    expect(opts[0].same).toBe(2);
+  });
+
+  it('空输入 / 款色卡都为空 ⇒ 空数组（弹层显示"先定款"，不抛错）', () => {
+    expect(colorOptionsOf([])).toEqual([]);
+    expect(colorOptionsOf([cRow({ id: 1, styleCode: 'S9' })])).toEqual([]);
   });
 });

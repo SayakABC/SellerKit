@@ -38,7 +38,7 @@ const DB = join(userDataDir(), 'sellerkit.db');
 const CLEAR = [
   // A 订单与派生（含 B1 拆表 / B2 包裹）
   'ae_settle_lines',
-  'oi_orders', 'oi_order_items', 'oi_images', 'parcels', 'parcel_lines',
+  'oi_orders', 'oi_order_items', 'parcels', 'parcel_lines',
   'oi_styles', 'oi_style_colors', 'oi_style_fingerprints', 'oi_variant_keys',
   'oi_style_merges', 'oi_style_merge_items', 'oi_item_parts',
   'sr_rate_snapshots',
@@ -47,8 +47,9 @@ const CLEAR = [
   // C 邮件（账号行跟着店铺走：外键指向 sk_shops，清店铺时一并清，否则留下孤儿账号）
   'sk_mail_accounts', 'sk_mail_messages', 'sk_mail_bodies', 'sk_mail_attachments',
   'sk_mail_attachment_cache', 'sk_mail_folders', 'sk_mail_meta',
-  // D 主数据（全流程从零演练；含色名别名、店铺商品快照与工具账号）
-  'pl_products', 'pl_variants', 'pl_images', 'pl_item_images', 'pl_shop_sku', 'oi_color_aliases',
+  // D 主数据（全流程从零演练；图片仓 / 颜色尺码字典 / 店铺商品快照与工具账号）
+  'pl_products', 'pl_variants', 'pl_shop_sku',
+  'md_images', 'md_colors', 'md_sizes', 'md_color_aliases',
   'sk_shops', 'sk_tool_accounts', 'sk_name_map', 'pl_shop_items', 'pl_shop_store_keys',
   // E 记账（2026-10-25 新增域；子表在前：结算行 → 结算单 → 分摊行/方案 → 条目 → 承接 → 相关人/科目）
   'bk_settlement_lines', 'bk_settlements', 'bk_allocations', 'bk_allocation_rules',

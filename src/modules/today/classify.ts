@@ -8,7 +8,7 @@
 //    `src/core/ai` / 「设置 › 识别」页 / `order-api-key-*` 两个通道）。原因是它们自 2026-10-05
 //    起就**零调用方**（「识别未归类」按钮当时已删），而用户已决定不接云端模型 ——
 //    留着就是"用户配了 Key、没有任何地方会用它"的只写不读。判断与替代路线见
-//    `docs/notes/2026-10-28-classify-local-vision-direction.md`。**别再往这里加识别入口**：
+//    `docs/notes/2026-10-30-order-classify-panel.md`。**别再往这里加识别入口**：
 //    本地视觉方案（像素特征/颜色检索）落点在 `src/lib/imageFeatures.ts` + 主进程解码，
 //    与云端引擎无关。
 //
@@ -108,9 +108,12 @@ export async function listStyleOptions(): Promise<StyleRecord[]> {
  *
  * 失败抛错（与 `listPending` 同口径）：静默空表会被读成"没有要命名的"，
  * 而那恰好是本页动作的反面。
+ *
+ * `importDate`：只算**这一批导入日**里的订单（与「待核对」同一批）——
+ * 键表是跨批次的记忆，不筛会把十几天累积的色全铺出来。
  */
-export async function loadNamingBoard(): Promise<VariantNamingBoard> {
-  const r = await ipc.orderVariantNaming();
+export async function loadNamingBoard(importDate = ''): Promise<VariantNamingBoard> {
+  const r = await ipc.orderVariantNaming(importDate ? { importDate } : undefined);
   if (!r.success) throw new Error(r.error || '读取待命名颜色失败');
   return r.data ?? { groups: [], unnamedKeys: 0, totalKeys: 0 };
 }

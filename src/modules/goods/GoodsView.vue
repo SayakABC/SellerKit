@@ -142,6 +142,7 @@
         v-if="GOODS_LAYOUT === 'workbench' && tab === 'workbench'"
         :refresh-nonce="refreshNonce"
         :go-registry="goRegistry"
+        @images-adopted="refresh"
       />
       <!-- 「商品清单」页签当前**收起**（见 `SHOP_PRODUCTS_TAB_ENABLED`）：分支与组件保留在这里，
            是为了要放回来时只改那一个常量。`tab` 永远取不到这个值，所以这段是不渲染的死代码 ——
@@ -209,7 +210,7 @@ type TabId = GoodsTabId;
 /**
  * 「商品清单」页签**暂时收起**（2026-10-08）。
  *
- * 判据是"有没有下游消费者"（同 `docs/notes/2026-10-01-ui-island-retirement` 的域删除判据）：
+ * 判据是"有没有下游消费者"（同 `docs/notes/2026-10-30-island-publish-and-retire` 的域删除判据）：
  * 这一页签的产出是 `pl_shop_sku` 的**池行**（`source='shop-import'` / `shop_id=0`），
  * 而订单归款 / 拣货 / 算钱一律走它的**补集** `skuMappingSql()` —— `skuPoolSql()` 全仓只有
  * `electron/shop-product-db.ts` 自己用。也就是：用户在这里导入商品、关联产品之后，

@@ -42,6 +42,8 @@ require('./shop-accounts-handlers');
 require('./company-handlers');
 // 产品库 IPC（产品主数据 CRUD + 汇总；pl_products 属主数据层，随宿主分发 —— ADR-002 C3）
 require('./product-handlers');
+// 主数据字典 IPC（颜色 / 尺码的只读面；R1 / S0a）
+require('./master-data-handlers');
 // 店铺实体 IPC（sk_shops / sk_name_map：店铺登记 + 两处历史店铺名的归一）
 // 同属主数据层，随宿主分发 —— 历史文本不改写，靠映射旁挂关联（DOMAIN_INTEGRATION_PLAN S1/G2）
 require('./shop-handlers');

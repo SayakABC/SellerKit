@@ -9,7 +9,7 @@
 // ⚠️ 2026-10-17：那个页面改名叫「统计」（`order-cost` 的 `name`），且成本表与汇率维护已搬到
 //   「基础数据」⇒ 下方 tip-card 的文案跟着改。**本次没发版**：用户手上已装的旧岛仍写「算钱」，
 //   要让这行文案到用户手里得走发布四步（打包 → market-out commit → publish → 安装），见
-//   `docs/notes/2026-09-30-island-publish-runbook.md`。
+//   `docs/notes/2026-10-30-island-publish-and-retire.md`。
 
 import { computed, onMounted, ref } from 'vue';
 import { aeDbEnsure, aeReceiverStatus } from '@/core/services/ipc';

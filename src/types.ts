@@ -53,13 +53,6 @@ export interface ElectronAPI {
   netRequest: (payload: NetRequestPayload) => Promise<APIResult<NetRequestResult>>;
   // 订单归类模块（SQLite 指纹库 / 订单 / 主图）
   orderDbEnsure: () => Promise<APIResult<void>>;
-  orderImageFind: (fingerprint: string) => Promise<APIResult<OrderImageRecord | null>>;
-  orderImageSave: (payload: {
-    id: number;
-    status: 'done' | 'error';
-    resultJson?: string;
-    error?: string;
-  }) => Promise<APIResult<void>>;
   orderInsert: (order: OrderRecord) => Promise<APIResult<{ id: number }>>;
   orderGroupStats: (dimensions: string[]) => Promise<APIResult<GroupStat[]>>;
   /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total }；列表不含 raw_fields */
@@ -180,7 +173,10 @@ export interface ElectronAPI {
    * 命名板（P3）：按 listing 分组的色键，未命名在前。
    * 只读；写走 {@link orderVariantRename}。
    */
-  orderVariantNaming: () => Promise<APIResult<VariantNamingBoard>>;
+  orderVariantNaming: (payload?: {
+    /** 这一批的导入日（`YYYY-MM-DD`，与「待核对」同一批）；不传 = 不筛 */
+    importDate?: string;
+  }) => Promise<APIResult<VariantNamingBoard>>;
   /**
    * 给一个款色起名 —— 命名板**唯一**的写入口。
    * 同款重名 / 空名 / 超长会被主进程拒绝（`ok:false` + 原话），不静默改。
@@ -645,6 +641,33 @@ export interface ElectronAPI {
   // ---- 产品库（产品主数据：编码 / 名称 / 厂家 / 类目；编码为跨域关联锚点，与 oi_styles.code 同口径）----
   /** 幂等建表（视图首次激活时调用） */
   productDbEnsure: () => Promise<APIResult<{ ok: boolean }>>;
+  // ---- 主数据字典（颜色 / 尺码；只读面）----
+  /** 颜色字典（启用中，按 sort_order；hex 空串 = 无标准色值） */
+  mdColorList: () => Promise<APIResult<{ colors: MdColorItem[] }>>;
+  /**
+   * 新增颜色到字典（「常用色」末尾的「＋ 新增颜色」）。
+   * 幂等：同名已存在时 `created=false` 并返回既有行；纯数字色号会被拒绝。
+   */
+  mdColorCreate: (payload: { name: string; hex?: string }) => Promise<
+    APIResult<{ color: MdColorItem | null; created: boolean }>
+  >;
+  /** 更新某个字典色的色块 hex（只改显示，不改名字；空串 = 没有标准色值） */
+  mdColorUpdateHex: (payload: {
+    id: number;
+    hex: string;
+  }) => Promise<APIResult<{ color: MdColorItem | null }>>;
+  /** 颜色板（字典 ∪ 业务表里出现过的色名 + 用量；「颜色」页签） */
+  mdColorBoard: () => Promise<APIResult<{ rows: ColorBoardItem[] }>>;
+  /**
+   * 颜色合并（把源色整体并进保留色）。
+   * ⚠️ 真改业务数据（款色 / 产品 SKU / 别名归到保留色）；保留名不许是数字色号。
+   */
+  mdColorMerge: (payload: {
+    source: string;
+    target: string;
+  }) => Promise<APIResult<{ result: ColorMergeOutcome }>>;
+  /** 尺码字典（启用中，含别名） */
+  mdSizeList: () => Promise<APIResult<{ sizes: MdSizeItem[] }>>;
   /** 产品列表（关键字 / 状态 / 厂家过滤 + 分页；按编码升序） */
   productList: (payload?: {
     search?: string;
@@ -733,6 +756,10 @@ export interface ElectronAPI {
    *  `adopted` = 顺手把订单图采纳为**款主图**的张数（只补空、已有主图的款不动） */
   productSkuMap: (payload: {
     rows: SkuMapInputPayload[];
+    /** 是否顺手把商品图采纳为款主图（缺省 true = 认款就补图）。
+     *  显式 false 只来自「建档并关联」向导里用户取消勾选「采纳为款主图」——
+     *  此时不能绕过人的选择去下载/采纳。 */
+    adoptImages?: boolean;
   }) => Promise<
     APIResult<{
       created: number;
@@ -744,6 +771,14 @@ export interface ElectronAPI {
   >;
   /** 标失效（商品ID 会变；**不物理删除**，否则关联率莫名回落且查不出原因） */
   productSkuInvalidate: (payload: { id: number }) => Promise<APIResult<{ changed: boolean }>>;
+  /**
+   * 存量补图：把「已确认认款、但款还没主图」的商品图（本地订单图 + 采集远程图）补上。
+   * 只补空、不覆盖；`pending` = 这一轮之后仍有几个款没补上（下载失败/超出单轮上限）。
+   */
+  productSkuRepairImages: (payload?: {
+    /** 单轮最多下载几张远程图（缺省/非法 = 40，硬上限同主进程） */
+    limit?: number;
+  }) => Promise<APIResult<{ adopted: number; pending: number }>>;
   // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
   productVariantList: (payload: { productIds: number[] }) => Promise<APIResult<{ rows: VariantRow[] }>>;
   productVariantUpsert: (payload: VariantUpsertInput) => Promise<APIResult<{ id: number; created: boolean }>>;
@@ -1022,6 +1057,70 @@ export interface APIResult<T> {
   error?: string;
 }
 
+/**
+ * 主数据：颜色字典行（`md_colors`，只读面）。
+ *
+ * `hex` 空串 = 这一色没有标准色值（如「印花多色」）——界面给中性灰，**不要**按色名猜一个。
+ */
+export interface MdColorItem {
+  id: number;
+  name: string;
+  hex: string;
+  sortOrder: number;
+  status: string;
+}
+
+/**
+ * 颜色板的一行（`md-color-board`）：一个色名 + 它在三个业务面各用了多少。
+ *
+ * `colorId = 0` 表示它只在业务表里（还没进字典）；`numeric` = 平台数字色号
+ * （只能当合并的源，不能当保留名 —— 与 `md-color-create` 同一条校验）。
+ */
+export interface ColorBoardItem {
+  name: string;
+  colorId: number;
+  hex: string;
+  /** 用到它的款数（`oi_style_colors` 去重 style_id） */
+  styles: number;
+  /** 它的 SKU 数（`pl_variants`） */
+  skus: number;
+  /** 指向它的订单明细行数 */
+  orders: number;
+  inDict: boolean;
+  numeric: boolean;
+  /**
+   * 这个色名的**代表款图**本地路径（`oi_style_colors.image_id` → `md_images.local_path`）。
+   *
+   * 数字色号 / 平台原文色名只有字符串（`5` 是红是蓝看不出来），归一列表靠这张图让用户
+   * 认得出该并给谁。空串 = 该色在款色表里还没有图（界面画空占位，不拿中性灰冒充）。
+   */
+  imagePath: string;
+}
+
+/** 颜色合并回执（`md-color-merge`）：说清"动了多少"，界面据此给一句可核对的回执 */
+export interface ColorMergeOutcome {
+  source: string;
+  target: string;
+  dictRemoved: number;
+  aliases: number;
+  styleRenamed: number;
+  styleMerged: number;
+  orders: number;
+  keys: number;
+  parts: number;
+  skusRenamed: number;
+  skusMerged: number;
+}
+
+/** 主数据：尺码字典行（`md_sizes`，只读面）。`aliases` 是逗号分隔的平台写法 */
+export interface MdSizeItem {
+  id: number;
+  name: string;
+  sortOrder: number;
+  sizeGroup: string;
+  aliases: string;
+}
+
 /** 主进程扫描到的外置插件目录条目（manifest.json 解析原始内容 + 派生信息） */
 export interface PluginScanItem {
   /** 目录名（应等于 manifest.name） */
@@ -1103,25 +1202,18 @@ export interface ProcessingRule {
   };
 }
 
-/** 订单主图指纹记录（SQLite oi_images 表） */
+/** 图片记录（`md_images` 主数据行；R1 起全项目只有这一张图片表，无识别流水线字段） */
 export interface OrderImageRecord {
   id?: number;
-  /** 内容指纹 SHA-256 */
+  /** 内容指纹 SHA-256（唯一；文件名就是它） */
   fingerprint: string;
-  /** URL 规范化指纹 */
+  /** URL 规范化指纹（同图不同签名参数去重；普通索引，不做唯一） */
   urlFingerprint: string;
   sourceUrl: string;
+  /** 本地绝对路径（`userData/images/<fingerprint><ext>`） */
   localPath: string;
-  status: 'pending' | 'done' | 'error';
-  /** AI 识别结果 JSON 原文 */
-  resultJson?: string;
-  /** AI 识别结果（解析后） */
-  result?: Record<string, unknown>;
-  error?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  /** 归属款色 id（oi_style_colors，识别确认后挂接） */
-  styleColorId?: number;
+  /** 来源标记：order-image / product-image / shop-item / upload …（只用于排查，不参与判定） */
+  source: string;
 }
 
 /** 订单明细（SQLite oi_orders 表） */
@@ -2363,7 +2455,7 @@ export interface ShopGateRow {
  * 门 1（店铺归一）的派生状态。`pending` 为空 = 门是开的。
  *
  * ⚠️ **不阻断任何按钮**：它保护的是"数字口径"（同一家店被当成两家 ⇒ 同一件货在统计里两行），
- *    不是某个动作。理由见 `docs/notes/2026-10-28-order-driven-classify-plan.md` §9.9。
+ *    不是某个动作。理由见 `docs/notes/2026-10-30-order-purchase-grid.md` §9.9。
  */
 export interface ShopGate {
   pending: ShopGateRow[];
@@ -2799,6 +2891,12 @@ export interface OrderCoverageRow {
   size: string;
   qty: number | null;
   rawFields: Record<string, string>;
+  /**
+   * 这一行的色图（本地路径；'' = 没图）。取图优先级与拣货投影同一条：
+   * 款色代表图（`oi_style_colors.image_id`）→ 本行订单图（`oi_order_items.image_id`）。
+   * 按单核对要能"看图核对"，所以这个字段必须在。
+   */
+  imagePath: string;
   covered: number;
   unclassified: boolean;
 }

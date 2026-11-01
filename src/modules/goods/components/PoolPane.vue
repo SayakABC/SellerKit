@@ -975,6 +975,11 @@ const emit = defineEmits<{
    * 把"还没拉过"当成"没有待办"，界面就会说出一个它不知道的结论。
    */
   'queue-groups': [groups: number | null];
+  /**
+   * 存量补图补到了款主图（>0 张）：外壳据此重拉同屏两栏 —— 左栏的产品列表归它自己管，
+   * 右栏说"补了 N 张"却不重拉，用户看到的就是"提示说补了、列表还是白图"。
+   */
+  'images-adopted': [];
 }>();
 
 const {
@@ -1103,6 +1108,8 @@ const {
   selectedProduct: () => props.product,
   // 右栏的合并段（待认）—— 首屏就要两源一起拉，见 `SkuPoolOptions.initialSub`
   initialSub: 'pending',
+  // 存量补图补到了款主图 → 请外壳重拉（左栏产品图由 `useProductList` 自己管）
+  onImagesAdopted: () => emit('images-adopted'),
 });
 
 /**

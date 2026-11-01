@@ -9,7 +9,7 @@
 //
 // ⚠️ **2026-10-28 删掉了唯一一条贡献「识别 › 识别引擎」**（`RecognitionSettings.vue`）：
 //   它配的是云端 VLM 的 provider / model / API Key，而那条识别链自 2026-10-05 起零调用方，
-//   用户已决定不接云端模型（判断见 `docs/notes/2026-10-28-classify-local-vision-direction.md`）。
+//   用户已决定不接云端模型（判断见 `docs/notes/2026-10-30-order-classify-panel.md`）。
 //   留着它的唯一效果是"用户填了 Key、没有任何地方会用它"。
 //
 // 新增一条宿主设置：写一个面板组件 + 在下面数组里加一项（别再往 SettingsModal 里塞硬编码分类）。

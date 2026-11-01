@@ -3,7 +3,7 @@
 // 守卫：**凡是要嵌邮件正文的页面，两层 CSP 都必须放行 `frame-src sk-mail:`**。
 //
 // 为什么单独立一条（2026-10-04 实测事故）：
-//   邮件正文跑在宿主的 `sk-mail://` 独立来源文档里（见 docs/notes/2026-10-04-mail-inline-images.md）。
+//   邮件正文跑在宿主的 `sk-mail://` 独立来源文档里（见 docs/notes/2026-10-30-mail-and-today-pages.md）。
 //   它能被嵌进去，需要**同时**满足两层 CSP —— CSP 是取交集的，任何一层缺这条就直接废掉整个 Frame：
 //     ① 宿主下发到岛页面的响应头 `UI_CSP`（electron/plugin-ui-protocol.ts）
 //     ② **岛自带的 index.html 里的 `<meta http-equiv="Content-Security-Policy">`**

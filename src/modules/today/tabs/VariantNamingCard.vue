@@ -5,29 +5,24 @@
           命名 = 那个款色叫什么（只有人能回答，且**可以永远不做**）。
        所以本卡不给任何"未完成就走不下去"的暗示：没有名字的色在统计与拿货里照样出数，
        只是显示成平台原文（`5` / `Picture color4`）。 -->
-  <section class="wb-panel vn" data-act="vn-panel">
+  <section class="wb-panel vn" data-act="vn-panel" @click.capture="onRootClickCapture">
     <div class="wb-panel__head vn-head">
       <div class="vn-head__text">
         <strong class="vn-title">颜色叫什么</strong>
         <!-- 计数只有一处：面板标题旁。它同时是"要不要展开"的理由 ——
-             0 个待办时整张卡收成一行，用户在核对页看不到多余的东西。 -->
+             0 个待办时整张卡收成一行，用户在核对页看不到多余的东西。
+             ⚠️ `totalKeys` 现在只算**这一批导入日**（与「待核对」同一批），所以 0 的两种含义要分开说：
+                 · 这批里没有订单行 ⇒ 「还没有要起名的颜色」（不是"全都起完了"）；
+                 · 这批有订单、但色全起过名 ⇒ 「全都起过名了」。 -->
         <span class="wb-muted vn-count" data-act="vn-count">
           <template v-if="board.unnamedKeys > 0">
             还有 <b>{{ board.unnamedKeys }}</b> 个颜色是平台原文，共 {{ board.totalKeys }} 个
           </template>
-          <template v-else>全部 {{ board.totalKeys }} 个颜色都起过名了</template>
+          <template v-else-if="board.totalKeys > 0">全部 {{ board.totalKeys }} 个颜色都起过名了</template>
+          <template v-else>这一批还没有要起名的颜色</template>
         </span>
       </div>
       <div class="vn-head__ops">
-        <button
-          v-if="board.unnamedKeys === 0 && board.totalKeys > 0"
-          type="button"
-          class="wb-btn wb-btn--sm"
-          data-act="vn-toggle-all"
-          @click="showAll = !showAll"
-        >
-          {{ showAll ? '收起' : '查看全部颜色' }}
-        </button>
         <button
           v-if="board.unnamedKeys > 0"
           type="button"
@@ -53,8 +48,40 @@
 
     <div v-if="visible" class="wb-panel__body vn-body">
       <p class="wb-muted vn-guide" data-act="vn-guide">
-        左边是订单图，右边填一个自家的叫法（例如 5 → 藏青）。填完按回车即存；不起名不影响统计和拿货。
+        这一块只列还没认颜色的订单色（起过名的不再出现）。点一个色格（例如「5」）→
+        上面点一个常用色 = 起名；也可以把色格直接拖到色卡上。存完自动跳到下一个没起名的色；
+        不起名不影响统计和拿货。
       </p>
+
+      <!-- 常用色（2026-10-30 用户口径：起名方式改成产品页 SKU 编辑那一套）。
+           一排色卡常驻在卡片顶部，点一颗 = 给"选中的色格"起名并保存。
+           为什么不再给每格一个输入框：色名就是款色库的色名（拿货单与统计直接读它），
+           手打会让 `黑 / 黑色 / Black` 各成一行 —— 同一件货在两张纸上分成三行。
+           「＋ 新增颜色」是字典里没有时的出口（只写字典，不给色格改名）。 -->
+      <div class="vn-palette" :class="{ 'is-dragging': drag.active }" data-act="vn-palette">
+        <span class="vn-palette__k" title="点一颗常用色 = 给选中的色格起名；也可以把色格拖到这里">
+          常用色
+        </span>
+        <ColorPalette
+          act="vn"
+          :colors="paletteColors"
+          :present="presentColors"
+          :current="activeName"
+          :disabled="busy > 0"
+          :dragging="drag.active"
+          :drop-color="drag.color"
+          drop-attr="data-vn-pc"
+          allow-add
+          compact
+          :title-for="pcTitle"
+          @pick="pickColor"
+          @added="onPaletteAdded"
+        />
+        <span class="vn-sel-hint wb-muted" data-act="vn-sel-hint">{{ selHint }}</span>
+        <button v-if="selected" type="button" class="wb-link" data-act="vn-sel-clear" @click="selectedId = 0">
+          取消选择
+        </button>
+      </div>
 
       <!-- 一个 listing 一块：一个 listing 常有 4-6 个色键，必须**一屏填完**，
            做成"点开一个、填一个、关掉"就是用户抱怨过的四个动作再来一遍。 -->
@@ -72,17 +99,14 @@
           <span class="wb-muted vn-group__meta">
             <template v-if="g.shop">{{ g.shop }} · </template>{{ g.itemId }}
           </span>
-          <span v-if="g.colors.length" class="wb-muted vn-group__meta">
-            · {{ g.colors.length }} 色
-          </span>
-          <!-- 组内进度：一屏只铺 6 个 listing，人需要一个"这一组填完了没"的读数，
-               否则最后一个色存完也不知道能不能往下走。 -->
+          <!-- 只数**还没认**的：这一块现在是"待办清单"，已起名的色根本不渲染
+               （2026-10-30 用户口径「只展示订单中没有认颜色的数据」）。 -->
           <span
-            v-if="leftOf(g) > 0"
+            v-if="unnamedOf(g).length"
             class="wb-muted vn-group__meta"
             :data-act="`vn-group-left-${g.itemId}`"
           >
-            · 还剩 {{ leftOf(g) }} 个没起名
+            · {{ unnamedOf(g).length }} 个没起名
           </span>
         </header>
 
@@ -135,11 +159,17 @@
 
         <div class="vn-grid">
           <div
-            v-for="c in g.colors"
+            v-for="c in unnamedOf(g)"
             :key="c.styleColorId"
             class="vn-cell"
-            :class="{ 'is-named': c.named }"
+            :class="{
+              'is-sel': selectedId === c.styleColorId,
+              'is-src': drag.active && drag.src === c.styleColorId,
+            }"
             :data-act="`vn-cell-${c.styleColorId}`"
+            :title="cellTitle(c)"
+            @pointerdown="onCellDown(c, $event)"
+            @click="onCellClick(c)"
           >
             <button
               type="button"
@@ -147,7 +177,7 @@
               :disabled="!c.localPath"
               :title="c.localPath ? '看原图' : '这条订单没有主图'"
               :data-act="`vn-thumb-${c.styleColorId}`"
-              @click="openImage(c)"
+              @click.stop="openImage(c)"
             >
               <img
                 v-if="c.localPath && thumbs[c.localPath]"
@@ -163,25 +193,27 @@
                 <span class="wb-muted">平台原文</span>
                 <code class="vn-raw" :data-act="`vn-raw-${c.styleColorId}`">{{ c.colorRaw || '（空）' }}</code>
               </div>
-              <div class="vn-cell__input">
-                <input
-                  class="wb-input wb-input--sm vn-input"
-                  :data-act="`vn-input-${c.styleColorId}`"
-                  :value="draftOf(c)"
-                  :placeholder="c.colorRaw || '起个名字'"
-                  maxlength="40"
-                  @input="onInput(c, ($event.target as HTMLInputElement).value)"
-                  @keyup.enter="saveOne(c, g)"
-                />
-                <button
-                  type="button"
-                  class="wb-btn wb-btn--sm"
-                  :data-act="`vn-save-${c.styleColorId}`"
-                  :disabled="!dirtyOf(c)"
-                  @click="saveOne(c, g)"
+              <!-- 色名**只读**（与产品页 SKU 编辑同一条口径）：改名的唯一路径是
+                   "选中这一格 → 点上面常用色 / 把这一格拖上去"，于是落库色名总是字典写法。
+                   选中标记常显（未选空框、已选打勾），点它和点整格等价。 -->
+              <div class="vn-cell__name">
+                <span
+                  class="vn-sel"
+                  :class="{ 'is-on': selectedId === c.styleColorId }"
+                  role="checkbox"
+                  :aria-checked="selectedId === c.styleColorId ? 'true' : 'false'"
+                  :aria-label="`选择${c.colorRaw || '这一色'}去起名`"
+                  :data-act="`vn-sel-${c.styleColorId}`"
+                  title="点一下选中这一格（再点上面常用色 = 起名）"
+                  >{{ selectedId === c.styleColorId ? '✓' : '' }}</span
                 >
-                  保存
-                </button>
+                <span
+                  class="vn-name"
+                  :class="{ 'is-empty': !c.named }"
+                  :data-act="`vn-name-${c.styleColorId}`"
+                  :title="c.named ? `现在叫「${c.colorName}」` : '还没起名：选中它，再到上面常用色里点一个'"
+                  >{{ c.named ? c.colorName : '还没起名' }}</span
+                >
               </div>
               <div class="vn-cell__foot wb-muted">
                 <span :data-act="`vn-qty-${c.styleColorId}`">{{ c.qty }} 件 / {{ c.orderRows }} 行</span>
@@ -223,8 +255,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ipc } from '@/core/services/ipc';
+// 「常用色」条与产品编辑页共用同一份字典、同一个组件（2026-10-30 用户口径）
+import ColorPalette from '@/core/components/ColorPalette.vue';
+import { colorDictNames, loadColorDict } from '@/core/services/colorDict';
+import { toast } from '@/core/services/toast';
 import { loadNamingBoard, renameVariantColor, saveVariantStyle } from '../classify';
 import { listSuppliers } from '../purchase';
 import { useShipping } from '../flowCtx';
@@ -238,23 +274,37 @@ import type {
 /**
  * 命名板（P3）。
  *
- * 三条设计纪律（每条都对应一个已踩过的坑）：
+ * 四条设计纪律（每条都对应一个已踩过的坑）：
  *   ① **可跳过**：不起名不影响统计与拿货 —— 卡上的计数说"还有 N 个"，不说"必须做完 N 个"。
  *      一旦做成前置，58 次输入就从可选变成门槛，等于把维护面换个名字搬回来。
- *   ② **一屏一批**：按 listing 分组，组内所有色键同时可见可填（不是逐键翻页）。
- *   ③ **保存是显式的**（回车 / 按钮），不做 blur 自动保存：色名会进拿货单，
- *      一次误触的失焦不该改变将要发给厂家的那张纸。
+ *   ② **一屏一批**：按 listing 分组，组内所有**未认**色键同时可见（不是逐键翻页）。
+ *   ③ **只列待办**（2026-10-30 用户口径「只展示订单中没有认颜色的数据，目的只为了能认款和色」）：
+ *      起过名的色不进渲染 —— 这块只服务"认款 + 认色"，为之后的拿货统计备口径；
+ *      要改已经起过的名，走「基础数据 › 产品管理」。
+ *   ④ **色名只能从常用色里挑**（2026-10-30 用户口径「改成编辑产品页 SKU 编辑的方式」）：
+ *      点一个色格 = 选中它，再点卡片顶部那排常用色 = 起名并保存（把色格拖到色卡上也一样）。
+ *      为什么不再逐格手打：色名会进拿货单与统计，`黑 / 黑色 / Black` 各成一行时，
+ *      同一件货在两张纸上分成三行；而"点一下"顺手就把名字收口到字典写法。
+ *      起手仍是**显式的一次点击**（不是 blur 自动保存）—— 一次误触的失焦
+ *      不该改变将要发给厂家的那张纸。
  */
+
+/**
+ * 这一批的导入日（`YYYY-MM-DD`，与下方「待核对」表**同一批**）。
+ * 为什么要有：`oi_variant_keys` 是**跨批次**的记忆，不筛就会把十几天累积的色全铺出来
+ * （真库实测 59 个键 / 10 个 listing 横跨 10-05 → 10-28），而核对表只显示今天的导入日。
+ * 空/不传 = 不筛（历史调用与测试）。
+ */
+const props = defineProps<{ importDate?: string }>();
 
 const board = ref<VariantNamingBoard>({ groups: [], unnamedKeys: 0, totalKeys: 0 });
 const loading = ref(false);
 const error = ref('');
-/** 正在保存的行数（并发计数；>0 时禁用输入，避免两次保存互相覆盖草稿） */
+/** 正在保存的行数（并发计数；>0 时禁用色卡，避免两次改名互相覆盖） */
 const busy = ref(0);
 const collapsed = ref(false);
-const showAll = ref(false);
-/** 草稿：`styleColorId → 输入框里的值`（未改动的不进这里，`draftOf` 回落当前名） */
-const draft = ref<Record<number, string>>({});
+/** 当前选中的色格（`styleColorId`；0 = 没选 —— 此时色卡只提示"先点一个色格"） */
+const selectedId = ref(0);
 /** 逐行的拒绝原话（同款重名 / 空名……）—— 只清掉这一行，不清整块 */
 const rowError = ref<Record<number, string>>({});
 const thumbs = ref<Record<string, string>>({});
@@ -274,91 +324,282 @@ const suppliers = ref<Supplier[]>([]);
 const cap = ref(6);
 const GROUP_STEP = 6;
 
-const visible = computed(
-  () => !collapsed.value && (board.value.unnamedKeys > 0 || showAll.value),
-);
+const visible = computed(() => !collapsed.value && board.value.unnamedKeys > 0);
 
-/** 待处理（或全部，`showAll` 时）的组 —— 排序与"哪些组还有活"都由主进程算好，这里只切片 */
-const workGroups = computed<VariantNamingGroup[]>(() => {
-  const all = board.value.groups;
-  if (showAll.value || board.value.unnamedKeys === 0) return all;
-  return all.filter((g) => g.colors.some((c) => !c.named));
-});
+/**
+ * 还有未认色的组。
+ *
+ * 2026-10-30 用户口径「只展示订单中没有认颜色的数据，目的只为了能认款和色」：
+ * 这块是**待办清单**，不是色名编辑器 —— 已起过名的色不进 `workGroups`，也不进渲染。
+ * 想改已经起过的名，去「基础数据 › 产品管理」（款的色图与色名在那里）。
+ */
+const workGroups = computed<VariantNamingGroup[]>(() =>
+  board.value.groups.filter((g) => g.colors.some((c) => !c.named)),
+);
 
 const shownGroups = computed<VariantNamingGroup[]>(() => workGroups.value.slice(0, cap.value));
 
-const hiddenGroups = computed(() =>
-  showAll.value || board.value.unnamedKeys === 0
-    ? 0
-    : Math.max(0, workGroups.value.length - cap.value),
-);
+const hiddenGroups = computed(() => Math.max(0, workGroups.value.length - cap.value));
 const hiddenKeys = computed(() =>
   workGroups.value.slice(cap.value).reduce((n, g) => n + g.colors.filter((c) => !c.named).length, 0),
 );
 
-function draftOf(c: VariantColorItem): string {
-  const d = draft.value[c.styleColorId];
-  return d === undefined ? c.colorName : d;
+/** 这一组里**还没认**的色（渲染与计数都只认这个口径） */
+function unnamedOf(g: VariantNamingGroup): VariantColorItem[] {
+  return g.colors.filter((c) => !c.named);
 }
 
-/** 这一组还剩几个色是平台原文（组的进度，不是总进度；总数只有 `board.unnamedKeys` 一处口径） */
-function leftOf(g: VariantNamingGroup): number {
-  return g.colors.filter((c) => !c.named).length;
+/** 在整块命名板里找色格（按 id；找不到 = 已经被重读刷掉） */
+function findCell(id: number): { c: VariantColorItem; g: VariantNamingGroup } | null {
+  for (const g of board.value.groups) {
+    const c = g.colors.find((x) => x.styleColorId === id);
+    if (c) return { c, g };
+  }
+  return null;
 }
 
 /**
- * 存完之后该把光标交给谁：**同组的下一个未命名框**，本组没了就交下一组的第一个。
+ * 选中的色格 —— 只在**这一批渲染出来的**组里认。
  *
- * 为什么这件事不能省（真库实测的依据）：待命名是 54 个键、分布在 37 个 listing 上。
- * 每次保存后组件会重读命名板（`finally` 里 reload），重排会把已命名的色挪到组尾、
- * 输入框重建 —— 不主动落焦的话，人每填一个都要再用鼠标点下一个框，54 次。
- * 这是这一页唯一还属于人的劳动，能省的只有"找框"这一半。
+ * 为什么要限定在 `shownGroups`：重读之后 `nextUnnamedOf` 可能把人"交给"下一批
+ * （cap 切片之外的组还没渲染）；若选择态指向一个看不见的格子，色卡上那句
+ * 「正在给『5』起名」就变成一次**看不见的写库**（用户以为在改眼前这一格）。
+ * 交不过去就停在"没选"，比悄悄改别处安全。
+ */
+const selected = computed<{ c: VariantColorItem; g: VariantNamingGroup } | null>(() => {
+  const id = selectedId.value;
+  if (!id) return null;
+  for (const g of shownGroups.value) {
+    // `!x.named`：已起名的色不渲染（这一块只列待办），选中态也就不能在它上面停留
+    const c = g.colors.find((x) => x.styleColorId === id && !x.named);
+    if (c) return { c, g };
+  }
+  return null;
+});
+
+/** 色卡上高亮的那一颗（选中色格现在就叫这个名字时才亮） */
+const activeName = computed(() => {
+  const s = selected.value;
+  return s ? String(s.c.colorName ?? '').trim() : '';
+});
+
+/**
+ * 常用色这一排 = **共享颜色字典**（`md_colors`）+ 命名板里**已经起过的名字**。
+ * 追加"本板用过的名字"的理由与产品页同一条：自己起的色名（`灰白 / 酒红`）不在字典里时，
+ * 第二次要手打 —— 而手打必然漂（`灰白` / `灰白色` 各成一行）。
+ * ⚠️ **平台原文**（`5` / `Picture color4`）不进这一排：那不是色名，摆上去等于允许"把色叫 5"。
+ */
+const paletteColors = computed<string[]>(() => {
+  const out: string[] = [...colorDictNames.value];
+  const seen = new Set(out);
+  for (const g of board.value.groups) {
+    for (const c of g.colors) {
+      if (!c.named) continue;
+      const n = String(c.colorName ?? '').trim();
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
+});
+
+/**
+ * 打勾的色 = 选中色格**所在的那个款下已经有了**这个名字。
+ *
+ * 为什么按款算而不是按整板：`renameStyleColor` 只拦"同一个款下重名"，
+ * 所以"点了会失败"和"点了会成功"的分界恰好是**款**。把这个判据画在色卡上，
+ * 用户点之前就知道"这一下会被拒（两个色要合并请用映射与关联）"，不用先撞一次再读错误。
+ */
+const presentColors = computed<string[]>(() => {
+  const s = selected.value;
+  if (!s) return [];
+  const code = String(s.c.styleCode ?? '');
+  if (!code) return [];
+  const out: string[] = [];
+  for (const g of board.value.groups) {
+    for (const c of g.colors) {
+      if (c.styleColorId === s.c.styleColorId) continue;
+      if (String(c.styleCode ?? '') !== code) continue;
+      const n = String(c.colorName ?? '').trim();
+      if (!n || !c.named || out.includes(n)) continue;
+      out.push(n);
+    }
+  }
+  return out;
+});
+
+/** 色卡上那句"现在这一下会发生什么"（悬停才看得见，但每一次点击前都该答得出来） */
+function pcTitle(c: string): string {
+  const s = selected.value;
+  if (!s) return `先在下面点一个色格，再点「${c}」给它起名（也可以把色格拖上来）`;
+  const raw = s.c.colorRaw || s.c.colorName || '这一色';
+  if (presentColors.value.includes(c)) {
+    return `「${s.c.styleCode}」这个款下已经有「${c}」了 —— 改名会被拒；两个色要合并请用「映射与关联」`;
+  }
+  if (s.c.named && String(s.c.colorName ?? '').trim() === c) {
+    return `它现在就叫「${c}」（点一下不会改动）`;
+  }
+  return `点一下：把「${raw}」叫「${c}」并保存`;
+}
+
+/**
+ * 存完之后选中态交给谁：**同组的下一个未命名色**，本组没了就交下一组的第一个。
+ *
+ * 与原来的"落焦"是同一条教训（真库待命名 54 个键、分布在 37 个 listing 上）：
+ * 每次保存后组件会重读命名板，已命名的色可能被排到组尾 —— 不主动接力的话，
+ * 人每存一个都要再用鼠标点下一格，54 次。这里只交到**这一批（`shownGroups`）渲染出来的**
+ * 格子；更后面的那一批由「再看 N 个商品」按钮接手（不把人交给看不见的格子）。
  *
  * 为什么**不**按"同一个平台原文"批量命名（`1` 在 7 个 listing 上都出现）：平台原文是
  * 商品级的编号，不同 listing 的 `1` 根本不是同一个颜色（键是 `(店铺, 商品, 原文色)` 也正是
  * 因为这个）。批量按原文命名 = 把"位置"当"语义"，错得悄无声息，还会被自己的键记住。
  */
-function nextFocusOf(c: VariantColorItem, g: VariantNamingGroup): number {
-  const idx = g.colors.findIndex((x) => x.styleColorId === c.styleColorId);
-  const rest = idx >= 0 ? g.colors.slice(idx + 1) : [];
+function nextUnnamedOf(c: VariantColorItem, g: VariantNamingGroup): number {
+  const at = g.colors.findIndex((x) => x.styleColorId === c.styleColorId);
+  const rest = at >= 0 ? g.colors.slice(at + 1) : [];
   const next = rest.find((x) => !x.named);
   if (next) return next.styleColorId;
-  const gi = workGroups.value.findIndex((x) => x.itemId === g.itemId && x.shop === g.shop);
-  for (const g2 of workGroups.value.slice(gi + 1)) {
+  const gi = shownGroups.value.findIndex((x) => x.itemId === g.itemId && x.shop === g.shop);
+  for (const g2 of gi >= 0 ? shownGroups.value.slice(gi + 1) : []) {
     const first = g2.colors.find((x) => !x.named);
     if (first) return first.styleColorId;
   }
   return 0;
 }
 
-/** 待落焦的框（`styleColorId`）；重读完成后再落，因为 reload 会重建 DOM */
-const pendingFocus = ref(0);
+/** 卡片顶部那句"现在给谁起名"（选中的一定还没起名，所以不会出现"现在叫 X"那种半句） */
+const selHint = computed(() => {
+  const s = selected.value;
+  if (!s) return '先在下面点一个色格，再点色卡（或把色格拖到色卡上）';
+  return `正在给「${s.c.colorRaw || s.c.colorName || '这一色'}」起名`;
+});
 
-async function applyPendingFocus(): Promise<void> {
-  const id = pendingFocus.value;
-  if (!id) return;
-  pendingFocus.value = 0;
-  await nextTick();
-  // 用 `data-act` 找而不是 `ref` 数组：一个 listing 里的框是 v-for 出来的、重排后会重建，
-  // 而 `data-act` 是这页与冒烟脚本共用的稳定标识（两边找的是同一个东西）。
-  const el = document.querySelector<HTMLInputElement>(`[data-act="vn-input-${id}"]`);
-  if (!el) return; // 目标被折叠/滑出这一批（cap 切片）—— 不抢焦点，别把人跳到别处
-  el.focus();
-  el.select();
+/** 点色格 = 选中 / 再点一次取消（色名只读之后，"点一下"只剩这一种含义） */
+function onCellClick(c: VariantColorItem): void {
+  if (busy.value) return;
+  selectedId.value = selectedId.value === c.styleColorId ? 0 : c.styleColorId;
 }
 
-/** 是否有改动（空串也算改动 —— 让人能看见"我清空了"，由保存时的校验来拒绝）。 */
-function dirtyOf(c: VariantColorItem): boolean {
-  return draftOf(c) !== c.colorName;
+function cellTitle(c: VariantColorItem): string {
+  const raw = c.colorRaw || c.colorName || '这一色';
+  return selectedId.value === c.styleColorId
+    ? `已选中「${raw}」—— 点上面常用色 = 起名`
+    : `点一下选中「${raw}」，再点上面常用色 = 起名；也可以把它拖到色卡上`;
 }
 
-function onInput(c: VariantColorItem, v: string): void {
-  draft.value = { ...draft.value, [c.styleColorId]: v };
-  if (rowError.value[c.styleColorId]) {
-    const next = { ...rowError.value };
-    delete next[c.styleColorId];
-    rowError.value = next;
+/* ---- 拖色格到常用色 = 起名（与产品页 `SkuMatrixEditor` 同一套手势）--------
+   用 pointer 事件而不是 HTML5 drag：Electron 里 draggable 的 ghost 图与 pointer capture
+   会丢事件；阈值 6px 区分"点击选中"与"拖动"。
+   落点只认 `[data-vn-pc]`（常用色胶囊自带的属性），不认坐标区间 —— 胶囊宽度随字号变。
+   `pointerup` 可能落在卡片外（比如页面上别处），所以监听挂在 `window` 上（按下时挂、收尾时摘）。 */
+const DRAG_THRESHOLD = 6;
+const drag = reactive({ active: false, src: 0, color: '' });
+let cellDrag: { id: number; x0: number; y0: number; moved: boolean } | null = null;
+/** 拖过之后的第一次 click 要吞掉（否则松手就顺手把别的格子选中/把色卡再点一次） */
+let swallowClick = false;
+let selectLocked = false;
+
+function blockSelectStart(e: Event): void {
+  e.preventDefault();
+}
+
+/**
+ * 按住色格期间**禁用原生文本选择**（与产品页 `lockTextSelection` 同一条教训：
+ * 色名改成只读文本后，整格都是拖动抓手，按住移动超过 6px 就会拖出一段"刷蓝"选择，
+ * 一路拖过色卡时选区会跨到上面那一排）。
+ * 用 `selectstart` 而不是 `pointerdown.preventDefault()`：后者会连带抑制 click，点选就失效了。
+ */
+function lockSelection(): void {
+  if (selectLocked) return;
+  selectLocked = true;
+  document.addEventListener('selectstart', blockSelectStart, true);
+  const sel = document.getSelection();
+  if (sel && !sel.isCollapsed) sel.removeAllRanges();
+}
+
+function unlockSelection(): void {
+  if (!selectLocked) return;
+  selectLocked = false;
+  document.removeEventListener('selectstart', blockSelectStart, true);
+}
+
+/** 指针下面是哪一颗常用色（`''` = 不在任何一颗上） */
+function paletteColorAt(x: number, y: number): string {
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  const chip = el?.closest?.('[data-vn-pc]') as HTMLElement | null;
+  return chip?.getAttribute('data-vn-pc') || '';
+}
+
+function onCellDown(c: VariantColorItem, e: PointerEvent): void {
+  if (busy.value || e.button !== 0) return;
+  const el = e.target as HTMLElement | null;
+  // 缩略图是"看原图"的按钮（裹着 img 的 button 正是最容易按到的地方，但要排除它）
+  if (el?.closest('[data-act^="vn-thumb-"]')) return;
+  cellDrag = { id: c.styleColorId, x0: e.clientX, y0: e.clientY, moved: false };
+  // 按下就锁（不等 6px 判定）：原生选择是从"按下 + 移动"起算的，等判定成拖动再锁已经晚了
+  lockSelection();
+  window.addEventListener('pointermove', onCellMove);
+  window.addEventListener('pointerup', onCellUp);
+  window.addEventListener('pointercancel', onCellCancel);
+}
+
+function onCellMove(e: PointerEvent): void {
+  const d = cellDrag;
+  if (!d) return;
+  if (!d.moved) {
+    if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < DRAG_THRESHOLD) return;
+    d.moved = true;
+    drag.active = true;
+    drag.src = d.id;
   }
+  drag.color = paletteColorAt(e.clientX, e.clientY);
+}
+
+function endCellDrag(): void {
+  cellDrag = null;
+  drag.active = false;
+  drag.src = 0;
+  drag.color = '';
+  unlockSelection();
+  window.removeEventListener('pointermove', onCellMove);
+  window.removeEventListener('pointerup', onCellUp);
+  window.removeEventListener('pointercancel', onCellCancel);
+}
+
+function onCellUp(e: PointerEvent): void {
+  const d = cellDrag;
+  const color = d && d.moved ? paletteColorAt(e.clientX, e.clientY) : '';
+  endCellDrag();
+  if (!d || !d.moved) return; // 普通点击：交给 click 去选中
+  swallowClick = true;
+  setTimeout(() => {
+    swallowClick = false;
+  }, 0);
+  if (!color) return;
+  const hit = findCell(d.id);
+  if (hit) void renameCell(hit.c, hit.g, color);
+}
+
+function onCellCancel(): void {
+  endCellDrag();
+}
+
+/** 拖过之后的第一次 click 一律不认（见 `onCellUp`）—— 包括落在色卡上的那一次 */
+function onRootClickCapture(e: MouseEvent): void {
+  if (!swallowClick) return;
+  swallowClick = false;
+  e.stopPropagation();
+  e.preventDefault();
+}
+
+/** 拖动被**外部**打断（切窗口 / 窗口失焦）：直接丢弃，不判落点（否则状态卡在"拖动中"） */
+function onWindowKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  const t = e.target as HTMLElement | null;
+  if (t && t.closest('input, select, textarea')) return; // 「新增颜色」的输入框自己处理 Esc
+  if (cellDrag) endCellDrag();
+  if (selectedId.value) selectedId.value = 0;
 }
 
 function styleNameOf(g: VariantNamingGroup): string {
@@ -429,24 +670,34 @@ async function saveStyle(g: VariantNamingGroup): Promise<void> {
   }
 }
 
-async function saveOne(c: VariantColorItem, g: VariantNamingGroup): Promise<void> {
-  // ⚠️ 这里**不许**写 `if (busy > 0) return`：那是"上一次还没存完就把这次回车丢掉"，
-  //    界面毫无反馈（用户以为名字存上了）。一次填 6 个色的正常用法必然连按回车，
-  //    所以并发是常态，按行各存各的；整批只用一个计数决定"什么时候该刷新"。
-  const name = draftOf(c).trim();
+/**
+ * 把某一格改成 `name` 并保存（**点色卡**与**拖到色卡**都走这里，落库语义只有一份）。
+ *
+ * ⚠️ 保存后**不动**被拒的那一格（不跳选中）：人还得看着它改（跳走等于把错误甩在身后）；
+ *    成功后才把选中交给下一个未命名的色。
+ * ⚠️ `busy > 0` 时直接返回（色卡此刻是 disabled，正常路径点不进来）—— 两次改名互相覆盖
+ *    比"少存一次"更糟。
+ */
+async function renameCell(c: VariantColorItem, g: VariantNamingGroup, name: string): Promise<void> {
+  const target = String(name ?? '').trim();
+  if (!target || busy.value) return;
+  // 已经是这个名字：不白跑一次 IPC（主进程虽幂等，但会给下游一次无意义的"已命名"心跳）
+  if (c.named && String(c.colorName ?? '').trim() === target) {
+    selectedId.value = nextUnnamedOf(c, g);
+    return;
+  }
   busy.value += 1;
   try {
-    const r = await renameVariantColor(c.styleColorId, name);
+    const r = await renameVariantColor(c.styleColorId, target);
     if (!r.ok) {
       rowError.value = { ...rowError.value, [c.styleColorId]: r.error || '没保存成功' };
-      return; // 被拒时**不动光标**：人还得在同一个框里改（跳走等于把错误甩在身后）
+      return;
     }
-    // 光标交给下一个未命名的框（顺序在点击那一刻确定，重排后依然成立）
-    pendingFocus.value = nextFocusOf(c, g);
-    // 成功后把草稿清掉（新值以服务端回读为准，下次 reload 会带回来）
-    const next = { ...draft.value };
+    const next = { ...rowError.value };
     delete next[c.styleColorId];
-    draft.value = next;
+    rowError.value = next;
+    // 选中交给下一个未命名的色（顺序在点击那一刻确定，重读后依然成立）
+    selectedId.value = nextUnnamedOf(c, g);
   } catch (e: unknown) {
     rowError.value = {
       ...rowError.value,
@@ -454,17 +705,33 @@ async function saveOne(c: VariantColorItem, g: VariantNamingGroup): Promise<void
     };
   } finally {
     busy.value -= 1;
-    // 最后一个存完才回读一次：每行各刷一次会让列表在用户眼前跳 6 次
+    // 最后一个存完才回读一次：每行各刷一次会让列表在用户眼前跳 N 次
     if (busy.value === 0) await reload();
   }
+}
+
+/** 点常用色：有选中 ⇒ 改名并保存；没选中 ⇒ 说清楚下一步（不做"点什么都没发生"） */
+async function pickColor(name: string): Promise<void> {
+  const s = selected.value;
+  if (!s) {
+    toast('先在下面点一个色格，再点常用色 —— 也可以把色格直接拖到色卡上', 'info');
+    return;
+  }
+  await renameCell(s.c, s.g, name);
+}
+
+/** 新增颜色成功后的一句回执（只进字典，**不给色格改名**） */
+function onPaletteAdded(name: string): void {
+  toast(`已把「${name}」加进常用色 —— 选中一个色格，再点它即可改名`, 'info');
 }
 
 async function reload(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    board.value = await loadNamingBoard();
-    await applyPendingFocus(); // 必须在重读之后：DOM 刚被这批新数据重建
+    board.value = await loadNamingBoard(props.importDate || '');
+    // 选中的色格被删/被归并掉了 ⇒ 收起选择（别让色卡指着一个不存在的行）
+    if (selectedId.value && !findCell(selectedId.value)) selectedId.value = 0;
     await loadThumbs();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取待命名颜色失败';
@@ -506,9 +773,15 @@ async function openImage(c: VariantColorItem): Promise<void> {
 // 再造一个 `window` 事件就是第二套刷新语义，且没人 dispatch 时它**静默什么都不做**。
 const { token } = useShipping();
 watch(token, () => void reload());
+// 这一批的导入日变了（跨零点 / 上层换批）⇒ 重取，否则卡上还是昨天那批的色
+watch(() => props.importDate, () => void reload());
 
 onMounted(() => {
   void reload();
+  // 常用色那一排来自共享颜色字典（与产品编辑页同一份单例）；取不到时组件自己回落到内置常用色
+  void loadColorDict();
+  // Esc = 取消选中 / 放弃这次拖动（键盘出口；输入框里的 Esc 由输入框自己处理）
+  window.addEventListener('keydown', onWindowKeydown);
   // 厂家列表单独取：它是采购域的数据，取不到（还没建表）只该让下拉少几个选项，
   // 不该让整块命名板报错 —— 命名板的活是"给色起名"，厂家是顺手捎带的那一步。
   void listSuppliers()
@@ -518,6 +791,11 @@ onMounted(() => {
     .catch(() => {
       suppliers.value = [];
     });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onWindowKeydown);
+  endCellDrag();
 });
 </script>
 
@@ -563,6 +841,29 @@ onMounted(() => {
 .vn-guide {
   margin: 0;
   font-size: 12px;
+}
+/* 常用色那一排（2026-10-30）：常驻在卡片顶部，点一颗 = 给选中的色格起名 */
+.vn-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px dashed var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+}
+.vn-palette.is-dragging {
+  border-color: var(--wb-focus);
+}
+.vn-palette__k {
+  font-size: 11px;
+  color: var(--wb-text-muted);
+  white-space: nowrap;
+}
+.vn-sel-hint {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 11px;
 }
 .vn-group {
   border: 1px solid var(--wb-border);
@@ -635,9 +936,15 @@ onMounted(() => {
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius-sm);
   min-width: 0;
+  /* 整格可点（选中）+ 整格可拖（拖到上面常用色）—— 光标要提前说出来 */
+  cursor: pointer;
 }
-.vn-cell.is-named {
-  opacity: 0.72;
+.vn-cell.is-sel {
+  border-color: var(--wb-focus);
+  background: var(--wb-focus-ring);
+}
+.vn-cell.is-src {
+  opacity: 0.45;
 }
 .vn-thumb-btn {
   padding: 0;
@@ -675,14 +982,41 @@ onMounted(() => {
   white-space: nowrap;
   max-width: 12ch;
 }
-.vn-cell__input {
+/* 色名（只读）+ 选中标记：整格都是"选中/拖动"的抓手（2026-10-30） */
+.vn-cell__name {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
 }
-.vn-input {
-  flex: 1;
+.vn-sel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--wb-primary-contrast);
+  border: 1px solid var(--wb-border);
+  border-radius: 4px;
+}
+.vn-sel.is-on {
+  background: var(--wb-primary);
+  border-color: var(--wb-primary);
+}
+.vn-name {
+  font-size: 12px;
+  font-weight: 600;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vn-name.is-empty {
+  font-weight: 400;
+  color: var(--wb-text-muted);
 }
 .vn-cell__foot {
   display: flex;

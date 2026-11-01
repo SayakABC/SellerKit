@@ -16,6 +16,7 @@ import {
   companyProfileDelete,
 } from '@/core/services/ipc';
 import IconGlyph from '@/core/components/IconGlyph.vue';
+import { useShopAccountsStore } from '../store';
 
 /** 合规资料类型定义（岛内表单口径；增删类型需同步主进程 COMPLIANCE_TYPES 白名单） */
 const PROFILE_DEFS = [
@@ -54,6 +55,10 @@ const EXPIRING_SOON_DAYS = 30;
 
 const COMPANY_STATUS_LABEL = { active: '启用', inactive: '停用' };
 const PROFILE_STATUS_LABEL = { valid: '有效', pending: '办理中', expired: '已过期' };
+
+// 店铺账号模块共享的关联企业下拉缓存（store.companies）与本页列表(items)是两份独立数据；
+// 本页新增/删除企业后需主动同步 store 的缓存，否则账号编辑器的「关联企业」下拉看不到新企业。
+const shopAccountsStore = useShopAccountsStore();
 
 const items = ref([]);
 const summary = reactive({ total: 0, byStatus: {}, byType: {}, expiringSoon: 0 });
@@ -245,6 +250,8 @@ async function saveCompany() {
     const keepDetailId = modal.value === 'company' && detail.value ? detail.value.id : 0;
     modal.value = '';
     await refresh();
+    // 同步刷新店铺账号模块的「关联企业」下拉缓存（新建/重命名后立即在账号编辑器可选）
+    void shopAccountsStore.loadCompanies();
     if (keepDetailId) await openDetail(keepDetailId);
   } catch (e) {
     toast.error(e.message);
@@ -264,6 +271,8 @@ async function removeCompany(id) {
     await unwrap(companyDelete(id), '删除企业失败');
     toast.success('已删除');
     await refresh();
+    // 同步刷新店铺账号模块的「关联企业」下拉缓存（避免已删除企业残留在候选中）
+    void shopAccountsStore.loadCompanies();
   } catch (e) {
     toast.error(e.message);
   }

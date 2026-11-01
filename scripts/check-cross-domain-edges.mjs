@@ -2,7 +2,7 @@
 // 「跨域数据访问」守卫（数据表审查 P1-4 的收口）。
 //
 // 背景：各域模块（`electron/*-db.ts`）只管自己的表，"跨域"是**代码归属边界**而非物理分库
-// （全仓共用一个 `userData/sellerkit.db`，见 `docs/notes/2026-10-15-host-data-dependencies.md`）。
+// （全仓共用一个 `userData/sellerkit.db`，见 `docs/notes/2026-10-30-island-host-boundary.md`）。
 // 跨域访问在主进程里有两种落地形态，风险完全不同：
 //
 //   1) 静态 `import`（`ae-db.ts: import { upsertCollectedOrder } from './order-db'`）
@@ -52,6 +52,10 @@ const DB_EDGES = [
     to: './product-db',
     symbols: [
       'adoptProduct',
+      // 2026-10-30（认款补图）：认款把订单图绑到款色后，顺手把它采纳为产品主图 ——
+      //   "只补空"的判定必须收在产品域（`pl_products.image_id = 0`），订单域不另写一份。
+      //   只借用这个窄接口，不因此把产品写入口挪到订单域。
+      'adoptProductImageIfEmpty',
       // 2026-10-28（套装）：归到套装款后自动展开成部件快照
       //   `isBundleProduct` 判"这个产品是不是套装"、`resolveBundleParts` 按 (产品,商品ID,色号)
       //   查出各部件色名、`bundleRolesOf` 在配色缺失时告诉用户"差哪个部位"。
@@ -144,6 +148,53 @@ const DB_EDGES = [
     to: './shop-item-db',
     symbols: ['itemShopIndex', 'shopIdByItemId', 'skuColorByItemImage'],
     why: '认店补末级证据：店铺原文归一落空时用**商品ID 反查采集快照**（pl_shop_items 的键本来就是店+商品ID，商品ID 是平台给的、比手填店名强）。只作兜底，反查不出 / 多店歧义一律保持「未归一」，绝不猜一个店 —— 否则"配了映射却不生效"又会变成查不出的静默错账',
+  },
+  // ---- 主数据域（S0a / R1）：图片收口到唯一图片仓 `md_images` ----
+  //
+  // 这两条边是**收口本身**，不是新的耦合：旧实现里订单域查 `oi_images`、产品域查 `pl_images`，
+  // 同一件事各有各的表/目录/落盘代码（两表 AUTOINCREMENT 撞 id 的生产 P0 就出在这里）。
+  // R1 之后两个业务域只做两件事：
+  //   ① 读 —— 列表/拿货单按 `image_id` 取 `local_path`（`imageIdExists` / `imageLocalPathMap` /
+  //      `allImageLocalPaths`，以及订单导入的两级去重查询 `findImageBy*Fingerprint`）；
+  //   ② 登记 —— 图已经在 `images/` 里时经 `registerImageRow` 落行（不写文件）；
+  //   ③ `ensureMasterDataSchema` 是"各域懒建表"的同一纪律：读侧 JOIN 它，就不能假定别人建过。
+  // 二进制落盘仍然只有 `landImageBytes` 一个入口，业务域**不**碰文件系统。
+  {
+    from: 'order-db.ts',
+    to: './master-data-db',
+    symbols: [
+      'allImageLocalPaths',
+      'ensureMasterDataSchema',
+      'findImageByFingerprint',
+      'findImageByUrlFingerprint',
+      'imageIdExists',
+      'registerImageRow',
+    ],
+    why: '订单域只读图片主数据：列表/拿货单取 local_path、导入按 URL/内容指纹复用同一行（"按图找色"的命入口）；登记图只经 registerImageRow（落盘唯一入口是 landImageBytes）',
+  },
+  {
+    from: 'product-db.ts',
+    to: './master-data-db',
+    symbols: ['ensureMasterDataSchema', 'imageIdExists', 'imageLocalPathMap', 'registerImageRow'],
+    why: '产品域同理：款主图/列表缩略图读 md_images.local_path，挂图前用 imageIdExists 挡住野 id（产品 id 误当图片 id 是历史事故），登记委托 registerImageRow',
+  },
+  // 下面两条是 R1d 之后**取数投影要带缩略图**带出来的读边（2026-11-01）：
+  // 拣货单与拿货单的每一行都要显示"这行是什么色/什么图案"，而色图与本行订单图都是
+  // `image_id`，路径唯一来源是 `md_images.local_path`。
+  // 为什么不收进编排层：`imageLocalPathMap` 的调用点在投影函数**内部**（拼行时一次批量解析，
+  // 一屏 2000 行只查一次），收上去就得把行拼装拆成"投影 → 编排喂路径 → 再拼回"两段，
+  // 却不减少任何一次查询 —— 只是把同一个批量读搬了个位置。**只读、不写文件、缺表降级**，风险面很小。
+  {
+    from: 'picking-db.ts',
+    to: './master-data-db',
+    symbols: ['imageLocalPathMap'],
+    why: '拣货投影按 `image_id` 批量取本地路径（款色代表图 → 本行订单图 → 商品池三档回落，见行上注释）；只读 md_images，缺表降级为空 Map 不抛',
+  },
+  {
+    from: 'purchase-db.ts',
+    to: './master-data-db',
+    symbols: ['imageLocalPathMap'],
+    why: '拿货/对账的覆盖行缩略图同上：一次批量把 style_color_image_id / order_image_id 解析成路径；只读，缺 md_images 表降级为空',
   },
 ];
 

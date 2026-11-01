@@ -386,8 +386,8 @@ const FAKE_BRIDGE = `<script>
   //       只有"两条同商品 + 一条无商品ID"时，「有商品ID 就标」这种错法也能全绿
   //       （缺的正是 P-44 这样的"有商品ID 但只此一行"——它不该有徽标）。
   // ⭐⭐ **P-43 与 P-45 的 category 必须是空串，这不是随手写的**（2026-10-11 修"归类核对设的颜色不生效"）：
-  //     真库里这两个量恰好**恒空** —— 导入不提品类（实测 23 行 category 全空）、从没跑过 VLM
-  //     （oi_images.result_json 全 null ⇒ features 恒空）⇒ buildStyleFingerprint('', []) 是**空串**。
+  //     真库里这两个量恰好**恒空** —— 导入不提品类（实测 23 行 category 全空）、识别链已整条退役
+  //     （R1 起 md_images 连结果列都没有 ⇒ features 恒空）⇒ buildStyleFingerprint('', []) 是**空串**。
   //     夹具原先给的是「帽子」「T恤」⇒ 指纹恒非空 ⇒ "点名款到底要不要指纹"这条**分不出来**，
   //     夹具把被验的量写成了实现的期望形状，断言只能恒绿（本仓反复踩的同一个坑）。
   //     · P-43（无款 + 空品类 + 空特征）⇒ **填了颜色也没处挂**："拦住并说明"那条守卫的载体；
@@ -573,6 +573,14 @@ const FAKE_BRIDGE = `<script>
     if (n && (window.__correctedIds || []).indexOf(n) < 0) window.__correctedIds.push(n);
   }
 
+  // 颜色字典（md_colors）的**可变**种子：自 2026-10-30 起，产品页 SKU 矩阵与命名板的
+  // 「常用色」都由它驱动（写死的 COMMON_COLORS 只是兜底）。命名板改成"选中色格 → 点常用色"
+  // 之后，色卡上每一颗都是这里的名字 —— 不桩的话调用落进 __unhandled（data:null），
+  // 页面退回内置兜底表，断言会**碰巧**绿（「藏青」恰好在兜底表里），换个色名就红。
+  var NAMING_DICT = [
+    ['黑色', '#3a3a3a'], ['白色', '#f5f5f5'], ['灰色', '#9a9a9a'], ['藏青', '#2f3b5e'],
+    ['藏蓝', '#2f3b5e'], ['军绿', '#5b6b46'], ['酒红', '#7d2f3a'], ['红色', '#d64545'],
+  ];
   var OVERRIDES = {
     'getAppVersion': function () { return { success: true, data: '0.0.0-smoke' }; },
     'selectExcel': function () {
@@ -585,7 +593,7 @@ const FAKE_BRIDGE = `<script>
       return { success: true, data: { filePath: '/tmp/smoke-import.xlsx', data: b64ToBuf(b64) } };
     },
     'orderInsert': function (p) { rec('orderInsert', p); return { success: true, data: { id: 1 } }; },
-    // 带图导入的接线点：芒果报表逐行下主图（真实实现落 oi_images，这里只回一个固定 id 供断言）
+    // 带图导入的接线点：芒果报表逐行下主图（真实实现落 md_images，这里只回一个固定 id 供断言）
     'orderDownloadImage': function (p) { rec('orderDownloadImage', p); return { success: true, data: { id: 77, localPath: '/tmp/mango.jpg' } }; },
     'settleImport': function (p) { rec('settleImport', p); return { success: true, data: { created: 0, updated: 0, failed: [] } }; },
     'shipRateSnapshotSave': function (p) { rec('shipRateSnapshotSave', p); return { success: true, data: { id: 7, created: true, effectiveFrom: '2026-09-30' } }; },
@@ -859,15 +867,54 @@ const FAKE_BRIDGE = `<script>
     'orderVariantRename': function (p) {
       rec('orderVariantRename', p);
       var name = String((p && p.name) || '');
-      if (name === '撞名') {
+      // 拒绝的一支：「藏青」在夹具里已经是 903（同一个款 N1）的名字 —— 这正是主进程
+      // renameStyleColor 只拦"同款重名"那条语义（换成别的词会验不到真正的判据）。
+      if (name === '藏青') {
         return {
           success: true,
-          data: { ok: false, error: '这个款下已经有同名颜色了（SUST-001-RED），要合并请用「映射与关联」', styleColorId: (p && p.styleColorId) || 0, name: name, keys: 0 },
+          data: { ok: false, error: '这个款下已经有同名颜色了（藏青），要合并请用「映射与关联」', styleColorId: (p && p.styleColorId) || 0, name: name, keys: 0 },
         };
       }
       return {
         success: true,
         data: { ok: true, styleColorId: (p && p.styleColorId) || 0, name: name, keys: 1 },
+      };
+    },
+    /* 颜色字典（2026-10-30）：产品页 SKU 矩阵与命名板的「常用色」都从 md_colors 读。
+       不桩的话调用落进 __unhandled（data:null），loadColorDict 退回内置 COMMON_COLORS ——
+       那份兜底表**恰好**含 藏青/军绿/酒红，断言会"碰巧"绿（换个色名就红），等于没测。
+       种子是可变的：mdColorCreate 会往里 push，同一个页面里新增完能立刻再选到它。 */
+    'mdColorList': function (p) {
+      rec('mdColorList', p);
+      return {
+        success: true,
+        data: {
+          colors: NAMING_DICT.map(function (s, i) {
+            return { id: i + 1, name: s[0], hex: s[1], sortOrder: i + 1, status: 'active' };
+          }),
+        },
+      };
+    },
+    /* 新增颜色：只写字典（**不给色格加行**）。校验照抄主进程那三条（空名 / 纯数字 / 超长）。
+       ⚠️ 正则里的 \\d 要写双反斜杠：本段整体在一个模板串里，单个反斜杠会被吃掉。 */
+    'mdColorCreate': function (p) {
+      rec('mdColorCreate', p);
+      var name = String((p && p.name) || '').trim();
+      if (!name) return { success: false, error: '颜色名不能为空' };
+      if (/^\\d+$/.test(name)) return { success: false, error: '数字色号不能当颜色名（先对照图认成具体的颜色）' };
+      if (name.length > 40) return { success: false, error: '颜色名太长了（40 字以内）' };
+      var at = -1;
+      for (var i = 0; i < NAMING_DICT.length; i++) {
+        if (NAMING_DICT[i][0] === name) { at = i; break; }
+      }
+      var created = at < 0;
+      if (created) {
+        NAMING_DICT.push([name, '']);
+        at = NAMING_DICT.length - 1;
+      }
+      return {
+        success: true,
+        data: { color: { id: at + 1, name: NAMING_DICT[at][0], hex: NAMING_DICT[at][1] }, created: created },
       };
     },
     // ---- 归类核对域（2026-10-05「归类核对」页签内建）----
@@ -2992,20 +3039,53 @@ async function main() {
       'all-ok=' + (card('cl-all-ok') ? 'disabled=' + card('cl-all-ok').disabled : '无') +
         ' go=' + !!card('cl-gate-shop-go'));
 
-    // ---- 命名板（P3，2026-10-28）：这一页现在唯一还属于人的判断 ----
-    // 三条断言各自守一个容易写错的实现（每条都能被一个具体错法弄红）：
-    //   ① 逐键翻页（"点开一个填一个"）=> 组内 3 个输入框不会同时在 DOM 里；
+    // ---- 命名板（P3，2026-10-28；2026-10-30 改成"选中色格 → 点常用色"）----
+    // 这一页现在唯一还属于人的判断。断言各自守一个容易写错的实现（每条都能被一个具体错法弄红）：
+    //   ① 逐键翻页（"点开一个填一个"）=> 组内 3 个色格不会同时在 DOM 里；
     //   ② 把已命名的也算待办 => 计数变 3（用户会白输一遍已经起过的名）；
-    //   ③ 改名时把款名/编码/平台原文一起送过去 => 主进程按界面草稿覆盖事实。
+    //   ③ 改名时把款名/编码/平台原文一起送过去 => 主进程按界面草稿覆盖事实；
+    //   ④ 起名仍然能手打 => 色名会漂成「黑 / 黑色 / Black」三行（这一页的整套改法就是为了堵它）。
     await waitFor(function () { return !!card('vn-panel'); }, 8000);
-    var vnInputs = queryAll('[data-act^="vn-input-"]');
-    // 按组取框：这条断言说的是"**一个 listing 的**色同屏"，所以必须限定在组内 ——
-    // 全页框数会随夹具里加组而变，拿它当判据等于让断言跟着夹具漂。
-    var vnGroup1 = queryAll('[data-act="vn-group-IT-N1"] [data-act^="vn-input-"]');
+    // 2026-10-30 用户口径「只列出订单中还没认的颜色」的第二半：取数必须**带着与下方核对表
+    // 同一个导入日**。键表是跨批次的记忆 —— 漏传就意味着把十几天前的批次一起铺出来
+    // （真库实测 59 个键横跨 10-05 → 10-28，而核对表只显示今天这批）。
+    // 日期在断言脚本里自算（不用正则：整段在模板串里，反斜杠会被吃掉）。
+    var td = new Date();
+    function pad2(n) { return n < 10 ? '0' + String(n) : String(n); }
+    var todayKey = String(td.getFullYear()) + '-' + pad2(td.getMonth() + 1) + '-' + pad2(td.getDate());
+    var vnReq = calls('orderVariantNaming')[0] || {};
+    report('命名板取数带着**今天**的导入日（与「待核对」同一批，不是全库）',
+      String(vnReq.importDate || '') === todayKey,
+      'payload=' + JSON.stringify(vnReq) + ' 今天=' + todayKey);
+    var vnCells = queryAll('[data-act^="vn-cell-"]');
+    // 按组取格：这条断言说的是"**一个 listing 的**色同屏"，所以必须限定在组内 ——
+    // 全页格数会随夹具里加组而变，拿它当判据等于让断言跟着夹具漂。
+    var vnGroup1 = queryAll('[data-act="vn-group-IT-N1"] [data-act^="vn-cell-"]');
     var vnCount = flat(card('vn-count'));
-    report('命名板：一个 listing 的 3 个色键**同屏**给出（不是逐键翻页）',
-      !!card('vn-panel') && vnGroup1.length === 3,
-      '本组=' + vnGroup1.length + ' 全页=' + vnInputs.length + ' 计数=' + vnCount);
+    report('命名板：一个 listing 里**还没认**的 2 个色格同屏给出（不是逐键翻页）',
+      !!card('vn-panel') && vnGroup1.length === 2,
+      '本组=' + vnGroup1.length + ' 全页=' + vnCells.length + ' 计数=' + vnCount);
+    // 2026-10-30 用户口径「只展示订单中没有认颜色的数据」：已起名的色**不进渲染**。
+    // 夹具里 903（藏青，N1 款下）与 905（黑，N2 款下）都已起名 ⇒ 它们必须既没有格、也没有输入框。
+    report('只列待办：已起过名的色不出现（903 / 905 都不在 DOM 里）',
+      !card('vn-cell-903') && !card('vn-cell-905') &&
+        queryAll('[data-act="vn-group-IT-N1"] [data-act^="vn-cell-"]').length === 2 &&
+        queryAll('[data-act="vn-group-IT-N2"] [data-act^="vn-cell-"]').length === 1,
+      '903=' + !!card('vn-cell-903') + ' 905=' + !!card('vn-cell-905') +
+        ' N1=' + queryAll('[data-act="vn-group-IT-N1"] [data-act^="vn-cell-"]').length +
+        ' N2=' + queryAll('[data-act="vn-group-IT-N2"] [data-act^="vn-cell-"]').length);
+    // 色格里**不许有输入框**（判据限定在色格内：组头的款名输入框是另一件事，它本来就该在）。
+    // 这一条是这次改法的核心：改名只剩"选中 → 点色卡 / 拖到色卡"一条路径。
+    report('色名是只读的：色格里没有任何输入框（起名只能点常用色 / 拖到色卡）',
+      queryAll('[data-act^="vn-cell-"] input').length === 0 &&
+        !!card('vn-name-901') && !!card('vn-palette') && !card('vn-input-901'),
+      '格内输入框=' + queryAll('[data-act^="vn-cell-"] input').length +
+        ' 色卡条=' + !!card('vn-palette') + ' 旧输入框=' + !!card('vn-input-901'));
+    // 未选中时色卡条只说下一步（此时点任何一颗色卡都不该发生写库 —— 见下一条）
+    var vnHint0 = flat(card('vn-sel-hint'));
+    report('未选中色格时，色卡条只提示"先点一个色格"，且没有「取消选择」',
+      vnHint0.indexOf('先在下面点一个色格') >= 0 && !card('vn-sel-clear'),
+      'hint=' + JSON.stringify(vnHint0) + ' 取消选择=' + !!card('vn-sel-clear'));
     // ⚠️ 正则里的空白写成 [ ] 而不是 \\s：这段代码整体在一个模板串里，单个反斜杠会被吃掉。
     report('命名板计数只数**未命名**的（夹具 3 待命名 + 2 已命名 => 文案必须是 3 / 共 5）',
       /还有[ ]*3[ ]*个/.test(vnCount) && /共[ ]*5[ ]*个/.test(vnCount),
@@ -3016,64 +3096,120 @@ async function main() {
     var vnLeft1 = flat(card('vn-group-left-IT-N1'));
     var vnLeft2 = flat(card('vn-group-left-IT-N2'));
     report('命名板：组头给的是**这一组**还剩几个（不是总进度）',
-      /还剩[ ]*2[ ]*个/.test(vnLeft1) && /还剩[ ]*1[ ]*个/.test(vnLeft2),
+      /2[ ]*个没起名/.test(vnLeft1) && /1[ ]*个没起名/.test(vnLeft2),
       'N1=' + JSON.stringify(vnLeft1) + ' N2=' + JSON.stringify(vnLeft2));
-    // 填一个名字 + 回车 => 只送 id 与名字（不送 styleCode / colorRaw / 款名）
-    function fillAndEnter(act, val) {
-      var el = card(act);
-      if (!el) return false;
-      el.value = val;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-      return true;
+    // ---- 起名的手势：点色格（选中）→ 点上面那颗常用色 ----
+    // 与产品页 SKU 矩阵同一套（2026-10-30 用户口径「改成编辑产品页的 SKU 编辑的方式」）。
+    // 三条要点各自能被一个错法弄红：
+    //   ① 一次点击只改**选中的那一格**（按平台原文批量改会把不同 listing 的「1」混成一色）；
+    //   ② 点之前就能看出"这一下会被拒"（同款已有该色时色卡打勾）；
+    //   ③ 送出去的载荷只有 id + 名字（款名/编码/平台原文一律由主进程回读）。
+    function vnChip(name) {
+      return document.querySelector('[data-act="vn-common"][data-color="' + name + '"]');
     }
-    var okFill = fillAndEnter('vn-input-901', '藏青');
+    // 当前选中的是哪一格（从 DOM 读，不碰组件内部状态）
+    function vnSelId() {
+      var el = document.querySelector('[data-act^="vn-cell-"].is-sel');
+      return el ? String(el.getAttribute('data-act')).replace('vn-cell-', '') : '';
+    }
+    card('vn-cell-901').click();
+    await waitFor(function () { return !!card('vn-sel-clear'); }, 4000);
+    var vnHint1 = flat(card('vn-sel-hint'));
+    report('点一个色格 = 选中它：色卡条改口成"正在给「5」起名"，并出现「取消选择」',
+      vnHint1.indexOf('正在给') >= 0 && vnHint1.indexOf('「5」') >= 0 &&
+        !!card('vn-sel-clear') && String(card('vn-sel-901').className).indexOf('is-on') >= 0,
+      'hint=' + JSON.stringify(vnHint1) + ' 选中标记=' + card('vn-sel-901').className);
+    // 同款下已有的色在色卡上打勾（所以人点之前就知道会被拒）；同款没有的不打勾
+    var cIn = vnChip('藏青');
+    var cOut = vnChip('军绿');
+    report('色卡按**款**打勾：这个款下已叫「藏青」的那颗打勾，没有的「军绿」不打勾',
+      !!cIn && !!cOut && cIn.className.indexOf('is-in') >= 0 && cOut.className.indexOf('is-in') < 0,
+      '藏青=' + (cIn ? cIn.className : '无') + ' 军绿=' + (cOut ? cOut.className : '无'));
+    // ① 点一个**已被同款占用**的名字 => 主进程回 ok:false，原话显示在这一格，且**不跳选中**
+    //    （跳走等于把错误甩在身后，人还得回头找是哪一格失败了）
+    var nb0 = calls('orderVariantNaming').length;
+    cIn.click();
     await waitFor(function () { return calls('orderVariantRename').length > 0; }, 6000);
+    // 等**重读**（finally 里 reload）落地：桩的 rec 是同步记的，只等"调用发生"拿到的是重读前的 DOM
+    await waitFor(function () { return calls('orderVariantNaming').length > nb0; }, 6000);
     var renCalls = calls('orderVariantRename');
     var renPayload = renCalls[0] || {};
-    report('命名保存：回车即存，且**只送** styleColorId + name（款名/编码/平台原文不许由界面送）',
-      okFill && renCalls.length === 1 && Number(renPayload.styleColorId) === 901 &&
+    var vnErr = flat(card('vn-err-901'));
+    report('点色卡即存，且**只送** styleColorId + name（款名/编码/平台原文不许由界面送）',
+      renCalls.length === 1 && Number(renPayload.styleColorId) === 901 &&
         String(renPayload.name) === '藏青' && Object.keys(renPayload).length === 2,
       'payload=' + JSON.stringify(renPayload) + ' 次数=' + renCalls.length);
-    // 光标接力：存完自动落到**同组下一个未命名**的框。真库 54 个待命名键，靠鼠标点 = 54 次。
-    // 为什么必须等：保存成功会在 finally 里重读命名板（DOM 重建）后才落焦，
-    // 只等"调用发生"拿到的是重读之前的焦点（那时还停在被保存的那个框上）。
-    var focusAct = '';
+    report('被拒绝时显示**主进程的原话**（不是统一的"保存失败"），且不把人跳到下一格',
+      vnErr.indexOf('同名') >= 0 && vnSelId() === '901',
+      '错误文案=' + JSON.stringify(vnErr) + ' 选中=' + JSON.stringify(vnSelId()));
+    // ② 点一个**同款还没有**的名字 => 存成功，选中自动交给同组下一个未命名的色
+    //    （真库 54 个待命名键，靠鼠标每格点一次 = 54 次）
+    var nb1 = calls('orderVariantNaming').length;
+    vnChip('军绿').click();
+    await waitFor(function () { return calls('orderVariantRename').length === 2; }, 6000);
+    await waitFor(function () { return calls('orderVariantNaming').length > nb1; }, 6000);
+    var ren2 = calls('orderVariantRename')[1] || {};
+    var sel2 = '';
     try {
-      await waitFor(function () {
-        var a = document.activeElement;
-        return !!a && a.getAttribute('data-act') === 'vn-input-902';
-      }, 6000);
-      focusAct = 'vn-input-902';
-    } catch (e) {
-      var a2 = document.activeElement;
-      focusAct = a2 ? String(a2.getAttribute('data-act')) : '';
-    }
-    report('存完自动把光标交给**同组下一个未命名**的框（省掉"每个色点一次鼠标"）',
-      focusAct === 'vn-input-902', '当前焦点=' + JSON.stringify(focusAct));
-    // 本组填完 ⇒ 交给**下一组**的第一个未命名框（一组 7 个色的真库 listing 很常见：
-    // 填到最后一个还得回头找下一块在哪，等于每组浪费一次滚屏 + 一次点击）。
-    var focusCross = '';
+      await waitFor(function () { return vnSelId() === '902'; }, 6000);
+      sel2 = vnSelId();
+    } catch (e) { sel2 = vnSelId(); }
+    report('存成功 ⇒ 选中自动交给**同组下一个未命名**的格（省掉"每个色点一次鼠标"）',
+      Number(ren2.styleColorId) === 901 && String(ren2.name) === '军绿' && sel2 === '902',
+      'payload=' + JSON.stringify(ren2) + ' 选中=' + JSON.stringify(sel2));
+    // ③ 本组填完 ⇒ 交给**下一组**的第一个未命名格（一组 7 个色的真库 listing 很常见：
+    //    填到最后一个还得回头找下一块在哪，等于每组浪费一次滚屏 + 一次点击）
+    var nb2 = calls('orderVariantNaming').length;
+    vnChip('酒红').click();
+    await waitFor(function () { return calls('orderVariantRename').length === 3; }, 6000);
+    await waitFor(function () { return calls('orderVariantNaming').length > nb2; }, 6000);
+    var ren3 = calls('orderVariantRename')[2] || {};
+    var sel3 = '';
     try {
-      fillAndEnter('vn-input-902', '灰');
-      await waitFor(function () {
-        var a = document.activeElement;
-        return !!a && a.getAttribute('data-act') === 'vn-input-904';
-      }, 6000);
-      focusCross = 'vn-input-904';
-    } catch (e) {
-      var a3 = document.activeElement;
-      focusCross = a3 ? String(a3.getAttribute('data-act')) : '';
-    }
-    report('本组填完 ⇒ 光标交给**下一组**的第一个未命名框（不回头找）',
-      focusCross === 'vn-input-904', '当前焦点=' + JSON.stringify(focusCross));
-    // 拒绝原话必须显示出来（同款重名 => 主进程回 ok:false + 一句人话）
-    fillAndEnter('vn-input-904', '撞名');
-    await waitFor(function () { return !!card('vn-err-904'); }, 6000);
-    var vnErr = flat(card('vn-err-904'));
-    report('被拒绝时显示**主进程的原话**（不是统一的"保存失败"）',
-      vnErr.indexOf('同名') >= 0,
-      '错误文案=' + JSON.stringify(vnErr));
+      await waitFor(function () { return vnSelId() === '904'; }, 6000);
+      sel3 = vnSelId();
+    } catch (e) { sel3 = vnSelId(); }
+    report('本组填完 ⇒ 选中交给**下一组**的第一个未命名格（不回头找）',
+      Number(ren3.styleColorId) === 902 && String(ren3.name) === '酒红' && sel3 === '904',
+      'payload=' + JSON.stringify(ren3) + ' 选中=' + JSON.stringify(sel3));
+    // ④ 把色格**拖到空白处**松手 = 什么都不发生，且那一次 click 被吞掉
+    //    （拖完松手总会跟一个 click；不吞的话它会顺手选中刚松手位置下面那一格 —— 人以为在拖，其实在选）
+    var emptyPt = { x: 8, y: 8 };
+    firePointer(card('vn-cell-904'), 'pointerdown', rectCenter(card('vn-cell-904')));
+    firePointer(window, 'pointermove', { x: 60, y: 60 });
+    firePointer(window, 'pointermove', emptyPt);
+    firePointer(window, 'pointerup', emptyPt);
+    card('vn-cell-901').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    // Vue 的 class 要等一次重绘：同步读 DOM 永远是"拖动前"的样子（这条断言就会恒绿）
+    await new Promise(function (r) { setTimeout(r, 120); });
+    report('拖到空白处松手：不改名（也没多送一次 IPC），且拖后那次 click 被吞掉（选中仍是 904）',
+      calls('orderVariantRename').length === 3 && vnSelId() === '904',
+      'IPC=' + calls('orderVariantRename').length + ' 选中=' + JSON.stringify(vnSelId()));
+    // ⑤ 把色格**拖到色卡上**松手 = 起名（与点色卡是同一条落库路径）
+    var dragChip = vnChip('藏蓝');
+    // 色卡条可能滚出视口 —— elementFromPoint 只认**屏幕上**的点，真上手时人也会先滚到看得见的地方
+    dragChip.scrollIntoView({ block: 'center' });
+    var from = rectCenter(card('vn-cell-904'));
+    var to = rectCenter(dragChip);
+    firePointer(card('vn-cell-904'), 'pointerdown', from);
+    firePointer(window, 'pointermove', { x: from.x + 18, y: from.y + 18 });
+    firePointer(window, 'pointermove', to);
+    // ⚠️ 等一次重绘再读 class：绑在 drag.active 上的 is-dragging / is-drop / is-src 是 Vue 渲染出来的，
+    //    同步读永远是"按下之前"的样子（这条断言就会恒绿或恒红）
+    await new Promise(function (r) { setTimeout(r, 120); });
+    // ⚠️ 必须在**松手前**记 class：pointerup 一落地，is-dragging / is-drop / is-src 就都复原了
+    var draggingCls = String(card('vn-palette').className);
+    var dropCls = String(dragChip.className);
+    var srcCls = String(card('vn-cell-904').className);
+    firePointer(window, 'pointerup', to);
+    await waitFor(function () { return calls('orderVariantRename').length === 4; }, 6000);
+    var ren4 = calls('orderVariantRename')[3] || {};
+    report('把色格拖到色卡上松手 = 起名（拖动中整排提亮、落点那颗高亮、被拖的格变淡）',
+      draggingCls.indexOf('is-dragging') >= 0 && dropCls.indexOf('is-drop') >= 0 &&
+        srcCls.indexOf('is-src') >= 0 &&
+        Number(ren4.styleColorId) === 904 && String(ren4.name) === '藏蓝' &&
+        calls('orderVariantRename').length === 4,
+      '拖动中=' + draggingCls + ' 落点=' + dropCls + ' payload=' + JSON.stringify(ren4));
 
     // ---- 款信息（组头）：这一层是"这个款叫什么 / 从哪家拿" ----
     // 为什么单列断言：色名写 oi_style_colors，款名与厂家写产品主数据（pl_products）——
@@ -3110,74 +3246,16 @@ async function main() {
       Number(sb2.styleId) === 77 && Number(sb2.supplierId) === 8 && !('name' in sb2),
       'payload=' + JSON.stringify(sb2));
 
-    // ---- 款合并（P4）：同厂家下「可能是同一件货」 ----
-    // 为什么在拿货页断言：这是唯一"同款分成两行"会让人肉疼的地方（同一件货要开两张单）。
-    // 三条要点：
-    //   ① 默认折叠、不拦任何动作 —— 合并不是门；
-    //   ② 目标 = **第一个勾的**，不是 DOM 里第一个（勾选顺序才是人的意图，DOM 顺序是渲染顺序）；
-    //   ③ 拆开按 batchId，不按行 id（一次 N→1 在库里写 N 行，按行只能拆掉最后一个源款）。
+    // ---- 「可能是同一件货」**已撤下**（2026-10-30 用户口径「现在的推荐完全不准」）----
+    // 为什么撤：它的"推荐"只是「同一厂家下 ≥2 个款」—— 真库 5 号厂家挂了 8 个款，
+    //   等于一屏摆 8 行让人自己判断，比不摆更费注意力（而错并比拆更难被发现）。
+    // 为什么这里要留**反向**断言：撤下这件事本身得有人守 —— 以后有人"顺手"把它挂回来，
+    //   冒烟全绿的话没人会发现"又冒出一块没有判据的猜测"。
     await activateTab('classify');
-    var okMergeHead = true;
-    try {
-      await waitFor(function () { return !!card('sm-merge-count'); }, 8000);
-    } catch (e) { okMergeHead = false; }
-    report('拿货页给出「可能是同一件货」：折叠头直接报数量（1 组 / 2 个款）',
-      okMergeHead && flat(card('sm-merge-count')).indexOf('1 组') >= 0 &&
-        flat(card('sm-merge-count')).indexOf('2 个款') >= 0,
-      okMergeHead ? flat(card('sm-merge-count')) : '没有折叠头');
-    report('默认折叠：说明与款列表都不在 DOM 里（低频整理，不占主屏）',
-      !card('sm-merge-note') && !card('sm-row-201'),
-      'note=' + !!card('sm-merge-note') + ' row=' + !!card('sm-row-201'));
-    card('sm-merge-toggle').click();
-    await waitFor(function () { return !!card('sm-merge-note'); }, 6000);
-    report('展开后说明里写明「随时可拆开」（合并可逆，人才敢点）',
-      !!card('sm-merge-note') && flat(card('sm-merge-note')).indexOf('随时可拆开') >= 0,
-      flat(card('sm-merge-note')).slice(0, 60));
-    report('两个款各自一行，带款名与色集（人靠它判断是不是同一件货）',
-      !!card('sm-row-201') && !!card('sm-row-202') &&
-        flat(card('sm-name-201')).indexOf('立领夹克') >= 0,
-      'row201=' + !!card('sm-row-201') + ' row202=' + !!card('sm-row-202'));
-    var mergeBtn = card('sm-merge-btn-5');
-    report('没勾够 2 个时按钮 disabled 且说清为什么（不是灰着不解释）',
-      !!mergeBtn && mergeBtn.disabled && flat(mergeBtn).indexOf('勾选 2 个') >= 0,
-      mergeBtn ? 'disabled=' + mergeBtn.disabled + ' 文案=' + flat(mergeBtn) : '没有按钮');
-    // ⭐ 故意**先勾第二个**：目标必须是"第一个勾的"，不是 DOM 里第一个。
-    //    按 DOM 顺序取目标的实现在这里就红（那种实现会说"合并到 立领夹克"，而人先点的是飘带卫衣）。
-    card('sm-pick-202').click();
-    await new Promise(function (r) { setTimeout(r, 60); });
-    card('sm-pick-201').click();
-    await waitFor(function () { return !card('sm-merge-btn-5').disabled; }, 4000);
-    report('勾满 2 个才能合并，按钮文案点名目标款（目标 = 先勾的「飘带卫衣」）',
-      !card('sm-merge-btn-5').disabled && flat(card('sm-merge-btn-5')).indexOf('飘带卫衣') >= 0,
-      flat(card('sm-merge-btn-5')));
-    report('目标行上有「合并到它」标记（不让人猜合并到哪个款了）',
-      !!card('sm-target-tag') && flat(card('sm-target-tag')).indexOf('合并到它') >= 0,
-      card('sm-target-tag') ? flat(card('sm-target-tag')) : '没有标记');
-    card('sm-merge-btn-5').click();
-    await waitFor(function () { return calls('orderStyleMerge').length > 0; }, 6000);
-    var mg1 = calls('orderStyleMerge')[0] || {};
-    report('合并只送目标 + 源款 id，目标 = **先勾的那个**（202，不是 DOM 第一个 201）',
-      Number(mg1.targetStyleId) === 202 && JSON.stringify(mg1.sourceStyleIds) === '[201]',
-      'payload=' + JSON.stringify(mg1));
-    report('已合并记录按批次列出（源款 → 目标款，搬了几个色/键也说出来）',
-      !!card('sm-merge-record-b-mg-old') &&
-        flat(card('sm-merge-record-b-mg-old')).indexOf('MG-4') >= 0 &&
-        flat(card('sm-merge-record-b-mg-old')).indexOf('MG-3') >= 0,
-      card('sm-merge-record-b-mg-old') ? flat(card('sm-merge-record-b-mg-old')) : '没有记录');
-    // ⚠️ 合并刚回来时按钮上是 busy（保存中）—— disabled 的按钮 click 不触发任何东西，
-    //    直接点会让这条断言超时得莫名其妙。先等它可点，再点。
-    var okUnReady = true;
-    try {
-      await waitFor(function () { var b = card('sm-unmerge-b-mg-old'); return !!b && !b.disabled; }, 8000);
-    } catch (e) { okUnReady = false; }
-    if (okUnReady) card('sm-unmerge-b-mg-old').click();
-    var okUn = true;
-    try { await waitFor(function () { return calls('orderStyleUnmerge').length > 0; }, 8000); }
-    catch (e) { okUn = false; }
-    var mg2 = calls('orderStyleUnmerge')[0] || {};
-    report('拆开送的是 batchId（一次 N→1 在库里是 N 行，按行 id 只能拆掉最后一个）',
-      okUn && okUnReady && String(mg2.batchId) === 'b-mg-old',
-      'ready=' + okUnReady + ' called=' + okUn + ' payload=' + JSON.stringify(mg2));
+    await new Promise(function (r) { setTimeout(r, 150); });
+    report('「可能是同一件货」已撤下：本页没有这块，也不再请求合并候选',
+      !card('sm-merge') && !card('sm-merge-toggle') && calls('orderStyleMergeBoard').length === 0,
+      '卡=' + !!card('sm-merge') + ' 候选请求=' + calls('orderStyleMergeBoard').length);
 
     // 本段两个小工具。⚠️ 全段都在 ASSERT_SCRIPT 模板串里 ⇒ 注释里**不能出现反引号**。
     function setInput(act, val) {
@@ -3200,6 +3278,69 @@ async function main() {
         found: true,
         values: Array.prototype.map.call(dl.querySelectorAll('option'), function (o) { return o.value; }),
       };
+    }
+    // ── 颜色格（2026-10-30 起不是下拉了）────────────────────────────────
+    // 有款色卡的行 = 「色点 + 色名」按钮（data-color 带当前值），点开一个
+    // Teleport 到 body 的小弹层（.cl-color-pop，chip = [data-act="cl-color-pick-common"]）；
+    // 没点名款 / 款还没录颜色的行仍是自由输入（INPUT，沿用 setInput）。
+    // 弹层挂在 body 下，**不在** classify 卡片里 ⇒ 不能用 card() 查，得走 document。
+    function clColorVal(id) {
+      var el = card('cl-color-' + id);
+      if (!el) return null;
+      return el.tagName === 'BUTTON' ? el.getAttribute('data-color') : el.value;
+    }
+    function clPopChip(name) {
+      return document.querySelector('.cl-color-pop [data-act="cl-color-pick-common"][data-color="' + name + '"]');
+    }
+    async function clPickColor(id, name) {
+      var btn = card('cl-color-' + id);
+      if (!btn || btn.tagName !== 'BUTTON') return false;
+      btn.click();
+      try { await waitFor(function () { return !!clPopChip(name); }, 4000); }
+      catch (e) { return false; }
+      clPopChip(name).click();
+      // 选中即写草稿并收起弹层；值到位才算数（点开错 chip 不该恒绿）
+      try { await waitFor(function () { return clColorVal(id) === name && !document.querySelector('.cl-color-pop'); }, 4000); }
+      catch (e) { return false; }
+      return true;
+    }
+    async function clClearColor(id) {
+      var btn = card('cl-color-' + id);
+      if (!btn || btn.tagName !== 'BUTTON') return false;
+      btn.click();
+      try { await waitFor(function () { return !!document.querySelector('[data-act="cl-color-clear"]'); }, 4000); }
+      catch (e) { return false; }
+      document.querySelector('[data-act="cl-color-clear"]').click();
+      try { await waitFor(function () { return clColorVal(id) === ''; }, 4000); }
+      catch (e) { return false; }
+      // 清空不收起弹层（组件有意如此，方便马上换另一个色）⇒ 这里点遮罩收掉，免得挡后面的行
+      var mask = document.querySelector('[data-act="cl-color-pop-mask"]');
+      if (mask) mask.click();
+      try { await waitFor(function () { return !document.querySelector('.cl-color-pop'); }, 4000); }
+      catch (e) { /* 收不收起不挡后面断言 */ }
+      return true;
+    }
+
+    // ── 色卡托盘（2026-10-30）──────────────────────────────────────────
+    // 页头下方常驻一排「色卡」（chip 与产品页共用 ColorPalette ⇒ data-act 是 cl-tray-common，
+    // 落点属性 data-cl-tray 由组件透传）。拖动用的是 pointer 事件（不是 HTML5 drag）：
+    // pointerdown 的监听在**行头缩略图元素**上，move / up 在 **window** 上 ——
+    // 合成事件必须分别派到这两个目标，派错目标 = 拖动压根不发生（而断言会误判成"功能没做"）。
+    function trayChips() {
+      return queryAll('[data-act="cl-tray-common"]');
+    }
+    function trayChip(name) {
+      return document.querySelector('[data-act="cl-tray-common"][data-color="' + name + '"]');
+    }
+    function rectCenter(el) {
+      var r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    }
+    function firePointer(target, type, pt) {
+      target.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, clientX: pt.x, clientY: pt.y,
+        button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+      }));
     }
 
     // ---- ① 页头指标条整条撤掉（用户："我看不太懂，用户肯定也会很懵"）----
@@ -3433,6 +3574,165 @@ async function main() {
       okStyleThumb,
       stIm ? 'nat=' + stIm.naturalWidth + ' src=' + String(stIm.src).slice(0, 40) : 'no-img');
 
+    // ---- ④0 色卡托盘 + 拖图定色（2026-10-30）--------------------------------------------
+    // 用户口径：把某行的订单图直接拖到色卡上 = 给那一行定色；勾选多行后点色卡 = 一起定色并保存。
+    // ⚠️ 托盘列的是**本页各行的款色卡并集**（夹具里只有 S1 在用 ⇒ 黑 / 白），不是 27 个字典色：
+    //    这一页落库的是"款 + 色"的款色，颜色不在款色卡里就落不下去（宿主会顺着它给这个款造一个新色）。
+    //    所以判据看两件相反的事：本页款色 黑 / 白 **在**，别的款的色 蓝 **不在**。
+    var trayEl = card('cl-tray');
+    var trayNames = trayChips().map(function (el) { return el.getAttribute('data-color'); });
+    report('色卡托盘 = 本页各行的**款色卡并集**（S1 = 黑 / 白），不是字典里那 27 个色',
+      !!trayEl && trayNames.join(',') === '黑,白' && !trayChip('蓝'),
+      'tray=' + !!trayEl + ' chips=' + trayNames.join(','));
+    report('每颗色卡都带拖放落点属性 data-cl-tray（落点按它认，不按坐标区间 —— 胶囊宽度会随字号变）',
+      trayChips().length === 2 && trayChips().every(function (el) {
+        return el.getAttribute('data-cl-tray') === el.getAttribute('data-color');
+      }),
+      trayChips().map(function (el) { return el.getAttribute('data-cl-tray'); }).join(','));
+    // 没勾选时点色卡：最容易写成"点了没反应"的一支。判据钉在**没写库**上
+    // （提示改一句话不影响数据；落库了才是替用户做了他没点的决定）。
+    var trayUpd0 = calls('orderUpdate').length;
+    var trayAsg0 = calls('orderStyleAssign').length;
+    trayChip('黑').click();
+    await new Promise(function (r) { setTimeout(r, 300); });
+    report('没勾选时点色卡**只提示下一步**，不写库（orderUpdate / orderStyleAssign 一次都没发）',
+      calls('orderUpdate').length === trayUpd0 && calls('orderStyleAssign').length === trayAsg0 &&
+        toastHas('先在左边勾选'),
+      'upd+' + (calls('orderUpdate').length - trayUpd0) +
+        ' asg+' + (calls('orderStyleAssign').length - trayAsg0) + ' | 提示=' + toastDump());
+    // 勾两行（都是 S1 的 P-42 / P-44）→ 点色卡 ⇒ 两行都落库
+    card('cl-select-42').click();
+    card('cl-select-44').click();
+    try { await waitFor(function () { return flat(card('cl-tray-hint')).indexOf('已选 2 行') >= 0; }, 4000); }
+    catch (e) { /* 下面那条会把实际文案写出来 */ }
+    var trayHintOk = !!card('cl-tray-hint') && flat(card('cl-tray-hint')).indexOf('已选 2 行') >= 0;
+    var trayList0 = calls('orderList').length;
+    var trayAsg1 = calls('orderStyleAssign').length;
+    trayChip('黑').click();
+    var okTrayBulk = true;
+    try { await waitFor(function () { return calls('orderStyleAssign').length >= trayAsg1 + 2; }, 10000); }
+    catch (e) { okTrayBulk = false; }
+    var trayAsgs = calls('orderStyleAssign').slice(trayAsg1);
+    var trayIds = trayAsgs.map(function (a) { return Number(a && a.orderId); }).sort().join(',');
+    report('勾选 2 行后点色卡「黑」⇒ **两行都定到这个色并保存**（载荷带款编码 S1 + 色 黑）',
+      okTrayBulk && trayIds === '42,44' && trayAsgs.every(function (a) {
+        return a && a.styleCode === 'S1' && a.color === '黑';
+      }),
+      'ids=' + trayIds + ' | ' + JSON.stringify(trayAsgs));
+    report('托盘把"这一下会处理几行"写在自己身上（已选 2 行），不靠用户在动作条上找',
+      trayHintOk, card('cl-tray-hint') ? flat(card('cl-tray-hint')) : 'no-hint');
+    var okTraySaved = true;
+    try { await waitFor(function () { return toastHas('已把 2 行定到'); }, 5000); } catch (e) { okTraySaved = false; }
+    report('落库后回执说清"定到哪个色、几行"（不是一句"完成"）',
+      okTraySaved && toastHas('「黑」'), toastDump());
+    // 等 bump 的重取落地，再把勾选清掉（勾选会跨重取保留 —— 不清会干扰后面的段落）
+    try { await waitFor(function () { return calls('orderList').length > trayList0; }, 10000); }
+    catch (e) { /* 不挡后面的断言 */ }
+    if (card('cl-bulk-clear')) { try { await clickReady('cl-bulk-clear'); } catch (e) { /* 同上 */ } }
+    try { await waitFor(function () { return !card('cl-bulk'); }, 4000); } catch (e) { /* 同上 */ }
+
+    // 拖图定色：pointerdown 从行头缩略图起手 → 越过 6px 阈值 → 在色卡上松手。
+    // 色卡可能被滚出视口（elementFromPoint 只在视口内有效）⇒ 先把它滚到中间再算坐标。
+    var chipW0 = trayChip('白');
+    if (chipW0) {
+      var wRect = chipW0.getBoundingClientRect();
+      if (wRect.top < 8 || wRect.bottom > window.innerHeight - 8) {
+        chipW0.scrollIntoView({ block: 'center' });
+        await new Promise(function (r) { setTimeout(r, 200); });
+      }
+    }
+    var thumb44 = card('cl-zoom-44');
+    var chipW = trayChip('白');
+    var tPt = thumb44 ? rectCenter(thumb44) : { x: 0, y: 0 };
+    var cPt = chipW ? rectCenter(chipW) : { x: 0, y: 0 };
+    var trayListD = calls('orderList').length;
+    var trayAsg2 = calls('orderStyleAssign').length;
+    firePointer(thumb44, 'pointerdown', tPt);
+    firePointer(window, 'pointermove', { x: tPt.x + 18, y: tPt.y + 18 });
+    firePointer(window, 'pointermove', cPt);
+    await new Promise(function (r) { setTimeout(r, 200); });
+    var dragMarksOk = !!card('cl-tray') && card('cl-tray').className.indexOf('is-dragging') >= 0 &&
+      !!trayChip('白') && trayChip('白').className.indexOf('is-drop') >= 0;
+    // 先记下来再松手：松手那一刻两处 class 都会复原，事后读只能读到"已经结束了"
+    var dragTrayCls = card('cl-tray') ? card('cl-tray').className : 'missing';
+    var dragChipCls = trayChip('白') ? trayChip('白').className : 'missing';
+    firePointer(window, 'pointerup', cPt);
+    // 真实浏览器在 pointerup 之后还会派一次 click —— 它必须被吞掉（否则松手就顺手把大图打开）
+    thumb44.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    var okDrop = true;
+    try { await waitFor(function () { return calls('orderStyleAssign').length > trayAsg2; }, 10000); }
+    catch (e) { okDrop = false; }
+    var dropAsg = calls('orderStyleAssign').slice(trayAsg2)[0] || {};
+    report('把 P-44 的图拖到色卡「白」上松手 ⇒ 给**那一行**定色并保存（只一行，不是整页）',
+      okDrop && Number(dropAsg.orderId) === 44 && dropAsg.styleCode === 'S1' && dropAsg.color === '白',
+      JSON.stringify(dropAsg));
+    report('拖动过程中托盘进入落点态（is-dragging + 指针底下那颗 is-drop）—— 松手前就知道会落到哪',
+      dragMarksOk, 'tray=' + dragTrayCls + ' 白=' + dragChipCls);
+    report('拖完那一下的 click 被吞掉（不会松手就顺手把大图打开）', !card('cl-viewer'),
+      'viewer=' + (card('cl-viewer') ? '开着（错）' : '没开'));
+    // 等这次保存的重取落地（后面那段要读行内控件）
+    try { await waitFor(function () { return calls('orderList').length > trayListD; }, 10000); }
+    catch (e) { /* 不挡后面的断言 */ }
+
+    // ---- ④1 批量定色弹层（2026-10-30）--------------------------------------------------
+    // 与托盘的区别：托盘是**快路径**（勾中的行款式一致，点一下就走）；这一层治的是**混款** ——
+    // 同一个色名在有的款色卡里、在有的款色卡里没有。所以判据盯的是**覆盖数**与**只写适配行**，
+    // 不是"弹层能打开"（那个一条 "有没有这个 DOM" 就过了，什么错都拦不住）。
+    card('cl-select-42').click();
+    card('cl-select-43').click();
+    try { await waitFor(function () { return !!card('cl-bulk-color'); }, 4000); } catch (e) { /* 下面这条会说 */ }
+    report('勾选后动作条出现「批量定色…」，与「批量定款…」并排（两条都是"这 N 行"的动作）',
+      !!card('cl-bulk-color') && !!card('cl-bulk-style'),
+      'color=' + !!card('cl-bulk-color') + ' style=' + !!card('cl-bulk-style'));
+    await clickReady('cl-bulk-color');
+    try { await waitFor(function () { return !!card('bc-head'); }, 4000); } catch (e) { /* 下面这条会说 */ }
+    var bcHead = card('bc-head') ? flat(card('bc-head')) : 'missing';
+    report('弹层头先说清这批的规模（已选 2 行 · 1 个款）',
+      bcHead.indexOf('已选 2 行') >= 0 && bcHead.indexOf('1 个款') >= 0, bcHead);
+    var bcBlack = card('bc-color-黑');
+    var bcWhite = card('bc-color-白');
+    var bcBlackMeta = card('bc-meta-黑') ? flat(card('bc-meta-黑')) : 'missing';
+    var bcWhiteMeta = card('bc-meta-白') ? flat(card('bc-meta-白')) : 'missing';
+    // 夹具：P-42（S1，已是白）+ P-43（还没点名款）⇒ 黑 改 1 行、另 1 行不适用；白 改 0、已是 1
+    report('每种色**点之前**就摆出覆盖数（黑：改 1 行 + 另 1 行不适用；白：改 0 行 · 已是 1）',
+      bcBlackMeta.indexOf('改 1 行') >= 0 && bcBlackMeta.indexOf('另 1 行不适用') >= 0 &&
+        bcWhiteMeta.indexOf('改 0 行') >= 0 && bcWhiteMeta.indexOf('已是 1') >= 0,
+      '黑=' + bcBlackMeta + ' | 白=' + bcWhiteMeta);
+    report('「一行都不用改」的色仍然列出来、但**点不动**（"已经是它"看得见，不是被藏起来）',
+      !!bcWhite && bcWhite.disabled === true && !!bcBlack && bcBlack.disabled === false,
+      '白 disabled=' + (bcWhite ? bcWhite.disabled : 'missing') +
+        ' 黑 disabled=' + (bcBlack ? bcBlack.disabled : 'missing'));
+    report('没选色之前「确定」不可用（这一层不替人猜一个颜色）',
+      !!card('bc-apply') && card('bc-apply').disabled === true,
+      'apply disabled=' + (card('bc-apply') ? card('bc-apply').disabled : 'missing'));
+    bcBlack.click();
+    await new Promise(function (r) { setTimeout(r, 120); });
+    var bcApplyText = card('bc-apply') ? flat(card('bc-apply')) : 'missing';
+    report('选中后按钮自带"真的会改几行"（定色并保存（1 行），不是一句"确定"）',
+      bcApplyText.indexOf('1 行') >= 0 && bcApplyText.indexOf('定色并保存') >= 0, bcApplyText);
+    var bcAsg0 = calls('orderStyleAssign').length;
+    var bcUpd0 = calls('orderUpdate').length;
+    await clickReady('bc-apply');
+    var okBc = true;
+    try { await waitFor(function () { return calls('orderStyleAssign').length > bcAsg0; }, 10000); }
+    catch (e) { okBc = false; }
+    var bcAsg = calls('orderStyleAssign').slice(bcAsg0)[0] || {};
+    report('落库只动**色卡里有这个色**的行（P-42 → 黑；没点名款的 P-43 一行都不写）',
+      okBc && Number(bcAsg.orderId) === 42 && bcAsg.color === '黑' &&
+        calls('orderUpdate').length - bcUpd0 === 1,
+      'asg=' + JSON.stringify(bcAsg) + ' upd+' + (calls('orderUpdate').length - bcUpd0));
+    var okBcToast = true;
+    try { await waitFor(function () { return toastHas('已把 1 行定到'); }, 5000); } catch (e) { okBcToast = false; }
+    report('回执把没定上的那 1 行也说出来（"还没点名款，先定款再定色"，不是一句"完成"）',
+      okBcToast && toastHas('还没点名款'), toastDump());
+    report('落库后弹层自己关掉（不用用户再点一次关闭）', !card('bc-mask'),
+      'mask=' + (card('bc-mask') ? '还在（错）' : '已关'));
+    // 清掉勾选，别把这一批带进后面的段落
+    try { await waitFor(function () { return calls('orderList').length > trayListD + 1; }, 10000); }
+    catch (e) { /* 不挡后面的断言 */ }
+    if (card('cl-bulk-clear')) { try { await clickReady('cl-bulk-clear'); } catch (e) { /* 同上 */ } }
+    try { await waitFor(function () { return !card('cl-bulk'); }, 4000); } catch (e) { /* 同上 */ }
+
     // 弹层里的候选 = **产品库全集**（人手工新建、识别池里没有的 S9 也在 ⇒ 识别池驱动会漏它）
     await clickReady('cl-style-41');
     var okPicker = true;
@@ -3464,22 +3764,39 @@ async function main() {
     // 三条各有专属夹具行，**不能合并**：只留 P-42 一条的话，"永远取订单自己的颜色"这种错法照样全绿
     //（P-42 两个值恰好都在色卡里）；只留 P-44 的话，"永远读记住的颜色"也能蒙对。
     var col42 = card('cl-color-42');
-    report('点名了款 ⇒ 颜色格是**该款的下拉**（S1 色卡 = 请选择颜色 + 黑 + 白）',
-      !!col42 && col42.tagName === 'SELECT' && col42.options.length === 3 &&
-        Array.prototype.map.call(col42.options, function (o) { return o.value; }).join(',') === ',黑,白',
-      col42 ? col42.tagName + ' opts=' +
-        Array.prototype.map.call(col42.options, function (o) { return o.value; }).join(',') : 'no-el');
+    report('点名了款 ⇒ 颜色格是**该款的色卡按钮**（色点 + 当前色名，不再是下拉）',
+      !!col42 && col42.tagName === 'BUTTON',
+      col42 ? col42.tagName : 'no-el');
+    // 色卡内容要在弹层里看：点开 P-42 的颜色格，chip 必须正好是 S1 的色卡（黑 / 白）——
+    // 只断言"弹层开了"会被"色卡是空壳 / 全是字典色"骗过去（恒绿）。
+    col42.click();
+    var okPop42 = true;
+    try {
+      await waitFor(function () { return !!document.querySelector('.cl-color-pop') && !!clPopChip('黑'); }, 4000);
+    } catch (e) { okPop42 = false; }
+    var popChips = Array.prototype.map.call(
+      document.querySelectorAll('.cl-color-pop [data-act="cl-color-pick-common"]'),
+      function (el) { return el.getAttribute('data-color'); });
+    report('点开颜色格 ⇒ 小弹层列出**该款的色卡**（S1 = 黑 / 白，一个不多一个不少）',
+      okPop42 && popChips.join(',') === '黑,白',
+      'chips=' + popChips.join(','));
+    report('弹层里当前色带选中态（P-42 记住「白」⇒ 白那颗是 is-current）',
+      !!clPopChip('白') && clPopChip('白').classList.contains('is-current'), '');
+    // 看完就关掉（遮罩），别让它挡后面的行
+    var popMask = document.querySelector('[data-act="cl-color-pop-mask"]');
+    if (popMask) popMask.click();
+    try { await waitFor(function () { return !document.querySelector('.cl-color-pop'); }, 4000); } catch (e) { /* 不挡路 */ }
     report('图记住的颜色**在**该款色卡里 ⇒ 自动选中它（P-42 图记住「白」、订单自己的颜色是「黑」⇒ 必须是白）',
-      !!col42 && col42.value === '白',
-      col42 ? 'value=' + col42.value : 'no-el');
+      clColorVal(42) === '白',
+      'value=' + clColorVal(42));
     var col45 = card('cl-color-45');
     report('图记住的颜色**不在**色卡、订单自己的颜色在 ⇒ 回落选订单那个（P-45 记住「印花」/ 订单「黑」⇒ 黑）',
-      !!col45 && col45.tagName === 'SELECT' && col45.value === '黑',
-      col45 ? col45.tagName + ' value=' + col45.value : 'no-el');
+      !!col45 && col45.tagName === 'BUTTON' && clColorVal(45) === '黑',
+      col45 ? col45.tagName + ' value=' + clColorVal(45) : 'no-el');
     var col44 = card('cl-color-44');
     report('两个颜色都**不在**色卡里 ⇒ 留空让用户自己选（P-44 记住与订单都是「印花」⇒ 空），并写明原因',
-      !!col44 && col44.tagName === 'SELECT' && col44.value === '' && !!card('cl-color-warn-44'),
-      col44 ? 'value=' + JSON.stringify(col44.value) +
+      !!col44 && col44.tagName === 'BUTTON' && clColorVal(44) === '' && !!card('cl-color-warn-44'),
+      col44 ? 'value=' + JSON.stringify(clColorVal(44)) +
         ' warn=' + (card('cl-color-warn-44') ? flat(card('cl-color-warn-44')) : '无') : 'no-el');
     var col41 = card('cl-color-41');
     report('没点名款 ⇒ 颜色格回落**自由输入**（本款没有色卡，给下拉就成了无源之水）',
@@ -3647,13 +3964,15 @@ async function main() {
       await waitFor(function () {
         var st = card('cl-style-43');
         var col = card('cl-color-43');
-        return !!st && st.dataset.style === 'S1' && !!col && col.tagName === 'SELECT' && col.value === '黑';
+        // 有了款（色卡非空）⇒ 这一格从自由输入变成色卡按钮，当前值挂在 data-color 上
+        return !!st && st.dataset.style === 'S1' && !!col && col.tagName === 'BUTTON' &&
+          clColorVal(43) === '黑';
       }, 4000);
     } catch (e) { okFill = false; }
     report('确定后行内回填「款 + 色」（S1 · 黑）—— 一次做完，不再"先选款、再回来点颜色"',
       okFill,
       'style=' + (card('cl-style-43') ? JSON.stringify(card('cl-style-43').dataset.style) : '?') +
-        ' color=' + JSON.stringify(card('cl-color-43') ? card('cl-color-43').value : null));
+        ' color=' + JSON.stringify(clColorVal(43)));
     // ⚠️ 这一条是上面那组"确定按不下去"的**反面**：证明解禁的原因是"款与色都到位"，
     //    不是"弹层关掉了"这种与内容无关的事件。
     report('回填后「保存」直接可点（款与色都到位）',
@@ -3727,14 +4046,13 @@ async function main() {
     try {
       await waitFor(function () {
         var st = card('cl-style-41');
-        var col = card('cl-color-41');
-        return !!st && st.dataset.style === 'S2' && !!col && col.value === '蓝';
+        return !!st && st.dataset.style === 'S2' && clColorVal(41) === '蓝';
       }, 4000);
     } catch (e) { okDirty2 = false; }
     report('从该款色卡里选上颜色后回填（S2 · 蓝），「保存」可点',
       okDirty2 && !!card('cl-save-41') && card('cl-save-41').disabled === false,
       'style=' + (card('cl-style-41') ? JSON.stringify(card('cl-style-41').dataset.style) : '?') +
-        ' color=' + JSON.stringify(card('cl-color-41') ? card('cl-color-41').value : null));
+        ' color=' + JSON.stringify(clColorVal(41)));
     var asg2 = calls('orderStyleAssign').length;
     await clickReady('cl-save-41');
     var okAsg = true;
@@ -3766,11 +4084,12 @@ async function main() {
     // 判据钉在**请求载荷**上，不钉回执：回执是假桥的固定值，拿回执反推请求，改坏了照样能全绿。
     var asgEmpty = calls('orderStyleAssign').length;
     var clListC = calls('orderList').length;
-    setInput('cl-color-45', '白');
+    var okPick45 = await clPickColor(45, '白');
     var okDirty45 = true;
     try { await waitFor(function () { return !!card('cl-save-45') && card('cl-save-45').disabled === false; }, 4000); }
     catch (e) { okDirty45 = false; }
-    report('空指纹那一行的保存前提就绪：P-45 改了颜色后「保存」可点', okDirty45, '');
+    report('空指纹那一行的保存前提就绪：P-45 从色卡里点选「白」后「保存」可点',
+      okPick45 && okDirty45, '点选=' + okPick45 + ' 值=' + JSON.stringify(clColorVal(45)));
     await clickReady('cl-save-45');
     var okAsgEmpty = true;
     try { await waitFor(function () { return calls('orderStyleAssign').length > asgEmpty; }, 6000); }
@@ -3789,14 +4108,16 @@ async function main() {
     //    根本分不出"往下走了一格"和"原地没动"。
     window.__emulateCorrected = true;
     window.__correctedIds = [];
-    setInput('cl-color-42', '黑');
+    var okPick42 = await clPickColor(42, '黑');
     var okDirty3 = true;
     try { await waitFor(function () { return !!card('cl-save-42') && card('cl-save-42').disabled === false; }, 4000); }
     catch (e) { okDirty3 = false; }
-    report('回车流的前提就绪：改了颜色后该行可保存', okDirty3, '');
+    report('回车流的前提就绪：色卡上点选「黑」后该行可保存', okPick42 && okDirty3, '点选=' + okPick42);
     var updKey = calls('orderUpdate').length;
-    // 在**行内控件**上派发 Enter（会冒泡到 tr 上的 @keydown.enter）
-    card('cl-color-42').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    // 在**行内控件**上派发 Enter（冒泡到 tr 上的 @keydown.enter）。
+    // ⚠️ 不能派在颜色格上：它现在是**按钮**，组件刻意忽略按钮上的 Enter
+    //    （原生 Enter=点击，会把色卡弹层按开）。行内剩下的非按钮控件是勾选框 ⇒ 派在它身上。
+    card('cl-select-42').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     var okKeySave = true;
     try { await waitFor(function () { return calls('orderUpdate').length > updKey; }, 6000); }
     catch (e) { okKeySave = false; }
@@ -3828,14 +4149,13 @@ async function main() {
     //    否则"按钮点不动 / 行不在 / 值没填进去"都能让它恒绿（本仓反复踩过的空转）。
     // ⚠️ 判据钉在**通道没被调用**上（不是钉提示）：提示给错一句话不影响数据，落库了才是真丢东西。
     await waitFor(function () { return !!card('cl-style-44') && !!card('cl-color-44'); }, 6000);
-    setInput('cl-color-44', '黑');
+    var okPick44 = await clPickColor(44, '黑');
     var okDirty44 = true;
     try { await waitFor(function () { return !!card('cl-save-44') && card('cl-save-44').disabled === false; }, 4000); }
     catch (e) { okDirty44 = false; }
-    report('确认守卫的前提就绪：P-44 填了颜色（该行变脏、「保存」可点）',
-      okDirty44,
-      '存在=' + !!card('cl-color-44') + ' 值=' +
-        JSON.stringify(card('cl-color-44') ? card('cl-color-44').value : null) +
+    report('确认守卫的前提就绪：P-44 从色卡里点选「黑」（该行变脏、「保存」可点）',
+      okPick44 && okDirty44,
+      '存在=' + !!card('cl-color-44') + ' 值=' + JSON.stringify(clColorVal(44)) +
         ' save=' + (card('cl-save-44') ? String(card('cl-save-44').disabled) : 'no-el'));
     var mkGuard = calls('orderMarkCorrected').length;
     await clickReady('cl-ok-44');
@@ -3851,8 +4171,11 @@ async function main() {
     report('「全部确认无误」在任一行有未保存改动时也不落库（提示与单行那条不同，是批量版）',
       calls('orderMarkCorrected').length === mkAllGuard && toastHas('先逐行点「保存」'),
       '调用数=' + calls('orderMarkCorrected').length + '（点前 ' + mkAllGuard + '）| 提示=' + toastDump());
-    // 把 P-44 的草稿改回原样（它载入时颜色就是空的），免得脏着影响后面这两段确认与空态
-    setInput('cl-color-44', '');
+    // 把 P-44 的草稿改回原样（它载入时颜色就是空的），免得脏着影响后面这两段确认与空态。
+    // 颜色格是色卡按钮 ⇒ "改回空"走弹层里的「清空颜色」（没有"输入空串"这条路了）。
+    var okClear44 = await clClearColor(44);
+    report('弹层里的「清空颜色」把草稿退回空（P-44 回到载入时的样子，不再脏）',
+      okClear44 && clColorVal(44) === '', '清空=' + okClear44 + ' 值=' + JSON.stringify(clColorVal(44)));
     await waitFor(function () { return !!card('cl-save-44') && card('cl-save-44').disabled === true; }, 4000);
 
     // ---- ⑤ 批量落库（2026-10-28）：保存并下一条 / 批量定款 ----
@@ -4364,7 +4687,7 @@ async function main() {
 
     // ---- 几何守卫（2026-10-28 用户报「归类核对页面展示不全」）----
     // 病根：本页根（cl-view）是 height:100% 的**定高弹性列**，直接子项默认可缩。
-    //   命名板（P3）与款合并卡（P4）插进来之后，核对表成了唯一"可缩"的那一项 ——
+    //   命名板（P3）插进来之后，核对表成了唯一"可缩"的那一项 ——
     //   实测被压到 55px、表格容器 0px，而页面 scrollHeight 与 clientHeight 相等
     //   （**没有滚动条**）⇒ 表格整块消失、想滚也滚不到。
     // ⚠️ 这是"DOM 都在、界面上什么都没有"的病：cl-table 存在、tr 有 7 行、
@@ -4372,7 +4695,6 @@ async function main() {
     var clViewEl = document.querySelector('.cl-view');
     var clListEl = document.querySelector('.cl-list');
     var clTableWrap = clListEl ? clListEl.querySelector('.wb-table-wrap') : null;
-    var smMergeEl = document.querySelector('.sm-merge');
     function clRows() { return queryAll('.cl-table tbody tr'); }
     report('核对表有地板高度（不是被弹性列压成一条）',
       !!clListEl && clListEl.clientHeight >= 300,
@@ -4380,10 +4702,6 @@ async function main() {
     report('表格容器看得见（可见高度 > 一行，不是被压到 0）',
       !!clTableWrap && clTableWrap.clientHeight >= 100,
       'wrap=' + (clTableWrap ? clTableWrap.clientHeight + ' 可见 / ' + clTableWrap.scrollHeight + ' 内容' : '无'));
-    // 款合并卡折叠态只有 41px，是"谁矮谁让路"里最容易被压没的那一个（实测压到 5px）
-    report('款合并卡没被压成一条（折叠态也要保住自己的高度）',
-      !smMergeEl || smMergeEl.clientHeight >= 30,
-      'smMerge=' + (smMergeEl ? smMergeEl.clientHeight + ' 可见 / ' + smMergeEl.scrollHeight + ' 内容' : '无（夹具没给候选）'));
     // 页面滚得动：内容比容器高时，滚到底必须真的移动 —— 压扁时两者相等，滚不动就是滚不动
     var clScrollable = !!clViewEl && clViewEl.scrollHeight > clViewEl.clientHeight + 1;
     var clTopAfter = -1;

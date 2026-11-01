@@ -41,7 +41,7 @@ function sanitizePeriod(v: unknown): string | undefined {
 // 原实现在 userData/secure/oi-api-key.bin 存云端 VLM 的 API Key。识别链（`readEngine` /
 // `recognizeOrder` / `src/core/ai` / 「设置 › 识别」）同一轮一起删掉（用户决定不接云端模型），
 // 单独留一个"能存 Key 但没人用"的通道只会让人以为还有识别功能。判断见
-// `docs/notes/2026-10-28-classify-local-vision-direction.md`。
+// `docs/notes/2026-10-30-order-classify-panel.md`。
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -50,13 +50,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 // 图片格式魔数嗅探 sniffImageFormat / IMG_EXT_BY_FORMAT 已收敛到 ./ipc-util（order/product 两域共用）。
 const { sniffImageFormat } = require('./ipc-util') as typeof import('./ipc-util');
 
-// 「远程图 → oi_images」的落库实现收敛到 ./order-image-land（订单主图 / 采集色图共用一份）：
+// 「远程图 → 图片主数据（`md_images`）」的落库实现收敛到 ./order-image-land（订单主图 / 采集色图共用一份）：
 // 色图要靠**内容指纹命中**才能在订单导入后被"按图找到颜色"，两份实现迟早分叉（P0-1 的教训）。
-// 本文件不再自带 fingerprintUrl / sha256File / 落盘去重，一律走它。
+// 本文件不再自带 fingerprintUrl / sha256File / 落盘去重，一律走它（字节落盘只有 `landImageBytes` 一处）。
 const {
   ORDER_IMAGE_DIR: IMAGE_DIR,
   landOrderImageByUrl,
 } = require('./order-image-land') as typeof import('./order-image-land');
+const { allImageLocalPaths } = require('./master-data-db') as typeof import('./master-data-db');
 
 // 幂等建表（模块首次使用时调用）
 register('order-db-ensure', async () => {
@@ -64,35 +65,8 @@ register('order-db-ensure', async () => {
   return { success: true };
 });
 
-// 指纹查重：payload.fingerprint 为内容指纹或 URL 指纹，返回图片记录或 null
-register('order-image-find', async (payload) => {
-  orderDb.ensureOrderSchema();
-  if (!isPlainObject(payload) || typeof payload.fingerprint !== 'string' || payload.fingerprint.length === 0) {
-    return { success: false, error: 'invalid fingerprint' };
-  }
-  const found = orderDb.findImageByFingerprint(payload.fingerprint) || orderDb.findImageByUrlFingerprint(payload.fingerprint);
-  if (!found) return { success: true, data: null };
-  let result: any = undefined;
-  if (found.resultJson) {
-    try { result = JSON.parse(found.resultJson); } catch { /* 保留 undefined */ }
-  }
-  return { success: true, data: { ...found, result } };
-});
-
-// 保存识别结果：payload { id, status: 'done'|'error', resultJson?, error? }
-register('order-image-save', async (payload) => {
-  if (!isPlainObject(payload) || typeof payload.id !== 'number') {
-    return { success: false, error: 'invalid payload' };
-  }
-  const status = payload.status === 'done' || payload.status === 'error' ? payload.status : 'error';
-  orderDb.updateImageResult(
-    payload.id,
-    status,
-    typeof payload.resultJson === 'string' ? payload.resultJson : undefined,
-    typeof payload.error === 'string' ? payload.error : undefined,
-  );
-  return { success: true };
-});
+// 指纹查重与「保存识别结果」通道已在 R1 下线：图片不再有 `result_json`（识别流水线删于 D16），
+// 图片记录只是 `md_images` 的一行（指纹 + 本地路径 + 来源），查找走 `order-download-image` 的去重逻辑。
 
 // 插入订单：payload 见 src/types.ts OrderRecord（结构白名单字段）
 // 幂等：同 订单号+图片 重复插入直接返回已有 id（避免重复导入产生重复行）
@@ -332,11 +306,16 @@ register('order-style-list', async () => {
 });
 
 // 命名板（P3）：按 listing 分组的色键，未命名在前。**只读**。
-// 为什么不带任何参数：本页要回答的是"还剩多少没起名"（口径必须与页签角标一致），
-// 加个筛子就等于多一套口径 —— 筛选在渲染层做（数据量是"当前库里的键数"，最多几百行）。
-register('order-variant-naming', async () => {
+// 2026-10-30：带上 `importDate`（与「待核对」**同一批**，口径同 `listPending`）。
+//   为什么必须筛：`oi_variant_keys` 是**跨批次**的记忆，不筛就会把十几天累积的键全铺出来
+//   （真库实测 59 个键、10 个 listing 横跨 10-05 → 10-28），而下面那张核对表只显示今天的导入日 ——
+//   两处口径不一样时，人看到的"这一屏要起名的色"和"下面这批订单"对不上号。
+//   空串 / 非法日期 = 不筛（订单库冒烟与历史调用走这条）。
+register('order-variant-naming', async (payload) => {
   orderDb.ensureOrderSchema();
-  return { success: true, data: orderDb.variantNamingBoard() };
+  const importDate =
+    isPlainObject(payload) && typeof payload.importDate === 'string' ? payload.importDate : '';
+  return { success: true, data: orderDb.variantNamingBoard(400, importDate) };
 });
 
 // 给一个款色起名：命名板唯一的写入口。payload { styleColorId, name }
@@ -622,22 +601,18 @@ register('order-delete', async (payload) => {
   return { success: true, data: { deleted: payload.id } };
 });
 
-// 下载主图：payload { url } → 下载并写入指纹库（pending 态），返回图片记录
-// 去重：URL 指纹 / 内容指纹任一命中即复用，不重复下载、不重复识别
+// 下载主图：payload { url } → 下载并登记进图片主数据，返回图片记录
+// 去重：URL 指纹 / 内容指纹任一命中即复用，不重复下载
 register('order-download-image', async (payload) => {
   if (!isPlainObject(payload) || typeof payload.url !== 'string' || payload.url.length === 0 || payload.url.length > 8192) {
     return { success: false, error: 'invalid url' };
   }
   orderDb.ensureOrderSchema();
-  // 落盘 + 两级去重 + 登记 oi_images 全在 `order-image-land` 里（与采集色图共用同一份实现）：
-  // 「同图不同 URL 复用既有记录（连带 styleColorId）」正是**按图找色**的命入口，口径只能有一处。
+  // 落盘 + 两级去重 + 登记 `md_images` 全在 `order-image-land` 里（与采集色图共用同一份实现）：
+  // 「同图不同 URL 复用既有记录（连带款色归属）」正是**按图找色**的命入口，口径只能有一处。
   const landed = await landOrderImageByUrl(payload.url);
   if (!landed.ok) return { success: false, error: landed.error };
-  let result: any = undefined;
-  if (landed.image.row.resultJson) {
-    try { result = JSON.parse(landed.image.row.resultJson); } catch { /* ignore */ }
-  }
-  return { success: true, data: { ...landed.image.row, result } };
+  return { success: true, data: landed.image.row };
 });
 
 // 导出 Excel：渲染层用 xlsx 生成 buffer，经保存对话框落盘
@@ -664,10 +639,10 @@ ipcMain.handle('order-export-excel', async (event: any, payload: any) => {
 });
 
 // 读图：payload { localPath } → { mime, dataUrl }（base64，供渲染层 <img> 展示）
-// 安全：仅允许应用自有图片缓存目录（order-images / product-images）内的图片文件，防止任意文件读取。
-// product-images 是产品库图片（pl_images）的落盘目录 —— 展示复用同一套读图/缩略图通道，
-// 目录白名单在这里收敛为一份（新增缓存目录时加进 IMAGE_CACHE_DIRS 即可，别在 handler 里散写字面量）。
-const IMAGE_CACHE_DIRS = new Set(['order-images', 'product-images']);
+// 安全：仅允许应用自有图片仓目录（`userData/images`，R1 起订单图/产品图/采集图共用一处）内的
+// 图片文件，防止任意文件读取。目录白名单在这里收敛为一份（新增缓存目录时加进 IMAGE_CACHE_DIRS
+// 即可，别在 handler 里散写字面量）。
+const IMAGE_CACHE_DIRS = new Set(['images']);
 const IMAGE_EXT_OK = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 // 注意：dev（seller-kit）与打包版（SellerKit）的 userData 目录名不一致（连字符/大小写），
 //       DB 中可能残留另一运行形态写入的绝对路径，不能依赖 userData 前缀 startsWith；
@@ -702,7 +677,7 @@ register('order-read-image', async (payload) => {
 // 缩略图：payload { localPath, maxEdge? } → { dataUrl }（JPEG data URL）
 // 主进程 nativeImage 解码后按最长边等比缩至 maxEdge（≤160px 展示级清晰度），
 // 供表格/封面/产品库等小尺寸展示，避免整张原图（可至 MB 级）反复过 IPC。
-// 本地 LRU 缓存 key: realPath|maxEdge；安全校验与 order-read-image 一致（仅 order-images 目录）。
+// 本地 LRU 缓存 key: realPath|maxEdge；安全校验与 order-read-image 一致（仅 `images` 目录）。
 const thumbCache = new Map<string, string>();
 const THUMB_CACHE_MAX = 200;
 /** 批量缩略图单次往返上限（超出拆批；渲染层合批窗口为 1 帧，同屏可见图通常远小于此值） */
@@ -811,14 +786,14 @@ register('order-image-thumb-batch', async (payload) => {
   return { success: true, data: { dataUrls } };
 });
 
-// 孤图清理（P2）：扫描 order-images 目录，删除不被 oi_images 引用的图片文件
+// 孤图清理：扫描 `userData/images`，删除不被 `md_images` 引用的图片文件
 // （重置数据/批次覆盖/换图等会留下已入库但行被删的文件；正常下载的图均有 DB 引用，不会误删）。
 register('order-cleanup-orphan-images', async () => {
   try {
     const dir = IMAGE_DIR();
     if (!fs.existsSync(dir)) return { success: true, data: { deleted: 0, freedBytes: 0 } };
     const refs = new Set<string>();
-    for (const p of orderDb.listImageLocalPaths()) {
+    for (const p of allImageLocalPaths()) {
       if (p) refs.add(path.basename(p)); // dev/打包形态 userData 前缀不同，按文件名判定引用
     }
     let deleted = 0;

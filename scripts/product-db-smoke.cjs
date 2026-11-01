@@ -22,8 +22,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sellerkit-product-smoke-'));
 
-const { dbQuery, initDb, closeDb, dbRun } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
+const { dbGet, dbQuery, initDb, closeDb, dbRun } = require(path.join(ROOT, 'dist', 'electron', 'db.js'));
 const pdb = require(path.join(ROOT, 'dist', 'electron', 'product-db.js'));
+const sidb = require(path.join(ROOT, 'dist', 'electron', 'shop-item-db.js'));
 
 initDb(path.join(dir, 'smoke.db'));
 pdb.ensureProductSchema();
@@ -329,9 +330,12 @@ check('upsert 模式下同一编码重复出现：先建后更，total 不翻倍
   assert.strictEqual(query().rows[0].name, '第二次');
 });
 
-// ---- SKU 子表（pl_variants）与产品图片（pl_images / pl_item_images）----
-// 最小同构表：订单域的 oi_orders（主表）/ oi_order_items（明细）/ oi_images
-// （itemImagePool 的第②层回落扫 oi_order_items.image_id + raw_fields）
+// ---- SKU 子表（pl_variants）与图片主数据（md_images / 采集行 pl_shop_items）----
+// 跨域只建最小同构表：订单域 oi_orders（主表）/ oi_order_items（明细）—— itemImagePool 第②层
+// 回落扫 oi_order_items.image_id + raw_fields。
+// 图片仓与采集快照走**真结构**：md_images 由 ensureVariantSchema → ensureMasterDataSchema 建，
+// pl_shop_items 由 shop-item-db 建 —— R1 之后「商品覆盖图」落的就是采集行自己的 image_id，
+// 手搓小表会把列抹平，让「凭空建映射行」这类错误实现恒绿。
 dbRun(`CREATE TABLE IF NOT EXISTS oi_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_no TEXT NOT NULL UNIQUE
@@ -342,14 +346,10 @@ dbRun(`CREATE TABLE IF NOT EXISTS oi_order_items (
   image_id INTEGER,
   raw_fields TEXT
 )`);
-dbRun(`CREATE TABLE IF NOT EXISTS oi_images (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  fingerprint TEXT NOT NULL UNIQUE,
-  local_path TEXT NOT NULL
-)`);
 // 第③层回落（映射 → 款主图）需要 pl_shop_sku 存在
 pdb.ensureSkuSchema();
 pdb.ensureVariantSchema();
+sidb.ensureShopItemSchema();
 
 const vInput = (over = {}) => ({
   id: 0,
@@ -363,11 +363,12 @@ const vInput = (over = {}) => ({
 
 const cleanVariants = () => {
   dbRun('DELETE FROM pl_variants');
-  dbRun('DELETE FROM pl_images');
-  dbRun('DELETE FROM pl_item_images');
+  dbRun('DELETE FROM pl_shop_items');
+  dbRun('DELETE FROM pl_shop_sku');
   dbRun('DELETE FROM pl_products');
+  dbRun('DELETE FROM oi_order_items');
   dbRun('DELETE FROM oi_orders');
-  dbRun('DELETE FROM oi_images');
+  dbRun('DELETE FROM md_images');
 };
 
 check('ensureProductSchema 幂等重跑不炸，且 image_id 列存在（老库 ALTER 补列的判定基础）', () => {
@@ -521,20 +522,24 @@ check('itemImagePool 三层回落：覆盖图 > 订单图 > 款主图，逐 item
   const g1 = pdb.upsertImageRecord({ fingerprint: 'fp-ov', localPath: '/cache/ov.jpg' }).imageId;
   const g3 = pdb.upsertImageRecord({ fingerprint: 'fp-pr', localPath: '/cache/pr.jpg' }).imageId;
 
-  // 订单域图（oi_images 表）：一条带商品ID 的订单，挂订单图 id=77
-  dbRun(`INSERT INTO oi_images (id, fingerprint, local_path) VALUES (77, 'fp-77', '/cache/o77.jpg')`);
+  // 订单域图（md_images 表）：一条带商品ID 的订单，挂订单图 id=77
+  dbRun(`INSERT INTO md_images (id, fingerprint, local_path) VALUES (77, 'fp-77', '/cache/o77.jpg')`);
   dbRun(`INSERT INTO oi_orders (order_no) VALUES ('FIX-100')`);
-  dbRun(
-    `INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (1, 77, ?)`,
-    [JSON.stringify({ 商品ID: ' IT-100 ' })], // 故意带空白 → 应归一成 IT-100
-  );
+  const oid = Number(dbGet(`SELECT id FROM oi_orders WHERE order_no = 'FIX-100'`).id);
+  dbRun(`INSERT INTO oi_order_items (order_id, image_id, raw_fields) VALUES (?, 77, ?)`, [
+    oid,
+    JSON.stringify({ 商品ID: ' IT-100 ' }), // 故意带空白 → 应归一成 IT-100
+  ]);
   // 款主图：商品ID → 产品 → 主图
   dbRun(
     `INSERT INTO pl_shop_sku (platform, shop_id, item_id, product_id, status) VALUES ('ae', 1, 'IT-100', ?, 'confirmed')`,
     [pid],
   );
   pdb.attachProductImage(pid, g3);
-  // 覆盖图
+  // 采集快照行（R1：覆盖图落在快照行自己的 image_id 上，无采集行时 setItemImage 直接报错）
+  dbRun(
+    `INSERT INTO pl_shop_items (shop_id, store_key, item_id) VALUES (1, '', 'IT-100'), (1, '', 'IT-200')`,
+  );
   pdb.setItemImage({ itemId: 'IT-200', imageId: g1 });
 
   const pool = pdb.itemImagePool(['IT-100', 'IT-200', 'IT-300']);
@@ -552,15 +557,32 @@ check('itemImagePool 三层回落：覆盖图 > 订单图 > 款主图，逐 item
   assert.strictEqual(e300.product, null);
 });
 
-check('clearItemImage 删除覆盖行；item_id 按归一键存储（原文带空白也能命中）', () => {
+check('setItemImage 对没有采集行的商品ID 显式报错（不凭空建映射行）', () => {
+  cleanVariants();
+  const g = pdb.upsertImageRecord({ fingerprint: 'fp-orphan', localPath: '/cache/orphan.jpg' }).imageId;
+  assert.throws(() => pdb.setItemImage({ itemId: 'IT-NOPE', imageId: g }), /还没有采集到/);
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS c FROM pl_shop_items WHERE item_id = 'IT-NOPE'`).c),
+    0,
+    '不该为覆盖图凭空插采集行',
+  );
+});
+
+check('clearItemImage 只清零覆盖图（不删采集行）；item_id 按归一键存储（原文带空白也能命中）', () => {
   cleanVariants();
   const g = pdb.upsertImageRecord({ fingerprint: 'fp-9', localPath: '/cache/9.jpg' }).imageId;
+  dbRun(`INSERT INTO pl_shop_items (shop_id, store_key, item_id) VALUES (1, '', 'IT-9')`);
   pdb.setItemImage({ itemId: '  IT\u200b-9  ', imageId: g });
   const pool = pdb.itemImagePool(['IT-9']);
   assert.strictEqual(pool.get('IT-9').override.imageId, g, '零宽/空白应被归一掉');
   const r = pdb.clearItemImage('IT-9');
   assert.strictEqual(r.removed, 1);
   assert.strictEqual(pdb.itemImagePool(['IT-9']).get('IT-9').override, null);
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS c FROM pl_shop_items WHERE item_id = 'IT-9'`).c),
+    1,
+    '采集行本身要保留（覆盖图只是清零 image_id）',
+  );
 });
 
 console.log('\n[N] 「商品ID 克重」链已删（2026-10-01 用户领域裁定）：表没了、函数没了');

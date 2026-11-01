@@ -60,7 +60,7 @@ function productLabelMap(): Map<number, { code: string; name: string }> {
  * 店铺名是**展示列**，不进 `pl_shop_sku`：ADR-002 C2「关联用 ID，不用名字」——
  * 存文本快照会让改名后的历史行指着旧名，且与**两处**历史店铺文本
  * （`oi_orders.shop` / `purchase_sources.shop`）的归一链分叉。
- * （原来是三处，`ae_orders.shop_name` 已随弃表删除 —— 见 `docs/notes/2026-10-15-table-necessity-review.md`）
+ * （原来是三处，`ae_orders.shop_name` 已随弃表删除 —— 见 `docs/notes/2026-10-30-db-schema-and-migration.md`）
  */
 function shopLabelMap(): Map<number, { name: string; platform: string }> {
   const m = new Map<number, { name: string; platform: string }>();

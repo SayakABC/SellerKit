@@ -38,6 +38,8 @@ export interface CoverageInputRow {
   bizStatus?: unknown;
   /** 宿主已算好的精确覆盖件数（同一行可能有多个来源行） */
   covered?: unknown;
+  /** 这一行的色图（本地路径；宿主已按"款色代表图 → 本行订单图"取好） */
+  imagePath?: unknown;
 }
 
 /** 一行的判定结果 */
@@ -64,6 +66,8 @@ export interface RowCoverage {
    * 把 id=0 也算成"未识别"会让这批行永远摊不到台账 ⇒ 拿过的货又出现在待拿里。
    */
   unclassified: boolean;
+  /** 这一行的色图（本地路径；'' = 没图）—— 按单核对要能看图，不只是读文字 */
+  imagePath: string;
 }
 
 export interface CoveragePlan {
@@ -132,6 +136,7 @@ export function planCoverage(
       covered: exact,
       estimated: false,
       unclassified: !styleCode,
+      imagePath: String(r?.imagePath ?? ''),
     };
     out.rows.push(row);
     if (qtySource === 'assumed') out.assumedQty += 1;
@@ -303,6 +308,7 @@ export function coverageInputs(
               colorRaw?: unknown;
               size?: unknown;
               styleColorId?: unknown;
+              imagePath?: unknown;
             }[]
           | null;
         unattributed?:
@@ -338,6 +344,8 @@ export function coverageInputs(
       //    "这行到底有没有被筛过"变成靠猜的 —— 缺省的 `''` 分桶是 `unknown`，
       //    `planCoverage` 不会二次剔除；真要二次剔除的是**带状态的行**（今天那批 shipping rows）。
       covered: r?.covered,
+      // 色图跟着行走（款色代表图优先的结论已在宿主算好），本层只透传
+      imagePath: r?.imagePath,
     });
   }
   for (const u of payload?.unattributed ?? []) {

@@ -219,7 +219,7 @@ function waitFor(fn, timeout) {
     var t0 = Date.now();
     (function tick() {
       // ⚠️ 回调必须 try/catch：它一旦抛错，Promise 永不落地 → await 挂死 → 断言结果一个字都写不出来，
-      // 症状是「没抓到 #smoke-result」（会把排查方向带到产物/注入上去）。实测踩过，见 docs/notes/2026-09-30-headless-smoke-waitfor-trap.md
+      // 症状是「没抓到 #smoke-result」（会把排查方向带到产物/注入上去）。实测踩过，见 docs/notes/2026-10-30-smoke-and-guard-discipline.md
       var v;
       try { v = fn(); } catch (e) { return reject(e); }
       if (v) return resolve(v);

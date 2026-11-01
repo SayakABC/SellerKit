@@ -37,10 +37,12 @@ import {
   getDb,
   migrate,
   tableExists,
+  tableSql,
   type MigrationStep,
 } from './db';
 import {
   adoptProduct,
+  adoptProductImageIfEmpty,
   bundleRolesOf,
   ensureProductSchema,
   isBundleProduct,
@@ -78,6 +80,9 @@ import {
   type MdImageId,
   type MdImageRow,
 } from './master-data-db';
+// 旧图表的**一次性**搬迁（R1 修订）：拆表前把 oi_images / pl_images 的存量搬进 md_images。
+// 过渡件 —— 迁移窗口结束后可整文件删除（旧表名只应出现在那里）。
+import { migrateLegacyImages, remapOrderItemImages } from './legacy-image-migration';
 
 // ---- 类型（与渲染层 src/types.ts 对应，结构保持一致） ----
 
@@ -549,10 +554,15 @@ export function ensureOrderSchema(): void {
   // house convention：**自定义迁移先跑，再 dbMigrate(SCHEMA)** —— 老库缺列时才能补上，
   // 依赖新增列的索引也就可以安全地留在 SCHEMA 里（见 `migrateColumns` 的旧注释）。
   migrate('order.main', orderMigrationSteps());
-  dbMigrate(SCHEMA);
   // R1：拆除三张旧图表（`oi_images` / `pl_images` / `pl_item_images`）并把 `oi_order_items`
-  // 上那条指向 `oi_images` 的外键一并去掉。必须排在迁移之后：迁移链 v1/v6 还要读 `oi_images`。
+  // 上那条指向 `oi_images` 的外键一并去掉。顺序两头都卡死：
+  //   · 必须排在 **migrate 之后**：迁移链 v1/v6 还要读 `oi_images`；
+  //   · 必须排在 **dbMigrate(SCHEMA) 之前**（就是上面那条 house convention）：SCHEMA 里
+  //     `idx_oi_style_colors_image` 建在 `oi_style_colors.image_id` 上，而老库的这一列是
+  //     本函数补的。2026-10-30 真库事故：先跑 dbMigrate 时老库没有该列 ⇒ 每次启动都在建索引处
+  //     抛 `no such column: image_id`，订单域所有 IPC 全灭、retire 永远跑不到。
   retireLegacyImageTables();
+  dbMigrate(SCHEMA);
   // 图片收口后的读侧（列表/拿货单取 `md_images.local_path`）直接 JOIN 它 ⇒ 表必须存在。
   // 幂等且开销很小（建表 IF NOT EXISTS + 字典仅在缺失时播种，见 `seedDictionaries`）。
   ensureMasterDataSchema();
@@ -582,7 +592,11 @@ const RETIRED_IMAGE_TABLES = ['oi_images', 'pl_images', 'pl_item_images'] as con
  *
  * 幂等判据：`oi_order_items` 的建表 SQL 里还含 `REFERENCES oi_images` 才重建；
  * `oi_style_colors.image_id` 用 `PRAGMA table_info` 探列（老库要补、新库建表就带）。
- * 旧表里**没有数据迁移**：R1 的口径是"清库重建"（方案 §10 E），老图不留。
+ *
+ * **存量图片要搬**（2026-10-30 修订，原口径是"清库重建、老图不留"）：真库里有 113 张图、
+ * 92 条「图 → 款色」绑定，直接 DROP 等于把人工定款定色的积累清零。搬迁收在
+ * `legacy-image-migration.ts`（一次性过渡件，拆表前调用；落盘仍走 `landImageBytes`）。
+ * 顺序是硬要求：**先搬完、再建 `oi_style_colors.image_id` 列、再写绑定、最后才 DROP 旧表**。
  */
 function retireLegacyImageTables(): void {
   const d = getDb();
@@ -591,6 +605,9 @@ function retireLegacyImageTables(): void {
     /REFERENCES\s+oi_images/i.test(tableSql('oi_order_items'));
   const hasRetired = RETIRED_IMAGE_TABLES.some((t) => tableExists(t));
   if (!needRebuild && !hasRetired) return;
+
+  // 旧表是搬迁的唯一数据源 ⇒ 必须在任何 DROP 之前。
+  const legacy = migrateLegacyImages();
 
   const prevFk = d.pragma('foreign_keys', { simple: true }) !== 0;
   d.pragma('foreign_keys = OFF');
@@ -618,6 +635,9 @@ function retireLegacyImageTables(): void {
         // 重建后索引随旧表一起没了；SCHEMA 里的 `CREATE INDEX IF NOT EXISTS` 由下面的
         // dbMigrate 重新建出来（放在函数末尾，保证"拆完立刻补回原形状"）。
       }
+      // 订单行的图 id 换成 md id：**只能在这里**（旧表带 `REFERENCES oi_images` 外键，
+      // 拆表前改写会直接 `FOREIGN KEY constraint failed`，见迁移模块的接口注释）。
+      if (needRebuild && tableExists('oi_order_items')) remapOrderItemImages(legacy);
       for (const t of RETIRED_IMAGE_TABLES) {
         if (tableExists(t)) dbRun(`DROP TABLE ${t}`);
       }
@@ -628,11 +648,23 @@ function retireLegacyImageTables(): void {
       if (scCols.length && !scCols.includes('image_id')) {
         dbRun(`ALTER TABLE oi_style_colors ADD COLUMN image_id INTEGER NOT NULL DEFAULT 0`);
       }
+      // 第 5 步的结论必须**等到这一列存在**才写得进去（新库建表就带，老库由上面补）。
+      for (const b of legacy.bindings) {
+        dbRun(`UPDATE oi_style_colors SET image_id = ? WHERE id = ?`, [b.imageId, b.styleColorId]);
+      }
     });
     // 重建掉的索引/新增列上的索引：把幂等 DDL 再跑一遍（只跑 DDL，不再走迁移）
     dbMigrate(SCHEMA);
   } finally {
     d.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
+  }
+  if (legacy.landed > 0 || legacy.remappedOrderItems > 0) {
+    console.log(
+      `[retire] 旧图搬迁：落 ${legacy.landed} 张（跳过 ${legacy.skipped}）` +
+        `，订单行改写 ${legacy.remappedOrderItems}，产品 ${legacy.remappedProducts}` +
+        `，款色代表图 ${legacy.bindings.length}` +
+        `（同色多图省 ${legacy.droppedBindings}，悬空 ${legacy.danglingBindings}）`,
+    );
   }
 }
 
@@ -719,7 +751,7 @@ function dropRetiredCostMap(): void {
  *
  * 队列存在的唯一用途是"导入行整批落库 → 逐行跑云端 VLM 识别 → 失败/缺图可重试"。
  * 那条识别链自 2026-10-05 起零调用方，2026-10-28 用户决定不接云端模型并把它整体删除
- * （见 `docs/notes/2026-10-28-classify-local-vision-direction.md`）⇒ 队列没有任何生产者，
+ * （见 `docs/notes/2026-10-30-order-classify-panel.md`）⇒ 队列没有任何生产者，
  * 留着只会在 `reset`/备份/孤图清理里制造"一张永远空着的表"。
  *
  * 真库实测 0 行（`SELECT count(*) FROM oi_queue`），删表不丢业务数据；
@@ -1113,11 +1145,14 @@ function addOrderClassification(): void {
   if (added) {
     dbRun(`ALTER TABLE oi_orders ADD COLUMN style_color_id INTEGER NOT NULL DEFAULT 0`);
     // 老行：图片上已有结论（识别 / 映射归款 / 人工纠正）→ 继承过来；图片没有结论 = 0（未归类）
-    dbRun(
-      `UPDATE oi_orders
-          SET style_color_id = COALESCE((SELECT i.style_color_id FROM oi_images i WHERE i.id = oi_orders.image_id), 0)
-        WHERE COALESCE(style_color_id, 0) = 0 AND image_id IS NOT NULL`,
-    );
+    // （`oi_images` 可能已被 R1 退役 ⇒ 先探表，别把一次可选的回填跑成 `no such table`）
+    if (tableExists('oi_images')) {
+      dbRun(
+        `UPDATE oi_orders
+            SET style_color_id = COALESCE((SELECT i.style_color_id FROM oi_images i WHERE i.id = oi_orders.image_id), 0)
+          WHERE COALESCE(style_color_id, 0) = 0 AND image_id IS NOT NULL`,
+      );
+    }
   }
   dbRun(`CREATE INDEX IF NOT EXISTS idx_oi_orders_sc ON oi_orders(style_color_id)`);
 
@@ -1202,7 +1237,7 @@ function backfillOrderPropColors(): void {
  * 可回滚：回填行的 `raw_fields.__migratedFrom = 'ae_orders'`，要撤就按这个标记删。
  *
  * ⚠️ 与所有迁移步骤同一条纪律：**迁移跑在表可能存在之前**，故先判表在不在（交接类步骤要自己保证目标表存在，
- * 见 `docs/notes/2026-09-30-table-rebuild-traps.md`）。
+ * 见 `docs/notes/2026-10-30-db-schema-and-migration.md`）。
  */
 function migrateLegacyCollectedOrders(): void {
   if (!tableExists('oi_orders') || !tableExists('ae_orders')) return; // 新库没有采集表 → 无事可做
@@ -1632,10 +1667,11 @@ export function adoptStyleColorImageByCode(
   const c = String(code ?? '').trim();
   const col = String(color ?? '').trim();
   if (!c || !col || !(Number(imageId) > 0)) return { bound: false };
+  // 图片必须真实存在（否则传进来的是别域的 id / 已删的行）。**先验再建**：不然一次无效入参
+  // 会留下一个空壳款 + 款色行（"没绑上却长出了款"，下次同名色就绑到那个空壳上了）。
+  if (!imageIdExists(imageId)) return { bound: false };
   const style = ensureStyleByCode(c);
   const sc = ensureStyleColor(style.id, style.code, col);
-  // 图片必须真实存在（否则传进来的是别域的 id：老库里 `pl_images` 撞车正是这个症状）
-  if (!imageIdExists(imageId)) return { bound: false };
   const imgBound = dbGet<{ id: number }>(
     `SELECT id FROM oi_style_colors WHERE image_id = ? LIMIT 1`,
     [imageId],
@@ -1833,6 +1869,32 @@ function mergeOrphanStyle(fromStyleId: number | undefined, toStyleId: number): v
 }
 
 /**
+ * 认款顺手把**这个款色当前生效的那张图**采纳为款主图（只补空、不覆盖）。
+ *
+ * 源的优先级由调用方先算好：有本次订单图 ⇒ 就是它（`setImageStyleColor` 刚绑定）；
+ * 订单没图 ⇒ 款色之前已有的图。两者都是用户嘴里"当前款的图片"。
+ *
+ * 为什么必须在认款这条路上也做：`product-sku-map` 里的同类采纳（`adoptOrderImages`）只覆盖
+ * "给商品ID 配产品映射"那条路；归类核对里**点名归款 / 批量定款根本不走映射**（没商品ID 的单
+ * 也不该被卡住），于是"已经认过款、产品页还是一张白图"成了常态 —— 用户实报（2026-10-30）。
+ *
+ * 三条边界与 `adoptOrderImages` 同构：
+ *   · **只补空**：判定收在 `adoptProductImageIfEmpty`（`pl_products.image_id = 0` 才写），
+ *     已有主图的款绝不覆盖（人挑过的图优先）；
+ *   · **失败不外抛**：归属 / 款色 / 回流都已提交，坏一张图不能让人以为"没保存"；
+ *   · **无处可采纳就静默跳过**：款色也没图 / 产品库还没有这个编码 ⇒ 下次认款再试。
+ */
+function adoptStyleColorImageIfEmpty(styleCode: string, imageId: number): void {
+  const pid = productIdByCode(styleCode);
+  if (!pid || !imageId) return;
+  try {
+    adoptProductImageIfEmpty(pid, imageId);
+  } catch {
+    // 图是附加值：失败不留痕（同 `skuBackfillFromOrder` / `rememberColorFromAssignment` 的纪律）
+  }
+}
+
+/**
  * 手动归并款式：把订单图片挂到指定款编码的对应款色，并把订单指纹记入该款式的附加指纹表，
  * 使后续自动识别也能命中目标款编码（解决同款衣服识别漂移产生多个款编码的问题）。
  * 不改动目标款式的既有主指纹；指纹已被其他款式占用时附加指纹静默忽略（图片归属仍生效）。
@@ -1859,6 +1921,8 @@ export function assignOrderStyle(input: {
 }): {
   styleCode: string;
   styleColorCode: string;
+  /** 归完后**该款色上生效的图**（`md_images.id`；0 = 这一行和这个款色都没有图）—— 只给顺手采纳款主图用 */
+  imageId: number;
   skuBackfill: SkuBackfillOutcome;
   /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
   colorAlias: ColorAliasRemembered | null;
@@ -1911,8 +1975,16 @@ export function assignOrderStyle(input: {
     }
     // 原款若因此变空壳（无图无单）→ 指纹迁入目标款并删除，避免空壳款占用主指纹误导后续识别
     if (prevStyleId && prevStyleId !== style.id) mergeOrphanStyle(prevStyleId, style.id);
-    return { styleCode: style.code, styleColorCode: sc.code };
+    // 归完后款色上**生效**的那张图：有订单图 ⇒ 刚被 `setImageStyleColor` 绑上去的那张；
+    // 订单本身没图 ⇒ 这个款色之前已经有的那张（不是 0 —— 用户说的"当前款的图片"就是它）。
+    const scImg = d.prepare(`SELECT image_id FROM oi_style_colors WHERE id = ?`).get(sc.id) as
+      | { image_id: number }
+      | undefined;
+    return { styleCode: style.code, styleColorCode: sc.code, imageId: Number(scImg?.image_id) || 0 };
   });
+  // ⭐ 认款顺手把**这个款色当前那张图**采纳为款主图（只补空、不覆盖；失败不影响已提交的归属）。
+  // 放在事务外：图是附加值，与 `skuBackfill` / `colorAlias` 同一条纪律。
+  adoptStyleColorImageIfEmpty(assigned.styleCode, assigned.imageId);
   // ⭐ 回流「商品ID → 款 + 色」在**事务外**做：它是"顺手记住"，失败绝不能影响
   // "归属已改"这个**已提交**的事实（`skuBackfillFromOrder` 内部不抛）。
   // 顺序也不能反：回流要用本次真正落下的款编码（`assigned.styleCode`），而不是入参里的猜测。
@@ -2008,7 +2080,7 @@ export function styleColorOptions(styleCodes: string[]): Record<string, StyleCol
  * 「款编码 + 色名」查的（见下方 `findStyleColorImagePath`），而产品编辑抽屉里的色名是
  * **人会改的标签**。产品侧改名、订单侧不改，两边就只剩"名字"这一条线索 ⇒ 图当场查不到
  * （重开抽屉也空）。按 C2「关联用 ID，不用名字」：色名是标签，款色行才是身份 ——
- * 所以改名只动标签，`oi_style_colors.id` 与 `oi_images.style_color_id` 保持原样，
+ * 所以改名只动标签，`oi_style_colors.id` 与 `oi_style_colors.image_id`（R1 起的代表图）保持原样，
  * 图、拿货/拣货的历史分组、订单归属全都不受影响。
  *
  * 三条边界（少一条就会造出"同款两行同色"或"改完更差"）：
@@ -2050,7 +2122,7 @@ export function renameStyleColorByCode(
 }
 
 /**
- * 按 款编码+款色（+尺码）取一张已下载的代表图（本地路径），供拿货单编辑器/Excel 导出嵌图；查不到返回 null。
+ * 按 款编码+款色（+尺码）取一张已下载的图（本地路径），供拿货单编辑器/Excel 导出嵌图；查不到返回 null。
  *
  * ⚠️ `size` 不是装饰，**调用方应当传**（2026-10-11 用户报"拿货单明细的图片都是一样的"）：
  *   · 明细行的粒度是「款色 × 尺码」（`outstanding()` 的聚合键 = `purchase_items` 唯一键），
@@ -2058,10 +2130,10 @@ export function renameStyleColorByCode(
  *   · 只按款色取 ⇒ `ORDER BY i.id DESC LIMIT 1` 永远挑"该款色最新那张"——同一款的多行
  *     （不同尺码、各来自不同商品）会**全显示同一张图**，且多数行显示的还不是自己那件的图。
  *     真库实测（SUST-006·未分类 下挂 4 张不同商品的图）：5 行明细全落到 id 最大那张，**4/5 行是错的**。
- *   · 传了 `size` 就**先**挑「该尺码的订单行用过的那张图」（`EXISTS` 子查询，不是 JOIN ——
- *     JOIN 会让一张图按引用它的订单行数放大，`LIMIT 1` 取到谁就变得不确定）；
- *     该尺码下压根没有订单行（手工加的行 / 订单还没导入）才回落到款色级最新图 ——
- *     **有图仍优于缺图**，回落只是兜底，不改变"优先本行对应图"的口径。
+ *   · 传了 `size` 就**先**挑「该尺码的订单行用过的那张图」（R1 后色→图是 1:1，
+ *     但同一款色在**不同订单行**上仍可能挂不同的图，所以这一档继续保留）；
+ *     该尺码下压根没有订单行（手工加的行 / 订单还没导入）才回落到款色的代表图
+ *     （`oi_style_colors.image_id`）—— **有图仍优于缺图**，回落只是兜底。
  */
 export function findStyleColorImagePath(
   styleCode: string,
@@ -2069,44 +2141,49 @@ export function findStyleColorImagePath(
   size = '',
   styleColorId = 0,
 ): string | null {
-  const code = String(styleCode ?? '').trim();
-  const clr = String(color ?? '').trim();
   const sz = String(size ?? '').trim();
   // 身份优先（2026-10-20）：拿货明细里带了款色 id 就只认它 —— 色名是**会变的标签**
   // （`autoAssignByMap` / 人工核对都会改写），拿它找图会在改名后静默变 null，
   // 症状是"拿货单图片全没了"（用户实报）。id 命中而该色行没图时**返回 null，不回落色名**：
   // 色名回落可能取到**别的色**的图 ⇒ 发错货；缺图只让人去补图，代价小得多。
-  if (Number(styleColorId) > 0) {
-    const byId = dbGet<{ local_path: string }>(
-      `SELECT i.local_path
-       FROM oi_style_colors sc
-       JOIN oi_images i ON i.style_color_id = sc.id
-       WHERE sc.id = ?
-         AND i.local_path IS NOT NULL AND i.local_path <> ''
-       ORDER BY
-         CASE WHEN ? <> '' AND EXISTS (
-           SELECT 1 FROM oi_order_items o WHERE o.image_id = i.id AND o.size = ?
-         ) THEN 0 ELSE 1 END,
-         i.id DESC
-       LIMIT 1`,
-      [Number(styleColorId), sz, sz],
+  let scId = Number(styleColorId) || 0;
+  if (scId <= 0) {
+    const code = String(styleCode ?? '').trim();
+    const clr = String(color ?? '').trim();
+    if (!code || !clr) return null;
+    const hit = dbGet<{ id: number }>(
+      `SELECT sc.id AS id
+         FROM oi_styles s
+         JOIN oi_style_colors sc ON sc.style_id = s.id
+        WHERE s.code = ? AND sc.color = ?
+        LIMIT 1`,
+      [code, clr],
     );
-    return byId?.local_path ?? null;
+    scId = Number(hit?.id) || 0;
   }
+  if (scId <= 0) return null;
+  // ① 该尺码的订单行用过的图（同款多商品：每件的图可能不同）
+  if (sz) {
+    const bySize = dbGet<{ local_path: string }>(
+      `SELECT i.local_path
+         FROM oi_order_items oi
+         JOIN md_images i ON i.id = oi.image_id
+        WHERE oi.size = ?
+          AND ${ITEM_STYLE_COLOR_ID} = ?
+          AND COALESCE(i.local_path, '') <> ''
+        ORDER BY oi.id DESC LIMIT 1`,
+      [sz, scId],
+    );
+    if (bySize?.local_path) return bySize.local_path;
+  }
+  // ② 款色的代表图（色 → 图 1:1）
   const row = dbGet<{ local_path: string }>(
     `SELECT i.local_path
-     FROM oi_styles s
-     JOIN oi_style_colors sc ON sc.style_id = s.id
-     JOIN oi_images i ON i.style_color_id = sc.id
-     WHERE s.code = ? AND sc.color = ?
-       AND i.local_path IS NOT NULL AND i.local_path <> ''
-     ORDER BY
-       CASE WHEN ? <> '' AND EXISTS (
-         SELECT 1 FROM oi_order_items o WHERE o.image_id = i.id AND o.size = ?
-       ) THEN 0 ELSE 1 END,
-       i.id DESC
-     LIMIT 1`,
-    [code, clr, sz, sz],
+       FROM oi_style_colors sc
+       JOIN md_images i ON i.id = sc.image_id
+      WHERE sc.id = ? AND COALESCE(i.local_path, '') <> ''
+      LIMIT 1`,
+    [scId],
   );
   return row?.local_path ?? null;
 }
@@ -2365,19 +2442,6 @@ export function listStyles(): StyleRecord[] {
   ];
 }
 
-/** 更新识别结果（done / error） */
-export function updateImageResult(
-  id: number,
-  status: 'done' | 'error',
-  resultJson?: string,
-  error?: string,
-): void {
-  dbRun(
-    `UPDATE oi_images SET status = ?, result_json = ?, error = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-    [status, resultJson ?? null, error ?? null, id],
-  );
-}
-
 // ---- 订单明细 ----
 
 /** 映射命中但产品还没进过识别链路（产品库手工新建的款）时，给它建的占位款用的指纹前缀。
@@ -2522,7 +2586,7 @@ function rememberColorFromAssignment(input: {
     if (!color || color === MAPPED_FALLBACK_COLOR) return null;
     const row = dbGet<{ source_url: string; raw_fields: string }>(
       `SELECT COALESCE(i.source_url, '') AS source_url, COALESCE(o.raw_fields, '{}') AS raw_fields
-         FROM oi_order_items o LEFT JOIN oi_images i ON i.id = o.image_id
+         FROM oi_order_items o LEFT JOIN md_images i ON i.id = o.image_id
         WHERE o.id = ?`,
       [input.orderId],
     );
@@ -2670,16 +2734,16 @@ export interface VariantNamingGroup {
 
 export interface VariantNamingBoard {
   groups: VariantNamingGroup[];
-  /** 还没人给过名字的**键**数（页签角标 / 折叠标题读它） */
+  /** 这一批里还没人给过名字的**键**数（页签角标 / 折叠标题读它） */
   unnamedKeys: number;
-  /** 参与统计的键总数（分母；两者相等时说明"全都命名过了"） */
+  /** 这一批参与统计的键总数（分母；两者相等时说明"全都命名过了"） */
   totalKeys: number;
 }
 
 /**
  * 命名板取数：按 listing 分组，组内是色键。
  *
- * 三条口径：
+ * 四条口径：
  *   ① **只取有键的**（`oi_variant_keys` 是记忆本体），没有键的款色不在这里出现 ——
  *      它们的归属不由订单驱动，给了入口反而会让人以为能在这一页重建。
  *   ② `colorRaw` 取该键下订单行的 `color`（导入时原样落库的值），**不从键里反解**：
@@ -2687,9 +2751,24 @@ export interface VariantNamingBoard {
  *      平台写的就是小写。
  *   ③ `title` 用 `extractSkuFields`（与导入 / 采集同**一份**实现）：标题不是键，只用于
  *      "这行是哪个商品"的可读性，所以取不到就回落商品ID，不猜。
+ *   ④ `importDate`（2026-10-30）：只算**这一批导入日**里的订单行 —— 键表是**跨批次的记忆**，
+ *      不筛的话命名板会把十几天累积的键全铺出来（真库实测 59 个键横跨 10-05 → 10-28），
+ *      而下面那张核对表只显示今天的导入日。两处口径必须一样，否则"这一屏要我做什么"
+ *      和"下面这批是什么"对不上。传空串 = 不筛（订单库冒烟与历史调用走这条）。
  */
-export function variantNamingBoard(limit = 400): VariantNamingBoard {
+export function variantNamingBoard(limit = 400, importDate = ''): VariantNamingBoard {
   if (!tableExists('oi_variant_keys')) return { groups: [], unnamedKeys: 0, totalKeys: 0 };
+  // 与 `listPending` 同一条正则/同一个日期字段口径（`date(o.created_at)` 是导入日，不是下单日）
+  const day =
+    typeof importDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(importDate) ? importDate : '';
+  // 把"这一批的订单行"先收成一个 CTE：下面 6 个子查询各自写一遍日期条件的话，
+  // 漏掉任何一处都会让"件数/行数/原文"来自别的批次 —— 而界面上看不出来。
+  const batchSql = `SELECT x.id AS id, x.variant_key AS variant_key, x.qty AS qty, x.color AS color,
+                           x.raw_fields AS raw_fields, x.image_id AS image_id,
+                           COALESCE(o.shop, '') AS shop
+                      FROM oi_order_items x
+                      JOIN oi_orders o ON o.id = x.order_id
+                     ${day ? 'WHERE date(o.created_at) = ?' : ''}`;
   const rows = dbQuery<{
     variant_key: string;
     style_color_id: number;
@@ -2704,33 +2783,33 @@ export function variantNamingBoard(limit = 400): VariantNamingBoard {
     raw_fields: string;
     state: string;
   }>(
-    `SELECT v.variant_key AS variant_key,
+    `WITH it AS (${batchSql})
+     SELECT v.variant_key AS variant_key,
             v.style_color_id AS style_color_id,
             COALESCE(sc.style_id, 0) AS style_id,
             COALESCE(sc.color, '') AS color_name,
             COALESCE(st.code, '') AS style_code,
             COALESCE(v.state, 'auto') AS state,
-            (SELECT COALESCE(o.shop, '')
-               FROM oi_order_items x JOIN oi_orders o ON o.id = x.order_id
-              WHERE x.variant_key = v.variant_key LIMIT 1) AS shop,
-            (SELECT COUNT(*) FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS order_rows,
-            (SELECT COALESCE(SUM(COALESCE(x.qty, 0)), 0)
-               FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS qty,
-            (SELECT MAX(COALESCE(x.color, ''))
-               FROM oi_order_items x WHERE x.variant_key = v.variant_key) AS color_raw,
+            (SELECT it.shop FROM it WHERE it.variant_key = v.variant_key LIMIT 1) AS shop,
+            (SELECT COUNT(*) FROM it WHERE it.variant_key = v.variant_key) AS order_rows,
+            (SELECT COALESCE(SUM(COALESCE(it.qty, 0)), 0)
+               FROM it WHERE it.variant_key = v.variant_key) AS qty,
+            (SELECT MAX(COALESCE(it.color, ''))
+               FROM it WHERE it.variant_key = v.variant_key) AS color_raw,
             (SELECT COALESCE(i.local_path, '')
-               FROM oi_order_items x JOIN oi_images i ON i.id = x.image_id
-              WHERE x.variant_key = v.variant_key AND COALESCE(i.local_path, '') <> ''
-              ORDER BY x.id LIMIT 1) AS local_path,
-            (SELECT COALESCE(x.raw_fields, '')
-               FROM oi_order_items x WHERE x.variant_key = v.variant_key
-              ORDER BY x.id LIMIT 1) AS raw_fields
+               FROM it JOIN md_images i ON i.id = it.image_id
+              WHERE it.variant_key = v.variant_key AND COALESCE(i.local_path, '') <> ''
+              ORDER BY it.id LIMIT 1) AS local_path,
+            (SELECT COALESCE(it.raw_fields, '')
+               FROM it WHERE it.variant_key = v.variant_key
+              ORDER BY it.id LIMIT 1) AS raw_fields
        FROM oi_variant_keys v
        JOIN oi_style_colors sc ON sc.id = v.style_color_id
        JOIN oi_styles st ON st.id = sc.style_id
+      WHERE EXISTS (SELECT 1 FROM it WHERE it.variant_key = v.variant_key)
       ORDER BY v.variant_key
       LIMIT ?`,
-    [Math.max(1, Number(limit) || 400)],
+    day ? [day, Math.max(1, Number(limit) || 400)] : [Math.max(1, Number(limit) || 400)],
   );
 
   const prodMeta = productMetaMap();
@@ -3110,7 +3189,7 @@ function styleBriefOf(styleId: number, code: string, meta: Map<string, { name: s
       `SELECT COALESCE(i.local_path, '') AS p
          FROM oi_order_items x
          JOIN oi_variant_keys v ON v.variant_key = x.variant_key
-         JOIN oi_images i ON i.id = x.image_id
+         JOIN md_images i ON i.id = x.image_id
         WHERE v.style_color_id IN (SELECT id FROM oi_style_colors WHERE style_id = ?)
           AND COALESCE(i.local_path, '') <> ''
         ORDER BY x.id LIMIT 1`,
@@ -3470,16 +3549,33 @@ function autoAssignByMap(
   // `currentIsGuess`（"猜的"结论不算人的结论，映射可以改掉）。
   // 图上的当前结论（mapped 分支要判"能不能改"，②③④ 还要 URL 与色名）——
   // 一次查回，两个分支共用，不查两遍。
-  const img = dbGet<{ source_url: string; color: string; style_color_id: number | null }>(
+  const img = dbGet<{ source_url: string; color: string; style_color_id: number }>(
     `SELECT COALESCE(i.source_url, '') AS source_url, COALESCE(sc.color, '') AS color,
-            i.style_color_id AS style_color_id
-       FROM oi_images i LEFT JOIN oi_style_colors sc ON sc.id = i.style_color_id
-      WHERE i.id = ?`,
+            COALESCE(sc.id, 0) AS style_color_id
+       FROM md_images i LEFT JOIN oi_style_colors sc ON sc.image_id = i.id
+      WHERE i.id = ?
+      ORDER BY sc.id LIMIT 1`,
     [rec.imageId],
   );
+  // R1 起「款色 ↔ 图」是 **1:1**：同一款色只有一张代表图能读到结论，同色的其他订单图读不到。
+  // 所以**行上有结论时以行为准**（行上的投影本来就更细，也是 R1 之后唯一的权威），图只作回落。
+  const rowCur =
+    Number(rowId) > 0
+      ? dbGet<{ color: string; style_color_id: number }>(
+          `SELECT COALESCE(sc.color, '') AS color, COALESCE(oi.style_color_id, 0) AS style_color_id
+             FROM oi_order_items oi LEFT JOIN oi_style_colors sc ON sc.id = oi.style_color_id
+            WHERE oi.id = ?`,
+          [Number(rowId)],
+        )
+      : undefined;
+  const curScId = Number(rowCur?.style_color_id ?? 0) || Number(img?.style_color_id ?? 0);
+  const current = String(rowCur?.color ?? '').trim() || String(img?.color ?? '').trim();
   // "猜的"结论（按变体键自动建的临时款）映射才可以改；人认过的（命名 / 合并 / 改过色名）不动。
-  // 没有结论时 `img.style_color_id` 为 0 ⇒ 判为"猜的" ⇒ 可写。
-  const currentIsGuess = isGuessedStyleColor(Number(img?.style_color_id ?? 0));
+  // 没有结论（`0`）= 猜的 ⇒ 可写；**占位色 `未分类` 也一律算猜的** —— 它本来就不是结论，
+  // 只是"什么都没定出来"的兜底名；不算猜的的话，补色通道永远回填不到占位行
+  // （`reassignCore` 把占位行选成候选、这里又把它挡回去，用户配完映射看不到任何变化）。
+  const currentIsGuess =
+    curScId === 0 || current === MAPPED_FALLBACK_COLOR || isGuessedStyleColor(curScId);
   const mapped = String(hit.spec ?? '').trim();
   if (mapped && mapped !== '*') {
     // 映射是"这个商品ID 是什么色"的人为判定，但它**不许冲掉人更直接的操作**：
@@ -3489,7 +3585,6 @@ function autoAssignByMap(
     setImageStyleColor(rec.imageId, ensureStyleColor(style.id, hit.productCode, mapped).id);
     return;
   }
-  const current = String(img?.color ?? '').trim();
   const aliases = colorAliases(hit.productId);
   // ②已有的真实色不动 —— 但**平台色名不算"真实色名"**：它只是采集侧的字符串（`Khaki` / `1`），
   //   一旦这个产品配过对照（`Khaki → 卡其`），挂在 `Khaki` 上的图就是"还没翻译的"，要重定。
@@ -3598,19 +3693,22 @@ function reassignCore(
   //     判据与 `autoAssignByMap` 的 ② 守卫**同一个函数**（`guessedScSql`），不另写一套。
   //   人认过的（命名过 / 改过色名 / 合并过）一律不在候选里 —— 那是"改一次映射把历史全改判"，禁用。
   const rows = dbQuery<{
+    id: number;
     image_id: number;
     shop: string;
     color: string;
     raw_fields: string;
-    cur_id: number | null;
+    cur_id: number;
   }>(
-    `SELECT oi.image_id, o.shop, oi.color, oi.raw_fields, i.style_color_id AS cur_id
+    // R1：结论读**订单行自己的投影**（`ITEM_STYLE_COLOR_ID`：行优先、图回落）。
+    // 不能只按 `sc.image_id = oi.image_id` —— 款色 ↔ 图是 1:1，同色但不同图的行会读不到结论，
+    // 于是"占位色的存量单"被当成"没归款"再判一次（回填数也会跟着虚高）。
+    `SELECT oi.id, oi.image_id, o.shop, oi.color, oi.raw_fields, ${ITEM_STYLE_COLOR_ID} AS cur_id
        FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       JOIN oi_images i ON oi.image_id = i.id
-       LEFT JOIN oi_style_colors sc ON sc.id = i.style_color_id
+       LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
       WHERE oi.image_id IS NOT NULL
-        AND (i.style_color_id IS NULL OR sc.color = ?${colorCond} OR ${guessedScSql('i.style_color_id')})`,
+        AND (sc.id IS NULL OR sc.color = ?${colorCond} OR ${guessedScSql('sc.id')})`,
     [MAPPED_FALLBACK_COLOR, ...extraColors.map((c) => c.toLowerCase().trim())],
   );
   const d = getDb();
@@ -3633,16 +3731,21 @@ function reassignCore(
       continue;
     }
     const imageId = Number(r.image_id);
+    const rowId = Number(r.id);
     const beforeId = Number(r.cur_id) || 0;
-    autoAssignByMap({
-      imageId,
-      shop: String(r.shop ?? ''),
-      color: String(r.color ?? ''),
-      rawFields,
-    });
-    const after = d.prepare(`SELECT style_color_id FROM oi_images WHERE id = ?`).get(imageId) as
-      | { style_color_id: number | null }
-      | undefined;
+    autoAssignByMap(
+      {
+        imageId,
+        shop: String(r.shop ?? ''),
+        color: String(r.color ?? ''),
+        rawFields,
+      },
+      rowId,
+    );
+    // 判据同样看**行**（行是 R1 之后的权威；一张图挂多行时逐行读数才不会漏计/多计）
+    const after = d
+      .prepare(`SELECT COALESCE(style_color_id, 0) AS style_color_id FROM oi_order_items WHERE id = ?`)
+      .get(rowId) as { style_color_id: number } | undefined;
     const afterId = Number(after?.style_color_id) || 0;
     // 判据是**换没换**而不是"有没有值"：补色前的占位色也有 id，拿"非空"计数会把没动的行也报成处理过
     if (afterId && afterId !== beforeId) {
@@ -4121,7 +4224,7 @@ export function shippingRows(
     args.push(period);
   }
   args.push(n);
-  // 款编码走**识别链** `oi_images.style_color_id → oi_style_colors → oi_styles`（与
+  // 款编码走**识别链** `oi_style_colors.image_id → oi_style_colors → oi_styles`（与
   // `purchase-db.outstanding()` 同一套 JOIN，口径只留一份）。一律 **LEFT JOIN**：
   // 未识别的订单行必须仍然回得来 —— 丢了行，"缺的是哪一环"就看不出来了。
   // 供应商**可选**：`suppliers` 表属采购域、可能还没建（各域表按域懒建）→ 先探再拼 JOIN，
@@ -4143,7 +4246,6 @@ export function shippingRows(
             ${supplierSel}
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
-     LEFT JOIN oi_images i ON oi.image_id = i.id
      LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${supplierJoin}
@@ -4227,7 +4329,6 @@ export function listOrdersPage(
     dbQuery<{ n: number }>(
       `SELECT COUNT(*) AS n FROM oi_order_items oi
        JOIN oi_orders o ON o.id = oi.order_id
-       LEFT JOIN oi_images i ON oi.image_id = i.id
        LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
        ${n.join}
@@ -4241,11 +4342,11 @@ export function listOrdersPage(
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT oi.id, oi.image_id, o.order_no, o.shop, oi.size, o.order_time, oi.raw_fields,
             oi.category, oi.color, oi.logo, oi.material, oi.status, oi.corrected, oi.created_at,
-            i.fingerprint, i.source_url, i.local_path, i.result_json,
+            i.fingerprint, i.source_url, i.local_path,
             s.code AS style_code, ${n.name} AS style_name, sc.color AS style_color
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
-     LEFT JOIN oi_images i ON oi.image_id = i.id
+     LEFT JOIN md_images i ON i.id = oi.image_id
      LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${n.join}
@@ -4267,17 +4368,11 @@ export function updateOrder(input: UpdateOrderInput): { styleCode?: string; styl
     if (!order) throw new Error(`订单不存在: id=${input.id}`);
     let reassigned: { styleCode?: string; styleColorCode?: string } = {};
     if (input.reclassify && input.fingerprint) {
-      // 重归类前记录图片原归属款（供空壳原款清理使用）
-      const prevImg = d.prepare(`SELECT style_color_id FROM oi_images WHERE id = ?`).get(order.image_id) as
-        | { style_color_id: number | null }
-        | undefined;
-      let prevStyleId: number | undefined;
-      if (prevImg?.style_color_id) {
-        const prevSc = d
-          .prepare(`SELECT style_id FROM oi_style_colors WHERE id = ?`)
-          .get(prevImg.style_color_id) as { style_id: number } | undefined;
-        prevStyleId = prevSc?.style_id;
-      }
+      // 重归类前记录图片原归属款（供空壳原款清理使用）：图 → 色行 1:1
+      const prevImg = d
+        .prepare(`SELECT style_id AS style_id FROM oi_style_colors WHERE image_id = ? ORDER BY id LIMIT 1`)
+        .get(order.image_id) as { style_id: number } | undefined;
+      const prevStyleId = Number(prevImg?.style_id) || undefined;
       const resolved = resolveStyle({
         fingerprint: input.fingerprint,
         category: input.category,
@@ -4304,7 +4399,6 @@ export function updateOrder(input: UpdateOrderInput): { styleCode?: string; styl
         .prepare(
           `SELECT s.code AS style_code, sc.code AS style_color_code
            FROM oi_order_items oi
-           LEFT JOIN oi_images i ON oi.image_id = i.id
            LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
            LEFT JOIN oi_styles s ON sc.style_id = s.id
            WHERE oi.id = ?`,
@@ -4481,19 +4575,14 @@ export function reopenOrdersCorrected(ids: number[]): number {
 }
 
 /** 删除款式（款编码）：
- *  - oi_styles 行删除（CASCADE 级联删除其款色）；
- *  - 该款式下所有图片解除款色归属（style_color_id 置 NULL），图片与识别指纹保留；
+ *  - oi_styles 行删除（CASCADE 级联删除其款色；款色行上的代表图 `image_id` 随之消失，
+ *    图片**字节与 `md_images` 行保留** —— 图片归主数据域，孤图清理负责回收）；
  *  - 订单行保留（category/color 等字段不变），仅款编码联表变为空。 */
 export function deleteStyle(id: number): void {
   const d = getDb();
   const style = d.prepare(`SELECT id FROM oi_styles WHERE id = ?`).get(id);
   if (!style) throw new Error(`款式不存在: id=${id}`);
   dbTransaction(() => {
-    dbRun(
-      `UPDATE oi_images SET style_color_id = NULL
-       WHERE style_color_id IN (SELECT id FROM oi_style_colors WHERE style_id = ?)`,
-      [id],
-    );
     // 订单行的投影跟着退成「未归类」（0）—— 款删了还留着旧 id 就是指向不存在行的悬空引用，
     // 而缺口统计按 id 分组，会把它算进一个已经不存在的款里（界面上看不见、数字却还在）。
     dbRun(`UPDATE oi_order_items SET style_color_id = 0 WHERE style_color_id IN (SELECT id FROM oi_style_colors WHERE style_id = ?)`, [
@@ -4544,30 +4633,30 @@ export function groupStats(dimensions: string[]): GroupStat[] {
   }));
 }
 
-/** 清空订单与图片指纹库（含识别缓存与待识别队列），谨慎使用 */
+/**
+ * 清空订单（**不碰图片**：图片与主数据归 `md_images`，生命周期由孤图清理决定）。
+ */
 export function clearAll(): void {
   dbTransaction(() => {
     dbRun('DELETE FROM parcels');
     dbRun('DELETE FROM oi_order_items');
     dbRun('DELETE FROM oi_orders');
-    dbRun('DELETE FROM oi_images');
   });
 }
 
 /**
- * 图片本地路径全集（`oi_images` 的非空 local_path），供孤图清理判定"仍被引用"。
+ * 图片本地路径全集（`md_images` 的非空 local_path），供孤图清理判定"仍被引用"。
  *
  * ⚠️ 2026-10-28 顺带修掉一条**从未成功执行过**的查询：原 SQL 是
  * `UNION SELECT local_path FROM oi_queue`，而 `oi_queue` 的建表语句里**没有 local_path 列** ——
  * 真库上整条语句抛 `no such column: local_path`，被调用方的 try/catch 吞掉后返回失败
  * （症状：孤图清理永远删不掉任何文件，界面上只看到"失败"）。删队列时去掉那一支才第一次能跑。
- * 取证：对真库直接执行原 SQL 可复现该报错。
+ *
+ * R1：实现搬到主数据域（`allImageLocalPaths`），本域只留一个转发（调用方是订单处理器，
+ * 但它清理的是全项目唯一的图片目录 —— 口径只能有一份）。
  */
 export function listImageLocalPaths(): string[] {
-  const rows = dbQuery<{ p: string }>(
-    `SELECT local_path AS p FROM oi_images WHERE local_path <> ''`,
-  );
-  return rows.map((r) => r.p);
+  return allImageLocalPaths();
 }
 
 function mapOrderRow(row: Record<string, unknown>): OrderRecord {
@@ -4595,23 +4684,10 @@ function mapOrderRow(row: Record<string, unknown>): OrderRecord {
     styleCode: row.style_code !== undefined && row.style_code !== null ? String(row.style_code) : undefined,
     styleName: row.style_name !== undefined && row.style_name !== null ? String(row.style_name) : undefined,
     styleColor: row.style_color !== undefined && row.style_color !== null ? String(row.style_color) : undefined,
-    features: parseFeatures(row.result_json),
+    // 识别流水线已删（D16，`result_json` 随 `oi_images` 一起退役）⇒ 特征恒空。
+    // 字段保留是因为渲染层「重新归类」仍读它（空数组交给 `buildStyleFingerprint` 按品类算指纹）。
+    features: undefined,
   };
-}
-
-/** 从识别结果 JSON 中解析款式特征数组（纠正重新归类时重建指纹用） */
-function parseFeatures(resultJson: unknown): string[] | undefined {
-  if (typeof resultJson !== 'string' || !resultJson) return undefined;
-  try {
-    const v = JSON.parse(resultJson);
-    if (Array.isArray(v?.features)) {
-      const feats = v.features.map((f: unknown) => String(f ?? '').trim()).filter(Boolean);
-      return feats.length ? feats.slice(0, 20) : undefined;
-    }
-  } catch {
-    /* 识别结果损坏时忽略，纠正时特征为空仍可按品类归类 */
-  }
-  return undefined;
 }
 
 function safeJson(s: string): Record<string, string> {
@@ -5040,20 +5116,26 @@ const PART_SELECT = `SELECT p.order_item_id, p.role, p.style_color_id, p.qty_per
  */
 /**
  * ⭐ 「这一行订单属于哪个款色」的**唯一身份表达式**（SQL 片段，要求 FROM 里有
- * `oi_order_items oi` 与 `LEFT JOIN oi_images i ON i.id = oi.image_id`）。
+ * `oi_order_items oi`，**不需要**再 JOIN 图片表）。
  *
- * 口径：**订单行优先、图回落**。2026-10-28 订单驱动归类之后，`oi_order_items.style_color_id`
- * 才是权威（由 `(店铺, 商品ID, Color 原值)` 的变体键自动写入）；`oi_images.style_color_id`
- * 是旧识别链的历史结论，只在该行还没归类时兜底。
+ * 口径：**订单行优先、图回落**（图 → 色经 `oi_style_colors.image_id` 反查，1:1）。
+ * 2026-10-28 订单驱动归类之后，`oi_order_items.style_color_id` 才是权威（由
+ * `(店铺, 商品ID, Color 原值)` 的变体键自动写入）；色行上的 `image_id` 是"这张图属于哪个色"
+ * 的历史结论（R1 起这里是唯一落点），只在该行还没归类时兜底。
+ *
+ * 为什么用**相关子查询**而不是 `LEFT JOIN oi_images i`：R1 之后图片表是 `md_images`，
+ * 而"图 → 色"不经过图片表（归属直接写在色行上）；用 JOIN 还得在每个消费者里多写一条
+ * `LEFT JOIN oi_images i`（拣货 / 采购 / 订单三处都抄），口径会分叉。
+ * 子查询也**不占用别名 `i`** —— 调用方常把 `i` 留给图片表。
  *
  * 为什么必须导出而不是各页自己写一遍 `COALESCE(...)`：
  * 改造前"改装色"只走图，于是所有投影层（待核对列表 / 订单利润 / 拣货 / 拿货缺口）都
  * 按 `oi_images.style_color_id` 直接 JOIN 款色。改造后订单行先有了款色，
- * 若投影层仍只认图，就会出现**同一行"统计说已归类、列表显示没归类"**——
+ * 若投影层仍只认图，就会出现**同一行"统计说已归类、列表显示没归类"** ——
  * 真库实测这类行有 9/75（`image.style_color_id = 0` 但订单行已归）。
  * 一个数字两处实现，用户只会认为坏了。
  */
-export const ITEM_STYLE_COLOR_ID = `COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0)`;
+export const ITEM_STYLE_COLOR_ID = `COALESCE(NULLIF(oi.style_color_id, 0), (SELECT sc.id FROM oi_style_colors sc WHERE sc.image_id = oi.image_id AND oi.image_id <> 0 LIMIT 1), 0)`;
 
 export const ITEM_STYLE_COLOR_SRC = `(SELECT p.order_item_id AS order_item_id,
             p.style_color_id AS style_color_id, p.qty_per_set AS qty_per_set
@@ -5065,7 +5147,6 @@ export const ITEM_STYLE_COLOR_SRC = `(SELECT p.order_item_id AS order_item_id,
             ${ITEM_STYLE_COLOR_ID} AS style_color_id,
             1 AS qty_per_set
        FROM oi_order_items oi
-       LEFT JOIN oi_images i ON i.id = oi.image_id
       WHERE NOT EXISTS (SELECT 1 FROM oi_item_parts p2 WHERE p2.order_item_id = oi.id))`;
 
 function mapPart(r: Record<string, unknown>): OrderItemPart {
@@ -5273,16 +5354,11 @@ export function materializeItemParts(orderItemId: number): MaterializeOutcome {
  *
  * 有部件 ⇒ 只返回部件集。**绝不**再把该行的单品款色并进来：套装行上那个 `style_color_id`
  *   是"这张套装图整体像哪个款"的残留，并进来就是同一件实物算两遍。
- * 无部件 ⇒ 回落单品款色，**图优先**：
+ * 无部件 ⇒ 回落单品款色（口径 = `ITEM_STYLE_COLOR_ID`：**行优先、图回落**）。
  *
- *   `oi_images.style_color_id` 才是款色归属的权威 —— `assignOrderStyle` 只写它
- *   （`setImageStyleColor`），从不写 `oi_order_items.style_color_id`；后者是 v8 拆表前的
- *   行级投影，写入方早已不再维护它的新值（只剩老数据里的历史值）。
- *   所以回落顺序必须是「图 → 行」，反过来会让历史行值压过后来人工改的归属。
- *
- *   ⚠️ `picking-db.ts` 里的 `COALESCE(NULLIF(oi.style_color_id, 0), i.style_color_id, 0)`
- *      是**行优先**，与本函数相反。目前那张表的行级值基本为历史残留，两个口径在真库上多半
- *      同值；接入套装时那处要改成走本函数（P3），不要照着它抄顺序。
+ *   `oi_order_items.style_color_id` 是权威（订单驱动归类、人工归款都写它）；
+ *   色行上的 `image_id`（R1 起是"图 → 色"的唯一落点）只在该行还没归类时兜底。
+ *   两者都经 `ITEM_STYLE_COLOR_ID` 一份实现，别在这里另写 `COALESCE`。
  *
  * 返回值已去重、按部件录入顺序（单件时长度为 0 或 1）。
  */

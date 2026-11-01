@@ -159,6 +159,14 @@ export interface SkuPoolOptions {
    * 首屏设对了，`onMounted` 的那次 `refreshAll` 才会两源一起拉。
    */
   initialSub?: SkuSub;
+  /**
+   * 存量补图真的补上了（>0 张）时回调 —— 外壳据此重拉**同屏两栏**。
+   *
+   * 补的是**产品主数据**（`pl_products.image_id`），而左栏的产品列表归 `useProductList` 自己管；
+   * 不通知它，用户会看到"提示说补了 4 张，左栏还是白图"（进度与画面自相矛盾）。
+   * 整宽回退形态不传（它没有左栏）。
+   */
+  onImagesAdopted?: () => void;
 }
 
 /** 右栏分段。`pending` = 待认（订单 + 采集合并，仅两栏形态）；其余为整宽形态的三个历史段 */
@@ -1074,6 +1082,30 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
   }
 
   /**
+   * 存量补图（2026-10-30 用户实报「认款后产品图片还是没更新」）。
+   *
+   * 认款顺手补图只覆盖**写入那一刻**的行；升级前已确认的映射不会自己长图。
+   * 这里在打开页面时跑一轮（只补空、不覆盖、主进程单轮限量）：
+   * 补上了就报一声并请外壳重拉同屏两栏；没有可补的、或网络失败都**安静**——
+   * 补图是附加值，不该在打开页面时弹错误。
+   */
+  async function repairMissingImages(): Promise<void> {
+    try {
+      const r = await api.skuRepairImages({ limit: 40 });
+      const adopted = Number(r?.adopted) || 0;
+      if (!adopted) return;
+      const left = Number(r?.pending) || 0;
+      toast(
+        `已为 ${adopted} 个款补上主图${left ? `，还有 ${left} 个款缺图（按「刷新」可再试）` : ''}`,
+        'info'
+      );
+      opts.onImagesAdopted?.();
+    } catch {
+      // 补图失败不挡页面、不弹错（下次进页/刷新会再试）
+    }
+  }
+
+  /**
    * 工具栏「刷新」：先清掉上一次的行级失败提示再重拉。
    *
    * ⚠️ 清 `failures` 的动作**不能**放进 `refreshAll()`：写入完成后是"先记失败、再重拉列表"，
@@ -1081,6 +1113,7 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
    */
   function manualRefresh(): void {
     failures.value = [];
+    void repairMissingImages();
     void refreshAll();
   }
 
@@ -1285,7 +1318,9 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
         }
       }
       // ③ 认到新款 —— 走**同一条**写路径（commitMap：单事务 + 行级失败回传 + 写完重拉）
-      await commitMap(itemWriteRows([item], p.id, ''), '');
+      //    `adoptImages` 跟随向导里的「采纳为款主图」勾选：不勾时连"顺手补图"也要关，
+      //    否则第 ③ 步已经悄悄采纳了，第 ④ 步的 `adoptMain=false` 形同虚设。
+      await commitMap(itemWriteRows([item], p.id, ''), '', { adoptImages: input.adoptImage });
       // 勾选集里必须把这一行摘掉。合并段的计数是「清单 ∩ 选择集」：写完后该行离开清单，
       // 但 key 还留着 —— 动作条会继续报「已选 1 项」、「认到 X（1 项）」照样亮着，
       // 而清单里一条勾中的都没有（用户看到的是"按钮说选了，但没选"）。
@@ -1403,11 +1438,17 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
    *
    * 不抛：失败落进 `failures` / `error`，界面怎么收尾（关不关弹层、清不清选择）交给调用方。
    */
-  async function commitMap(rows: SkuMapInputPayload[], color: string): Promise<void> {
+  async function commitMap(
+    rows: SkuMapInputPayload[],
+    color: string,
+    mapOpts?: { adoptImages?: boolean },
+  ): Promise<void> {
     busy.value = true;
     failures.value = [];
     try {
-      const res = await api.skuMap({ rows });
+      // 认款顺手补图默认开（`adoptImages` 缺省即 true）。唯一会关掉它的是「建档并关联」向导：
+      // 用户取消勾选「采纳为款主图」时传 false —— 人的选择不能被"顺手"推翻。
+      const res = await api.skuMap({ rows, adoptImages: mapOpts?.adoptImages !== false });
       failures.value = res?.failed ?? [];
       const created = res?.created ?? 0;
       const updated = res?.updated ?? 0;
@@ -1420,10 +1461,15 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
       // 两个数都为 0 时都不提（"全零不是正确表达"），有值才报。
       const tail =
         (reassigned ? `，另有 ${reassigned} 行老订单一并归好` : '') +
-        (adopted ? `，并把 ${adopted} 张订单图设为款主图` : '');
+        (adopted ? `，并把 ${adopted} 张商品图设为款主图` : '');
       const head = `新增 ${created} 条、更新 ${updated} 条${color ? `（颜色「${color}」）` : ''}${tail}`;
       if (failed) toast(`${head}，${failed} 条失败`, 'error');
       else toast(head, 'success');
+      // 认款顺手补了款主图（写的是 `pl_products.image_id`）⇒ 通知外壳重拉左栏。
+      // 右栏自己的 `refreshAll` 只管队列/快照/映射，左栏的产品列表归 `useProductList` 管：
+      // 不通知它，用户会看到"回执说设了主图、左栏还是白图"（banner 与画面自相矛盾）。
+      // 这是 2026-10-30「认款后产品图片还是没更新」的另一半 —— 后端写进去了，界面没重拉。
+      if (adopted) opts.onImagesAdopted?.();
       await refreshAll();
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : String(e);
@@ -1564,6 +1610,8 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
 
   onMounted(() => {
     void refreshAll();
+    // 存量补图：把"升级前就认过、但一直没有主图"的款补上（认款写入时的那一轮覆盖不到它们）
+    void repairMissingImages();
     // 扩展采集是**外部进程**写库，本页无从感知 —— 主进程落库后广播，这里据此重拉：
     // 停在采集相关分段（含合并的「待认」段）刷列表；停在别的段只刷汇总（把分段徽标先点亮）
     offAeItems = onAeItemsIngested(() => {

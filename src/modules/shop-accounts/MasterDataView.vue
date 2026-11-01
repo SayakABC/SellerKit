@@ -11,7 +11,7 @@
 // 2026-10-15：第七类「物流运费」——「无忧物流运费」UI 岛回收为内建资料项
 //   （报价单导入 / 运费查询 / 按订单试算 / 按产品试算，见 components/ShippingRatePane.vue）。
 // 2026-10-17：同一批两处搬家（用户口径「邮件功能独立出来放一级菜单；货与成本归拢到基础数据中」，
-//   见 docs/notes/2026-10-17-mail-out-goods-into-master-data.md）：
+//   见 docs/notes/2026-10-30-goods-ux-refactor.md）：
 //   · 「邮件」**搬出去**成一级模块（`src/modules/mail`）：读信不是"维护一份资料"，
 //     它有自己的动线（而且未读是每天要看的东西），留在左导航里等于让用户先猜"信属于哪类资料"。
 //   · 「货与成本」**搬进来**成第二项「货品档案」（`GoodsView.vue` 以 embedded 形态渲染）：
@@ -60,6 +60,7 @@ import type { IconName } from '@/core/components/icons';
 import AccountsPanel from './components/AccountsPanel.vue';
 import ShopRegistryView from './components/ShopRegistryView.vue';
 import ToolsPanel from './components/ToolsPanel.vue';
+import ColorPanel from './components/ColorPanel.vue';
 import CompanyManageView from './components/CompanyManageView.vue';
 import SupplierView from './components/SupplierView.vue';
 import ShippingRatePane from './components/ShippingRatePane.vue';
@@ -116,6 +117,10 @@ const KINDS: KindDef[] = [
   // 「待关联采集商品」那个队列表格（右栏分段 + 状态条），侧栏再算一遍等于同一个数
   // 摆两个地方（同 2026-10-08 撤掉指标条的理由）。要加就先问"这个数在右栏是不是已经有了"。
   { id: 'goods', name: GOODS_TAB_LABEL.workbench, icon: 'box' },
+  // 2026-10-30 新增：颜色板与合并（`ColorPanel.vue`）。同一个颜色在款色 / SKU 里以
+  // `黑` / `黑色` 两种写法各占一行，本页是唯一能把它们归一的地方（拖一行到另一行）。
+  // **刻意不给徽标**：色名总量是低频变化的，不是待办（同 `goods` / `tools` 的判据）。
+  { id: 'colors', name: '颜色', icon: 'palette' },
   // 2026-10-22：「店铺登记」改名「店名归一」—— 它只负责认历史文本里的名字，
   // 实体增改在「店铺」页签（合并编辑器）。
   { id: 'registry', name: '店名归一', icon: 'table', countTitle: (n) => `${n} 个店名待认领`, todo: true },
@@ -162,7 +167,7 @@ const GROUPS: GroupDef[] = [
   // 2026-10-22：组内加 `tools`（工具账号库）。顺序 = 维护频率：店铺天天看，
   // 店名归一 / 企业 / 工具账号按需维护。
   { id: 'accounts', name: '店铺账号', icon: 'key', kinds: ['accounts', 'registry', 'companies', 'tools'] },
-  { id: 'goods', name: '产品管理', icon: 'box', kinds: ['goods', 'suppliers'] },
+  { id: 'goods', name: '产品管理', icon: 'box', kinds: ['goods', 'colors', 'suppliers'] },
   { id: 'shipping', name: '物流运费', icon: 'truck', kinds: ['shipping'] },
   // 2026-10-19：第四组「待补清单」—— 只有一项，故不画组内页签条（同物流运费）。
   // 独立成组而不是塞进「产品管理」：它的六类检查里有两类在**订单侧**（没认款 / 颜色未分类），
@@ -305,7 +310,7 @@ function onSwitchModule(e: Event): void {
 
 onMounted(async () => {
   // 2026-10-17：七项资料从**页面内左导航**搬到**主侧栏的二级菜单**（省下 212px 内容宽度，
-  // 见 docs/notes/2026-10-17-sub-nav-to-sidebar.md）。这里把菜单报给外壳，越早越好：
+  // 见 docs/notes/2026-10-30-ui-nav-and-tabs.md）。这里把菜单报给外壳，越早越好：
   // 跨模块跳转（如发货台「去「货品档案」补 SKU 克重」）落地时，用户第一眼就该看见
   // 侧栏已经在「货品档案」上 —— 晚一步上报会先闪一行孤零零的「基础数据」。
   // `items` / `activeId` 是 getter 而不是快照：徽标数（未归一店名、缺进价）随 `loadCounts`
@@ -417,6 +422,8 @@ onBeforeUnmount(() => {
            同日收拢：它自己的页签条交给外层（`hide-tabs`）—— 它只有一项页签，
            和「成本」「供应商」并成一条才不会出现两条并排的页签条。 -->
       <GoodsView v-else-if="kind === 'goods'" embedded hide-tabs />
+      <!-- 2026-10-30：颜色板与合并（同色异名归一的唯一入口；拖一行到另一行）。 -->
+      <ColorPanel v-else-if="kind === 'colors'" />
       <ShopRegistryView v-else-if="kind === 'registry'" />
       <CompanyManageView v-else-if="kind === 'companies'" />
       <!-- 2026-10-22：紫鸟 / ERP 登录名库（物理合并新增；原先这些字段每家店重复录入）。 -->

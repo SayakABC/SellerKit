@@ -65,20 +65,18 @@
          的事；核对表在改造后通常一进来就是空的（"这批核对完了"）。
          ⚠️ 它是**可选**动作：不起名照样统计/拿货，卡片自己会收成一行 —— 不要给它加"必须做完"
             的措辞，也不要把它做成进入本页的前置（那会把 58 次输入变成门槛）。 -->
-    <VariantNamingCard />
+    <VariantNamingCard :import-date="localDayKey()" />
 
-    <!-- 款合并（P4，2026-10-28）：同一个厂家下几个款其实是同一件货时，合并成 1 个。
-         为什么和命名板并排、而不是放拿货页：两者是同一件事的两个动作（**人给结构**）——
-         给色起名、认出一件货有两个链接；人在这页刚看完一屏 listing，判断成本最低。
-         也有一条实测理由：拿货页是固定高度 flex + 内部滚动，往里插一块折叠卡会把宫格卡尾
-         按钮挤出可点区（`today:ui` 的几何守卫 elementFromPoint 直接红）—— 那页的主活是
-         开单，不能为了低频整理动它。
-         ⚠️ 它**不是门**：默认折叠、可完全不碰，合并只影响"按款汇总"的口径。 -->
-    <StyleMergeCard />
+    <!-- 款合并（P4）**已撤下**（2026-10-30 用户口径「同一件货模块现在的推荐完全不准」）。
+         它的"推荐"其实只是「同一厂家下 ≥2 个款」—— 真库 5 号厂家里挂了 8 个款，
+         于是一屏 8 行全摆出来让人自己判断，比不摆更费注意力（错并比拆更难被发现）。
+         组件与 IPC（orderStyleMergeBoard / orderStyleMerge / orderStyleUnmerge）都留着，
+         真库 0 条合并记录、不存在"想拆拆不掉"的问题；将来若有可信判据（同商品ID跨店等）
+         再接回来。**不要**在没有判据的情况下把它挂回来。 -->
 
     <!-- ⚠️ `cl-list` 不是装饰：它是"核对表不许被压扁"这条样式的挂点（见样式段末尾）。
-         本页是**定高弹性列**（`.cl-view` = `.wb-page`，height:100%），命名板与款合并卡
-         进来之后，剩下这一块就成了唯一"默认可缩"的弹性项 —— 实测它被压到 55px、
+         本页是**定高弹性列**（`.cl-view` = `.wb-page`，height:100%），命名板进来之后，
+         剩下这一块就成了唯一"默认可缩"的弹性项 —— 实测它被压到 55px、
          表格容器 0px，而页面 scrollHeight 与 clientHeight 相等（**滚不动**）⇒ 表格整块消失。 -->
     <section class="wb-panel cl-list">
       <div class="wb-panel__head">
@@ -166,6 +164,40 @@
         </span>
       </div>
 
+      <!-- ── 色卡托盘（2026-10-30）────────────────────────────────────────────────
+           用户口径：归类核对页要能"把图拖到色卡上定色"。
+           托盘列的是**本页款色卡里出现过的颜色**，不是 27 个字典色：这一页的落点是
+           「款 + 色」的款色，颜色不在款色卡里就该先去产品管理加色 —— 摆一整排用不上的色，
+           人会以为"拖上去没反应"是因为自己拖错了。
+           ⚠️ 点与拖**走同一个 `applyTrayColor`**（不写两套归类逻辑）。 -->
+      <div
+        v-if="scope === 'pending' && rows.length && trayColors.length"
+        class="cl-tray"
+        :class="{ 'is-dragging': trayDrag.active }"
+        data-act="cl-tray"
+      >
+        <span class="cl-tray__label" data-act="cl-tray-label">色卡</span>
+        <ColorPalette
+          act="cl-tray"
+          :colors="trayColors"
+          :current="trayCurrent"
+          :selected-count="selectedIds.size"
+          :dragging="trayDrag.active"
+          :drop-color="trayDrag.color"
+          drop-attr="data-cl-tray"
+          compact
+          :title-for="trayTitle"
+          @pick="onTrayPick"
+        />
+        <span class="cl-tray__hint wb-muted" data-act="cl-tray-hint">
+          {{
+            selectedIds.size
+              ? `点色卡 = 把已选 ${selectedIds.size} 行定到这个色并保存`
+              : '点色卡 = 给勾选行定色；把左边的图直接拖上来 = 给那一行定色'
+          }}
+        </span>
+      </div>
+
       <div v-if="rows.length" class="wb-panel__body wb-table-wrap">
         <table class="wb-table cl-table" data-act="cl-table">
           <thead>
@@ -231,8 +263,13 @@
                   type="button"
                   class="cl-thumb-btn"
                   :data-act="`cl-zoom-${o.id}`"
-                  title="点击看大图（原图）"
-                  @click="openImage(o)"
+                  :title="
+                    scope === 'pending'
+                      ? '点击看大图；按住拖到上方色卡 = 定色（这行有勾选时整组一起定）'
+                      : '点击看大图（原图）'
+                  "
+                  @pointerdown="onThumbDown(o, $event)"
+                  @click="onThumbClick(o)"
                 >
                   <img class="wb-thumb cl-thumb" :src="thumbs[o.localPath || '']" :alt="o.orderNo" />
                   <span class="cl-thumb-btn__zoom" aria-hidden="true">⤢</span>
@@ -275,16 +312,34 @@
                       在这里也能编辑的话，"退回"就变成多此一举的一步，而"哪些行还动得"会长成两套规则。 -->
               <td class="cl-color-col">
                 <template v-if="scope === 'pending'">
-                  <select
+                  <!-- 颜色格（2026-10-30 用户口径「颜色不要用下拉…把现有的颜色列出来，点击选中」）：
+                       有款色卡 ⇒ 「色点 + 当前色名」按钮，点开一个复用 `ColorPalette` 的小弹层；
+                       没点名款 / 这款还没录颜色 ⇒ 仍是自由输入 + 本库已用写法建议（不是下拉）。
+                       ⚠️ `data-color` 是给冒烟/脚本读**当前值**的锚点（原来靠 `<select>.value`）。 -->
+                  <button
                     v-if="paletteOf(o).length"
-                    v-model="draftOf(o).color"
-                    class="wb-input wb-input--sm cl-cell"
+                    type="button"
+                    class="cl-color-btn"
+                    :class="{ 'is-empty': !draftOf(o).color }"
                     :data-act="`cl-color-${o.id}`"
+                    :data-color="draftOf(o).color"
+                    :aria-expanded="colorPicker && colorPicker.id === Number(o.id) ? 'true' : 'false'"
                     :title="colorTitle(o)"
+                    @click="openColorPicker(o, $event)"
                   >
-                    <option value="">请选择颜色</option>
-                    <option v-for="c in paletteOf(o)" :key="c" :value="c">{{ c }}</option>
-                  </select>
+                    <span
+                      class="cl-color-btn__dot"
+                      :style="{
+                        background: draftOf(o).color
+                          ? colorSwatchOf(draftOf(o).color) ?? 'transparent'
+                          : 'transparent',
+                      }"
+                    ></span>
+                    <span class="cl-color-btn__name">{{
+                      draftOf(o).color || '请选择颜色'
+                    }}</span>
+                    <span class="cl-color-btn__caret" aria-hidden="true">▾</span>
+                  </button>
                   <input
                     v-else
                     v-model="draftOf(o).color"
@@ -521,6 +576,65 @@
         </div>
       </div>
 
+      <!-- ── 颜色小弹层（2026-10-30）─────────────────────────────────────────────
+           复用产品编辑页的 `ColorPalette`：这一款有哪些色，一眼全在；点一下 = 选中。
+           为什么不用原生 `<select>`（用户原话「颜色不要用下拉」）：下拉展开时看不见色块，
+           27 个色名排成一条文字列表，选错/选漏全靠读字。
+           ⚠️ 它**必须放在 `v-if="rows.length"` / `v-else` 那一段之后**（与 `cl-viewer` 同区）：
+              插在两者中间会把 `v-else` 改绑，表格与空态同时渲染（见上面 `cl-viewer` 的长注释）。
+           ⚠️ 这里**不新增颜色**（`allowAdd` 关闭）：新增色写的是全局字典，但"这个款有哪些色"
+              是另一条写路径（款色卡），不在本页职责内。 -->
+      <Teleport to="body">
+        <div
+          v-if="colorPicker"
+          class="cl-color-pop__mask"
+          data-act="cl-color-pop-mask"
+          @click.self="closeColorPicker"
+        ></div>
+        <div
+          v-if="colorPicker"
+          class="cl-color-pop"
+          data-act="cl-color-pop"
+          :style="colorPopStyle"
+          role="dialog"
+          aria-label="选择颜色"
+          @pointerdown.stop
+        >
+          <div class="cl-color-pop__head">
+            <span class="cl-color-pop__title" :data-act="`cl-color-pop-${colorPicker.id}`">
+              给 {{ colorPicker.row.orderNo || `#${colorPicker.id}` }} 选颜色
+            </span>
+            <button
+              class="cl-color-pop__x"
+              type="button"
+              data-act="cl-color-pop-close"
+              aria-label="关闭颜色选择"
+              @click="closeColorPicker"
+            >
+              ✕
+            </button>
+          </div>
+          <ColorPalette
+            act="cl-color-pick"
+            :colors="colorPicker.colors"
+            :current="draftOf(colorPicker.row).color"
+            compact
+            @pick="pickDraftColor"
+          />
+          <div class="cl-color-pop__foot">
+            <button
+              class="wb-link"
+              type="button"
+              data-act="cl-color-clear"
+              :disabled="!draftOf(colorPicker.row).color"
+              @click="clearDraftColor"
+            >
+              清空颜色
+            </button>
+          </div>
+        </div>
+      </Teleport>
+
       <!-- ── 批量动作条（2026-10-28）─────────────────────────────────────────────
            用户原话：「归属款还是只能一个一个选，路径太长（点击、选择、关闭、确认）」。
            这条是"勾选 → 一次提交"的落点，吸附在可视区底部（表格再长也够得着）。
@@ -546,6 +660,16 @@
           @click="openBulkPicker"
         >
           批量定款…
+        </button>
+        <button
+          type="button"
+          class="wb-btn wb-btn--sm"
+          data-act="cl-bulk-color"
+          :disabled="busy"
+          title="给这几行定同一个色：先看清「会改几行 / 几行不适用」，再落库"
+          @click="openBulkColorPicker"
+        >
+          批量定色…
         </button>
         <button
           type="button"
@@ -627,6 +751,16 @@
       @apply="applyBulkStyles"
     />
 
+    <!-- 批量定色弹层（2026-10-30）：勾选多行 → 一次选色 → 一次落库。
+         ⚠️ 同样放在空态 `v-else` **之后**（插进 `v-if="rows.length"` 与 `v-else` 之间会让 v-else 改绑）。 -->
+    <BulkColorPicker
+      v-if="bulkColorOpen"
+      :rows="bulkColorRows"
+      :busy="busy"
+      @close="closeBulkColorPicker"
+      @apply="applyBulkColor"
+    />
+
     <!-- 拆包抽屉：打开时按 `orderNo` 拉整单（包裹 + 商品行 + 汇总），关掉重算行内徽标 -->
     <ParcelDrawer
       :visible="!!parcelOrderNo"
@@ -671,7 +805,7 @@
 //   ✅ **2026-10-28 已拍板：不做云端识别** —— 识别原语（`readEngine` / `recognizeOrder`）、
 //   `src/core/ai`、`order-api-key-*` 与「设置 › 识别」页**一并删除**。本页要的"自动认出款与色"
 //   改走**本地视觉**（无网络、无云模型）：路线与落点见
-//   `docs/notes/2026-10-28-classify-local-vision-direction.md`。别再把云端引擎接回来。
+//   `docs/notes/2026-10-30-order-classify-panel.md`。别再把云端引擎接回来。
 //
 // ⚠️ **2026-10-12 加「已核对」范围 + 行内「退回待核对」**（与用户确认过的口径）。要治的是：
 //   核对过之后发现定错了款/色 —— 那些行按定义不在待核对列表里（本页只查 `corrected = 0`），
@@ -695,22 +829,32 @@
 // **照功能不照样式**：移植自原「订单归类」岛的**纠正页**（该岛已于 2026-10-05 整体下架，
 // 源码留档不入库，`CHANGELOG.md` 的 Removed 段有清单）—— 原页用自己的 `.panel/.bar/.btn`；
 // 内建页一律走 `.wb-*`（见 `src/styles/index.css`）。
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import * as ipc from '@/core/services/ipc';
 import { COLOR_WHITELIST } from '@/lib/orderClassifier';
 import ParcelDrawer from './ParcelDrawer.vue';
 import StylePicker from './StylePicker.vue';
 import BulkStylePicker from './BulkStylePicker.vue';
+import BulkColorPicker from './BulkColorPicker.vue';
+// 「颜色格」的通用色卡条（与产品编辑页共用同一份字典与同一个组件）
+import ColorPalette from '@/core/components/ColorPalette.vue';
+import { colorSwatchOf, loadColorDict } from '@/core/services/colorDict';
 import { buildStyleFingerprint } from '@/lib/styleMatcher';
-import { groupByProduct, pickColorFor, productKeyOf, type BulkGroupView } from '@/lib/classifyBulk';
+import {
+  groupByProduct,
+  pickColorFor,
+  productKeyOf,
+  type BulkColorRow,
+  type BulkGroupView,
+} from '@/lib/classifyBulk';
 import { localDayKey } from '@/lib/localDay';
 import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered, ShopGate } from '@/types';
 import { useShipping } from '../flowCtx';
 import { styleImages } from '../purchase';
 // 命名板（P3）：本页多出来的一块**可选**动作，见该组件头注释
 import VariantNamingCard from './VariantNamingCard.vue';
-import StyleMergeCard from './StyleMergeCard.vue';
+// StyleMergeCard 已从本页撤下（见模板里的注释）；组件文件保留，但这里不再 import。
 import {
   PAGE_SIZE,
   listCorrected,
@@ -823,7 +967,7 @@ function setScope(s: Scope): void {
 /**
  * 颜色框的输入建议（datalist）= **标准色词表 + 本库已用过的写法**（词表在前）。
  *
- * ⚠️ 只在"没有可选色卡"那一支用得上：有款有颜色时给的是**该款的下拉**（主数据说了算）。
+ * ⚠️ 只在"没有可选色卡"那一支用得上：有款有颜色时给的是**该款的色卡按钮**（主数据说了算）。
  *    自由输入这一支放任它只有库内写法是不够的 —— 同一个色各写各的（"藏青" / "深蓝"）时，
  *    库内已有的写法只会让错误写法**自我强化**；词表用来把新写法拉回规范。
  */
@@ -877,10 +1021,84 @@ function colorsFor(code: string): string[] {
   return styleOptions.value.find((s) => s.code === c)?.colors ?? [];
 }
 
-/** 这一行**当前草稿所选款**的色卡（模板里读它决定用下拉还是输入框） */
+/** 这一行**当前草稿所选款**的色卡（模板里读它决定用「色卡按钮」还是输入框） */
 function paletteOf(o: OrderRecord): string[] {
   return colorsFor(draftOf(o).styleCode);
 }
+
+/**
+ * 颜色小弹层（2026-10-30）：点颜色格打开，复用 `ColorPalette`。
+ *
+ * 状态里存 `row` 快照 + `rect`（按钮的视口矩形）：弹层挂 `body`（`fixed`），
+ * 不依赖表格/滚动容器的裁剪；空间不够时翻到按钮上方（与 SKU 矩阵的候选浮层同一套做法）。
+ */
+interface ColorPickerState {
+  id: number;
+  row: OrderRecord;
+  colors: string[];
+  rect: { left: number; top: number; bottom: number; width: number };
+}
+const colorPicker = ref<ColorPickerState | null>(null);
+
+function openColorPicker(o: OrderRecord, e: MouseEvent): void {
+  if (scope.value !== 'pending') return;
+  const id = Number(o.id ?? 0);
+  const colors = paletteOf(o).slice();
+  if (!colors.length) return;
+  // 再点同一格 = 收起（弹层自己就是锚点，第二次点击不该再开一个）
+  if (colorPicker.value?.id === id) {
+    closeColorPicker();
+    return;
+  }
+  const el = e.currentTarget as HTMLElement | null;
+  const r = el?.getBoundingClientRect?.();
+  if (!r) return;
+  colorPicker.value = {
+    id,
+    row: o,
+    colors,
+    rect: { left: r.left, top: r.top, bottom: r.bottom, width: r.width },
+  };
+}
+
+function closeColorPicker(): void {
+  colorPicker.value = null;
+}
+
+/** 弹层定位：贴按钮下沿，下面放不下且上方更宽裕时翻上去 */
+const colorPopStyle = computed<Record<string, string> | undefined>(() => {
+  const p = colorPicker.value;
+  if (!p) return undefined;
+  const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
+  const vh = typeof window === 'undefined' ? 900 : window.innerHeight;
+  const width = Math.min(360, Math.max(240, p.rect.width + 140));
+  const estimated = 190; // 标题 + 一排色卡 + 底部清空 ≈ 190px
+  const below = vh - p.rect.bottom - 12;
+  const flip = below < estimated && p.rect.top > below;
+  const left = `${Math.min(Math.max(8, p.rect.left), Math.max(8, vw - width - 8))}px`;
+  const style: Record<string, string> = { left, width: `${width}px` };
+  if (flip) style.bottom = `${vh - p.rect.top + 6}px`;
+  else style.top = `${p.rect.bottom + 6}px`;
+  return style;
+});
+
+/** 点色卡 = 写入草稿并收起（保存仍走行内「保存」，与原来的下拉同一套保存流） */
+function pickDraftColor(color: string): void {
+  const p = colorPicker.value;
+  if (!p) return;
+  const name = String(color ?? '').trim();
+  if (!name) return;
+  draftOf(p.row).color = name;
+  closeColorPicker();
+}
+
+/** 清空当前色（不收起：用户可能马上换另一个；空值由 `colorMissing` 继续拦保存） */
+function clearDraftColor(): void {
+  const p = colorPicker.value;
+  if (!p) return;
+  draftOf(p.row).color = '';
+}
+
 
 /**
  * 这一行载入时的颜色。优先级（**每一支都要在色卡里才作数**）：
@@ -912,7 +1130,7 @@ function displayColor(o: OrderRecord): string {
   return String(o.styleColor ?? '').trim() || String(o.color ?? '').trim();
 }
 
-/** 颜色格「为什么是这个值」的一句话（下拉的 title；把"记住"这件事说出来，否则用户不知道它从哪来） */
+/** 颜色格「为什么是这个值」的一句话（颜色格的 title；把"记住"这件事说出来，否则用户不知道它从哪来） */
 function colorTitle(o: OrderRecord): string {
   const palette = colorsFor(String(o.styleCode ?? ''));
   const remembered = String(o.styleColor ?? '').trim();
@@ -1338,6 +1556,259 @@ async function applyBulkStyles(picks: { key: string; styleCode: string }[]): Pro
   bump();
 }
 
+// ───────────────────────────────────────── 批量定色（2026-10-30）
+
+/** 弹层是否打开 */
+const bulkColorOpen = ref(false);
+
+/**
+ * 弹层要的行 = **勾选行的快照投影**。
+ *
+ * ⚠️ 用 `drafts[id]` 而不是 `draftOf(o)`：`draftOf` 在 computed 里会**新建**草稿（写响应式对象），
+ *    与这个 computed 自己的依赖同源，容易自激（`trayColors` 那条注释里的同一个坑）。
+ *    没有草稿时退回 `initialColor`（与行内颜色格的初值同源，不另立规则）。
+ * ⚠️ `palette` 用**草稿款**的色卡：弹层是"定完款再定色"的第二刀，刚在批量定款里选的款
+ *    还没保存时，色卡必须按那一款算 —— 否则会把人挡在"色卡里没有这个色"上。
+ */
+const bulkColorRows = computed<BulkColorRow[]>(() =>
+  selectedRows.value.map((o) => {
+    const id = Number(o.id);
+    const d = drafts[id];
+    const styleCode = String((d ? d.styleCode : o.styleCode) ?? '');
+    const color = d ? String(d.color ?? '') : initialColor(o);
+    return {
+      id,
+      orderNo: String(o.orderNo ?? ''),
+      styleCode,
+      color,
+      palette: colorsFor(styleCode),
+    };
+  })
+);
+
+function openBulkColorPicker(): void {
+  if (!selectedRows.value.length || busy.value) return;
+  bulkColorOpen.value = true;
+  // 字典没载入时 `colorSwatchOf` 只能给空 —— 色点会是一排透明圆，看着像"色卡丢了"
+  void loadColorDict();
+}
+
+function closeBulkColorPicker(): void {
+  bulkColorOpen.value = false;
+}
+
+/**
+ * 落库：与托盘的**同一个入口**（`applyTrayColor`）。
+ *
+ * 它已经把那笔账算好了：只改色卡里有这个色的行，并按四类回执（已存 / 本就同色 /
+ * 没点名款 / 款色卡没这个色）报出来 —— 这里再写一套"批量落库"必然与它分叉，
+ * 症状是"弹层说改了 3 行、列表里只动了 1 行"。
+ */
+async function applyBulkColor(color: string): Promise<void> {
+  const ids = [...selectedIds.value];
+  bulkColorOpen.value = false;
+  await applyTrayColor(color, ids);
+}
+
+// ───────────────────────────────────────── 色卡托盘 + 拖图定色（2026-10-30）
+
+/**
+ * 托盘里的颜色 = **本页款色卡里出现过的颜色**（首次出现顺序，去重）。
+ *
+ * 为什么不摆 27 个字典色：这一页写的是「款 + 色」的款色，颜色不在款色卡里就不该从这页写进去
+ * （宿主 `saveCorrection` 会 `ensureStyleColor` 顺手给它造一个新色）—— 那正是"款色卡只有产品页能改"
+ * 这条口径要防的事。托盘只列**真的能落**的色，拖上去没反应就不再是常态。
+ *
+ * ⚠️ 用行上的 `styleCode` 而不是草稿：`draftOf` 会在 computed 里**新建**草稿（写响应式对象），
+ * 与这个 computed 自己的依赖同源，容易自激。款的选择器是"选完即存"，行数据本来就最新。
+ */
+const trayColors = computed<string[]>(() => {
+  const out: string[] = [];
+  for (const o of rows.value) {
+    for (const c of colorsFor(String(o.styleCode ?? ''))) {
+      const name = String(c ?? '').trim();
+      if (name && !out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+});
+
+/** 勾选行**共有的**当前色（全一样才高亮；不一样 = 没有"当前色"可标） */
+const trayCurrent = computed<string>(() => {
+  const sel = selectedRows.value;
+  if (!sel.length) return '';
+  const first = String(draftOf(sel[0]).color ?? '').trim();
+  return sel.every((o) => String(draftOf(o).color ?? '').trim() === first) ? first : '';
+});
+
+function trayTitle(c: string): string {
+  const n = selectedIds.value.size;
+  if (n) return `点一下把已选 ${n} 行定到「${c}」并保存`;
+  return `把左边的订单图拖到这里 = 给那一行定色「${c}」；也可以先勾选多行再点`;
+}
+
+/** 点色卡：有勾选 ⇒ 给这批定色；没勾选 ⇒ 说清楚下一步（不做"点什么都没发生"） */
+function onTrayPick(color: string): void {
+  if (!selectedIds.value.size) {
+    toast('先在左边勾选要定色的行，或把某一行的图直接拖到这个色卡上', 'info');
+    return;
+  }
+  void applyTrayColor(color, [...selectedIds.value]);
+}
+
+/* ---- 拖图（从行头的订单图拖到色卡）----
+   用 pointer 事件而不是 HTML5 drag：Electron 里 draggable 的 ghost 图与 pointer capture 会丢事件，
+   产品页的归类拖动早已是这套（`SkuMatrixEditor` 的 onChipDown/onChipMove）。
+   阈值 6px：点击看大图和拖动定色是同一个元素上的两个意图，阈值区分它们。 */
+const DRAG_THRESHOLD = 6;
+const trayDrag = reactive({ active: false, color: '' });
+let thumbDrag: { ids: number[]; x0: number; y0: number; moved: boolean } | null = null;
+/** 拖完那一下的 click 要吞掉，否则松手就顺手把大图打开了 */
+let swallowThumbClick = false;
+let selectLocked = false;
+
+function blockSelectStart(e: Event): void {
+  e.preventDefault();
+}
+
+/** 拖过整页时不许刷出一片蓝（与产品页 `lockTextSelection` 同一条教训） */
+function lockSelection(): void {
+  if (selectLocked) return;
+  selectLocked = true;
+  document.addEventListener('selectstart', blockSelectStart, true);
+  const sel = document.getSelection();
+  if (sel && !sel.isCollapsed) sel.removeAllRanges();
+}
+
+function unlockSelection(): void {
+  if (!selectLocked) return;
+  selectLocked = false;
+  document.removeEventListener('selectstart', blockSelectStart, true);
+}
+
+function onThumbDown(o: OrderRecord, e: PointerEvent): void {
+  if (scope.value !== 'pending' || busy.value) return;
+  if (e.button !== 0) return;
+  const id = Number(o.id ?? 0);
+  // 这行在勾选里且勾了多行 ⇒ 拖的是整组（与「批量定款/确认」同一个对象）
+  const ids = isSelected(o) && selectedIds.value.size > 1 ? [...selectedIds.value] : [id];
+  thumbDrag = { ids, x0: e.clientX, y0: e.clientY, moved: false };
+  window.addEventListener('pointermove', onThumbMove);
+  window.addEventListener('pointerup', onThumbUp);
+  window.addEventListener('pointercancel', onThumbCancel);
+}
+
+/** 松开点下面那个色卡（只认 `[data-cl-tray]`，不认坐标区间 —— 胶囊宽度会随字号变） */
+function trayColorAt(x: number, y: number): string {
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  const chip = el?.closest?.('[data-cl-tray]') as HTMLElement | null;
+  return chip?.getAttribute('data-cl-tray') || '';
+}
+
+function onThumbMove(e: PointerEvent): void {
+  const d = thumbDrag;
+  if (!d) return;
+  if (!d.moved) {
+    if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < DRAG_THRESHOLD) return;
+    d.moved = true;
+    trayDrag.active = true;
+    lockSelection();
+  }
+  trayDrag.color = trayColorAt(e.clientX, e.clientY);
+}
+
+function endThumbDrag(): void {
+  thumbDrag = null;
+  trayDrag.active = false;
+  trayDrag.color = '';
+  unlockSelection();
+  window.removeEventListener('pointermove', onThumbMove);
+  window.removeEventListener('pointerup', onThumbUp);
+  window.removeEventListener('pointercancel', onThumbCancel);
+}
+
+function onThumbUp(e: PointerEvent): void {
+  const d = thumbDrag;
+  endThumbDrag();
+  if (!d || !d.moved) return;
+  swallowThumbClick = true;
+  const color = trayColorAt(e.clientX, e.clientY);
+  if (color) void applyTrayColor(color, d.ids);
+}
+
+function onThumbCancel(): void {
+  endThumbDrag();
+}
+
+/** 行头图的点击 = 看大图；刚拖完的那一下不算 */
+function onThumbClick(o: OrderRecord): void {
+  if (swallowThumbClick) {
+    swallowThumbClick = false;
+    return;
+  }
+  void openImage(o);
+}
+
+/**
+ * 给指定行定色并保存（点色卡与拖图都走这里）。
+ *
+ * 四类计数分开报，不合并成一句"完成"：
+ *   · **已定色并保存** —— 真的写进去了（串行逐行，部分失败是可能的）；
+ *   · **本来就是这色** —— 不用重写；
+ *   · **还没点名款** —— 颜色无处可挂（与 `colorUnattached` 同一条理由）；
+ *   · **款色卡里没有这个色** —— 不替用户给这款造新色（加色是产品页的职责）。
+ * 只 `bump()` 一次：逐行 bump 会把 N 行变成 N 次整页重载（批量定款同理）。
+ */
+async function applyTrayColor(color: string, ids: number[]): Promise<void> {
+  const name = String(color ?? '').trim();
+  if (!name) return;
+  const targets = rows.value.filter((o) => ids.includes(Number(o.id)));
+  if (!targets.length) return;
+  const ready: OrderRecord[] = [];
+  let same = 0;
+  let noStyle = 0;
+  let notInCard = 0;
+  for (const o of targets) {
+    const code = String(draftOf(o).styleCode ?? '').trim();
+    if (!code) {
+      noStyle += 1;
+      continue;
+    }
+    if (!paletteOf(o).includes(name)) {
+      notInCard += 1;
+      continue;
+    }
+    const d = draftOf(o);
+    if (d.color === name) {
+      same += 1;
+      continue;
+    }
+    d.color = name;
+    ready.push(o);
+  }
+  let done = 0;
+  let failed = 0;
+  if (ready.length) {
+    busy.value = true;
+    try {
+      for (const o of ready) {
+        if (await saveOne(o, { silent: true, defer: true })) done += 1;
+        else failed += 1;
+      }
+    } finally {
+      busy.value = false;
+    }
+    bump();
+  }
+  const parts: string[] = [];
+  if (ready.length) parts.push(failed ? `已定色并保存 ${done} 行（${failed} 行保存失败）` : `已把 ${done} 行定到「${name}」并保存`);
+  if (same) parts.push(`${same} 行本来就是「${name}」`);
+  if (noStyle) parts.push(`${noStyle} 行还没点名款，先定款再定色`);
+  if (notInCard) parts.push(`${notInCard} 行的款色卡里没有「${name}」（先到产品管理给它加色）`);
+  if (!parts.length) return;
+  toast(parts.join('；'), failed ? 'error' : noStyle || notInCard ? 'info' : 'success');
+}
+
 // ───────────────────────────────────────── 键盘流（回车＝保存并往下走）
 
 /** 下一次取数完成后要把焦点送到的**行下标**；-1 = 不送 */
@@ -1429,6 +1900,8 @@ function fieldsChanged(o: OrderRecord): boolean {
 }
 
 async function load(): Promise<void> {
+  // 换页/换范围/刷新时会换掉行快照 ⇒ 挂着的颜色弹层要对齐的是旧行，直接收起
+  closeColorPicker();
   loading.value = true;
   error.value = '';
   try {
@@ -1790,7 +2263,7 @@ async function reopenOne(o: OrderRecord): Promise<void> {
  *
  * 为什么不给按钮：这是把**已被确认的事实**重新套一遍（确定性推导），唯一不确定的只是
  * "有没有漏"，而那正是这一步算出来的。让人点一下，只是把"系统该自愈"变成"人记得点"。
- * 详见 `docs/notes/2026-10-20-replay-mappings-on-load.md` 与 MEMORY 的「人工介入最少」原则。
+ * 详见 `docs/notes/2026-10-30-mapping-color-and-replay.md` 与 MEMORY 的「人工介入最少」原则。
  *
  * 只在**挂载 / 外部数据变更（`token`）**时跑；翻页、搜索不跑 —— 那些不改变"有没有漏网"，
  * 而重放要扫一遍能补的行（订单量级大时不是零成本）。
@@ -1805,7 +2278,22 @@ async function bootstrap(): Promise<void> {
   await load();
 }
 
-onMounted(() => void bootstrap());
+/** Esc 收起颜色弹层（它挂在 body，焦点不一定在弹层内 —— 必须挂 window）；拖动中也一并取消 */
+function onColorPickKey(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  if (colorPicker.value) closeColorPicker();
+  if (thumbDrag) endThumbDrag();
+  if (bulkColorOpen.value) closeBulkColorPicker();
+}
+
+onMounted(() => {
+  void loadColorDict();
+  window.addEventListener('keydown', onColorPickKey);
+  void bootstrap();
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onColorPickKey);
+});
 // 保活的代价要还回去：容器 `token` 变了（导入 / 别处改了订单）就重取本页。
 // ⚠️ 这里**只 load、不再自愈**：`token` 在本页保存一行、翻一页都会变（本页自己也在 `bump()`），
 //    跟着它重放 = 每动一下就把全表扫一遍（冒烟实测过：一次进页被触发 21 次）。
@@ -1963,6 +2451,126 @@ watch(
 .cl-cell {
   width: 100%;
   min-width: 76px;
+}
+/* ── 色卡托盘（2026-10-30）：核对表上方常驻的一排款色 ────────────────────────────
+   为什么不做成吸顶：它只在本页顶部用（拖动起点是行头图，人把图往上拖一次就够），
+   吸顶会把这页唯一的弹性区再压掉一行高度（`cl-list` 被压扁的坑见 `.cl-list` 注释）。
+   拖到托盘上时整排变虚线（`.cp--dragging` 由组件管），悬停的那一个实心反白 —— 落在哪个色
+   必须一眼可见，否则松手定错色，而这是一次**直接落库**的动作。 */
+.cl-tray {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--wb-border);
+  background: var(--wb-surface-2);
+}
+.cl-tray__label {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--wb-text);
+}
+.cl-tray__hint {
+  font-size: 11px;
+}
+
+/* ── 颜色格（2026-10-30）：色点 + 当前色名，点开复用 `ColorPalette` 的小弹层 ──────────
+   与归属款格同一口径：看起来就是一个"可点的框"，不是链接。
+   `is-empty`（还没选色）走灰字 —— 与「请先选颜色」的红字提示一起把"这一步没做完"说清楚。 */
+.cl-color-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 96px;
+  height: 32px;
+  padding: 0 6px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.cl-color-btn:hover {
+  border-color: var(--wb-primary);
+}
+.cl-color-btn__dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.cl-color-btn__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--wb-text);
+}
+.cl-color-btn.is-empty .cl-color-btn__name {
+  color: var(--wb-text-muted);
+}
+.cl-color-btn__caret {
+  flex: none;
+  font-size: 10px;
+  color: var(--wb-text-muted);
+}
+/* 弹层：挂 body，定位由 `colorPopStyle` 给（不看表格的 overflow） */
+.cl-color-pop__mask {
+  position: fixed;
+  inset: 0;
+  z-index: 58;
+  background: transparent;
+}
+.cl-color-pop {
+  position: fixed;
+  z-index: 59;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--wb-border-strong);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-surface);
+  box-shadow: var(--wb-elev-3);
+}
+.cl-color-pop__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cl-color-pop__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--wb-text);
+}
+.cl-color-pop__x {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--wb-radius-sm);
+  background: transparent;
+  color: var(--wb-text-muted);
+  cursor: pointer;
+}
+.cl-color-pop__x:hover {
+  background: var(--wb-hover);
+  color: var(--wb-text);
+}
+.cl-color-pop__foot {
+  display: flex;
+  justify-content: flex-end;
 }
 .cl-thumb-col {
   width: 112px;

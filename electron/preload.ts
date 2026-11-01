@@ -415,15 +415,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   netRequest: (payload: any) => ipcRenderer.invoke('net-request', sanitizeNetPayload(payload)),
   // --- 订单归类模块（SQLite 指纹库 / 订单 / 主图）---
   orderDbEnsure: () => ipcRenderer.invoke('order-db-ensure'),
-  orderImageFind: (fingerprint: string) =>
-    ipcRenderer.invoke('order-image-find', { fingerprint: String(fingerprint ?? '') }),
-  orderImageSave: (payload: any) =>
-    ipcRenderer.invoke('order-image-save', {
-      id: typeof payload?.id === 'number' ? payload.id : 0,
-      status: payload?.status === 'done' || payload?.status === 'error' ? payload.status : 'error',
-      resultJson: typeof payload?.resultJson === 'string' ? payload.resultJson : undefined,
-      error: typeof payload?.error === 'string' ? payload.error : undefined,
-    }),
   orderInsert: (payload: any) =>
     ipcRenderer.invoke('order-insert', {
       imageId: typeof payload?.imageId === 'number' ? payload.imageId : 0,
@@ -782,8 +773,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       styleName: typeof payload?.styleName === 'string' ? payload.styleName.slice(0, 50) : '',
     }),
   orderStyleList: () => ipcRenderer.invoke('order-style-list'),
-  // 命名板（P3）：按 listing 分组的色键，未命名在前
-  orderVariantNaming: () => ipcRenderer.invoke('order-variant-naming'),
+  // 命名板（P3）：按 listing 分组的色键，未命名在前。
+  // `importDate` = 这一批的导入日（与「待核对」同一批）；不传 = 不筛。
+  orderVariantNaming: (payload?: { importDate?: string }) =>
+    ipcRenderer.invoke('order-variant-naming', payload),
   // 给一个款色起名（命名板唯一的写入口）。⚠️ 只送 id + 名字：
   // 款名 / 款编码 / 平台原文都由主进程回读，界面送过来的只能是"要改成什么"。
   orderVariantRename: (payload: any) =>
@@ -1166,6 +1159,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }),
   // ---- 产品库（产品主数据：编码 / 名称 / 厂家 / 类目；编码与 oi_styles.code 同口径，为跨域关联锚点）----
   productDbEnsure: () => ipcRenderer.invoke('product-db-ensure'),
+  // ---- 主数据字典（颜色 / 尺码）----
+  // 颜色工作台（SKU 矩阵）与归类页的色卡从这里取"现有的颜色"。其余写入仍走业务写路径
+  // （建 SKU / 认款时由主进程 `ensureColorId` / `ensureSizeId` 顺带补字典）；
+  // 唯一例外是「＋ 新增颜色」—— 只写 `md_colors`，不给任何款加色（主进程 `md-color-create`）。
+  mdColorList: () => ipcRenderer.invoke('md-color-list'),
+  mdColorCreate: (payload: any) =>
+    ipcRenderer.invoke('md-color-create', {
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 40) : '',
+      hex: typeof payload?.hex === 'string' ? payload.hex.slice(0, 20) : '',
+    }),
+  // 只改色块 hex，不改名字（名字是业务身份）。空串 = 这个色没有标准色值。
+  mdColorUpdateHex: (payload: any) =>
+    ipcRenderer.invoke('md-color-update-hex', {
+      id: typeof payload?.id === 'number' ? payload.id : 0,
+      hex: typeof payload?.hex === 'string' ? payload.hex.slice(0, 20) : '',
+    }),
+  // 颜色管理（「基础数据 › 产品管理 › 颜色」）：板 = 字典 ∪ 业务表里出现过的色名 + 用量；
+  // 合并会**真改业务数据**（款色 / SKU / 别名归到保留色），见主进程 `color-merge.ts`。
+  mdColorBoard: () => ipcRenderer.invoke('md-color-board'),
+  mdColorMerge: (payload: any) =>
+    ipcRenderer.invoke('md-color-merge', {
+      source: typeof payload?.source === 'string' ? payload.source.slice(0, 40) : '',
+      target: typeof payload?.target === 'string' ? payload.target.slice(0, 40) : '',
+    }),
+  mdSizeList: () => ipcRenderer.invoke('md-size-list'),
   productList: (payload: any) =>
     ipcRenderer.invoke('product-list', {
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 200) : '',
@@ -1317,6 +1335,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }),
   productSkuMap: (payload: any) =>
     ipcRenderer.invoke('product-sku-map', {
+      // 缺省**采纳**（直接认款就该顺手补图）；显式 `false` 才关掉 ——
+      // 只有「建档并关联」向导在用户取消勾选「采纳为款主图」时会传 false。
+      // 不能用 `=== true`：老调用方不传这个键，把缺省读成 false 会让补图静默失效。
+      adoptImages: payload?.adoptImages === false ? false : true,
       rows: Array.isArray(payload?.rows)
         ? payload.rows.slice(0, 20000).map((r: any) => ({
             platform: typeof r?.platform === 'string' ? r.platform.slice(0, 40) : '',
@@ -1332,6 +1354,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   productSkuInvalidate: (payload: any) =>
     ipcRenderer.invoke('product-sku-invalidate', {
       id: typeof payload?.id === 'number' ? payload.id : 0,
+    }),
+  // 存量补图：非法/缺省的 limit 传 0 —— 主进程按 0 回落默认上限（不在这里猜一个数，
+  // 上限只归主进程一处，渲染层写死第二份迟早对不上）
+  productSkuRepairImages: (payload: any) =>
+    ipcRenderer.invoke('product-sku-repair-images', {
+      limit: Number.isFinite(Number(payload?.limit)) ? Number(payload?.limit) : 0,
     }),
   // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
   productVariantList: (payload: any) =>

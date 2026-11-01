@@ -57,19 +57,38 @@
                 <span v-if="isEdit" class="ed-tag" title="编码是订单 / 采购 / 成本三域的关联锚点，改了会让历史数据指向另一个产品">
                   不可改
                 </span>
+                <span
+                  v-else
+                  class="ed-tag"
+                  data-act="ed-code-auto"
+                  title="由系统发号（STYLE-序号），不用手填 —— 发号器同时避开订单识别已占用的序号"
+                >
+                  自动生成
+                </span>
               </span>
-              <!-- 编辑时只读：编码是订单 / 采购 / 成本三域的关联锚点 —— 改这里会让历史数据
-                   指向另一个产品。为什么不写成一行说明：这一屏已经有一枚「不可改」标签，
-                   想追问的人悬停标签即可（2026-10-24 用户口径「文字也太多了」）。 -->
+              <!-- 两种模式都只读：编辑时编码是订单 / 采购 / 成本三域的关联锚点 —— 改这里会让历史数据
+                   指向另一个产品；新增时由主进程发号（2026-10-30 用户口径「新增产品时，款编码自动生成，
+                   不要手动填写」）。为什么不写成一行说明：这一屏已经有一枚标签，想追问的人悬停即可
+                   （2026-10-24 用户口径「文字也太多了」）。 -->
               <input
                 v-model="form.code"
-                class="wb-input"
+                class="wb-input is-readonly"
                 data-act="ed-code"
-                :readonly="isEdit"
-                :class="{ 'is-readonly': isEdit }"
-                placeholder="例：STYLE-001"
+                readonly
+                :placeholder="createCodeLoading ? '生成中…' : '打开时自动生成'"
               />
             </label>
+            <p v-if="!isEdit && createCodeError" class="wb-field__hint" data-act="ed-code-error">
+              款编码生成失败：{{ createCodeError }}
+              <button
+                class="wb-link"
+                type="button"
+                :disabled="createCodeLoading"
+                @click="loadCreateCode"
+              >
+                重新生成
+              </button>
+            </p>
 
             <label class="wb-field">
               <span class="wb-field__label">款式名</span>
@@ -201,7 +220,7 @@
               {{
                 importRows.length
                   ? '这款关联的采集商品还没采到 SKU —— 到商品详情页用「采 SKU」采一次（列表页只采到标题/图/价）。'
-                  : '还没有采集商品认到这款 —— 先到「待关联采集商品」段认款，或直接在矩阵里手动加颜色/尺码。'
+                  : `「${form.code} ${form.name}」还没有采集商品认到它 —— 只有认到这一款的采集商品才会出现在这里，认到别的款的不显示。先到「待关联采集商品」段认款，或直接在矩阵里手动加颜色/尺码。`
               }}
             </p>
             <template v-else>
@@ -292,7 +311,7 @@
                   data-act="ed-code-rule"
                   aria-label="SKU 编码规则"
                   :placeholder="DEFAULT_SKU_CODE_RULE"
-                  title="用占位符拼：{code} 款号 · {color} 颜色 · {size} 尺码 · {index} 序号"
+                  title="用占位符拼：{code} 款号 · {color} 颜色ID · {size} 尺码 · {index} 序号"
                   @change="persistCodeRule"
                   @blur="persistCodeRule"
                 />
@@ -464,7 +483,9 @@
         本来没打算删（比如刚点到了尺码列头 = 整列取消）？按
         <b>「保留这 {{ pendingSkuPlan.deletes.length }} 个」</b>把它们连同原克重加回矩阵，核对后再按「完成」。
       </p>
-      <p class="ed-del-note">只删这个款的 SKU 档案。历史订单 / 拿货单里已经记下的颜色、尺码文字不受影响。</p>
+      <p class="ed-del-note">
+        只删这个款的 SKU 档案。历史订单 / 拿货单里已经记下的颜色、尺码文字不受影响。
+      </p>
     </ConfirmDialog>
 
     <ConfirmDialog
@@ -543,6 +564,7 @@ import {
   SKU_CODE_TOKENS,
   type SkuCodeSeed,
 } from '@/lib/skuCode';
+import { colorIdOf, loadColorDict } from '@/core/services/colorDict';
 import type { ProductListItem, ProductStatus, ShopItemRow, VariantRow } from '@/types';
 
 interface SupplierOption {
@@ -626,6 +648,28 @@ const form = reactive({
   /** 进价（**元**，输入框原样字符串；落库转分）。空串 = 未填 → 落 0 */
   costYuan: props.product?.costCents ? (props.product.costCents / 100).toFixed(2) : '',
 });
+
+/* ---- 款编码：新增时系统发号（2026-10-30 用户口径「新增产品时，款编码自动生成，不要手动填写」）----
+   为什么走主进程而不是渲染层自己算：`nextStyleCode` 的编码池是 `oi_styles ∪ pl_products`
+   （订单识别也会占号），渲染层按 max+1 会漏掉识别侧已用的序号，撞唯一键时报错方向全反。
+   与建款向导（`ShopItemWizard`）用的是**同一个**发号器 —— 两处各算一套迟早分叉。 */
+const createCodeLoading = ref(false);
+const createCodeError = ref('');
+
+async function loadCreateCode(): Promise<void> {
+  if (isEdit.value || createCodeLoading.value) return;
+  createCodeLoading.value = true;
+  createCodeError.value = '';
+  try {
+    const r = await api.nextCode();
+    form.code = String(r?.code ?? '').trim();
+    if (!form.code) throw new Error('发号器返回了空编码');
+  } catch (e: unknown) {
+    createCodeError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    createCodeLoading.value = false;
+  }
+}
 
 /** 元 → 分（整数）。空串/认不出 → 0（"没填"与"填 0"在本字段同义：都没价） */
 function costYuanToCents(v: string): number {
@@ -721,6 +765,16 @@ async function doSave(opts: SaveOpts): Promise<boolean> {
   } catch (e: unknown) {
     // 编码冲突这类错误必须留在表单里可见（toast 一闪而过，用户还要照着改）
     error.value = e instanceof Error ? e.message : String(e);
+    // 新增时编码**只读且由系统发号**：撞号只可能是抽屉打开之后别处刚占了同号
+    // （订单识别会自动占号 / 另一处建档）。用户没有"手改编码"这个出口 ——
+    // 不自动换号的话，只读框里的老号会让他反复按保存、反复失败，还找不到能改的地方。
+    if (!isEdit.value && error.value.includes('产品编码已存在')) {
+      await loadCreateCode();
+      if (!createCodeError.value) {
+        error.value = '';
+        toast(`款编码 ${code} 已被占用，已重新发号为 ${form.code} —— 再按一次「保存」`, 'info');
+      }
+    }
     if (opts.silent) toast(error.value, 'error');
     return false;
   } finally {
@@ -785,11 +839,16 @@ const closeGuard = computed(() => {
   return '';
 });
 
-/** 新增模式下**填过东西**（判据是"界面上有内容"，不是"有改动"——新增没有可比的基线） */
+/**
+ * 新增模式下**填过东西**（判据是"界面上有内容"，不是"有改动"——新增没有可比的基线）。
+ *
+ * ⚠️ **不含 `form.code`**：它由系统发号，打开抽屉就有值。算进来的话，每次点 ✕ 都会弹
+ * 「这个新产品还没创建」—— 用户只打了声招呼就被拦一次，久了就闭眼点过，真丢东西那次也照点。
+ */
 const createTouched = computed(
   () =>
     !isEdit.value &&
-    ([form.code, form.name, form.category, form.note].some((v) => String(v).trim() !== '') ||
+    ([form.name, form.category, form.note].some((v) => String(v).trim() !== '') ||
       (Number(form.supplierId) || 0) !== 0)
 );
 
@@ -892,7 +951,12 @@ function persistCodeRule(): void {
   }
 }
 
-/** 生成用的种子：只有"色 + 码成对"的 SKU（老数据没有颜色/尺码，编码是只读的，不参与生成） */
+/**
+ * 生成用的种子：只有"色 + 码成对"的 SKU（老数据没有颜色/尺码，编码是只读的，不参与生成）。
+ *
+ * `colorId` 2026-10-30 起带上（用户口径「SKU编码把color修改为颜色ID」）：`{color}` 渲染的是
+ * 字典 id。`colorIdOf` 读的是模块级单例字典 ⇒ 字典后到时会自动重算预览（computed 依赖成立）。
+ */
 const codeSeeds = computed<SkuCodeSeed[]>(() =>
   variants.value
     .filter((v) => !isLegacyVariant(v))
@@ -900,6 +964,7 @@ const codeSeeds = computed<SkuCodeSeed[]>(() =>
       key: String(v.id),
       styleCode: form.code,
       color: String(v.color ?? '').trim(),
+      colorId: colorIdOf(String(v.color ?? '').trim()),
       size: String(v.size ?? '').trim(),
       index: i + 1,
     })),
@@ -1724,6 +1789,11 @@ async function loadSkus(): Promise<void> {
 onMounted(() => {
   void loadThumb();
   void loadSkus();
+  // 新增：打开即发号（只读展示），人不用也不能手填款编码
+  if (!isEdit.value) void loadCreateCode();
+  // 编码预览与一键生成都要读字典（`{color}` 渲染的是 `md_colors.id`）——
+  // 字典不预载的话，第一帧会先按色名算一遍、载入后再跳成 ID，看着像"编码规则乱跳"。
+  void loadColorDict();
 });
 
 onUnmounted(() => {

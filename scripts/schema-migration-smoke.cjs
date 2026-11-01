@@ -309,8 +309,16 @@ console.log('\n[C] oi_orders 老库（无金额/状态/时点列）→ 迁移后
 const dirC = newDb('order-legacy');
 const odb = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
 dbMigrate([
+  // **老库的图片表叫 `oi_images`**（R1 / S0a 之后已退役，新库只有主数据域的 `md_images`；
+  // 见 `electron/order-db.ts` 的 `retireLegacyImageTables`）。老库 2026-10 前的真形状里，
+  // `oi_orders.image_id` 写的是 `REFERENCES oi_images(id) ON DELETE CASCADE` —— 而 v3 的
+  // 冻结 DDL（`ORDER_LEGACY_SPINE_DDL`）原样复刻了这条外键，于是"重建主干 / 搬数据"两步都会先撞
+  // `no such table: main.oi_images`。所以这个表**必须按老库真实表名造出来**，不能拿 `md_images`
+  // 顶替（`insertOrder` 也不校验父行，图行只是占位）。
+  // 迁移末尾 `retireLegacyImageTables` 会把它拆掉：R1 的口径是"清库重建"，旧图**不做数据迁移**。
   `CREATE TABLE oi_images (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL DEFAULT '',
     url_fingerprint TEXT NOT NULL UNIQUE,
     source_url TEXT NOT NULL,
     local_path TEXT NOT NULL,
@@ -346,8 +354,19 @@ dbMigrate([
     fingerprint TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
+  // 老库的款色表：**只有 4 列、没有 `image_id`**（真库 2026-10-30 实测形状）。
+  // 这是 R1 排序事故的复现关键：SCHEMA 里 `idx_oi_style_colors_image` 建在该列上，
+  // 若 `dbMigrate(SCHEMA)` 先于 `retireLegacyImageTables` 补列，老库每次都抛
+  // `no such column: image_id` —— 这张表不存在时反而建不出这个事故（新表自带该列）。
+  `CREATE TABLE oi_style_colors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    style_id INTEGER NOT NULL,
+    color TEXT NOT NULL,
+    code TEXT NOT NULL
+  )`,
 ]);
 dbRun(`INSERT INTO oi_styles (id, code, name, fingerprint) VALUES (1, 'S-OLD', '老款名', 'fp-s1')`);
+dbRun(`INSERT INTO oi_style_colors (id, style_id, color, code) VALUES (1, 1, '黑', 'S-OLD-BLACK')`);
 dbRun(
   `INSERT INTO oi_images (id, url_fingerprint, source_url, local_path) VALUES (1, 'fp1', 'u', '/tmp/x')`,
 );
@@ -361,6 +380,21 @@ check(`迁移记账推进到 order.main = ${ORDER_MAIN_STEPS}（v1–v3 一次�
   odb.ensureOrderSchema();
   // 本场景没有 ae_orders → v4 是**空操作**（顺序：v4 在迁移链里、表不存在就跳过），但版本照样推进
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
+});
+
+check('老库款色表补出 image_id 列 + 代表图索引建成 + 旧行原样（2026-10-30 真库事故的回归钉）', () => {
+  const cols = dbQuery(`PRAGMA table_info(oi_style_colors)`).map((r) => String(r.name));
+  assert.ok(cols.includes('image_id'), `老库 oi_style_colors 必须补上 image_id：${cols}`);
+  const idx = dbQuery(
+    `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_oi_style_colors_image'`,
+  );
+  assert.strictEqual(idx.length, 1, '补列之后代表图索引必须建得出来（顺序：先补列再 dbMigrate）');
+  const row = dbGet(`SELECT id, style_id, color, code FROM oi_style_colors WHERE id = 1`);
+  assert.deepStrictEqual(
+    row && { id: Number(row.id), style_id: Number(row.style_id), color: row.color, code: row.code },
+    { id: 1, style_id: 1, color: '黑', code: 'S-OLD-BLACK' },
+    '补列不许动存量行',
+  );
 });
 
 check('主干形状：主表含订单级列（金额/状态/时点），行级列（qty/raw_fields/size）已拆到明细', () => {
@@ -628,7 +662,7 @@ dbMigrate([
     version INTEGER NOT NULL DEFAULT 0,
     applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`,
-  `CREATE TABLE oi_images (
+  `CREATE TABLE md_images (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     fingerprint TEXT NOT NULL UNIQUE,
     url_fingerprint TEXT NOT NULL DEFAULT '',
@@ -1038,10 +1072,19 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
     '',
     '无商品ID 的老行不许被编出一个键（那会把无关订单并成一件）',
   );
-  // 收口：`ensureOrderSchema` 末尾会按键把存量归上款色（迁移只写键，不建款色）
-  assert.ok(
-    Number(dbGet(`SELECT COALESCE(style_color_id,0) AS s FROM oi_order_items WHERE id = 1005`).s) > 0,
-    '存量收口应把带键的老行归到款色上',
+  // 收口（2026-10-29 回退后）：`ensureOrderSchema` 末尾**不再**"导入即归款" ——
+  // `backfillVariantStyleColors` 只给**已归类行**补记 `oi_variant_keys` 绑定，没有任何映射时
+  // 不建款/不建色、行留在待认款（`style_color_id = 0`）。所以这里反向钉住：
+  // 迁移只写"键"，不许顺手长出一个款色来。
+  assert.strictEqual(
+    Number(dbGet(`SELECT COALESCE(style_color_id,0) AS s FROM oi_order_items WHERE id = 1005`).s),
+    0,
+    '没有人工映射时带键的老行必须留在待认款（不许自动长款色）',
+  );
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_style_colors`).n),
+    2,
+    '收口不许新建款色（迁移只写键）',
   );
 });
 closeDb();

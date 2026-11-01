@@ -16,8 +16,11 @@
 //      （归属写 `pl_shop_sku`，R2；款色代表图写 `oi_style_colors.image_id`）；
 //   ④ 派生不存储：色块 hex、尺码排序都是字典行上的字段，业务表只存 `color_id` / `size_id`。
 //
-// 迁移方式（D12）：**不写 backfill**。`scripts/reset-dev-data.mjs` 清业务表 + `md_*` 后由应用
-// 空库重建并重新播种；老库里的两套图片目录不再合并（测试数据可丢，见方案 §10 E）。
+// 迁移方式（D12，2026-10-30 修订）：本模块**不写 backfill**，但存量图片也不丢 ——
+// 真库已有 113 张图 / 92 条「图 → 款色」绑定，旧表直接拆会让人工定款定色的积累归零。
+// 搬迁收在 `electron/legacy-image-migration.ts`（一次性过渡件）：拆旧表前把 `oi_images` /
+// `pl_images` 的字节经 `landImageBytes`（唯一落盘入口）搬进 `images/`，并改写订单行/产品行
+// 的 `image_id`、款色代表图。`scripts/reset-dev-data.mjs` 清库后仍由空库重建 + 重新播种。
 
 import { app } from 'electron';
 import * as crypto from 'crypto';
@@ -376,12 +379,34 @@ export function imageIdExists(imageId: number): boolean {
   return !!dbGet<{ id: number }>(`SELECT id FROM md_images WHERE id = ?`, [id]);
 }
 
+/**
+ * 图片路径**自愈**：`md_images.local_path` 记的是绝对路径，而它可能失效 ——
+ * 2026-10-30 真库实测：101 条全指向 `/tmp/sk-apply/images/`（R1 迁移是在临时 userData 里跑的，
+ * 数据库随后被拷回真 userData，路径却固化了临时前缀），`/tmp` 一被系统清理，**整站图片全黑**。
+ *
+ * 字节本身没有丢（文件名 = 内容指纹，就在唯一的 `userData/images/` 里），所以：
+ * 原位不存在时按 basename 到图片目录找一次。还找不到就原样返回 —— 让调用方照常
+ * 走"读不到 → 空占位"的分支，绝不编一个看起来像答案的假路径。
+ *
+ * 为什么不顺手写回库：列表/详情查询是**只读**路径，顺手 UPDATE 会把"看一眼产品列表"
+ * 变成事务；脏前缀的正确清理是一次性的数据修复（直接 `UPDATE md_images SET local_path`
+ * 把前缀换成 `IMAGE_DIR()`，2026-10-30 真库已修 101 条）。
+ */
+function resolveImagePath(p: string): string {
+  if (!p) return '';
+  if (fs.existsSync(p)) return p;
+  const base = path.basename(p);
+  if (!base) return p;
+  const alt = path.join(IMAGE_DIR(), base);
+  return fs.existsSync(alt) ? alt : p;
+}
+
 /** image_id → 本地路径（缺表/无行降级为空串，不报错） */
 export function imageLocalPath(imageId: number): string {
   const id = Number(imageId) || 0;
   if (id <= 0 || !tableExists('md_images')) return '';
   const row = dbGet<{ local_path: string }>(`SELECT local_path FROM md_images WHERE id = ?`, [id]);
-  return String(row?.local_path ?? '');
+  return resolveImagePath(String(row?.local_path ?? ''));
 }
 
 /** 批量 image_id → 本地路径（产品/订单列表一次取完，避免 N+1） */
@@ -393,7 +418,7 @@ export function imageLocalPathMap(imageIds: readonly number[]): Map<number, stri
     `SELECT id, local_path FROM md_images WHERE id IN (${ids.map(() => '?').join(',')})`,
     ids,
   )) {
-    m.set(Number(r.id), String(r.local_path ?? ''));
+    m.set(Number(r.id), resolveImagePath(String(r.local_path ?? '')));
   }
   return m;
 }
@@ -493,6 +518,31 @@ export function ensureColorId(raw: unknown, hex = ''): { id: number; created: bo
     [name, String(hex ?? ''), max + 1],
   );
   return { id: Number(r.lastInsertRowid), created: true };
+}
+
+/**
+ * 更新某个字典色的 hex（色块）。**只改 hex，不改名字**：名字是业务身份（编码 / 别名 /
+ * 款色行都引用它），改错一个字会牵一发动全身；hex 只是"显示成什么颜色"，可以单独修。
+ *
+ * 入参 hex 规范化成 `#rrggbb`（小写）；空串表示"这个色没有标准色值"（`印花多色` 一类）。
+ * id 不存在时抛错（静默 no-op 会让界面以为改成功了）。
+ */
+export function updateColorHex(colorId: number, hexRaw: unknown): { id: number; hex: string } {
+  ensureMasterDataSchema();
+  const id = Number(colorId) || 0;
+  if (id <= 0 || !colorById(id)) throw new Error('颜色不存在');
+  const raw = String(hexRaw ?? '').trim().toLowerCase();
+  let hex = '';
+  if (raw) {
+    const m = /^#?([0-9a-f]{6})$/.exec(raw);
+    if (!m) throw new Error('色值格式应为 #RRGGBB（如 #3a3a3a）');
+    hex = '#' + m[1];
+  }
+  dbRun(
+    `UPDATE md_colors SET hex = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
+    [hex, id],
+  );
+  return { id, hex };
 }
 
 /** 把平台码名归一成字典里的码名（先本名，再别名；都不中返回 trim 原值） */

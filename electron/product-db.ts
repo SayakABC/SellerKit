@@ -48,6 +48,14 @@ import {
 } from './shopSku';
 // 色号归一只留一份：套装配色与单品别名的键必须同口径，否则同一个 `8` 在两处算两个键
 import { colorAliasKey } from './colorAlias';
+// 图片主数据（唯一图片仓，R1）：本域**只读**它（款主图 / 商品图池取 local_path），
+// 登记新图一律走 `registerImageRow`（二进制落盘只有 `landImageBytes` 一个入口）。
+import {
+  ensureMasterDataSchema,
+  imageIdExists,
+  imageLocalPathMap,
+  registerImageRow,
+} from './master-data-db';
 
 // ---- 类型（与渲染层 src/types.ts 对应结构保持一致；两端各自声明，避免主进程 import 渲染层） ----
 
@@ -67,7 +75,7 @@ export interface ProductListItem {
   category: string;
   status: string;
   note: string;
-  /** 主图 pl_images(id)；0 = 未设置。走窄接口 imageAttach/detach 维护，不进 upsertProduct */
+  /** 主图 `md_images.id`；0 = 未设置。走窄接口 imageAttach/detach 维护，不进 upsertProduct */
   imageId: number;
   /** 主图缓存路径（由 image_id 派生；'' = 无图。渲染层经 order-image-thumb/读图通道展示） */
   imagePath: string;
@@ -107,7 +115,7 @@ export interface ProductSummary {
 
 const SCHEMA = [
   // `pl_products`：产品 / 款式主数据（product 域，一行 = 一个可管理的产品），PK `id`、业务编码 `code` 唯一。
-  // `supplier_id` 软关联 `suppliers`（无外键）；`image_id` → `pl_images`；`cost_cents` 是**当前进价**（不是历史）。
+  // `supplier_id` 软关联 `suppliers`（无外键）；`image_id` → `md_images`（主数据域图片仓）；`cost_cents` 是**当前进价**（不是历史）。
   // 写 = 产品库编辑 / 套装子商品；读 = 商品映射（`pl_shop_sku.product_id`）、订单归类、成本与利润估算。
   `CREATE TABLE IF NOT EXISTS pl_products (
     -- 用途：产品/款式主数据（product 域，code 唯一）；cost_cents 是当前进价，历史成本看订单行。供应商为软关联。
@@ -253,19 +261,9 @@ function num(v: unknown): number {
 
 const COLS = `id, code, name, supplier_id, category, status, note, image_id, cost_cents, created_at, updated_at`;
 
-/** image_id → 缓存路径（pl_images 未建表/无行时降级为空，不报错） */
+/** image_id → 缓存路径（`md_images` 未建表/无行时降级为空，不报错） */
 function imagePathMap(imageIds: number[]): Map<number, string> {
-  const m = new Map<number, string>();
-  const ids = [...new Set(imageIds.filter((x) => x > 0))];
-  if (!ids.length) return m;
-  if (!tableExists('pl_images')) return m;
-  for (const r of dbQuery<Record<string, unknown>>(
-    `SELECT id, local_path FROM pl_images WHERE id IN (${ids.map(() => '?').join(',')})`,
-    ids
-  )) {
-    m.set(num(r.id), String(r.local_path ?? ''));
-  }
-  return m;
+  return imageLocalPathMap(imageIds);
 }
 
 function mapRow(row: Record<string, unknown>, supplierNames: Map<number, string>, imagePaths?: Map<number, string>): ProductListItem {
@@ -709,7 +707,7 @@ export interface ProductImportRow {
    */
   skus: { color: string; size: string; weightG: number }[];
   /**
-   * 该行 Excel 里那张图（已由 `product-extract-images` 落盘并登记 `pl_images`）；
+   * 该行 Excel 里那张图（已由 `product-extract-images` 落盘并登记 `md_images`）；
    * 0 = 这行没图（**不覆盖**款上已有的主图）。
    */
   imageId: number;
@@ -848,10 +846,7 @@ export function importProducts(
 
         // ③ 图
         const imageId = toId(r?.imageId);
-        if (
-          imageId &&
-          dbGet<{ id: number }>(`SELECT id FROM pl_images WHERE id = ?`, [imageId])
-        ) {
+        if (imageId && imageIdExists(imageId)) {
           attachProductImage(saved.id, imageId);
           out.imagesAttached++;
         }
@@ -1827,19 +1822,19 @@ export function invalidateSkuMapping(id: number): { changed: boolean } {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// SKU 子表（pl_variants，P5 计划的表提前落地）+ 产品图片（pl_images / pl_item_images）
+// SKU 子表（pl_variants，P5 计划的表提前落地）+ 产品图（`md_images`，主数据域）
 // ═══════════════════════════════════════════════════════════════════════════════════
 //
 // pl_variants    一个款（pl_products.id）下**多个 SKU**（颜色/尺码），每 SKU 一个克重。
 //                与 pl_item_weights（键 = 商品ID，来自「商品信息」Excel，**只读导入**）分层：
 //                变体是人工维护的款维度主数据；商品ID 克重是订单算运费的输入。两者不互写。
-// pl_images      产品图缓存登记：fingerprint = 内容 SHA-256（同图只存一份，与 oi_images 同思路）。
-//                有意**不复用** oi_images：那行的生命周期归订单域（孤图清理会删"没有订单引用"
-//                的图，产品主图会被误删）。文件统一落 `userData/product-images/`（handler 层复制，
-//                展示走 order-read-image / order-image-thumb 通道 —— 白名单已扩展为两目录）。
-// pl_item_images 商品ID 维度的**手动覆盖图**（映射与关联列表"商品ID对应的图片"的第一优先级）。
-//                取图三层回落（`itemImagePool`）：手动覆盖图 → 订单识别图（oi_order_items.raw_fields
-//                命中该商品ID 的行，image_id → oi_images，最新在前）→ 款主图（映射 → pl_products）。
+// md_images      全项目**唯一**图片仓（`electron/master-data-db.ts` 拥有）：`fingerprint` = 内容 SHA-256
+//                唯一，二进制在 `userData/images/`（不入库）。本域只读它，登记走 `registerImageRow`。
+//                产品主图 = `pl_products.image_id`；商品覆盖图 = `pl_shop_items.image_id`。
+//                两层都指向同一张表 ⇒ 不再有「产品图 / 订单图各自一套 id」的撞车与双份去重。
+// 取图三层回落（`itemImagePool`）：商品覆盖图（`pl_shop_items.image_id`）→ 订单图
+//                （`oi_order_items.raw_fields` 命中该商品ID 的行，`image_id → md_images`，最新在前）
+//                → 款主图（映射 → `pl_products.image_id`）。
 
 export interface VariantRow {
   id: number;
@@ -1872,7 +1867,7 @@ export interface VariantUpsertInput {
 }
 
 export interface ProductImageRef {
-  /** pl_images.id（override / product）或 oi_images.id（order）——仅标识用，展示走 localPath */
+  /** `md_images.id`（三层回落都指向同一张图仓）——仅标识用，展示走 localPath */
   imageId: number;
   /** 缓存文件的绝对路径；渲染层经 order-image-thumb(-batch) 取缩略图 dataUrl */
   localPath: string;
@@ -1911,29 +1906,6 @@ const VARIANT_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_pl_variants_product ON pl_variants(product_id)`,
 ];
 
-const IMAGE_SCHEMA = [
-  // `pl_images`：产品图仓（内容寻址），`fingerprint` = SHA-256 且唯一；`local_path` 指向
-  // `userData/product-images/` 下的文件（二进制不入库）。写 = 产品图上传 / 订单图回灌；读 = 产品主图、商品图池。
-  `CREATE TABLE IF NOT EXISTS pl_images (
-    -- 用途：产品图仓（内容寻址，fingerprint 唯一；二进制在 userData/product-images/，不入库）。
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fingerprint TEXT NOT NULL UNIQUE,
-    local_path TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'upload',
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  )`,
-  // `pl_item_images`：商品ID → 覆盖图（`item_id` 主键，人工指定的"这个商品就用这张图"）。
-  // 它是商品图池**最高优先级**的一层（覆盖图 → 订单识别图 → 产品图，见 `productImagePool`）；
-  // 写 = 映射/关联列表的改图；读 = 产品库列表与订单图池。覆盖图被移除时 `pl_images` 行**保留**（可能仍被引用）。
-  `CREATE TABLE IF NOT EXISTS pl_item_images (
-    -- 用途：商品ID→覆盖图（图池最高优先级，人工指定）；移除覆盖不删 pl_images 行（可能仍被别处引用）。
-    item_id TEXT PRIMARY KEY,
-    image_id INTEGER NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-  )`,
-];
-
 /**
  * 幂等补列（**老库**）—— color/size 只写进了 CREATE TABLE 的话老库永远拿不到它
  * （`CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改）。判定用 `PRAGMA table_info`。
@@ -1951,12 +1923,13 @@ function ensureVariantColumns(): void {
   }
 }
 
-/** 幂等初始化（SKU + 图片；与 ensureProductSchema 同挂载点调用） */
+/** 幂等初始化（SKU + 图片主数据；与 ensureProductSchema 同挂载点调用）
+ *  图片表（`md_images`）由主数据域拥有，这里只是**确保它建好**（本域查询要 JOIN 它）。 */
 export function ensureVariantSchema(): void {
   initDb();
   dbMigrate(VARIANT_SCHEMA);
   ensureVariantColumns();
-  dbMigrate(IMAGE_SCHEMA);
+  ensureMasterDataSchema();
 }
 
 // ---- SKU 子表 ----
@@ -2079,30 +2052,32 @@ export function variantList(productIds: number[]): VariantRow[] {
   ).map(mapVariantRow);
 }
 
-// ---- 产品图片（pl_images + pl_products.image_id） ----
+// ---- 产品图（`md_images` 主数据域 + `pl_products.image_id`） ----
 
-/** 登记一张已落盘的图（handler 层负责复制文件与算指纹；同指纹复用既有行） */
+/**
+ * 登记一张已落盘的图（同指纹复用既有行）。
+ *
+ * ⚠️ 函数名保留是为了不惊动历史调用方（handler / 冒烟），**实现已委托主数据域的
+ * `registerImageRow`**：全项目只有一张图片表，登记口径（指纹、去重、默认 source）只此一份。
+ * 二进制落盘不在这里 —— 那是 `master-data-db.landImageBytes` 的事。
+ */
 export function upsertImageRecord(input: {
   fingerprint: string;
   localPath: string;
   source?: string;
 }): { imageId: number; reused: boolean } {
   ensureVariantSchema();
-  const fp = str(input?.fingerprint, 128);
-  const lp = str(input?.localPath, 1024);
-  if (!fp || !lp) throw new Error('图片指纹与路径不能为空');
-  const existing = dbGet<{ id: number }>(`SELECT id FROM pl_images WHERE fingerprint = ?`, [fp]);
-  if (existing) return { imageId: num(existing.id), reused: true };
-  const info = dbRun(`INSERT INTO pl_images (fingerprint, local_path, source) VALUES (?,?,?)`, [
-    fp,
-    lp,
-    str(input?.source, 40) || 'upload',
-  ]);
-  return { imageId: Number(info.lastInsertRowid), reused: false };
+  const out = registerImageRow({
+    fingerprint: str(input?.fingerprint, 128),
+    localPath: str(input?.localPath, 1024),
+    source: str(input?.source, 40) || 'upload',
+  });
+  return { imageId: out.imageId, reused: out.reused };
 }
 
 /** 设置款主图（窄接口：**不进 upsertProduct**，全量提交会把它按缺省值清掉） */
 export function attachProductImage(productId: number, imageId: number): { changed: boolean } {
+  ensureProductSchema();
   ensureVariantSchema();
   const pid = toId(productId);
   const iid = toId(imageId);
@@ -2111,7 +2086,7 @@ export function attachProductImage(productId: number, imageId: number): { change
   if (!dbGet<{ id: number }>(`SELECT id FROM pl_products WHERE id = ?`, [pid])) {
     throw new Error('产品不存在或已被删除');
   }
-  if (!dbGet<{ id: number }>(`SELECT id FROM pl_images WHERE id = ?`, [iid])) {
+  if (!imageIdExists(iid)) {
     throw new Error('图片不存在或已被删除');
   }
   dbRun(
@@ -2153,7 +2128,7 @@ export function getProductCode(productId: number): string {
   return row ? String(row.code ?? '') : '';
 }
 
-/** 移除款主图（pl_images 行保留 —— 可能仍被 pl_item_images 引用；孤图清理另议） */
+/** 移除款主图（`md_images` 行与字节保留 —— 可能仍被订单行 / 采集行引用；孤图清理另议） */
 export function detachProductImage(productId: number): { changed: boolean } {
   ensureVariantSchema();
   const pid = toId(productId);
@@ -2165,32 +2140,46 @@ export function detachProductImage(productId: number): { changed: boolean } {
   return { changed: info.changes > 0 };
 }
 
-// ---- 商品ID 手动覆盖图 ----
+// ---- 商品ID 覆盖图（落 `pl_shop_items.image_id`） ----
 
-/** 设置商品ID的覆盖图（item_id 存归一形态，与映射表同口径） */
+/**
+ * 设置商品ID的覆盖图（item_id 存归一形态，与映射表同口径）。
+ *
+ * 落点是**采集快照行自己的 `image_id`**（`pl_shop_items` 唯一键 `(shop_id, store_key, item_id)`），
+ * 一个商品ID 在多店/多行时逐行同写 —— 覆盖图是"这个商品就用这张"的决定，与店铺无关。
+ * 没有任何采集行时**显式报错**：旧实现能凭空插一行映射（`pl_item_images` 以 item_id 为主键），
+ * 但那个商品的元数据并不存在，图上去了也无处展示、且会在图池里成为一个孤键。
+ */
 export function setItemImage(input: { itemId: string; imageId: number }): { changed: boolean } {
   ensureVariantSchema();
   const key = toSkuKey(input?.itemId);
   const iid = toId(input?.imageId);
   if (!key) throw new Error('商品ID不能为空');
   if (!iid) throw new Error('请指定图片');
-  if (!dbGet<{ id: number }>(`SELECT id FROM pl_images WHERE id = ?`, [iid])) {
+  if (!imageIdExists(iid)) {
     throw new Error('图片不存在或已被删除');
   }
-  dbRun(
-    `INSERT INTO pl_item_images (item_id, image_id, updated_at) VALUES (?,?,datetime('now','localtime'))
-     ON CONFLICT(item_id) DO UPDATE SET image_id = excluded.image_id, updated_at = datetime('now','localtime')`,
-    [key, iid],
+  const info = dbRun(
+    `UPDATE pl_shop_items SET image_id = ?, updated_at = datetime('now','localtime')
+      WHERE item_id = ?`,
+    [iid, key],
   );
+  if (info.changes <= 0) {
+    throw new Error(`商品ID ${key} 还没有采集到的店铺商品行 —— 先采集商品，再设覆盖图`);
+  }
   return { changed: true };
 }
 
-/** 清除商品ID的覆盖图（回到"自动聚合"回落链；pl_images 行保留） */
+/** 清除商品ID的覆盖图（回到"自动聚合"回落链；图片行与字节保留） */
 export function clearItemImage(itemId: string): { removed: number } {
   ensureVariantSchema();
   const key = toSkuKey(itemId);
   if (!key) return { removed: 0 };
-  const info = dbRun(`DELETE FROM pl_item_images WHERE item_id = ?`, [key]);
+  const info = dbRun(
+    `UPDATE pl_shop_items SET image_id = 0, updated_at = datetime('now','localtime')
+      WHERE item_id = ? AND image_id <> 0`,
+    [key],
+  );
   return { removed: info.changes };
 }
 
@@ -2203,9 +2192,10 @@ const ORDER_IMAGES_PER_ITEM = 3;
 
 /**
  * 批量取商品ID的候选图（**三层回落，逐 item 独立判定**）：
- *   ① pl_item_images 覆盖图 —— 人的显式决定，最高优先；
- *   ② 订单识别图 —— `oi_order_items.image_id` 非空的行，raw_fields 商品ID 命中即收集（最新在前）；
- *   ③ 款主图 —— 该商品ID 的 confirmed 映射 → pl_products.image_id（多行映射取任一，确定性按 id 升序）。
+ *   ① 商品覆盖图 —— `pl_shop_items.image_id`（人的显式决定，最高优先）；
+ *   ② 订单图 —— `oi_order_items.image_id` 非空的订单行，raw_fields 商品ID 命中即收集（最新在前）；
+ *   ③ 款主图 —— 该商品ID 的 confirmed 映射 → `pl_products.image_id`（多行映射取任一，确定性按 id 升序）。
+ * 三层都指向同一张图仓 `md_images`（R1）—— 候选图之间不再有"这张图在哪个表里"的分叉。
  * 不做模糊匹配：商品ID 是精确键（toSkuKey 归一后比对），命中不了就回落下一层。
  */
 export function itemImagePool(itemIds: string[]): Map<string, ItemImagePoolEntry> {
@@ -2217,24 +2207,28 @@ export function itemImagePool(itemIds: string[]): Map<string, ItemImagePoolEntry
   if (!keys.length) return out;
   for (const k of keys) out.set(k, { override: null, order: [], product: null });
 
-  // ① 手动覆盖图
-  if (tableExists('pl_item_images') && tableExists('pl_images')) {
+  // ① 商品覆盖图（采集快照行自己的 image_id；同 itemId 多行时取最早一行，确定性）
+  if (tableExists('pl_shop_items') && tableExists('md_images')) {
     const placeholders = keys.map(() => '?').join(',');
     for (const r of dbQuery<Record<string, unknown>>(
-      `SELECT i.item_id AS item_id, i.image_id AS image_id, g.local_path AS local_path
-       FROM pl_item_images i JOIN pl_images g ON g.id = i.image_id
-       WHERE i.item_id IN (${placeholders})`,
+      `SELECT si.item_id AS item_id, si.image_id AS image_id, i.local_path AS local_path
+       FROM pl_shop_items si JOIN md_images i ON i.id = si.image_id
+       WHERE si.image_id <> 0 AND si.item_id IN (${placeholders})
+       ORDER BY si.id ASC`,
       keys,
     )) {
       const e = out.get(String(r.item_id ?? ''));
-      if (e) e.override = { imageId: num(r.image_id), localPath: String(r.local_path ?? '') };
+      if (e && !e.override) {
+        e.override = { imageId: num(r.image_id), localPath: String(r.local_path ?? '') };
+      }
     }
   }
 
-  // ② 订单识别图：商品ID 只在明细表 raw_fields JSON 里（与队列同一条扫描路径）
+  // ② 订单图：商品ID 只在明细表 raw_fields JSON 里（与队列同一条扫描路径）
   if (tableExists('oi_order_items')) {
     const keySet = new Set(keys);
-    const collected = new Map<string, ProductImageRef[]>();
+    /** 先挑出命中的 (itemId, imageId)，再**一次**查出本地路径（避免逐行 SQL） */
+    const collected = new Map<string, number[]>();
     const rows = dbQuery<Record<string, unknown>>(
       `SELECT id, image_id, raw_fields FROM oi_order_items
        WHERE image_id IS NOT NULL ORDER BY id DESC LIMIT ${IMAGE_POOL_SCAN_LIMIT}`,
@@ -2250,27 +2244,31 @@ export function itemImagePool(itemIds: string[]): Map<string, ItemImagePoolEntry
       if (!itemId || !keySet.has(itemId)) continue;
       const iid = num(r.image_id);
       if (!iid) continue;
-      const localPath = orderImagePath(iid);
-      if (!localPath) continue;
       const list = collected.get(itemId) ?? [];
       if (list.length >= ORDER_IMAGES_PER_ITEM) continue;
-      list.push({ imageId: iid, localPath });
+      // 同一张图可能被同一商品ID 的多条订单行复用 —— 去重但保留"最新在前"的顺序
+      if (list.includes(iid)) continue;
+      list.push(iid);
       collected.set(itemId, list);
     }
-    for (const [k, list] of collected) {
+    const paths = imageLocalPathMap([...collected.values()].flat());
+    for (const [k, ids] of collected) {
       const e = out.get(k);
-      if (e) e.order = list;
+      if (!e) continue;
+      e.order = ids
+        .map((id) => ({ imageId: id, localPath: paths.get(id) ?? '' }))
+        .filter((ref) => !!ref.localPath);
     }
   }
 
-  // ③ 款主图：映射 → 产品 → image_id → pl_images
-  if (tableExists('pl_shop_sku') && tableExists('pl_products') && tableExists('pl_images')) {
+  // ③ 款主图：映射 → 产品 → image_id → md_images
+  if (tableExists('pl_shop_sku') && tableExists('pl_products') && tableExists('md_images')) {
     const placeholders = keys.map(() => '?').join(',');
     for (const r of dbQuery<Record<string, unknown>>(
-      `SELECT s.item_id AS item_id, p.image_id AS image_id, g.local_path AS local_path
+      `SELECT s.item_id AS item_id, p.image_id AS image_id, i.local_path AS local_path
        FROM pl_shop_sku s
        JOIN pl_products p ON p.id = s.product_id
-       JOIN pl_images g ON g.id = p.image_id
+       JOIN md_images i ON i.id = p.image_id
        WHERE s.status = 'confirmed' AND s.item_id IN (${placeholders})
        ORDER BY s.id ASC`,
       keys,
@@ -2284,15 +2282,6 @@ export function itemImagePool(itemIds: string[]): Map<string, ItemImagePoolEntry
   }
 
   return out;
-}
-
-/** oi_images.image_id → local_path（订单域表未建/无行时返回 ''，不报错） */
-function orderImagePath(imageId: number): string {
-  if (!imageId || !tableExists('oi_images')) return '';
-  const row = dbGet<{ local_path: string }>(`SELECT local_path FROM oi_images WHERE id = ?`, [
-    imageId,
-  ]);
-  return row ? String(row.local_path ?? '') : '';
 }
 
 // ---- 认款时顺手采纳：订单图 → 款主图 ----
@@ -2319,7 +2308,7 @@ export interface ProductImageAdoption {
  *   ③ **确定性**：同一个款被多个商品ID 映射时取 `productId` 升序 + `itemKey` 升序的第一个 ——
  *      不依赖 Map 插入顺序 / SQL 返回顺序（否则同一次操作两次跑出不同的图）。
  *
- * ⚠️ 本层**不碰文件**：只回路径。复制文件、算指纹、登记 `pl_images`、写 `pl_products.image_id`
+ * ⚠️ 本层**不碰文件**：只回路径。复制文件、算指纹、登记 `md_images`、写 `pl_products.image_id`
  * 全在 handler 层（与 `product-image-attach` 同一套实现，口径只此一份）。
  */
 export function pendingProductImages(
@@ -2369,6 +2358,135 @@ export function pendingProductImages(
       source: e?.override ? 'item-override' : 'order-image',
     });
   }
+  return out;
+}
+
+/** 一条「该去下载哪张远程采集图并采纳给哪个款」的待办（本层只挑，下载在 handler 层） */
+export interface RemoteProductImageAdoption {
+  productId: number;
+  /** 归一后的商品ID */
+  itemId: string;
+  /** `pl_shop_items` 行 id —— 下载入库后要回填它的 `image_id`，列表下次就能直接用本地图 */
+  shopItemId: number;
+  imageUrl: string;
+}
+
+/**
+ * 认款补图的**第二档**：「产品没主图 + 采集商品只有远程 `image_url`」。
+ *
+ * 为什么 `pendingProductImages` 不够：它只发**本地**图（订单图 / 人工覆盖图）。采集回来的商品
+ * 常常还没下载主图（`pl_shop_items.image_id = 0`，但 `image_url` 有值，界面**直接拿远程 URL 显示**）。
+ * 用户在「款与商品」认款时看到的就是这张远程图；不把它落库，款侧永远是一张白图
+ * （2026-10-30 用户实报：认款后主图还是没有）。
+ *
+ * 规则与 `pendingProductImages` 同口径：① 只补空（`pl_products.image_id = 0`）；
+ * ② 一个款只挑一张，按 `productId` + `itemKey` 升序取第一个（确定性）；
+ * ③ 只挑**还没入库**的采集行（`image_id = 0` 且有 URL）—— 已经入过库的交给第一档；
+ * ④ 本层**不做网络**：下载、登记 `md_images`、回填采集行、写产品主图全在 handler 层。
+ */
+export function pendingRemoteProductImages(
+  pairs: readonly { productId?: unknown; itemId?: unknown }[],
+): RemoteProductImageAdoption[] {
+  ensureVariantSchema();
+  if (!tableExists('pl_shop_items')) return [];
+  const list: { productId: number; itemKey: string }[] = [];
+  for (const p of Array.isArray(pairs) ? pairs : []) {
+    const pid = toId(p?.productId);
+    const key = toSkuKey(p?.itemId);
+    if (!pid || !key) continue;
+    list.push({ productId: pid, itemKey: key });
+  }
+  if (!list.length) return [];
+  list.sort(
+    (a, b) =>
+      a.productId - b.productId || (a.itemKey < b.itemKey ? -1 : a.itemKey > b.itemKey ? 1 : 0),
+  );
+
+  const firstItemByProduct = new Map<number, string>();
+  for (const r of list) {
+    if (!firstItemByProduct.has(r.productId)) firstItemByProduct.set(r.productId, r.itemKey);
+  }
+
+  const need: { productId: number; itemKey: string }[] = [];
+  for (const [productId, itemKey] of firstItemByProduct) {
+    const row = dbGet<{ image_id: number }>(`SELECT image_id FROM pl_products WHERE id = ?`, [
+      productId,
+    ]);
+    if (!row) continue;
+    if (num(row.image_id)) continue; // ① 已有主图 → 只补空、不覆盖
+    need.push({ productId, itemKey });
+  }
+  if (!need.length) return [];
+
+  const keys = [...new Set(need.map((x) => x.itemKey))];
+  const placeholders = keys.map(() => '?').join(',');
+  const rows = dbQuery<Record<string, unknown>>(
+    `SELECT id, item_id, image_url FROM pl_shop_items
+     WHERE image_id = 0 AND image_url <> '' AND item_id IN (${placeholders})
+     ORDER BY id ASC`,
+    keys,
+  );
+  // 同一商品ID 可能有多家店各一行（同图）；取 id 最小的一条，结果与 SQL 顺序无关
+  const byItem = new Map<string, { shopItemId: number; imageUrl: string }>();
+  for (const r of rows) {
+    const key = toSkuKey(r.item_id);
+    if (!key || byItem.has(key)) continue;
+    const imageUrl = String(r.image_url ?? '').trim();
+    if (!imageUrl) continue;
+    byItem.set(key, { shopItemId: Number(r.id) || 0, imageUrl });
+  }
+
+  const out: RemoteProductImageAdoption[] = [];
+  for (const n of need) {
+    const hit = byItem.get(n.itemKey);
+    if (!hit?.shopItemId) continue;
+    out.push({
+      productId: n.productId,
+      itemId: n.itemKey,
+      shopItemId: hit.shopItemId,
+      imageUrl: hit.imageUrl,
+    });
+  }
+  return out;
+}
+
+/**
+ * 全库「已确认认款」的 (款, 商品ID) 配对 —— 存量补图（`product-sku-repair-images`）的输入。
+ *
+ * 为什么需要它：认款顺手补图只在**写入那一刻**跑。升级前就认过的映射不会自己长图，
+ * 用户看到的就是"认款后主图还是没有"（2026-10-30 实报）。补图时无从知道"当时那一批行"，
+ * 只能从库里把已确认的配对重新取出来。
+ *
+ * 口径与 `upsertSkuMappings` 的映射行一致（`skuMappingSql`：排除商品清单的池行），
+ * 商品ID 归一后去重；排序固定（含产品 id），让"一款只补一张"的选择可复现。
+ */
+export function confirmedMapPairs(): { productId: number; itemId: string }[] {
+  ensureProductSchema();
+  ensureSkuSchema();
+  if (!tableExists('pl_shop_sku')) return [];
+  const rows = dbQuery<{ product_id: number; item_id: string }>(
+    `SELECT DISTINCT product_id, item_id FROM pl_shop_sku
+      WHERE status = 'confirmed' AND product_id > 0 AND ${skuMappingSql('')}
+      ORDER BY product_id ASC, item_id ASC`,
+  );
+  // 归一 + 去重必须放在**出参**这一层：`DISTINCT` 比的是库里的原文，而历史数据/手工行可能
+  // 带着空白（`B0PAIR1` 与 ` B0PAIR1 ` 是同一件商品）。只按原文去重会让同一款同一商品出现两次，
+  // 「一款只补一张」的选择就会随库里的排列顺序漂移（SQL 排序也按原文，空白会排到前面）。
+  const seen = new Set<string>();
+  const out: { productId: number; itemId: string }[] = [];
+  for (const r of rows) {
+    const pid = toId(r.product_id);
+    const key = toSkuKey(r.item_id);
+    if (!pid || !key) continue;
+    const dedupe = `${pid}\u0000${key}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+    out.push({ productId: pid, itemId: key });
+  }
+  out.sort(
+    (a, b) =>
+      a.productId - b.productId || (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0),
+  );
   return out;
 }
 

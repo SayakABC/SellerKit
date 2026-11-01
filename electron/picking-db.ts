@@ -1,11 +1,12 @@
 // electron/picking-db.ts
-// 「拣货」只读投影：**未发货**的订单行 + 三层回落后的图 + 款色码/供应商（供拣货单按 SKU 汇总）。
+// 「拣货」只读投影：**未发货**的订单行 + 款色代表图/本行图/商品池回落后的图 + 款色码/供应商（供拣货单按 SKU 汇总）。
 //
 // 为什么单开一个文件而不是扩 `order-db.shippingRows`：两者问的不是同一个问题 ——
 //   · `shippingRows` 是"算钱"用的（金额/时点/运价维度，最多 2000 行、不筛时点）；
 //   · 本投影是"要拣什么"用的（**未发货** + 日期窗 + 店铺 + 图 + 供应商）。
-// 但**款编码的识别链 JOIN 与"缺表降级"策略与它同一份**（`oi_images → oi_style_colors → oi_styles`、
-// `pl_products → suppliers` 可选）—— 两处都改时别忘了对方（口径只能有一份）。
+// 但**款编码的识别链 JOIN 与"缺表降级"策略与它同一份**（行上的 `style_color_id` 优先、
+// 图上的代表款色回落（`ITEM_STYLE_COLOR_ID`）→ `oi_styles`、`pl_products → suppliers` 可选）
+// —— 两处都改时别忘了对方（口径只能有一份）。
 //
 // ⚠️ 本层**只做机械筛选**（`ship_time` 空 / `status <> 'shipped'` / 店铺 / 上限）：
 //   日期窗与"关闭单不该出现在拣货单里"**都不在本层** —— 前者要认 `order_time` 的多种写法
@@ -18,6 +19,7 @@
 export {};
 
 import { initDb, dbQuery, tableExists } from './db';
+import { imageLocalPathMap } from './master-data-db';
 import { ITEM_STYLE_COLOR_ID } from './order-db';
 import { itemImagePool } from './product-db';
 import { extractSkuFields, toSkuKey } from './shopSku';
@@ -43,7 +45,11 @@ export interface PickingRowProjection {
   itemId: string;
   supplierId: number;
   supplierName: string;
-  /** 三层回落后的图（本地路径，经 `order-image-thumb(-batch)` 取缩略图）；'' = 没图 */
+  /** 取图优先级：款色代表图 → 商品覆盖图 → 本行订单图 → 商品池订单图 → 款主图（本地路径，
+   *  经 `order-image-thumb(-batch)` 取缩略图）；'' = 没图。
+   *  为什么款色代表图排第一（2026-11-01 用户实报"颜色和图片不匹配"）：按商品ID取图时，
+   *  同一商品的多色共用一张最新的订单图/覆盖图 ⇒ 每个色行都显示同一张图。款色代表图
+   *  （`oi_style_colors.image_id`）是 1:1 挂在款色上的，只有它能让图和色对上。 */
   imagePath: string;
   /** 机械事实：已发货（`ship_time` 非空 或 `status='shipped'`）。默认范围里恒 false */
   shipped: boolean;
@@ -119,13 +125,14 @@ export function pickingRows(
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT oi.id, o.order_no, o.shop, o.order_time, oi.raw_fields, oi.color, oi.size,
             o.ship_time, oi.status, o.biz_status, oi.cost_cents, oi.actual_cost_cents,
+            COALESCE(oi.image_id, 0) AS order_image_id,
+            COALESCE(sc.image_id, 0) AS style_color_image_id,
             ${ITEM_STYLE_COLOR_ID} AS style_color_id,
             COALESCE(s.code, '') AS style_code, ${styleNameSel},
             COALESCE(sc.color, '') AS style_color,
             ${supplierSel}, ${productCostSel}
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
-     LEFT JOIN oi_images i ON oi.image_id = i.id
      LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${domainJoin}
@@ -135,6 +142,7 @@ export function pickingRows(
   );
 
   const itemIds: string[] = [];
+  const mediaIds: number[] = [];
   const parsed = rows.map((r) => {
     let rawFields: Record<string, string> = {};
     try {
@@ -146,24 +154,41 @@ export function pickingRows(
     // 商品ID 只在 raw_fields 里（`oi_orders` 无该列）—— 提取口径直接复用 `shopSku`（队列/取图同一份）
     const itemId = extractSkuFields(rawFields).itemId;
     if (itemId) itemIds.push(itemId);
-    return { r, rawFields, itemId };
+    // 两张"按色/按行"的图 id 先收齐，后面一次批量取本地路径（避免逐行查库）
+    const styleColorImageId = Number(r.style_color_image_id ?? 0) || 0;
+    const orderImageId = Number(r.order_image_id ?? 0) || 0;
+    if (styleColorImageId > 0) mediaIds.push(styleColorImageId);
+    if (orderImageId > 0) mediaIds.push(orderImageId);
+    return { r, rawFields, itemId, styleColorImageId, orderImageId };
   });
 
-  // 三层回落取图（`itemImagePool` 是唯一实现：覆盖图 → 订单图 → 款主图）—— 一次算好，逐 item 取首选
+  // 商品池（`itemImagePool` 是那个"按商品ID"的三层回落：覆盖图 → 订单图 → 款主图）
   const pool = itemIds.length ? itemImagePool(itemIds) : new Map();
+  // 款色代表图 / 本行订单图：image_id → 本地路径（缺表降级为空，见 `imageLocalPathMap`）
+  const imagePaths = mediaIds.length ? imageLocalPathMap(mediaIds) : new Map<number, string>();
   /** 成本列（分）：0/空 一律 null（"没维护"≠"零成本"；判据与渲染层 `positiveCents` 同口径） */
   const centsOrNull = (v: unknown): number | null => {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
-  const out: PickingRowProjection[] = parsed.map(({ r, rawFields, itemId }) => {
+  const out: PickingRowProjection[] = parsed.map(({ r, rawFields, itemId, styleColorImageId, orderImageId }) => {
     const orderTime = String(r.order_time ?? '');
     // ⚠️ 池的键是 **归一后** 的商品ID（`toSkuKey`，`itemImagePool` 内部归一的）。拿原文去取会
     // 在带空格/不可见字符的行上静默取不到图（`shopSku.ts` 的注释已写明；这里曾漏改）。
     const entry = itemId ? pool.get(toSkuKey(itemId)) : undefined;
-    const imagePath = entry
-      ? String(entry.override?.localPath ?? entry.order[0]?.localPath ?? entry.product?.localPath ?? '')
-      : '';
+    // 取图优先级（2026-11-01 修复"颜色和图片不匹配"）：
+    //   ① 款色代表图 —— 1:1 挂款色，唯一能保证"这行的图和这行的色一致"；
+    //   ② 商品覆盖图 —— 人的显式决定（`scripts/picking-db-smoke.cjs` 断言它优先于订单图）；
+    //   ③ 本行订单图 —— 这一行自己的图，比"同商品最新一单"更贴；
+    //   ④ 商品池里的订单图 / ⑤ 款主图 —— 都没有才回落。
+    const colorPath = styleColorImageId > 0 ? imagePaths.get(styleColorImageId) ?? '' : '';
+    const rowPath = orderImageId > 0 ? imagePaths.get(orderImageId) ?? '' : '';
+    const imagePath =
+      colorPath ||
+      String(entry?.override?.localPath ?? '') ||
+      rowPath ||
+      String(entry?.order[0]?.localPath ?? '') ||
+      String(entry?.product?.localPath ?? '');
     const shipTime = String(r.ship_time ?? '');
     const status = String(r.status ?? '');
     return {

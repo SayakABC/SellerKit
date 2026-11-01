@@ -88,7 +88,7 @@ const reset = () => {
   for (const t of [
     'oi_item_parts',
     'oi_orders',
-    'oi_images',
+    'md_images',
     'oi_style_colors',
     'oi_style_fingerprints',
     'oi_styles',
@@ -126,6 +126,19 @@ function seedLegacyOrderShape() {
   dbRun(`DROP TABLE IF EXISTS oi_order_items`);
   dbRun(`DROP TABLE IF EXISTS oi_orders`);
   dbRun(`DROP TABLE IF EXISTS oi_styles`);
+  // 老库的 `oi_orders.image_id` 与 v3 的冻结 DDL 都指向 `oi_images`（R1 已退役）。
+  // 真老库里它当然存在 —— 不建这一行，迁移链一 INSERT 就 `no such table: main.oi_images`。
+  // 迁移跑完 `retireLegacyImageTables` 会把它（连同另外两张旧图表）一起拆掉。
+  dbRun(`DROP TABLE IF EXISTS oi_images`);
+  dbRun(`CREATE TABLE oi_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    url_fingerprint TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    local_path TEXT NOT NULL DEFAULT '',
+    style_color_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`);
   dbRun(`CREATE TABLE oi_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     image_id INTEGER NOT NULL REFERENCES oi_images(id) ON DELETE CASCADE,
@@ -224,22 +237,33 @@ function confirmMap({ shopId, itemId, productId, status = 'confirmed', platform 
   assert.strictEqual(r.failed.length, 0, `映射写入失败：${JSON.stringify(r.failed)}`);
 }
 
-/** 订单图片当前归属的**款编码**（空串 = 未归款） */
+/** 订单图片当前归属的**款编码**（空串 = 未归款）。R1：款色↔图 1:1 落在 `oi_style_colors.image_id`。 */
 function imageStyleCode(imageId) {
   const row = dbGet(
-    `SELECT s.code AS code FROM oi_images i
-     JOIN oi_style_colors sc ON sc.id = i.style_color_id
-     JOIN oi_styles s ON s.id = sc.style_id WHERE i.id = ?`,
+    `SELECT s.code AS code FROM oi_style_colors sc
+     JOIN oi_styles s ON s.id = sc.style_id WHERE sc.image_id = ?`,
     [imageId],
   );
   return row ? String(row.code ?? '') : '';
 }
 
+/**
+ * 图片落盘路径：R1 之后 `md_images.local_path` 是 **NOT NULL 且不许空串**
+ * （`registerImageRow` 会把空路径当成"没落盘"直接拒掉）。夹具给一个确定性的假路径即可
+ * （本组不读文件，只验证归属）。
+ */
+const fakeImagePath = (fp) => `/tmp/sk-style/${fp}.jpg`;
+
 /** 落一条带商品ID 的订单（不过 AI：本组验证的正是"确定性映射"这条路） */
 function insertMappedOrder({ orderNo, shop, itemId, color = '红色', imageId }) {
   const img =
     imageId ??
-    odb.insertImage({ fingerprint: `FP-${orderNo}`, urlFingerprint: `FP-${orderNo}-u`, sourceUrl: '', localPath: '' });
+    odb.insertImage({
+      fingerprint: `FP-${orderNo}`,
+      urlFingerprint: `FP-${orderNo}-u`,
+      sourceUrl: '',
+      localPath: fakeImagePath(`FP-${orderNo}`),
+    });
   const id = odb.insertOrder({
     imageId: img,
     orderNo,
@@ -256,7 +280,12 @@ function insertMappedOrder({ orderNo, shop, itemId, color = '红色', imageId })
 /** 造一条"有款色归属"的订单：识别建款 → 落图 → 挂款色 → 落单 */
 function seedOrder({ fp = 'FP-A', color = '红色', size = 'M', shop = '店A', orderNo = 'NO-1' } = {}) {
   const res = odb.resolveStyle({ fingerprint: fp, category: '家居', features: [], color });
-  const imgId = odb.insertImage({ fingerprint: fp, urlFingerprint: `${fp}-u`, sourceUrl: '', localPath: '' });
+  const imgId = odb.insertImage({
+    fingerprint: fp,
+    urlFingerprint: `${fp}-u`,
+    sourceUrl: '',
+    localPath: fakeImagePath(fp),
+  });
   odb.setImageStyleColor(imgId, res.styleColorId);
   odb.insertOrder({
     imageId: imgId,

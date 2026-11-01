@@ -26,37 +26,40 @@
            2026-10-24 晚补充（用户口径「拖动颜色里的项，拖动到常用色中进行归类」）：
            它同时是**拖放的落点** —— 把下面某个色名拖到自己这一排的某个常用色上松手，
            那个色就归到这个规范名下（矩阵里已有同名色 ⇒ 并进那一行；没有 ⇒ 原地改名）。
-           于是"归类"的落点是 10 个固定的大靶子，而不是下面一排要瞄准的小 chip。 -->
+           2026-10-30 收口成通用组件 `ColorPalette`（归类核对页复用同一个）：色条、色点、
+           拖放高亮、末尾「＋ 新增颜色」都在那里；本页只把"点/拖之后做什么"接进去。 -->
       <div class="mx-line mx-line--palette">
-        <span class="mx-line__k" title="常用色：点一下加一色；打勾 = 矩阵里已经有这个色名；把下面的色名拖到这里归档">
+        <span
+          class="mx-line__k"
+          title="常用色：点一下加一色；打勾 = 矩阵里已经有这个色名；把已选/拖动的色归到这里；末尾可新增颜色"
+        >
           常用色
         </span>
-        <div class="mx-palette" :class="{ 'mx-palette--dragging': dragActive }">
-          <button
-            v-for="c in paletteColors"
-            :key="`pc${c}`"
-            class="mx-pc"
-            :class="{ 'is-in': hasColor(c), 'is-drop': dragActive && dropPalette === c }"
-            type="button"
-            :data-act="`${act}-common`"
-            :data-color="c"
-            :data-mx-pc="c"
-            :disabled="disabled"
-            :title="pcTitle(c)"
-            @click="pickCommon(c)"
-          >
-            <span class="mx-pc__dot" :style="{ background: findSwatch(c) ?? 'transparent' }"></span>
-            {{ c }}
-          </button>
-        </div>
+        <ColorPalette
+          :colors="paletteColors"
+          :present="presentColors"
+          :act="act"
+          :disabled="disabled"
+          allow-add
+          drop-attr="data-mx-pc"
+          :drop-color="dropPalette"
+          :dragging="dragActive"
+          :selected-count="selectedCount"
+          :title-for="pcTitle"
+          @pick="pickCommon"
+          @added="onPaletteAdded"
+        />
       </div>
 
       <div class="mx-line">
         <span
           class="mx-line__k"
-          title="按住左侧色图拖到上面「常用色」= 归到这个规范色（落库用常用色的名字）；拖到另一个色上 = 合并两色"
+          title="点一行 = 选中它（可多选 / Shift 连选），再点上面「常用色」= 批量归类；按住色图拖到常用色 = 归类，拖到另一色 = 合并"
           >颜色</span
         >
+        <!-- 点击整行即选中（2026-10-30 用户口径「可以改成可多选，点击选中，批量拖动到常用色中选择颜色」）。
+             不再有"多选"开关：色名改成只读之后，"点一下"只剩"选中/取消"一种含义，
+             开关反而多一步（且用户会以为进入模式后要再点一次复选框）。 -->
         <div class="mx-colors" :class="{ 'mx-colors--dragging': dragActive }">
           <div
             v-for="(r, ri) in matrix.rows"
@@ -66,6 +69,7 @@
               'is-flagged': flagged(r),
               'is-src': dragActive && dragSrc === ri,
               'is-drop': dragActive && dragOver === ri,
+              'is-sel': rowSelected(ri),
             }"
             :data-mx-row="ri"
             :title="
@@ -73,10 +77,25 @@
                 ? dragOver === ri
                   ? `松手：把「${matrix.rows[dragSrc ?? 0]?.color || '这一色'}」并进「${r.color || '这一色'}」`
                   : ''
-                : '按住色图左侧空白处拖到上面「常用色」= 归到这个规范色；拖到另一个色上 = 合并两色'
+                : '点一下选中（Shift 连选）；拖到上面「常用色」= 归到这个规范色'
             "
             @pointerdown="onChipDown(ri, $event)"
+            @click="onColorRowClick(ri, $event)"
           >
+            <!-- 选中标记：**常显**（未选是空框、已选打勾）。点它和点整行等价；不拦 pointerdown，
+                 否则按它起手就不能整组拖走了。 -->
+            <span
+              class="mx-sel"
+              :class="{ 'is-on': rowSelected(ri) }"
+              :aria-pressed="rowSelected(ri)"
+              :aria-label="`选择颜色 ${r.color || ri + 1}`"
+              role="checkbox"
+              :data-act="`${act}-sel`"
+              :data-color="r.color"
+              title="点一下选中这一色（按住 Shift 连选一段）"
+            >
+              {{ rowSelected(ri) ? '✓' : '' }}
+            </span>
             <button
               v-if="rowImage(r)"
               class="mx-thumb-btn"
@@ -84,7 +103,7 @@
               :data-act="`${act}-thumb`"
               :aria-label="`放大查看${r.color || '这一色'}的色图`"
               :title="thumbTitle(r)"
-              @click="openViewer(r)"
+              @click.stop="openViewer(r)"
             >
               <img
                 :src="rowImage(r)"
@@ -104,20 +123,17 @@
               :title="`${r.color || '这一色'}没有采到色图（色块按色名近似，只作辨认）`"
             ></span>
             <span v-if="flagged(r)" class="mx-dot" :title="flagHint" aria-hidden="true"></span>
-            <input
-              v-model="r.color"
-              class="wb-input mx-color__name"
+            <!-- 色名**只读**（2026-10-30 用户口径「编辑产品中的颜色修改为不能修改」）：
+                 改色名的唯一路径是"选中后到上面常用色里挑 / 拖到常用色上"，
+                 于是落库色名总是字典写法，不会再手打出 `黑 / 黑色 / Black` 三种行。 -->
+            <span
+              class="mx-color__name"
               :data-act="`${act}-color`"
-              :aria-label="`第 ${ri + 1} 个颜色的名称`"
-              :aria-expanded="suggestFor === ri ? 'true' : 'false'"
-              autocomplete="off"
-              :disabled="disabled"
-              @focus="openSuggest(ri, $event)"
-              @click="onColorNameClick(ri, $event)"
-              @input="onColorNameInput(ri, $event)"
-              @keydown="onColorNameKey(ri, $event)"
-              @blur="closeSuggest"
-            />
+              :data-color="r.color"
+              :aria-label="`第 ${ri + 1} 个颜色的名称：${r.color || '未命名'}`"
+              :title="`${r.color || '这一色'}（色名只读；要改名请选中后点/拖到常用色）`"
+              >{{ r.color || '未命名' }}</span
+            >
             <button
               class="mx-x"
               type="button"
@@ -125,20 +141,54 @@
               :aria-label="`删除颜色 ${r.color || ri + 1}`"
               :title="delColorTitle(r)"
               :disabled="disabled"
-              @click="delColor(ri)"
+              @click.stop="delColor(ri)"
             >
               ✕
             </button>
           </div>
+        </div>
+      </div>
+
+      <!-- 批量归类条（2026-10-30）：选中任意一行就出现（不再依赖"多选模式"开关）。
+           为什么不是"选中后直接拖"就够：拖是快，但"选了什么、会变成什么"需要一个常驻位置说清楚；
+           而且键盘用户与不方便拖的人需要一对按钮 —— 三个入口都通向同一组纯函数
+           （`classifySelection` / `mergeSelectionInto`），落库语义只有一份。 -->
+      <div v-if="selectedCount" class="mx-line mx-line--batch" :data-act="`${act}-batch`">
+        <span class="mx-line__k">批量</span>
+        <div class="mx-batch">
+          <span class="mx-batch__count" :class="{ 'wb-muted': !selectedCount }">
+            {{ selectedCount ? `已选 ${selectedCount} 色` : '还没选色' }}
+          </span>
+          <span class="mx-batch__hint wb-muted">
+            拖到「常用色」= 归类（落库用字典写法）；拖到另一色 = 合并
+          </span>
           <button
-            class="mx-add"
+            class="wb-btn wb-btn--sm"
             type="button"
-            :data-act="`${act}-add`"
-            :disabled="disabled"
-            title="新增一色（新色对所有现有尺码默认都在卖）"
-            @click="addColor"
+            :data-act="`${act}-merge-sel`"
+            :disabled="disabled || selectedCount < 2"
+            title="把这些色并成一行（保留第一行，其余格子搬进来）"
+            @click="mergeSelectedRows"
           >
-            ＋ 颜色
+            合并为一行
+          </button>
+          <button
+            class="wb-link"
+            type="button"
+            :data-act="`${act}-select-all`"
+            :disabled="disabled"
+            @click="selectAllRows"
+          >
+            全选
+          </button>
+          <button
+            class="wb-link"
+            type="button"
+            :data-act="`${act}-select-clear`"
+            :disabled="disabled || !selectedCount"
+            @click="clearSelection"
+          >
+            取消选择
           </button>
         </div>
       </div>
@@ -280,7 +330,7 @@
           class="wb-link mx-bar__undo"
           type="button"
           :data-act="`${act}-bulk-undo`"
-          title="把刚才那一整行 / 整列的开关收回去"
+          title="把刚才那一步收回去（整行/整列开关、批量归类、批量合并都走这一条）"
           @click="undoBulkAction"
         >
           撤销
@@ -494,46 +544,6 @@
         </div>
       </div>
     </div>
-
-    <!-- 色名候选（归类 / 合并的"点选"路径）。
-         为什么用 `Teleport` + `fixed`：`.mx-colors` 现在不再滚动（2026-10-25 起全部展开），
-         但祖先仍是"抽屉 + 首屏容器"两层 `overflow`，`absolute` 浮层照样会被裁；
-         抽屉的进出场动画还会改包含块。挂到 body 上一次躲掉这三件事。 -->
-    <Teleport to="body">
-      <div
-        v-if="suggestFor !== null && suggestList.length"
-        class="mx-suggest"
-        :style="suggestStyle"
-        role="listbox"
-        :aria-label="'色名候选：归类或合并'"
-        :data-act="`${act}-color-suggest`"
-        @pointerdown.prevent
-      >
-        <div class="mx-suggest__hint">点一个 = 归类 / 合并</div>
-        <template v-for="g in suggestGroups" :key="g.key">
-          <!-- 分组标题：8 色时"合并两行"有六七项，没有标题就分不清"哪些是字典色、哪些是旁边的行" -->
-          <div class="mx-suggest__group">{{ g.title }}</div>
-          <button
-            v-for="it in g.items"
-            :key="it.key"
-            class="mx-suggest__item"
-            :class="{ 'is-active': suggestList.indexOf(it) === suggestActive }"
-            type="button"
-            role="option"
-            :aria-selected="suggestList.indexOf(it) === suggestActive ? 'true' : 'false'"
-            :data-act="`${act}-color-suggest-item`"
-            :data-suggest-kind="it.kind"
-            :title="it.note"
-            @pointerenter="suggestActive = suggestList.indexOf(it)"
-            @click="pickSuggest(it)"
-          >
-            <span class="mx-suggest__dot" :style="{ background: it.swatch ?? 'transparent' }"></span>
-            <span class="mx-suggest__name">{{ it.label }}</span>
-            <span class="mx-suggest__note wb-muted">{{ it.note }}</span>
-          </button>
-        </template>
-      </div>
-    </Teleport>
   </div>
 </template>
 
@@ -559,7 +569,8 @@ import {
   type SkuMatrix,
   type SkuMatrixRow,
 } from '@/lib/skuMatrix';
-import { COMMON_COLORS, findSwatch } from '@/lib/colorSwatch';
+import ColorPalette from '@/core/components/ColorPalette.vue';
+import { colorDictNames, colorSwatchOf, loadColorDict } from '@/core/services/colorDict';
 
 /**
  * SKU 矩阵编辑器 —— 产品编辑抽屉（矩阵的唯一维护面）与建款向导**共用同一个**组件。
@@ -883,17 +894,17 @@ function onVisibilityChange(): void {
   if (document.hidden) abortDrag();
 }
 onMounted(() => {
+  void loadColorDict();
   window.addEventListener('keydown', onViewerKey);
   window.addEventListener('blur', abortDrag);
-  document.addEventListener('pointerdown', onDocPointerDown);
   document.addEventListener('visibilitychange', onVisibilityChange);
 });
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onViewerKey);
   window.removeEventListener('blur', abortDrag);
-  document.removeEventListener('pointerdown', onDocPointerDown);
   document.removeEventListener('visibilitychange', onVisibilityChange);
   window.removeEventListener('pointerup', onAnyPointerUp); // 拖色归类进行中被卸载
+  unlockTextSelection(); // 按住 chip 时抽屉被关掉 ⇒ 别把整页的选择锁留在这里
   if (undoBulkTimer) clearTimeout(undoBulkTimer);
 });
 
@@ -911,14 +922,14 @@ const flagHint =
  * ⚠️ 只作显示：不参与匹配，也不落库（见 `lib/colorSwatch.ts` 的说明）。
  */
 function swatchStyle(color: string): Record<string, string> {
-  const hex = findSwatch(color);
+  const hex = colorSwatchOf(color);
   if (!hex) return {};
   return { background: hex, borderColor: hex };
 }
 
 /** 整行左侧那道 3px 色条：14 行时靠它认行（同样只作显示，认不出就不画） */
 function rowAccent(r: SkuMatrixRow): Record<string, string> {
-  return { '--mx-accent': findSwatch(r.color) ?? 'transparent' };
+  return { '--mx-accent': colorSwatchOf(r.color) ?? 'transparent' };
 }
 
 /**
@@ -954,56 +965,41 @@ async function focusSizeAt(index: number): Promise<void> {
   el?.select();
 }
 
-/** 焦点落到最后一个色名输入（「＋ 颜色」之后直接敲名字） */
-async function focusLastColor(): Promise<void> {
-  await nextTick();
-  const els = rootEl.value?.querySelectorAll<HTMLInputElement>(`[data-act="${props.act}-color"]`);
-  const el = els?.[els.length - 1];
-  el?.focus();
-  el?.select();
-}
-
-async function addColor(): Promise<void> {
-  if (props.disabled) return;
-  matrix.value = addMatrixColor(matrix.value, '', '', weightValue.value);
-  await focusLastColor();
-}
-
 /**
  * 常用色（矩阵顶部那一排）。
  *
  * 点一个**已经在矩阵里**的色不再加一行（那会造出两行同名色，保存时被校验拦下），
- * 而是把焦点递到那一行上 —— 用户的意图多半是"这个色在这儿，我要改它"。
+ * 而是把那一行**选中** —— 色名只读之后，"我要改它"的下一步就是"选中后点常用色/拖上去归类"。
  * 判断按**去空白后的全等**：`黑` 与 `黑色` 是两个色名，不做同义猜测（合并是人看着图做的判断）。
  *
  * 2026-10-24 晚：这一排同时是**拖放的落点**（见 `classifyInto`）。所以"打勾"的判据必须和
  * "拖上去会发生什么"是同一个：勾 = 矩阵里已经有这个色名 = 拖上去是**并入已有行**；
  * 没勾 = 拖上去是**原地改名**。两处若用两套判据，用户会看到"打勾了却新加一行"。
  */
-const presentColors = computed(
-  () =>
-    new Set(
-      matrix.value.rows.map((r) => String(r.color ?? '').trim()).filter((c) => !!c)
-    )
+const presentColors = computed(() =>
+  matrix.value.rows.map((r) => String(r.color ?? '').trim()).filter((c) => !!c)
 );
 
 function hasColor(color: string): boolean {
   const c = String(color ?? '').trim();
-  return !!c && presentColors.value.has(c);
+  return !!c && presentColors.value.includes(c);
 }
 
 /**
- * 常用色这一排 = 字典色 + **这个款已经在用的颜色**。
+ * 常用色这一排 = **共享颜色字典**（`md_colors`）+ 这个款已经在用的颜色。
  *
  * 2026-10-25 用户口径「常用色需要增加已设置的颜色」：原来这排只有 10 个写死的字典色，
  * 「酒红 / 灰白 / 深蓝」这类自己起的色名永远不在里面 —— 于是同一个色名第二次要手打一遍，
  * 打字就会漂（`灰白` / `灰白色` / `灰 白` 各成一行，同色不同行）。
  *
+ * 2026-10-30：词表改由 `md_colors` 驱动（共享 `colorDict` 服务，另一个消费者是归类核对页），
+ * 下面追加的"本款自造色"就是**未归类**那一档：它们不在字典里，正是"该被收口"的对象。
+ *
  * 顺序上字典色在前（大多数人要的是黑/白/红），自己的色跟在后面、并且天然是打勾态
  * （它就在矩阵里）—— 打勾的意思是"拖上去 = 并进这一行"，不是"点了会加一行"。
  */
 const paletteColors = computed<string[]>(() => {
-  const out: string[] = [...COMMON_COLORS];
+  const out: string[] = [...colorDictNames.value];
   const seen = new Set(out);
   for (const r of matrix.value.rows) {
     const c = String(r.color ?? '').trim();
@@ -1015,9 +1011,12 @@ const paletteColors = computed<string[]>(() => {
 });
 
 function pcTitle(c: string): string {
-  const dragged = dragActive.value
-    ? String(matrix.value.rows[dragSrc.value ?? -1]?.color ?? '').trim()
-    : '';
+  if (selectedCount.value) {
+    return `把已选的 ${selectedCount.value} 色归到「${c}」（落库色名 = ${c}）`;
+  }
+  const dragged = dragNames.value.length > 1
+    ? `${dragNames.value.length} 色`
+    : String(matrix.value.rows[dragSrc.value ?? -1]?.color ?? '').trim();
   if (dragActive.value && dragged) {
     return dragged === c
       ? `松手：不改变（「${c}」已经是这个色名）`
@@ -1025,20 +1024,32 @@ function pcTitle(c: string): string {
         ? `松手：把「${dragged}」并进已有的「${c}」（同码合并，只留一张色图）`
         : `松手：把「${dragged}」归到「${c}」（原地改色名，SKU 与色图都保留）`;
   }
-  return hasColor(c) ? `矩阵里已经有「${c}」了` : `加一色「${c}」（现有尺码全码都在卖）`;
+  return hasColor(c) ? `「${c}」已经在矩阵里（点它 = 选中那一行）` : `加一色「${c}」（现有尺码全码都在卖）`;
 }
 
-async function pickCommon(color: string): Promise<void> {  if (props.disabled) return;
+/** 点常用色：有选中 ⇒ 批量归类；已在矩阵 ⇒ 选中该行；否则加一行 */
+async function pickCommon(color: string): Promise<void> {
+  if (props.disabled) return;
+  if (selectedCount.value) {
+    classifySelection(color);
+    return;
+  }
   const at = matrix.value.rows.findIndex((r) => String(r.color ?? '').trim() === String(color).trim());
   if (at >= 0) {
-    await nextTick();
-    const el = rootEl.value?.querySelectorAll<HTMLInputElement>(`[data-act="${props.act}-color"]`)[at];
-    el?.focus();
-    el?.select();
+    selected.value = [at];
+    selectAnchor = at;
     return;
   }
   matrix.value = addMatrixColor(matrix.value, color, '', weightValue.value);
 }
+
+/** 新增颜色成功后的一句回执（只进字典，**不给当前款加色**） */
+function onPaletteAdded(name: string): void {
+  flashHint(
+    `已把「${name}」加进常用色 —— 点它加一色，或把上面的色拖/点它归类（只写了字典，没有给这个款加色）`,
+  );
+}
+
 
 /**
  * 删一色的提示：这一行里有**已经落库的 SKU**（格子里带 `variantId`）时要说清代价 ——
@@ -1051,6 +1062,180 @@ function delColorTitle(r: SkuMatrixRow): string {
   return saved
     ? `删掉「${name}」这一行：保存后会连同它已落库的 ${saved} 个 SKU 一起删除`
     : `删掉「${name}」这一行（它还没有落库的 SKU）`;
+}
+
+/* ---- 多选与批量归类（2026-10-30 用户口径「把现有的颜色列出来，批量归类、批量拖动」）----
+   为什么加多选而不是只做大靶子：SKU 维护的真实节奏是"一批异写一起收口"
+   （`黑 / 黑色 / Black` 分三行时，逐个拖要三次，且每次都要重新瞄准）。
+   多选之后一次拖放 = 一次归类；落库语义仍是 `classifyMatrixColor` / `mergeMatrixColor` ——
+   批量只是**循环**，不新增任何写规则。
+
+   ⚠️ 批量循环必须按**当前色名**重新定位下标：每归并一行，后面的行下标会前移
+      （`classifyMatrixColor` 里合并时摘掉源行），拿旧下标会改错行。 */
+/** 已选中的**行下标**（只在一次批量操作内有效；任何行结构变化后都清空） */
+const selected = ref<number[]>([]);
+let selectAnchor: number | null = null;
+
+const selectedCount = computed(() => selected.value.length);
+
+function rowSelected(i: number): boolean {
+  return selected.value.includes(i);
+}
+
+function rowColorName(i: number): string {
+  return String(matrix.value.rows[i]?.color ?? '').trim();
+}
+
+/**
+ * 点击一行 = 选中 / 取消（Shift 连选）。
+ *
+ * 排除三类"点一下不是选中"的元素：
+ *   · ✕ 删除（已有 `@click.stop`，这里再兜一层）；
+ *   · 色图按钮（点它要看大图，已 `.stop`）；
+ *   · 任何表单控件（本组件里只剩尺码输入，兜底防将来加别的）。
+ * 拖过之后的第一次 click 由 `onRootClickCapture` 吞掉（`swallowClick`），不会误选。
+ */
+function onColorRowClick(i: number, e: MouseEvent): void {
+  if (props.disabled) return;
+  const t = e.target as HTMLElement | null;
+  if (t?.closest('input,textarea,select,button')) return;
+  toggleSelect(i, e);
+}
+
+function toggleSelect(i: number, e?: MouseEvent): void {
+  if (props.disabled) return;
+  const cur = selected.value.slice();
+  if (e?.shiftKey && selectAnchor !== null) {
+    const [a, b] = selectAnchor <= i ? [selectAnchor, i] : [i, selectAnchor];
+    for (let k = a; k <= b; k += 1) if (!cur.includes(k)) cur.push(k);
+    selected.value = cur.sort((x, y) => x - y);
+    return;
+  }
+  const at = cur.indexOf(i);
+  if (at >= 0) cur.splice(at, 1);
+  else cur.push(i);
+  selected.value = cur.sort((x, y) => x - y);
+  selectAnchor = i;
+}
+
+function clearSelection(): void {
+  selected.value = [];
+  selectAnchor = null;
+}
+
+function selectAllRows(): void {
+  if (props.disabled) return;
+  selected.value = matrix.value.rows.map((_, i) => i);
+  selectAnchor = 0;
+}
+
+/** 选中的色名（去重、去空；顺序按行序 = 合并时"第一行"就是第一个选中项） */
+function selectedNames(): string[] {
+  const out: string[] = [];
+  for (const i of selected.value) {
+    const name = rowColorName(i);
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+function batchSummary(moved: number, conflicts: number, dropped: number): string {
+  return (
+    (moved ? ` · 搬 ${moved} 格` : '') +
+    (conflicts ? ` · ${conflicts} 个同码格以目标为准` : '') +
+    (dropped ? `（保存后少 ${dropped} 个 SKU）` : '')
+  );
+}
+
+/** 批量归到某个规范色（落库色名 = 字典写法） */
+function classifySelection(canonical: string): void {
+  const names = selectedNames();
+  const target = String(canonical ?? '').trim();
+  if (!names.length || !target) return;
+  const before = matrix.value;
+  // ⚠️ 批量必须累加在**局部变量**上，不能每归一次就读 `matrix.value`：
+  //    这个组件是 `defineModel`（props 模式），`matrix.value = x` 只是 emit，
+  //    父组件的 prop 要等下一次渲染才回写 ⇒ 马上读回来还是**旧矩阵**。
+  //    照旧矩阵算第二轮会把第一轮的结果整个覆盖掉（冒烟实测：两色只归了后一个）。
+  let cur = before;
+  let moved = 0;
+  let conflicts = 0;
+  let dropped = 0;
+  let mergedRows = 0;
+  for (const name of names) {
+    const at = cur.rows.findIndex((r) => String(r.color ?? '').trim() === name);
+    if (at < 0) continue;
+    const res = classifyMatrixColor(cur, at, target);
+    if (res.matrix === cur) continue; // 已经是这个色名 / 已在目标行里
+    cur = res.matrix;
+    if (res.merged) {
+      mergedRows += 1;
+      moved += res.moved;
+      conflicts += res.conflicts;
+      dropped += res.dropped;
+    }
+  }
+  clearSelection();
+  if (cur === before) {
+    flashHint(`「${target}」已经是这些色名，不用再归类`);
+    return;
+  }
+  matrix.value = cur;
+  markBulk(
+    `已把 ${names.length} 色归到「${target}」` +
+      (mergedRows ? ` · 并进 ${mergedRows} 行` : '') +
+      batchSummary(moved, conflicts, dropped),
+    before,
+  );
+}
+
+/** 批量并入某一行（保留目标行，其余格子搬进来） */
+function mergeSelectionInto(target: string): void {
+  const names = selectedNames().filter((n) => n !== target);
+  if (!names.length) {
+    // 选中了两行**同名**的色（矩阵里允许同名行，改名前常出现）：这时"合并"没有对象。
+    // 必须回一句，否则按钮点下去毫无反应，人以为界面卡了。
+    flashHint(`选中的色名都是「${target}」—— 没有别的色可并`);
+    return;
+  }
+  const before = matrix.value;
+  // 同 `classifySelection`：累加在局部变量上（写回 props 要等下一帧，读回来还是旧矩阵）
+  let cur = before;
+  let moved = 0;
+  let conflicts = 0;
+  let dropped = 0;
+  for (const name of names) {
+    const from = cur.rows.findIndex((r) => String(r.color ?? '').trim() === name);
+    const to = cur.rows.findIndex((r) => String(r.color ?? '').trim() === target);
+    if (from < 0 || to < 0) continue;
+    const res = mergeMatrixColor(cur, from, to);
+    if (res.matrix === cur) continue;
+    cur = res.matrix;
+    moved += res.moved;
+    conflicts += res.conflicts;
+    dropped += res.dropped;
+  }
+  clearSelection();
+  if (cur === before) return;
+  matrix.value = cur;
+  markBulk(
+    `已把 ${names.length} 色并入「${target}」` + batchSummary(moved, conflicts, dropped),
+    before,
+  );
+}
+
+/** 「合并为一行」按钮：目标 = 第一个选中的色 */
+function mergeSelectedRows(): void {
+  if (selectedCount.value < 2) {
+    flashHint('先选两色以上再合并');
+    return;
+  }
+  const target = rowColorName(selected.value[0]);
+  if (!target) {
+    flashHint('第一行还没有色名，先给它起名再合并');
+    return;
+  }
+  mergeSelectionInto(target);
 }
 
 /* ---- 拖色：归类到常用色 / 合并到另一个色 ------------------------------------
@@ -1066,14 +1251,14 @@ function delColorTitle(r: SkuMatrixRow): string {
    顶部这 10 个靶子是固定的、每个都自带色块和名字 —— 拖上去不会拖错"旁边那一格"。
 
    实现取舍：
-   · **不用 HTML5 拖放**：chip 里有 `<input>`，`draggable` 会和"拖选文字"抢事件；
+   · **不用 HTML5 拖放**：改用 pointer 事件，阈值 6px 区分"点击"与"拖动"；
    · **不用 pointer capture**：捕获会把 `pointermove` 全部锁在源元素上，合成事件（冒烟）里
      `setPointerCapture` 还可能直接抛 `InvalidStateError`。落点就在同一个组件里，
      所以监听挂在**根元素**上（原来挂在 `.mx-colors` 上 —— 那样鼠标一离开那一条
-     就收不到 move/up，根本拖不到上面的常用色），靠 `elementFromPoint` 命中落点；
+     就收不到 move/up，根本拖不到上面的常用色），按几何取落点；
    · 另挂一个 `window` 级 `pointerup`：松手落在组件外（比如矩阵表格上）也必须结束拖动，
      否则状态会卡在"拖动中"（鼠标已经抬起，界面还灰着一片）；
-   · 阈值 6px：小于它算"点击"（点 input / 缩略图 / ✕ 时要保持原行为）。
+   · 阈值 6px：小于它算"点击"（点缩略图 / ✕ 时要保持原行为）。
    `pointerdown` 只记起点，**不改数据** —— 一次普通点击不能被算成一次合并。
 */
 const dragSrc = ref<number | null>(null);
@@ -1081,18 +1266,70 @@ const dragOver = ref<number | null>(null);
 /** 拖动中悬停的常用色（`''` = 没悬停在任何常用色上） */
 const dropPalette = ref('');
 const dragActive = ref(false);
+/** 本次拖动带的**行下标**：多选时 >1（批量归类 / 批量合并），否则就是被拖的那一行 */
+const dragGroup = ref<number[]>([]);
+/** 本次拖动的色名（多选时是多个，提示文案与 `pcTitle` 用） */
+const dragNames = ref<string[]>([]);
 const mergeHint = ref('');
 let mergeHintTimer: ReturnType<typeof setTimeout> | null = null;
-let chipDrag: { index: number; x: number; y: number; fromField: boolean } | null = null;
+let chipDrag: {
+  index: number;
+  x: number;
+  y: number;
+  /** 起手那一行在多选中 ⇒ 整组一起拖（批量归类） */
+  group: number[];
+} | null = null;
 /** 拖过之后的第一次 click 要吞掉（`@click.capture` 里读它） */
 let swallowClick = false;
 
+/**
+ * 按住 chip（准备点选或拖动）期间**禁用原生文本选择**（2026-10-30 用户反馈
+ * 「多选拖动的时候会出现文字被选中的情况」）。
+ *
+ * 为什么需要：色名改成只读文本后，整条 chip 都是拖动抓手 —— 按住它移动超过 6px 就会
+ * 起一段浏览器原生"刷蓝"选择，一路拖过多行时选区会跨到上面那排常用色上。
+ * 功能不受影响，但看起来像界面出了故障。
+ *
+ * 为什么用 `selectstart` 而不是 `pointerdown.preventDefault()`：后者会连带抑制兼容的
+ * mousedown / click，点选（`onColorRowClick`）就失效了 —— 这个界面既要点、又要拖。
+ * 也不靠 CSS `user-select: none`：选择在按下→移动之间就开始了，样式后加收不回来。
+ */
+let selectionLock = false;
+
+function blockSelectStart(e: Event): void {
+  e.preventDefault();
+}
+
+function lockTextSelection(): void {
+  if (selectionLock) return;
+  selectionLock = true;
+  document.addEventListener('selectstart', blockSelectStart, true);
+  // 已有的旧选区也清掉：`selectstart` 只管"开始一段新选择"，之前残留的那段不会自己消失
+  const sel = document.getSelection();
+  if (sel && !sel.isCollapsed) sel.removeAllRanges();
+  // 兜底：松手（或手势被系统取消）时一定要解锁 —— 否则整页再也选不了文字
+  window.removeEventListener('pointerup', unlockTextSelection);
+  window.removeEventListener('pointercancel', unlockTextSelection);
+  window.addEventListener('pointerup', unlockTextSelection, { once: true });
+  window.addEventListener('pointercancel', unlockTextSelection, { once: true });
+}
+
+function unlockTextSelection(): void {
+  if (!selectionLock) return;
+  selectionLock = false;
+  document.removeEventListener('selectstart', blockSelectStart, true);
+}
+
 /** 拖动中那一句"现在松手会发生什么"（占的是图例/回执那一格，不额外占高度） */
 const dropHintText = computed(() => {
+  const multi = dragNames.value.length > 1;
   const from = matrix.value.rows[dragSrc.value ?? -1];
-  const name = String(from?.color ?? '').trim() || '这一色';
+  const name = multi
+    ? `${dragNames.value.length} 色`
+    : String(from?.color ?? '').trim() || '这一色';
   if (dropPalette.value) {
     const to = dropPalette.value;
+    if (multi) return `松手：把 ${name}归到「${to}」`;
     return hasColor(to) ? `松手：把「${name}」并进「${to}」` : `松手：把「${name}」改名为「${to}」`;
   }
   if (dragOver.value !== null) {
@@ -1100,7 +1337,9 @@ const dropHintText = computed(() => {
     const to = String(dst?.color ?? '').trim() || '这一色';
     return `松手：把「${name}」并进「${to}」`;
   }
-  return '拖到上面「常用色」= 归类；拖到另一个颜色上 = 合并';
+  return multi
+    ? '拖到上面「常用色」= 整组归类；拖到另一个颜色上 = 整组合并'
+    : '拖到上面「常用色」= 归类；拖到另一个颜色上 = 合并';
 });
 
 function onChipDown(index: number, e: PointerEvent): void {
@@ -1110,13 +1349,15 @@ function onChipDown(index: number, e: PointerEvent): void {
   // ⚠️ 这里**只**排除"按下就该让位"的一类，绝不能写成 `closest('input,button')`：
   //    色图裹在 `<button class="mx-thumb-btn">` 里（为了能点开看大图），那正是要按住拖的手柄。
   //    连 button 一起排除的后果是——**凡是有色图的色，整条都拖不动**，只剩没采到图的空色块能拖。
-  //    用户看到的就是「根本没办法操作」。v-click vs 拖动由 6px 阈值区分，见 `onChipMove`。
+  //    用户看到的就是「根本没办法操作」。点 vs 拖由 6px 阈值区分，见 `onChipMove`。
   if (el?.closest('[data-act$="-del"]')) return; // ✕ 是独立动作，不该被拖走
-  // 色名输入框**也算抓手**（2026-10-25 用户口径「拖动区域太小」）：
-  // 原来这里一行 `closest('input') ⇒ return`，把整条 chip 唯一能按的地方压成了 26px 的色图；
-  // 而 chip 有 125px 宽，人的手指/指针落在色名上的概率远大于落在色图上 —— 于是"拖十次动不了一次"。
-  // 冲突（拖选色名文字 vs 拖这一行）由方向判据解决，见 `onChipMove`。
-  chipDrag = { index, x: e.clientX, y: e.clientY, fromField: !!el?.closest('input,textarea,select') };
+  // 色名已改为只读文本 ⇒ 整条 chip 都是抓手（2026-10-25 用户口径「拖动区域太小」）。
+  // 多选时按在**已选行**上 = 整组拖走（批量归类）；按在未选行上仍只拖这一行。
+  const group =
+    selected.value.includes(index) && selected.value.length > 1 ? selected.value.slice() : [];
+  chipDrag = { index, x: e.clientX, y: e.clientY, group };
+  // 按下就锁（不等 6px 阈值）：原生选择是从"按下 + 移动"起算的，等判定成拖动再锁已经晚了
+  lockTextSelection();
 }
 
 function onChipMove(e: PointerEvent): void {
@@ -1124,18 +1365,11 @@ function onChipMove(e: PointerEvent): void {
   if (!dragActive.value) {
     const dx = e.clientX - chipDrag.x;
     const dy = e.clientY - chipDrag.y;
-    if (chipDrag.fromField) {
-      // 在色名框里按下的两种意图：横向 = 拖选文字（保持原生行为），竖向为主 = 拖这一行。
-      // 门槛 10px 且必须"竖向明显大于横向"，所以想选文字的人不会被半路改行、想拖行的人也不必先挪到色图上。
-      if (Math.abs(dy) < 10 || Math.abs(dy) <= Math.abs(dx) + 4) return;
-      // 已经拖出的文字选区要清掉：否则整段色名一路跟着变蓝，看着像"选了一大块"
-      window.getSelection()?.removeAllRanges();
-    } else if (Math.hypot(dx, dy) < 6) {
-      return; // 还没离开"点击"的范围
-    }
+    if (Math.hypot(dx, dy) < 6) return; // 还没离开"点击"的范围（点一下 = 选中/取消）
     dragActive.value = true;
     dragSrc.value = chipDrag.index;
-    closeSuggest(); // 拖动开始：色名框刚聚焦弹出来的候选列表要让位，否则它挡着落点
+    dragGroup.value = chipDrag.group.length ? chipDrag.group.slice() : [chipDrag.index];
+    dragNames.value = dragGroup.value.map(rowColorName).filter((n) => !!n);
     window.addEventListener('pointerup', onAnyPointerUp, { once: true });
   }
   resolveDropAt(e.clientX, e.clientY);
@@ -1176,7 +1410,8 @@ function resolveDropAt(x: number, y: number): void {
     }
     for (const el of root.querySelectorAll<HTMLElement>('[data-mx-row]')) {
       const at = Number(el.dataset.mxRow);
-      if (!Number.isFinite(at) || at === dragSrc.value) continue; // 拖回自己身上不算落点
+      // 拖回自己身上不算落点；多选时**整组里的任何一行**都不能当落点（"并进自己"没有意义）
+      if (!Number.isFinite(at) || dragSrc.value === at || dragGroup.value.includes(at)) continue;
       const d = dropDistance(el.getBoundingClientRect(), x, y);
       if (d === null) continue;
       if (!bestRow || d < bestRow.d) bestRow = { at, d };
@@ -1206,11 +1441,14 @@ function onAnyPointerUp(e: PointerEvent): void {
  */
 function abortDrag(): void {
   chipDrag = null;
+  unlockTextSelection();
   window.removeEventListener('pointerup', onAnyPointerUp);
   dragActive.value = false;
   dragSrc.value = null;
   dragOver.value = null;
   dropPalette.value = '';
+  dragGroup.value = [];
+  dragNames.value = [];
 }
 
 function onChipUp(e?: PointerEvent): void {
@@ -1223,12 +1461,16 @@ function endDrag(): void {
   const to = dragOver.value;
   const pc = dropPalette.value;
   const active = dragActive.value;
+  const group = dragGroup.value.slice();
   chipDrag = null;
+  unlockTextSelection();
   window.removeEventListener('pointerup', onAnyPointerUp);
   dragActive.value = false;
   dragSrc.value = null;
   dragOver.value = null;
   dropPalette.value = '';
+  dragGroup.value = [];
+  dragNames.value = [];
   if (!active || src === null) return; // 普通点击 / 松在空白处
   // 真的拖过了：松手之后浏览器还会补一次 click，落点若在缩略图按钮上就是"打开大图"——
   // 那层遮罩是全屏 fixed，拖完颜色顺手弹出来，看着就像"页面被锁住了动不了"。吞掉这一次。
@@ -1237,10 +1479,19 @@ function endDrag(): void {
     swallowClick = false;
   }, 0);
   if (pc) {
-    classifyInto(src, pc);
+    if (group.length > 1) classifySelection(pc);
+    else classifyInto(src, pc);
     return;
   }
-  if (to !== null) mergeColorInto(src, to);
+  if (to !== null) {
+    if (group.length > 1) {
+      const target = String(matrix.value.rows[to]?.color ?? '').trim();
+      if (target) mergeSelectionInto(target);
+      else flashHint('目标行还没有色名，先给它起名再合并');
+    } else {
+      mergeColorInto(src, to);
+    }
+  }
 }
 
 /** 拖过之后的第一次 click 一律不认（见 `endDrag` 的说明） */
@@ -1258,207 +1509,13 @@ function flashHint(text: string): void {
     mergeHint.value = '';
     mergeHintTimer = null;
   }, 8000);
-}
-
-/* ---- 色名候选：改名即归类 / 合并 ------------------------------------------
-   为什么要有这一条（2026-10-25）：「拖动」是把两件事画在一个手势上，天生要求精度 ——
-   目标只有 42×22，源与目标只隔 6px，人手一次定位偏 20px 就落空（用户口径「拖动区域太小」）。
-   而"这一色该叫什么"本质是**挑一个词**，挑词不该用手势：点进色名框，候选就摆在下面。
-   于是同一个动作有两条路 —— 会拖的拖（快），不想拖的点（准），两条都通向 `classifyInto` /
-   `mergeColorInto`，**落库语义只有一份**。
-
-   候选列表的顺序就是决策顺序：先"归到常用色"（这条产品线认可的叫法），再"并进其它行"
-   （两个色都不在字典里时的兜底，如 `香芋紫`）。每项后面的说明写清"会发生什么"，
-   因为"归类"与"合并"的区别是**搬格子 vs 原地改名**，光看色名看不出来。 */
-const suggestFor = ref<number | null>(null);
-const suggestQuery = ref('');
-const suggestAnchor = ref<{ left: number; top: number; bottom: number; width: number } | null>(null);
-const suggestActive = ref(0);
-
-type SuggestItem = {
-  key: string;
-  label: string;
-  note: string;
-  swatch: string | null;
-  kind: 'common' | 'row';
-  rowIndex?: number;
-};
-
-const suggestList = computed<SuggestItem[]>(() => {
-  const at = suggestFor.value;
-  if (at === null) return [];
-  const q = suggestQuery.value.trim().toLowerCase();
-  const self = String(matrix.value.rows[at]?.color ?? '').trim();
-  const hit = (s: string) => !q || s.toLowerCase().includes(q);
-  const out: SuggestItem[] = [];
-  for (const c of COMMON_COLORS) {
-    if (c === self || !hit(c)) continue;
-    out.push({
-      key: `pc:${c}`,
-      label: c,
-      // 判据与拖动的落点提示同源（`hasColor`）：勾着 ⇒ 并进已有行，没勾 ⇒ 原地改名。
-      // 两处若用两套判据，会出现"候选说合并、实际新加一行"。
-      // 文案刻意只有四个字：这一列每行都要读，写全（"归类（原地改名，SKU 不丢）"）会占掉一半宽度
-      // 又把名字挤成省略号 —— 解释放在 title 与分组标题里，不重复 9 遍。
-      note: hasColor(c) ? '并入已有' : '归类',
-      swatch: findSwatch(c) ?? null,
-      kind: 'common',
-    });
-  }
-  matrix.value.rows.forEach((r, i) => {
-    if (i === at) return;
-    const name = String(r.color ?? '').trim();
-    if (!name || !hit(name)) return;
-    if (COMMON_COLORS.includes(name)) return; // 上面已经列过，不重复
-    out.push({
-      key: `row:${i}`,
-      label: name,
-      note: '合并两行',
-      swatch: findSwatch(name) ?? null,
-      kind: 'row',
-      rowIndex: i,
-    });
-  });
-  return out;
-});
-
-/** 按组渲染：「归到常用色」是主路径（色名不规范 → 归到字典写法），「并入其它颜色」是兜底 */
-const suggestGroups = computed<{ key: string; title: string; items: SuggestItem[] }[]>(() => {
-  const groups: { key: string; title: string; items: SuggestItem[] }[] = [];
-  for (const it of suggestList.value) {
-    const title = it.kind === 'common' ? '归到常用色' : '并入其它颜色';
-    const last = groups[groups.length - 1];
-    if (last && last.title === title) {
-      last.items.push(it);
-    } else {
-      groups.push({ key: `${it.kind}-${groups.length}`, title, items: [it] });
-    }
-  }
-  return groups;
-});
-
-/**
- * 浮层位置：贴着色名框下沿，下面放不下就翻到**上方**（上方用 `bottom` 定位：
- * 内容少时也贴着输入框，不会在顶边留一大片空白）。
- *
- * 高度按**可用空间**给，不给固定 264：8 色 × 5 码时"并入其它颜色"有六七项，
- * 固定高度会把它整段藏在滚动条下面 —— 用户看到的候选里永远没有"合并两行"。
- */
-const suggestStyle = computed<Record<string, string> | undefined>(() => {
-  const a = suggestAnchor.value;
-  if (!a) return undefined;
-  const width = Math.max(a.width + 90, 200);
-  const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
-  const vh = typeof window === 'undefined' ? 900 : window.innerHeight;
-  const below = vh - a.bottom - 14;
-  const above = a.top - 14;
-  const flip = below < 260 && above > below;
-  const maxH = Math.max(160, Math.min(400, flip ? above : below));
-  const left = `${Math.min(Math.max(8, a.left), vw - width - 8)}px`;
-  const style: Record<string, string> = { left, width: `${width}px`, maxHeight: `${maxH}px` };
-  if (flip) style.bottom = `${vh - a.top + 6}px`;
-  else style.top = `${a.bottom + 6}px`;
-  return style;
-});
-
-function openSuggest(index: number, e: Event): void {
-  const el = e.target as HTMLInputElement | null;
-  if (!el?.getBoundingClientRect) return;
-  const r = el.getBoundingClientRect();
-  suggestAnchor.value = { left: r.left, top: r.top, bottom: r.bottom, width: r.width };
-  suggestFor.value = index;
-  // 聚焦时**不过滤**（空 query = 列全部）：把框里现有的色名当搜索词的话，
-  // 一点进「藏青」就什么都剩不下 —— 用户看到的是"点了没反应"，而他要的恰恰是"换一个词"。
-  suggestQuery.value = '';
-  suggestActive.value = 0;
-}
-
-function closeSuggest(): void {
-  if (suggestFor.value === null) return;
-  suggestFor.value = null;
-  suggestAnchor.value = null;
-  suggestQuery.value = '';
-  suggestActive.value = 0;
-}
-
-/**
- * 点浮层外面就收起。
- * 光靠色名框的 `blur` 不够：点到矩阵格子、空白处时焦点**没有转移**（那里不可聚焦），
- * input 不 blur ⇒ 浮层一直飘在矩阵上挡视线，用户以为"卡住了"。
- */
-function onDocPointerDown(e: PointerEvent): void {
-  if (suggestFor.value === null) return;
-  const t = e.target as HTMLElement | null;
-  if (t?.closest('.mx-suggest')) return; // 点候选本身
-  if (t?.closest(`[data-act="${props.act}-color"]`)) return; // 同一格/另一格色名框：由 focus 换锚点
-  closeSuggest();
-}
-
-function pickSuggest(item: SuggestItem): void {
-  const at = suggestFor.value;
-  closeSuggest();
-  if (at === null) return;
-  if (item.kind === 'common') {
-    classifyInto(at, item.label);
-    return;
-  }
-  if (item.rowIndex != null) mergeColorInto(at, item.rowIndex);
-}
-
-/** 点已经聚焦的色名框也要能重新打开（Esc / 点外面关掉之后，焦点还在原处 ⇒ 不会再触发 focus） */
-function onColorNameClick(index: number, e: Event): void {
-  if (suggestFor.value === index) return; // 已经开着：别把正在输入的关键字清掉
-  openSuggest(index, e);
-}
-
-/** 色名框里打字：候选跟着过滤（聚焦后才想起来要改名的，这里补开一次） */
-function onColorNameInput(index: number, e: Event): void {
-  const el = e.target as HTMLInputElement;
-  if (suggestFor.value !== index) {
-    // 只有**真的拿着焦点**才弹浮层：程序化写值（导入合并、脚本、自动改写）不该在半空
-    // 里长出一个菜单 —— 它挡着下面的矩阵，而且用户下一步点的可能是别处。
-    if (document.activeElement !== el) return;
-    openSuggest(index, e);
-  }
-  suggestQuery.value = el.value;
-  suggestActive.value = 0;
-}
-
-/**
- * 色名框的键盘：↑↓ 选候选、Enter 采用、Esc 收起。
- * ⚠️ Enter 有候选时必须 `preventDefault` —— 这个组件挂在表单里，不拦就会连带提交整个表单
- * （用户改个色名，抽屉被关掉）。
- */
-function onColorNameKey(index: number, e: KeyboardEvent): void {
-  if (suggestFor.value !== index) {
-    if (e.key === 'ArrowDown') {
-      openSuggest(index, e);
-      e.preventDefault();
-    }
-    return;
-  }
-  const n = suggestList.value.length;
-  if (e.key === 'ArrowDown' && n) {
-    suggestActive.value = (suggestActive.value + 1) % n;
-    e.preventDefault();
-    return;
-  }
-  if (e.key === 'ArrowUp' && n) {
-    suggestActive.value = (suggestActive.value - 1 + n) % n;
-    e.preventDefault();
-    return;
-  }
-  if (e.key === 'Escape') {
-    closeSuggest();
-    e.preventDefault();
-    return;
-  }
-  if (e.key === 'Enter') {
-    const item = suggestList.value[suggestActive.value];
-    if (item) {
-      e.preventDefault();
-      pickSuggest(item);
-    }
+  // 回执只有一行位置 ⇒ 永远显示**最新**那一条：单条归类/合并的回执出现时，
+  // 上一条批量操作的「撤销」回执必须让位。让位不只是显示问题 —— undoBulk 存的是
+  // 批量前的**整矩阵快照**，中间又动了别的（比如这次单拖）再点撤销，会把新改动一起抹掉。
+  if (undoBulk.value) {
+    undoBulk.value = null;
+    if (undoBulkTimer) clearTimeout(undoBulkTimer);
+    undoBulkTimer = null;
   }
 }
 
@@ -1467,6 +1524,7 @@ function onColorNameKey(index: number, e: KeyboardEvent): void {
  * 已有同名行就并进去（一个色只留一张色图）。
  */
 function classifyInto(from: number, canonical: string): void {
+  clearSelection(); // 归并可能摘掉源行 ⇒ 已有选中下标全部作废
   const a = matrix.value.rows[from];
   if (!a) return;
   const name = String(canonical ?? '').trim();
@@ -1489,6 +1547,7 @@ function classifyInto(from: number, canonical: string): void {
 }
 
 function mergeColorInto(from: number, to: number): void {
+  clearSelection();
   const a = matrix.value.rows[from];
   const b = matrix.value.rows[to];
   if (!a || !b) return;
@@ -1518,11 +1577,15 @@ async function addSize(): Promise<void> {
     await focusSizeAt(blank);
     return;
   }
-  matrix.value = addMatrixSize(matrix.value, '', weightValue.value);
-  await focusSizeAt(matrix.value.sizes.length - 1);
+  // ⚠️ 下标要用**新矩阵**算：`matrix.value = …` 之后马上读回来还是旧值（defineModel 的 prop 回写晚一帧），
+  //    用旧值的 length - 1 会把焦点落在倒数第二个尺码上。
+  const next = addMatrixSize(matrix.value, '', weightValue.value);
+  matrix.value = next;
+  await focusSizeAt(next.sizes.length - 1);
 }
 
 function delColor(index: number): void {
+  clearSelection(); // 删一行会让后面所有下标前移，已选列表必须作废
   matrix.value = removeMatrixColor(matrix.value, index);
 }
 
@@ -1548,6 +1611,11 @@ function markBulk(label: string, before: SkuMatrix): void {
     undoBulk.value = null;
     undoBulkTimer = null;
   }, 12000);
+  // 对称的另一面（见 flashHint）：批量回执出现时，上一条单条回执让位 ——
+  // 否则 12 秒后撤销条收起，一条 8 秒前的旧回执会"复活"几秒，看着像界面自己说话。
+  mergeHint.value = '';
+  if (mergeHintTimer) clearTimeout(mergeHintTimer);
+  mergeHintTimer = null;
 }
 
 function undoBulkAction(): void {
@@ -1556,7 +1624,9 @@ function undoBulkAction(): void {
   undoBulk.value = null;
   if (undoBulkTimer) clearTimeout(undoBulkTimer);
   undoBulkTimer = null;
-  flashHint('已撤销刚才那一整行 / 整列的开关');
+  // 撤销会把行结构搬回去 ⇒ 多选/拖动期间记下的下标全部作废（否则下次批量会改到别的色）
+  clearSelection();
+  flashHint('已撤销刚才那一步');
 }
 
 function rowAllOn(r: SkuMatrixRow): boolean {
@@ -1765,73 +1835,56 @@ function onSizeInput(index: number, e: Event): void {
 }
 
 /* ---- 常用色（顶部那一排）----------------------------------------------------
-   22px 的小胶囊，比下面的颜色 chip 更矮 —— 它只是"加一个色"的快捷方式，不是数据本身
-   （数据在下面那行）。已经在矩阵里的**变灰打勾**：这一排于是同时回答"还差哪些色没加"，
-   而且点它不会造出第二行同名色（只把焦点递过去）。 */
+   色条本身在通用组件 `ColorPalette.vue` 里（产品编辑页与归类核对页共用）；
+   这里只留本页独有的一条：让标签与那排 24px 胶囊的基线对齐。 */
 .mx-line--palette .mx-line__k {
   padding-top: 3px;
 }
-.mx-palette {
+
+/* 多选勾：**常显**的 18×22 小框（未选是虚线空框、已选打勾）。
+   点它和点整行等价；不再是 `<button>`，否则按它起手会被拖动的 `pointerdown` 排除掉。 */
+.mx-sel {
+  width: 18px;
+  height: 22px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: transparent;
+  background: transparent;
+  border: 1px dashed var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+}
+.mx-sel.is-on {
+  color: #fff;
+  background: var(--wb-focus);
+  border-color: var(--wb-focus);
+}
+/* 选中的色：整条描边 + 淡底。与人眼在勾选框上的第一判断一致（勾在行首，行也要亮） */
+.mx-color.is-sel {
+  border-color: var(--wb-focus);
+  background: var(--wb-focus-ring);
+}
+
+/* 批量条：选中任意一行后出现，占一行；文案先给"选了几个"，再给两个按钮 */
+.mx-batch {
   display: flex;
   flex: 1 1 auto;
   flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-.mx-pc {
-  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  /* 24px：这一排同时是拖放的落点，22px 时"点在胶囊上下边缘"会脱靶（2026-10-25 实测） */
-  height: 24px;
-  padding: 0 9px;
+  gap: 6px;
+  min-width: 0;
   font-size: 12px;
-  color: var(--wb-text);
-  border: 1px solid var(--wb-border);
-  border-radius: 999px;
-  background: var(--wb-surface);
-  cursor: pointer;
 }
-.mx-pc:hover:not(:disabled) {
-  border-color: var(--wb-border-strong);
+.mx-batch__count {
+  font-weight: 600;
 }
-.mx-pc__dot {
-  width: 10px;
-  height: 10px;
-  flex: none;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-}
-.mx-pc.is-in {
-  color: var(--wb-text-muted);
-  background: var(--wb-surface-2);
-  border-style: dashed;
-}
-.mx-pc.is-in::after {
-  content: '✓';
-  font-size: 10px;
-}
-/* 拖动中：这一排就是落点，全部描边提亮（否则"能不能往这儿拖"全靠猜）。
-   不加高、不加 padding —— 拖到一半布局跳一下，落点会从指针底下跑掉。 */
-.mx-palette--dragging .mx-pc {
-  border-color: var(--wb-focus);
-  border-style: dashed;
-  background: var(--wb-surface);
-  cursor: copy;
-}
-/* 悬停中的那一个：实心描边 + 外环 + 反白，与"整排可拖"区分开（一半亮度不够区分"将落到哪个"） */
-.mx-palette--dragging .mx-pc.is-drop,
-.mx-palette--dragging .mx-pc.is-drop.is-in {
-  color: var(--wb-primary-contrast);
-  background: var(--wb-primary);
-  border-color: var(--wb-primary);
-  border-style: solid;
-  box-shadow: 0 0 0 2px var(--wb-focus-ring);
-}
-.mx-palette--dragging .mx-pc.is-drop .mx-pc__dot {
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.12),
-    0 0 0 1.5px #fff;
+.mx-batch__hint {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
 /* 颜色 chip：色图/色块 26px + 色名 + 删除。一屏能放下十来个（原来一张卡 196px，
@@ -1860,6 +1913,7 @@ function onSizeInput(index: number, e: Event): void {
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius-md);
   background: var(--wb-surface);
+  cursor: pointer;
   transition: border-color 0.15s ease;
 }
 .mx-color:hover {
@@ -1887,7 +1941,7 @@ function onSizeInput(index: number, e: Event): void {
   width: 28px;
   height: 28px;
   flex: none;
-  /* 色图/色块就是**拖动手柄**（名字那格是输入框，拖它等于拖选文字）。
+  /* 色图/色块就是**拖动手柄**（色名已改为只读文本，点它是"选中"，拖才算拖）。
      光标必须自己说这件事：会拖的人不看 title。 */
   cursor: grab;
   touch-action: none;
@@ -1910,105 +1964,25 @@ function onSizeInput(index: number, e: Event): void {
 .mx-colors--dragging .mx-color .mx-thumb-btn {
   cursor: grabbing;
 }
+/* 色名：**只读文本**（2026-10-30 用户口径「颜色修改为不能修改」）。
+   保留 `data-act`/`data-color` 是为了冒烟与可访问性能按名字认出这一行；
+   固定 76px 宽让 14 行色名左对齐（长短不一的名字不会把 ✕ 推来推去）。 */
 .mx-color__name {
   width: 76px;
   height: 24px;
+  display: inline-flex;
+  align-items: center;
   padding: 0 3px;
   font-size: 12px;
-  /* chip 自己已经是框，输入框再画一圈就是双层边框 */
-  border-color: transparent;
-  background: transparent;
-  border-radius: var(--wb-radius-sm);
-}
-.mx-color__name:focus-visible {
-  border-color: var(--wb-focus);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
 }
 .mx-colors__empty {
   margin: 0;
   font-size: 11px;
   line-height: 1.6;
-}
-
-/* ---- 色名候选浮层（Teleport 到 body ⇒ 这里的定位一律相对**视口**）----------------
-   1px 间隙 + 28px 行高：这是"点一个词"的靶子，比拖动落点（42×24）还大一点。
-   用 `--wb-elev-3` 抬起来：它盖在矩阵上方，不抬就会和表格线糊在一起。 */
-.mx-suggest {
-  position: fixed;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 4px;
-  overflow-y: auto;
-  border: 1px solid var(--wb-border-strong);
-  border-radius: var(--wb-radius-md);
-  background: var(--wb-surface);
-  box-shadow: var(--wb-elev-3);
-}
-.mx-suggest__hint {
-  padding: 3px 6px 5px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--wb-text-muted);
-  border-bottom: 1px solid var(--wb-border);
-  margin-bottom: 2px;
-}
-.mx-suggest__group {
-  padding: 6px 8px 3px;
-  font-size: 11px;
-  line-height: 1.2;
-  color: var(--wb-text-muted);
-  border-top: 1px solid var(--wb-border);
-  margin-top: 3px;
-}
-/* 紧跟在使用说明后面的那一组不再画分隔线（它有 hint 的下边框，再画就是双线） */
-.mx-suggest__hint + .mx-suggest__group {
-  padding-top: 3px;
-  border-top: 0;
-  margin-top: 0;
-}
-.mx-suggest__item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 28px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--wb-radius-sm);
-  background: transparent;
-  color: var(--wb-text);
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-/* 键盘 ↑↓ 与鼠标悬停共用同一个高亮：两条路看到的是同一个"回车会选哪个" */
-.mx-suggest__item.is-active,
-.mx-suggest__item:hover {
-  background: var(--wb-hover);
-}
-.mx-suggest__dot {
-  width: 10px;
-  height: 10px;
-  flex: none;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-}
-.mx-suggest__name {
-  flex: none;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mx-suggest__note {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  text-align: right;
 }
 
 /* 「＋ 颜色 / ＋ 尺码 / 常用」：虚线小按钮，和 chip 同一行高 */

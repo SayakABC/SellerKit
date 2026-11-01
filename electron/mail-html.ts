@@ -4,7 +4,7 @@
 // 唯一职责：把「MIME 世界的 cid 引用」翻译成「本地可加载的 URL」，并判定是否还缺映射。
 //
 // 为什么需要它：正文里的 `<img src="cid:image001.png@01D9...">` 是 MIME 的 Content-ID 引用，
-// 浏览器不认识 `cid:` 这个 scheme（实测被 CSP 直接拦掉，见 docs/notes/2026-10-04-mail-inline-images.md）。
+// 浏览器不认识 `cid:` 这个 scheme（实测被 CSP 直接拦掉，见 docs/notes/2026-10-30-mail-and-today-pages.md）。
 // 必须靠 `sk_mail_attachments.content_id` 把它换成宿主的
 // `sk-mail://att/<messageId>/<attachmentId>`（渲染通道见 electron/mail-body-protocol.ts）。
 //

@@ -27,7 +27,6 @@ export {};
 import { ipcMain, app, dialog, BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash } from 'crypto';
 import {
   ensureProductSchema,
   listProducts,
@@ -52,8 +51,9 @@ import {
   detachProductImage,
   itemImagePool,
   pendingProductImages,
+  pendingRemoteProductImages,
+  confirmedMapPairs,
   setItemImage,
-  upsertImageRecord,
   variantDelete,
   variantList,
   variantUpsert,
@@ -62,8 +62,11 @@ import {
   type ProductUpsertInput,
   type ProductImportRow,
   type SkuMapInput,
+  type RemoteProductImageAdoption,
 } from './product-db';
-import { handle, IMG_EXT_BY_FORMAT, sniffImageFormat } from './ipc-util';
+import { handle } from './ipc-util';
+// 图片仓（唯一落盘入口 + 唯一图片表 `md_images`）：本文件只调 `landImageBytes` / `IMAGE_DIR`
+import { IMAGE_DIR, landImageBytes } from './master-data-db';
 import { nextStyleCode, adoptStyleColorImageByCode } from './order-db';
 // 供应商「按名称查找、不存在则新建」—— `suppliers` 表的 owner 是采购域（ADR-002 C1 单点写入），
 // 产品域只借它把 Excel 里的厂家名落成一个 id（2026-10-10）
@@ -74,8 +77,8 @@ import { getShopItemRow, setShopItemImageId } from './shop-item-db';
 import { buildProductWorkbook, extractEmbeddedImages } from './product-xlsx';
 // 映射写入后回填存量订单 —— 只有 handler 层能同时看到两个域（product-db 不得 import order-db，会成环）
 import { reassignOrdersByItemIds, ensureOrderSchema } from './order-db';
-// 色图落 **订单图库 oi_images**：与订单主图共用同一份落库实现（见该文件头的闭环说明）。
-// 色图落在产品域 pl_images 时，订单导入的「内容指纹命中」永远看不到它 ⇒ 按图找色一次都不闭（P0-1）。
+// 色图与订单主图落**同一张图片表 `md_images`**、走同一份落库实现（见该文件头的闭环说明）。
+// 色图若落在另一份图仓，订单导入的「内容指纹命中」永远看不到它 ⇒ 按图找色一次都不闭（P0-1）。
 import { landOrderImageByUrl } from './order-image-land';
 
 const MAX = {
@@ -232,7 +235,7 @@ handle('product-move-supplier', (payload: any) => {
 //
 // **唯一的例外是"图"**：Excel 的嵌入图是**浮动对象**，既不在单元格里，渲染层也读不到
 // （SheetJS 不解析 `xl/drawings`）—— 只有主进程的 exceljs 能。于是图按方向各占一个通道：
-//   读进来：`product-extract-images` —— xlsx → 落盘 + 登记 `pl_images` → **按锚点行**报回
+//   读进来：`product-extract-images` —— xlsx → 落盘 + 登记 `md_images` → **按锚点行**报回
 //   写出去：`product-export`         —— 渲染层给"每格写什么"+"每行的图路径"，主进程生成并嵌图
 
 /** 单次导入上限（与 order 域的导入量级对齐；速卖通万级商品之内） */
@@ -307,7 +310,7 @@ handle('product-import', (payload: any) => {
 });
 
 /**
- * 抽「导入文件里的嵌入图」：xlsx → 落盘 + 登记 `pl_images` → **按锚点行号**报回。
+ * 抽「导入文件里的嵌入图」：xlsx → 落盘 + 登记 `md_images` → **按锚点行号**报回。
  *
  * 为什么要单独一步、且在**解析之后**才调：
  *   ① "哪张表是产品表"由渲染层逐张体检得出（`readProductSheet`），所以必须先解析、
@@ -434,7 +437,7 @@ handle('product-sku-queue', (payload: any) => {
   });
 });
 
-handle('product-sku-map', (payload: any) => {
+handle('product-sku-map', async (payload: any) => {
   const items = Array.isArray(payload?.rows) ? payload.rows : [];
   if (items.length > MAX_SKU_BATCH) {
     throw new Error(`product-sku-map: 单次最多 ${MAX_SKU_BATCH} 条（收到 ${items.length}）`);
@@ -458,14 +461,80 @@ handle('product-sku-map', (payload: any) => {
   } catch {
     out.reassigned = 0;
   }
-  // 认款**顺手**把订单图采纳为款主图（只补空 / 不覆盖；失败不外抛 —— 见 `adoptOrderImages`）。
-  // 放在回填之后：两件事都以"映射已写入"为前提，互不依赖。
-  try {
-    out.adopted = adoptOrderImages(rows, new Set(out.failed.map((f) => f.itemId)));
-  } catch {
-    out.adopted = 0;
+  // 认款**顺手**把商品图采纳为款主图（只补空 / 不覆盖；失败不外抛）。
+  // 两档都放在回填之后，且都以"映射已写入"为前提，互不依赖：
+  //   ① 本地已有图（订单图 / 人工覆盖图）—— 见 `adoptOrderImages`；
+  //   ② 采集商品只有远程 image_url（`pl_shop_items.image_id = 0`）—— 下载入库再采纳。
+  //      缺了这一档，「款与商品」里认的采集商品永远补不上主图（2026-10-30 用户实报）。
+  // `adoptImages = false` 只来自「建档并关联」向导里用户取消勾选「采纳为款主图」——
+  // 那是人的决定，不能被这两档顺手推翻（否则勾选框形同虚设）。
+  const adoptImages = payload?.adoptImages !== false;
+  const failedItemIds = new Set(out.failed.map((f) => f.itemId));
+  if (adoptImages) {
+    try {
+      out.adopted = adoptOrderImages(rows, failedItemIds);
+    } catch {
+      out.adopted = 0;
+    }
+    try {
+      out.adopted += await adoptShopItemRemoteImages(rows, failedItemIds);
+    } catch {
+      // 下载链路整体异常（如网络模块不可用）不影响映射：能采纳几张算几张
+    }
   }
   return out;
+});
+
+/**
+ * 存量补图（2026-10-30 用户实报「认款后产品图片还是没更新」）。
+ *
+ * 认款顺手补图只覆盖**写入那一刻**的行；升级前已经确认的映射不会自己长图 ——
+ * 用户重启后看到的仍是白图。打开「款与商品」时跑一轮：把全库已确认映射里
+ * "款还没有主图"的挑出来，先采纳本地图（订单图 / 覆盖图），再下载采集远程图
+ * （单轮上限 `MAX_REMOTE_ADOPTS`，超出的如实报 `pending`，下一轮再补）。
+ *
+ * 三条边界与认款补图同构：**只补空**（两个挑选层都只看 `image_id = 0`）、失败不外抛、
+ * 不静默截断（`pending` 报的是"这一轮之后还缺几个款"）。
+ */
+handle('product-sku-repair-images', async (payload: any) => {
+  ensureProductSchema();
+  const limitRaw = Number(payload?.limit);
+  const limit =
+    Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.min(Math.trunc(limitRaw), MAX_REMOTE_ADOPTS)
+      : MAX_REMOTE_ADOPTS;
+  const pairs = confirmedMapPairs();
+  if (!pairs.length) return { adopted: 0, pending: 0 };
+  // 两档共用一个"写入行"形状：只用到 productId / itemId（其余字段给安全缺省）
+  const rows: SkuMapInput[] = pairs.map((p) => ({
+    platform: '',
+    shopId: 0,
+    itemId: p.itemId,
+    spec: '*',
+    productId: p.productId,
+    status: 'confirmed',
+    note: '',
+  }));
+  let adopted = 0;
+  try {
+    adopted += adoptOrderImages(rows, new Set());
+  } catch {
+    // 本地图这一档失败不影响远程档：能补几张算几张
+  }
+  let pending = 0;
+  try {
+    const todo = pendingRemoteProductImages(pairs).slice(0, limit);
+    adopted += await runRemoteAdoptions(todo);
+    // 再取一次**真实缺口**：下载失败的款也算在 pending 里 —— 不能让界面说"全补好了"
+    pending = pendingRemoteProductImages(pairs).length;
+  } catch {
+    try {
+      pending = pendingRemoteProductImages(pairs).length;
+    } catch {
+      pending = 0;
+    }
+  }
+  return { adopted, pending };
 });
 
 handle('product-sku-invalidate', (payload: any) => {
@@ -499,43 +568,32 @@ handle('product-variant-delete', (payload: any) => {
   return variantDelete(toId(payload?.id));
 });
 
-// ---- 产品图片（pl_images / pl_item_images；落盘 userData/product-images/） ----
+// ---- 产品图片（`md_images` 主数据域；字节统一落 `userData/images/`） ----
 //
-// 图片**不**走 order-download-image：那条链路写 oi_images、受订单域孤图清理管辖，
-// 产品主图挂上去会被"没有订单引用"的清理误删。这里独立落盘 + pl_images 登记，
-// 展示复用 order-read-image / order-image-thumb（目录白名单已扩展为两缓存目录）。
+// R1 起全项目只有一张图片表 + 一个落盘目录：产品主图、商品覆盖图、订单图、采集图都登记在
+// `md_images`（内容 SHA-256 唯一），字节落在 `userData/images/`。
+// 落盘/去重**只有 `master-data-db.landImageBytes` 一个入口** —— 本文件不再自带一份
+// （两份实现会让"同一张图两种去重口径"，缓存里出现两份、占用统计对不上）。
 // srcPath 必须来自**用户经对话框选择的文件**（信任层级与 order-read-local-image 一致）。
 
-const PRODUCT_IMAGE_DIR = () => path.join(app.getPath('userData'), 'product-images');
-/** 单张图片上限（与 order-read-local-image 的 10MB 对齐） */
+/** 单张图片上限（与 order-read-local-image / landImageBytes 的 10MB 对齐） */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /**
- * 把一段图片字节落进 product-images 缓存并登记 `pl_images`（内容 SHA-256 命名去重）。
+ * 把一段图片字节落进图片仓并登记 `md_images`。
  *
  * 与 `importImageFile` 的分工：那个先做"这是不是一个用户选中的本地文件"的信任判定，
- * 再交给这里落盘。**只此一份**落盘/去重逻辑，两条来源（用户选文件 / Excel 嵌入图）共用 ——
- * 否则"同一张图两种去重口径"会让缓存里出现两份，且占用统计对不上。
+ * 再交给这里落盘。落盘/去重口径见 `master-data-db.landImageBytes`（只此一份）。
  */
 function landImageBuffer(
   buf: Buffer,
   source = 'upload',
 ): { imageId: number; localPath: string; reused: boolean } {
-  if (!buf || !buf.length) throw new Error('图片内容为空');
-  if (buf.length > MAX_IMAGE_BYTES) throw new Error('图片超过 10MB 上限');
-  // 按**内容**判格式（不按扩展名）：项目里真实存在"内容是 WebP、文件名是 .jpg"的存量图
-  const fmt = sniffImageFormat(buf);
-  if (!fmt) throw new Error('文件内容不是受支持的图片格式（按文件头判断，不只看扩展名）');
-  const fingerprint = createHash('sha256').update(buf).digest('hex');
-  const dir = PRODUCT_IMAGE_DIR();
-  fs.mkdirSync(dir, { recursive: true });
-  const finalPath = path.join(dir, fingerprint + IMG_EXT_BY_FORMAT[fmt]);
-  if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf);
-  const rec = upsertImageRecord({ fingerprint, localPath: finalPath, source });
-  return { imageId: rec.imageId, localPath: finalPath, reused: rec.reused };
+  const landed = landImageBytes(buf, { source: source || 'product-image' });
+  return { imageId: landed.imageId, localPath: landed.localPath, reused: landed.reused };
 }
 
-/** 把用户选中的图片复制进 product-images 缓存（内容 SHA-256 命名去重），返回登记后的图 */
+/** 把用户选中的图片复制进图片仓（内容 SHA-256 命名去重），返回登记后的图 */
 function importImageFile(
   srcPath: unknown,
   source = 'upload',
@@ -583,6 +641,73 @@ function adoptOrderImages(rows: readonly SkuMapInput[], failedItemIds: ReadonlyS
   return adopted;
 }
 
+/**
+ * 单次认款最多顺手下载几张远程采集图（每款一张）。
+ *
+ * 为什么有上限：这是 IPC 同步链路，`downloadFile` 单张最长 15s；没有上限时一次 500 行批量映射
+ * 可能把界面卡到分钟级。常态是「本次认到几个没有主图的款」，远小于这个数；超出的下次改绑再补。
+ */
+const MAX_REMOTE_ADOPTS = 40;
+
+/**
+ * 认款补图**第二档**：把「采集商品只有远程 `image_url`」的主图下载入库并采纳为款主图。
+ *
+ * 为什么需要第二档：第一档 `adoptOrderImages` 只发本地图（订单图 / 人工覆盖图）。「款与商品」
+ * 里认的常常是**采集来的商品**：`pl_shop_items.image_id = 0`，但 `image_url` 有值 —— 界面直接
+ * 拿远程 URL 显示，用户看到的这张图却从没落过库，于是"认完款、产品页还是白图"
+ * （2026-10-30 用户实报）。下载后同时回填采集行，下次列表/映射可直接用本地图。
+ *
+ * 边界与第一档同构：只补空（`adoptProductImageIfEmpty` 再判一次）、失败不外抛、只处理写入成功的行。
+ */
+async function adoptShopItemRemoteImages(
+  rows: readonly SkuMapInput[],
+  failedItemIds: ReadonlySet<string>,
+): Promise<number> {
+  const pairs = rows
+    .filter((r) => !!r.productId && !!r.itemId && !failedItemIds.has(r.itemId))
+    .filter((r) => (r.status ?? 'confirmed') === 'confirmed')
+    .map((r) => ({ productId: r.productId, itemId: r.itemId }));
+  if (!pairs.length) return 0;
+  const todo = pendingRemoteProductImages(pairs).slice(0, MAX_REMOTE_ADOPTS);
+  return runRemoteAdoptions(todo);
+}
+
+/**
+ * 执行一批「下载远程采集图 → 入库 → 采纳为款主图」的待办。
+ *
+ * 与挑选层（`pendingRemoteProductImages`）分开，是因为"哪几张要下"有两个入口：
+ * 认款时只挑本次写入的行；存量补图（`product-sku-repair-images`）挑全库已确认的映射。
+ * 下载/回填/采纳的语义只写一份 —— 两个入口各写一遍，漂起来就是"其中一个入口会覆盖主图"。
+ */
+async function runRemoteAdoptions(
+  todo: readonly RemoteProductImageAdoption[],
+): Promise<number> {
+  if (!todo.length) return 0;
+  let adopted = 0;
+  const queue = [...todo];
+  // 并发 4：AE 图床单张通常 <1s；串行会把"批量认款"拖成一条长链
+  const workers = Array.from({ length: Math.min(4, todo.length) }, async () => {
+    for (;;) {
+      const t = queue.shift();
+      if (!t) return;
+      try {
+        const img = await fetchImageToLibrary(t.imageUrl);
+        // 先回填采集行（下次列表直接命中本地图）；行可能刚被删，失败不影响采纳
+        try {
+          setShopItemImageId(t.shopItemId, img.imageId);
+        } catch {
+          /* 快照行没了：图仍在图片仓，产品主图照常采纳 */
+        }
+        if (adoptProductImageIfEmpty(t.productId, img.imageId)) adopted += 1;
+      } catch {
+        // 单张失败不影响其余（也不影响映射本身）：这个款留空图，改绑/下次认款会再试
+      }
+    }
+  });
+  await Promise.all(workers);
+  return adopted;
+}
+
 handle('product-image-attach', (payload: any) => {
   const productId = toId(payload?.productId);
   if (!productId) throw new Error('请指定产品');
@@ -627,11 +752,11 @@ handle('product-item-image-clear', (payload: any) => {
 
 const { downloadFile } = require('./http-client');
 
-/** 下载远程图 → 临时文件 → `landImageBuffer` 入库；失败抛（由调用方决定外抛还是收进 reason） */
+/** 下载远程图 → 临时文件 → `landImageBytes` 入库；失败抛（由调用方决定外抛还是收进 reason） */
 async function fetchImageToLibrary(
   imageUrl: string,
 ): Promise<{ imageId: number; localPath: string; reused: boolean }> {
-  const dir = PRODUCT_IMAGE_DIR();
+  const dir = IMAGE_DIR();
   fs.mkdirSync(dir, { recursive: true });
   // 临时文件用 .img 后缀（不是图片扩展名）：下载失败/格式不对时不会被当成正式缓存图。
   // 随机后缀：色图是连续多张下载，同一毫秒内两个临时路径不能相撞。
@@ -642,9 +767,14 @@ async function fetchImageToLibrary(
   try {
     const r = await downloadFile(imageUrl, tmpPath);
     if (!r.ok) throw new Error(r.error || '图片下载失败');
-    return landImageBuffer(fs.readFileSync(tmpPath), 'shop-item');
+    // 带 sourceUrl：URL 指纹进登记，同一采集图被采两次不会落第二行（与色图采纳同一口径）
+    const landed = landImageBytes(fs.readFileSync(tmpPath), {
+      sourceUrl: imageUrl,
+      source: 'shop-item',
+    });
+    return { imageId: landed.imageId, localPath: landed.localPath, reused: landed.reused };
   } finally {
-    // landImageBuffer 已另存正式文件（内容哈希命名），临时文件必须清掉
+    // landImageBytes 已另存正式文件（内容哈希命名），临时文件必须清掉
     if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
   }
 }
@@ -672,14 +802,15 @@ handle('shop-item-image-fetch', async (payload: any) => {
   }
   const colorResults: { color: string; imageId: number; bound: boolean; reason: string }[] = [];
   if (colorInputs.length) {
-    // 色图登记在 oi_images ⇒ 先确保订单域表在（懒建表：采集通道不碰订单表时它还没建）
+    // 色图与订单行共用 `md_images` ⇒ 先确保订单域表在（懒建表：采集通道不碰订单表时它还没建）
     ensureOrderSchema();
     const code = getProductCode(productId);
     if (!code) throw new Error(`产品不存在或已被删除: id=${productId}`);
     for (const c of colorInputs) {
       try {
-        // ⚠️ 必须走 `landOrderImageByUrl`（oi_images），**不能**用 `fetchImageToLibrary`（pl_images）：
-        //    后者的 id 属于另一张表，喂给 adoptStyleColorImageByCode 会去改一张不相干的订单图。
+        // ⚠️ 必须走 `landOrderImageByUrl`：它除了落盘，还把 **URL 指纹** 与内容指纹一起登记进
+        //    `md_images` —— 订单导入的「按图找色」正是靠这条登记的命中来闭环。
+        //    `fetchImageToLibrary` 虽然也进同一张表，但不带 URL 指纹，重复采集会再落一行。
         const landed = await landOrderImageByUrl(c.imageUrl);
         if (!landed.ok) throw new Error(landed.error);
         const r = adoptStyleColorImageByCode(code, c.color, landed.image.imageId);

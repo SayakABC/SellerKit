@@ -1,7 +1,7 @@
 // electron/purchase-cost-sync.ts
 // **拿货落账 → 订单行实际进价**（C2 定稿，2026-10-21）。
 //
-// 订单明细行有两个成本字段（见 `docs/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5）：
+// 订单明细行有两个成本字段（见 `docs/archive/plans/ORDER_PURCHASE_MODEL_SIMPLIFY_PLAN.md` §5）：
 //   · `cost_cents` = **进价（预估）**，归类核对「确认无误」时按当时产品当前价钉（`order-db.snapshotOrderCosts`）；
 //   · `actual_cost_cents` = **实际进价（实付真值）**，就是本函数写的那一列。
 // 利润取数 `实际 > 预估 > 缺`，所以拿货实付永远压过估算。

@@ -201,7 +201,7 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
   //
   // ⚠️ **视觉引擎已于 2026-10-28 整条删除**（`src/core/ai/**`、`order-api-key-*`、「设置 › 识别」页）：
   //   自 2026-10-05 该岛下架起就零调用方，用户已决定不接云端模型。本注释上一段说的"能力一行没丢"
-  //   仅指**数据层通道**，不再包括识别引擎。判断见 `docs/notes/2026-10-28-classify-local-vision-direction.md`。
+  //   仅指**数据层通道**，不再包括识别引擎。判断见 `docs/notes/2026-10-30-order-classify-panel.md`。
   //
   // 存储命名空间 `order-insight`（引擎配置 + 列映射）随引擎一并停止读写；**但键名不要回收**——
   //   那是 electron-store 里已落盘的用户数据，将来重新接入识别时是同名恢复而非凭空重来。

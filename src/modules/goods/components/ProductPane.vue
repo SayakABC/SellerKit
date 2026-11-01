@@ -467,7 +467,7 @@ const props = defineProps<{
    *
    * 只用于一处：空态里"先做哪个"的顺序（P0-5 左半）。判据必须保留 `null`：
    * "还没拉过"不是"没有待办"，拿它当空会给出一句界面并不知道的结论
-   * （见 `docs/notes/2026-10-08-goods-page-entry-guide.md` 第 4 条）。
+   * （见 `docs/notes/2026-10-30-goods-list-and-pool.md` 第 4 条）。
    */
   queueEmpty: boolean | null;
 }>();

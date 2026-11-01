@@ -102,7 +102,6 @@ const TABLE_PURPOSES = {
   oi_variant_keys: '变体键→款色映射（订单驱动归类；state = auto/named/merged）；保证重导幂等。',
   oi_style_merges: '款合并操作头（一行 = 一次合并，支持撤销还原）；明细见 oi_style_merge_items。',
   oi_style_merge_items: '款合并明细（kind = color 搬色 / key 改键），记 from/to 与 from_state 以支持拆开。',
-  oi_images: '订单识别图仓（内容指纹唯一，缓存 AI 识别结果与"按图找色"记忆）。',
   parcels: '包裹（一单可多包，按订单行拆；金额/重量缺值为 NULL 不给 0）。',
   parcel_lines: '拆包明细（包×订单行唯一，拆出的 qty 记在这条）。',
   oi_styles: '款式识别池（order 域，code 与主指纹唯一）；业务字段权威在 pl_products。',
@@ -115,8 +114,11 @@ const TABLE_PURPOSES = {
   pl_bundle_links: '套装关联（套装产品×商品×平台色号→子产品/子色/数量）；只存关系。',
   pl_shop_sku: '店铺商品认款映射（平台商品→产品/SKU，含每件用量）；认款写路径唯一。',
   pl_variants: '产品 SKU（颜色+尺码组合；weight_g 是拣货/运费的唯一克重落点）。',
-  pl_images: '产品图仓（内容寻址，fingerprint 唯一；二进制在 userData/product-images/）。',
-  pl_item_images: '商品ID→覆盖图（图池最高优先级，人工指定）。',
+
+  md_images: '全项目唯一图片仓（内容指纹唯一；二进制在 userData/images/，不入库）。',
+  md_colors: '颜色主数据（全局唯一色名 + 色块 hex）；业务表只存 color_id。',
+  md_sizes: '尺码主数据（全局唯一码名 + 别名 + 尺码组）；业务表只存 size_id。',
+  md_color_aliases: '平台色名→颜色主数据（product_id=0 为全局别名，>0 按款覆盖）。',
 
   pl_shop_items: '店铺商品快照（采集的平台事实，只存"店里有什么"，不认款）。',
   pl_shop_store_keys: '采集「展示名键」→ 已登记店 的收养记忆（防"只跑一次、再采又落未登记桶"）。',

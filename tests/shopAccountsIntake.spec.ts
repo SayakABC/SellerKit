@@ -208,6 +208,8 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
       { id: 'tools', name: '工具账号' },
       { id: 'suppliers', name: '供应商' },
       { id: 'shipping', name: '物流运费' },
+      // 2026-10-30：颜色板与合并（同色异名归一；「基础数据 › 产品管理」组第三项）。
+      { id: 'colors', name: '颜色' },
       // 2026-10-19：单页组「待补清单」（组名与页签名同名 —— 它不属于任何既有组，
       // 六类检查里有两类在订单侧，塞进「产品管理」会让组名说谎）。
       { id: 'health', name: '待补清单' },
@@ -252,6 +254,7 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     );
     expect(grouped.slice().sort()).toEqual([
       'accounts',
+      'colors',
       'companies',
       'goods',
       'health',

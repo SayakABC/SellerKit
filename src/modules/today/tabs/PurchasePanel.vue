@@ -86,6 +86,14 @@
               </div>
               <div class="pu-cover-item__missing">
                 <span v-for="(r, j) in missingOf(o)" :key="j" class="pu-cover-chip" data-act="pu-cover-chip">
+                  <!-- 缩略图（源 64px、显示 18px）：核对"这行要的色"时图比文字快；没图就只给文字。 -->
+                  <img
+                    v-if="coverThumbOf(r)"
+                    class="pu-cover-chip__img"
+                    :src="coverThumbOf(r)"
+                    alt=""
+                    draggable="false"
+                  />
                   {{ missingLabel(r) }}
                 </span>
                 <span
@@ -116,6 +124,7 @@
       supplier-action
       move-action
       fix-action
+      assign-action
       :refresh-token="token"
       :supplier-orders="ordersBySupplier"
       :ignore-reasons="ignoreReasonMap"
@@ -127,6 +136,7 @@
       @supplier-action="onSupplierAction"
       @order-action="onOrderAction"
       @move-supplier="onMoveSupplier"
+      @assign-supplier="askAssignSupplier"
       @fix-unclassified="onFixUnclassified"
       @show-ignores="showIgnores = true"
     />
@@ -224,6 +234,32 @@
         />
       </label>
     </ConfirmDialog>
+
+    <!-- 指定厂家：「未指定厂家」的款色行点进来的入口。
+         为什么必须有这一步：拖拽的落点只来自**有清单行/有拿货单**的厂家，还没拿过货的厂家
+         根本没有格子 ⇒ 无厂家的款色只能拖到别家、没法"指定给某个新厂家"。
+         写的是**款级**主数据（`pl_products.supplier_id`），与拖拽同一条通道，所以必须说明整款一起走。 -->
+    <ConfirmDialog
+      v-if="assigning"
+      title="指定厂家"
+      confirm-text="指定"
+      :busy="busy"
+      @close="assigning = null"
+      @confirm="runAssignSupplier"
+    >
+      <p>{{ [assigning.styleCode, assigning.styleName].filter(Boolean).join(' ') }}</p>
+      <p class="wb-muted">厂家挂在款上：这一款的 {{ assigning.colors }} 个款色会一起改（与拖拽改厂家同一件事）。</p>
+      <label v-if="suppliers.length" class="wb-field pu-field">
+        <span class="wb-field__label">厂家</span>
+        <select v-model.number="assignTarget" class="wb-input" data-act="pu-assign-supplier">
+          <option :value="0" disabled>请选择厂家</option>
+          <option v-for="s in suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
+        </select>
+      </label>
+      <p v-else class="wb-muted" data-act="pu-assign-empty">
+        还没有任何厂家 —— 先去「基础数据 › 供应商」建一个，再回来指定。
+      </p>
+    </ConfirmDialog>
   </div>
 </template>
 
@@ -287,7 +323,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import ConfirmDialog from '@/core/components/ConfirmDialog.vue';
 import { toast } from '@/core/services/toast';
-import { productMoveSupplier } from '@/core/services/ipc';
+import { orderImageThumbBatch, productMoveSupplier } from '@/core/services/ipc';
 import ProductPicker from '@/modules/goods/components/ProductPicker.vue';
 import { skuMap } from '@/modules/goods/api';
 import type { IgnoreRow, PurchaseOrder, Supplier } from '@/types';
@@ -372,6 +408,40 @@ function hiddenMissingOf(o: OrderCoverageOrder): number {
   return Math.max(0, o.rows.filter((r) => r.covered < r.qty).length - 6);
 }
 
+/**
+ * 缺失项的缩略图（本地路径 → dataURL）。按需取：只有展开「按单核对」才去拉，
+ * 且只在缺口行上（齐了的行不需要看图）。64px 够看颜色/印花，不抢 chip 版面。
+ */
+const coverThumbs = ref<Record<string, string>>({});
+
+async function loadCoverThumbs(orders: OrderCoverageOrder[]): Promise<void> {
+  const paths = new Set<string>();
+  for (const o of orders) {
+    if (o.done) continue;
+    for (const r of o.rows) {
+      if (r.covered < r.qty && r.imagePath) paths.add(r.imagePath);
+    }
+  }
+  if (!paths.size) {
+    coverThumbs.value = {};
+    return;
+  }
+  const list = [...paths];
+  const r = await orderImageThumbBatch(list.map((localPath) => ({ localPath, maxEdge: 64 })));
+  const out: Record<string, string> = {};
+  const urls = r.data?.dataUrls ?? [];
+  list.forEach((p, i) => {
+    const u = urls[i];
+    if (u) out[p] = u;
+  });
+  coverThumbs.value = out;
+}
+
+/** chip 上那张图（没图/取失败给 ''，模板按空处理，不画占位） */
+function coverThumbOf(r: RowCoverage): string {
+  return r.imagePath ? coverThumbs.value[r.imagePath] ?? '' : '';
+}
+
 type ConfirmSpec = {
   title: string;
   body: string[];
@@ -382,6 +452,10 @@ type ConfirmSpec = {
 };
 const confirm = ref<ConfirmSpec | null>(null);
 const confirmInput = ref('');
+
+/** 「指定厂家」弹层：待指定的款（null = 关着）+ 选中的厂家 id（0 = 还没选） */
+const assigning = ref<{ styleCode: string; styleName: string; colors: number } | null>(null);
+const assignTarget = ref(0);
 
 /** 各厂家的拿货单（supplierId → 单子；草稿 + 已提交，排序交给 `PickingView`）—— 卡上"已开单"那一截 */
 const ordersBySupplier = computed<Record<number, PurchaseOrder[]>>(() => {
@@ -440,6 +514,8 @@ async function load(): Promise<void> {
     const ins = coverageInputs(cv);
     coverOrders.value = groupByOrder(planCoverage(ins.rows, ins).rows);
     cover.value = coverageSummary(coverOrders.value);
+    // 缩略图只有**展开着**才去拉（收起时不上取数、不占往返）
+    if (showCover.value) void loadCoverThumbs(coverOrders.value);
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取拿货数据失败';
   } finally {
@@ -467,14 +543,48 @@ function onOrderAction(intent: { kind: 'edit' | 'submit' | 'export' | 'delete'; 
 }
 
 /**
- * 把一款拖到别家（宫格里拖拽的写入口）—— 改 `pl_products.supplier_id`（产品域主数据）。
+ * 改一款的**厂家**（款级主数据 `pl_products.supplier_id`）—— 拖拽「移到」与「指定厂家」共用这一条写通道。
  *
- * 为什么**不弹确认**：落点就是用户眼前的那一格，松手后清单立刻重排（这款从旧格跳进新格）——
- * 结果自证，弹窗反而是多问一句；且这一步可逆（拖回去 / 去「货品档案」改）。
+ * @param verb toast 里的说法（'移到' / '指定给'）—— 两种入口的话不一样，但写的是同一件事
+ * @returns true = 写成功且厂家真的变了（调用方据此关弹层）
+ *
  * ⚠️ toast 必须说清"**该款共 N 个款色一起走**"：写是款级的（厂家挂在款上），
- *    用户拖的是看见的那一款色行，不说清会以为只搬走了一行、别的色还在旧厂家。
- * 写失败**不外抛到拖拽热区**（行已经回原位了）—— 收进 error + toast，清单不动。
+ *    用户点/拖的是看见的那一款色行，不说清会以为只改了那一行、别的色还挂在旧厂家。
+ * 失败**不外抛**（拖拽热区里的行已经回原位）—— 收进 error + toast，清单不动。
  */
+async function moveStyleSupplier(
+  intent: { styleCode: string; styleName: string; toSupplierId: number; colors: number },
+  verb: '移到' | '指定给'
+): Promise<boolean> {
+  busy.value = true;
+  error.value = '';
+  try {
+    const r = await productMoveSupplier({ code: intent.styleCode, supplierId: intent.toSupplierId });
+    if (!r.success) throw new Error(r.error || '改厂家失败');
+    if (r.data?.changed === false) {
+      toast('厂家没有变化', 'info');
+      return false;
+    }
+    const toName = intent.toSupplierId
+      ? (suppliers.value.find((s) => s.id === intent.toSupplierId)?.name ?? `#${intent.toSupplierId}`)
+      : '未指定厂家';
+    const label = [intent.styleCode, intent.styleName].filter(Boolean).join(' ');
+    toast(`${label}（该款共 ${intent.colors} 个款色）已${verb}「${toName}」`, 'success');
+    bump();
+    return true;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '改厂家失败';
+    error.value = msg;
+    toast(msg, 'error');
+    return false;
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 拖拽的写入口（`PickingView` 只发意图，不碰产品域）。
+ *  为什么拖拽**不弹确认**：落点就是用户眼前的那一格，松手后清单立刻重排（这款从旧格跳进新格）——
+ *  结果自证，弹窗反而是多问一句；且这一步可逆（拖回去 / 去「货品档案」改）。 */
 async function onMoveSupplier(intent: {
   styleCode: string;
   styleName: string;
@@ -482,28 +592,41 @@ async function onMoveSupplier(intent: {
   toSupplierId: number;
   colors: number;
 }): Promise<void> {
-  busy.value = true;
-  error.value = '';
-  try {
-    const r = await productMoveSupplier({ code: intent.styleCode, supplierId: intent.toSupplierId });
-    if (!r.success) throw new Error(r.error || '移动失败');
-    if (r.data?.changed === false) {
-      toast('厂家没有变化', 'info');
-      return;
-    }
-    const toName = intent.toSupplierId
-      ? (suppliers.value.find((s) => s.id === intent.toSupplierId)?.name ?? `#${intent.toSupplierId}`)
-      : '未指定厂家';
-    const label = [intent.styleCode, intent.styleName].filter(Boolean).join(' ');
-    toast(`${label}（该款共 ${intent.colors} 个款色）已移到「${toName}」`, 'success');
-    bump();
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '移动失败';
-    error.value = msg;
-    toast(msg, 'error');
-  } finally {
-    busy.value = false;
+  await moveStyleSupplier(
+    {
+      styleCode: intent.styleCode,
+      styleName: intent.styleName,
+      toSupplierId: intent.toSupplierId,
+      colors: intent.colors,
+    },
+    '移到'
+  );
+}
+
+/** 行尾「指定厂家」→ 打开弹层（`PickingView` 只发意图） */
+function askAssignSupplier(intent: { styleCode: string; styleName: string; colors: number }): void {
+  assigning.value = intent;
+  assignTarget.value = 0;
+}
+
+/** 弹层「指定」：选中的厂家 → 同一条款级写通道 */
+async function runAssignSupplier(): Promise<void> {
+  const target = assigning.value;
+  if (!target) return;
+  if (!assignTarget.value) {
+    toast('先选一个厂家', 'error');
+    return;
   }
+  const ok = await moveStyleSupplier(
+    {
+      styleCode: target.styleCode,
+      styleName: target.styleName,
+      toSupplierId: assignTarget.value,
+      colors: target.colors,
+    },
+    '指定给'
+  );
+  if (ok) assigning.value = null;
 }
 
 /**
@@ -541,7 +664,7 @@ async function createFromPick(supplierId: number): Promise<void> {
     if (gate.noSupplierRows > 0) {
       parts.push(`${gate.noSupplierRows} 个款色还没指定厂家（开单会直接报"厂商不存在"）`);
     }
-    const msg = `先补数据再开单：${parts.join('；')}。到「归类核对」把这几行归好 / 给款选个厂家，或把它们标「暂不拿」`;
+    const msg = `先补数据再开单：${parts.join('；')}。未归类的到「归类核对」归好，无厂家的点该行的「指定厂家」，也可以把它们标「暂不拿」`;
     error.value = msg;
     toast(msg, 'error');
     return;
@@ -756,6 +879,11 @@ watch(
   () => token.value,
   () => void load()
 );
+
+// 展开「按单核对」时才去拉缺失项缩略图（收起态不需要图，不必每屏都取一次）
+watch(showCover, (open) => {
+  if (open) void loadCoverThumbs(coverOrders.value);
+});
 </script>
 
 <style scoped>
@@ -925,12 +1053,25 @@ watch(
 }
 
 .pu-cover-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 1px 8px;
   border-radius: 10px;
   background: var(--wb-surface-2);
   font-size: 12px;
   line-height: 18px;
   color: var(--wb-text);
+}
+
+/* chip 里的色图（源是 64px 缩略图，这里显示 18px —— 按单核对要"看图对这个色"，只读文字核不出来） */
+.pu-cover-chip__img {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--wb-surface);
 }
 
 .pu-cover-chip--more {

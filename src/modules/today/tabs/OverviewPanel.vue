@@ -143,6 +143,12 @@
         <p v-if="pulse.assumedQty" class="td-pulse__hint" data-act="pulse-assumed">
           件数里有 {{ pulse.assumedQty }} 行不知道数量，按 1 件计
         </p>
+
+        <!-- 下钻（T2-4）：这一块只说"还有几单"，"是哪几单、先发哪个"在「待发货」页签。
+             就地切页签（`go`）而不是跳模块 —— 与四步的页签同一个姿势。 -->
+        <button class="wb-btn td-pulse__cta" data-act="pulse-goto-queue" @click="go('queue')">
+          看清单：按最晚发货时间排，最急的在最上
+        </button>
       </template>
 
       <!-- 空态：说"没有待发货"，不说"没有数据" —— 后者会让人以为采集坏了 -->
@@ -423,6 +429,11 @@ function onEmptyImport(): void {
   margin: 0;
   font-size: 13px;
   color: var(--wb-text-muted);
+}
+
+/* 下钻按钮跟内容宽度，不铺满（铺满会变成"整块只有一个按钮"） */
+.td-pulse__cta {
+  align-self: flex-start;
 }
 
 .td-stat.is-done {

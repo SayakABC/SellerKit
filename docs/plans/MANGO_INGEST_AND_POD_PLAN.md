@@ -298,13 +298,14 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 
 #### M2 施工记录（2026-11-01）
 
-已完成 **T2-1 / T2-2 / T2-3**（T2-4 待发货清单、T2-5 空态骨化待做）。
+已完成 **T2-1 / T2-2 / T2-3 / T2-4**（T2-5 空态骨化待做）。
 
 | 任务 | 落点 | 验证 |
 |---|---|---|
 | T2-1 状态分桶 | `src/lib/mangoStatus.ts`（5 桶 + 唯一实现） | `tests/mangoStatus.spec.ts` 25 例；变异「认不出→pending」立刻红 |
 | T2-2 第二行四数 | `src/lib/shippingPulse.ts`（纯函数）+ `flowCtx.ShippingSummary.pulse` + `TodayView.reload()` + `OverviewPanel` 新块 | `tests/shippingPulse.spec.ts` 12 例；`today:ui` 3 条新断言；两次变异确认会红 |
 | T2-3 采集状态条 | `src/lib/syncBanner.ts`（纯函数）+ 新 IPC `mango-sync-status` + `OverviewPanel` 顶部 | `tests/syncBanner.spec.ts` 13 例；`today:ui` 3 条接线断言；变异「error 字段丢掉」立刻红 |
+| T2-4 待发货清单 | `shippingQueue`（`src/lib/shippingPulse.ts`，与四数**同一份实现**）+ 新页签 `src/modules/today/tabs/QueuePanel.vue`（`flowCtx` 加 `pulseRows` 行源）+ 总览下钻按钮 | `tests/shippingQueue.spec.ts` 16 例；`today:ui` 5 条接线断言（含"没有截止期的垫底"与"清单单数 == 页签徽标"）；两次变异确认会红 |
 
 **与计划的三处偏离（都是实现时才发现的口径问题）**：
 
@@ -335,13 +336,30 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
    此前记录的"308 PASS 全绿"其实就是截断，实际跑完是 **364+** 条。预算已提到 90s，
    且**判据改为"输出里有 `SMOKE:` 收尾行"**，不再是"没有 FAIL"。
 
+**T2-4 的三处定性（都影响到后面 M3/M4，先写清楚）**：
+
+1. **`shippingPulse` 改成"由清单汇总而来"，而不是并列两个函数**。计划把清单排在四数之后，
+   照字面实现就是"四数一个函数、清单另一个函数"—— 一个按单去重、一个按行累加，
+   界面上一句"待发货 3 单"、下面清单列 5 行，用户没法判断哪个是真的。
+   现在 `shippingQueue()` 出行，`shippingPulse()` 只做汇总（单级 vs 行级的分流写在两处
+   注释里），并有单测直接钉住"两组数逐项相等"。
+2. **「图案状态」在 M2 只有两列可真读**：`image_id`（有没有图）与 `style_color_id`（归没归类）。
+   所以三档是「缺图 / 待绑 / 已绑」，语义分别是"印不了 / 不知道印在哪个款色 / 可以进生产"。
+   M3 的 `pod_variant_patterns` 上线后 `ready` 要**再收紧一层**（"这款色默认印哪个图案"也查得到），
+   改动点只有 `patternStateOf` 一处 —— 别在界面里另写判定。
+3. **"没有截止期的垫底"是一条独立规则**。导入单没有 `deal_deadline`，若按 0 参与排序会飘到最前
+   （"1970 年就到期"），当"最不急"排到最后又会被读成"这几单不重要"。所以：垫底 + 单元格写「不知道」，
+   并且**件数与风险里都要单独交代**（`noDeadline`）。单测与 UI 各钉一条。
+
 **变异测试（确认守卫有效，不是"跑了就绿"）**：
 - 去掉 `isWaitingShip` 筛选 → 3 条红
 - 风险窗口 `<= 24h` 改成 `< 0`（只算已过期）→ 2 条红
 - `today:ui` 把第二次取数也带上 `importDate` → 3 条红（正是"两块口径必须不同"那条）
 - 状态条的 `error` 字段恒空 → 「读不到 ≠ 没同步过」立刻红（detail 里显示"还没同步过"）
+- 清单排序里"无截止期"改成按 0 参与比较 → 单测「垫底」红 + UI「最急的在最上」红（顺序变成 I-OLD 打头）
+- `patternStateOf` 忽略 `styleColorId` → 单测「有图未归类⇒待绑」红 + UI 状态列变成「已绑,缺图,缺图」
 
-**门禁**：`npm test` 1217 例 / 59 文件 · `today:ui` 367 项 PASS（连跑两次稳定）· `verify` · `verify:docs` · `lint`（0 error）全绿。
+**门禁**：`npm test` **1233 例 / 60 文件** · `today:ui` **372 项 PASS / 0 FAIL**（`SMOKE: ALL PASS`）· `verify` · `verify:docs` · `lint`（0 error）全绿。
 
 ---
 

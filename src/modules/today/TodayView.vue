@@ -88,7 +88,7 @@ import { switchModule } from '@/core/services/shell';
 import { selectExcelFile } from '@/core/services/dialog';
 import { detectAndImport, type AutoImportResult } from '@/core/services/importSheet';
 import { dailyShip } from '@/lib/dailyShip';
-import { shippingPulse } from '@/lib/shippingPulse';
+import { shippingPulse, type PulseRow } from '@/lib/shippingPulse';
 import { coverageInputs } from '@/lib/orderCoverage';
 import { localDayKey } from '@/lib/localDay';
 import type { UnifiedOrderRow } from '@/types';
@@ -119,6 +119,10 @@ interface TabDef {
  * 页签定义。顺序 = 流程顺序（与流程卡、与用户说的四步一致 —— 2026-10-17 算钱整步撤出前是五步）。
  * ⚠️ `defineAsyncComponent` 必须在模块顶层建一次：写进 `computed` 会在每次渲染时新建包装器，
  * 于是 `KeepAlive` 永远认不出"这是同一个组件"，保活失效（切换即重建，等于没做）。
+ *
+ * 2026-11-01（T2-4）：新增 `queue`「待发货」，位置紧跟「总览」。
+ *   · 它**不带步骤号**：四步是"今天导进来的这批怎么走完"，而它是"现在手上还有多少没发"（跨天）；
+ *   · 它是总览那块「现在还没发」的**下钻落点**（那块的按钮 `go('queue')` 就切到这里）。
  */
 const TABS: TabDef[] = [
   {
@@ -126,6 +130,14 @@ const TABS: TabDef[] = [
     name: TN.overview,
     hint: '今天要发几单、共几件、已拿多少、还差多少',
     comp: defineAsyncComponent(() => import('./tabs/OverviewPanel.vue')),
+  },
+  {
+    id: 'queue',
+    name: TN.queue,
+    hint: '还没发的单，按最晚发货时间排，最急的在最上面',
+    comp: defineAsyncComponent(() => import('./tabs/QueuePanel.vue')),
+    // 徽标 = 待发货**单数**（与总览那一格同一个数、同一份来源 `summary.pulse`）
+    badge: (s) => (s.pulse.pending ? `${s.pulse.pending} 单` : ''),
   },
   {
     id: 'import',
@@ -166,6 +178,14 @@ const error = ref('');
 const tab = ref('overview');
 const token = ref(0);
 const receipt = ref<AutoImportResult | null>(null);
+/**
+ * 「待发货」清单的行源（2026-11-01 T2-4）。
+ *
+ * 与 `summary.pulse` 是**同一次取数**的两个视角：四数（待发货/快超时/件/缺图）与清单
+ * 分别由 `shippingPulse` / `shippingQueue` 算，而后者是前者唯一的实现基础（见 `lib/shippingPulse`）。
+ * 各取一次 IPC 的话，"总览说 3 单、清单列 2 行"这种缝迟早出现，且没人能一眼看出哪边对。
+ */
+const pulseRows = ref<PulseRow[]>([]);
 
 const summary = ref<ShippingSummary>({
   orders: { total: 0, collect: 0, import: 0, lastTime: '' },
@@ -339,6 +359,7 @@ const importing = ref(false);
 
 const ctx: ShippingCtx = {
   summary,
+  pulseRows,
   flow,
   flowNow,
   loading,
@@ -483,7 +504,14 @@ async function reload(): Promise<void> {
       assumedQty: 0,
     };
     const pr = await ipc.orderShippingRows({ limit: 2000 });
-    if (pr.success && pr.data) pulse = shippingPulse(pr.data);
+    if (pr.success && pr.data) {
+      pulse = shippingPulse(pr.data);
+      // 同一批行也留给「待发货」页签（T2-4）：清单与四数因此不可能来自两次不同的快照。
+      // 取不到时**清空**而不是保留上一次的行 —— 留旧行会出现"总览说 0 单、清单还挂着 7 行"。
+      pulseRows.value = pr.data;
+    } else {
+      pulseRows.value = [];
+    }
 
     // 3c) 最近一次芒果同步（T2-3 采集状态条）。
     //     ⚠️ **`success:false` 不许折成 `last: null`**：那会把"读日志失败"显示成"还没同步过"，

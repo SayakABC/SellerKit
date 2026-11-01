@@ -1238,12 +1238,15 @@ function pickingGenCalls() {
  *    拣货清单现在是「拿货」页签「要拿什么」子视图里的整页视图（PurchasePanel 内嵌），
  *    所以页面级只剩六个页签；.pk-view 仍存在，但它是**拿货面板的下属**，不再是一个页签。
  * ⚠️ 2026-10-17：算钱页签整步撤出（.oc-view 不再属于本页）⇒ 五页签。
+ * ⚠️ 2026-11-01：新增「待发货」页签（T2-4，无步骤号）⇒ 六页签。
  */
 var PANEL_SEL = {
   // ⚠️ 2026-10-22：总览改版成"四格数字"，判据从「[data-act="flow"]」（流程卡）换成「daily-summary」。
   //    流程卡与三张卡已撤掉 —— 守着旧锚点会恒红（看着像功能坏了），守着一个"随便有什么元素"的
   //    选择器又会恒绿，所以钉在**这块面板自己的根**上。
   overview: '[data-act="daily-summary"]',
+  // 「待发货」清单：钉在面板根上（表体在空态时不存在，不能拿 queue-table 当"面板挂上了"的判据）
+  queue: '[data-act="queue-panel"]',
   import: '[data-act="import"]',
   classify: '[data-act="classify-panel"]',
   purchase: '.pu-view',
@@ -1402,10 +1405,11 @@ async function main() {
     // 页签栏（2026-10-05「发货台」改造）：四步 + 总览 = 五个。
     //   2026-10-10：原第 3 步「生成拣货单」并进「拿货」⇒ 六步 → 五步，页签少一个。
     //   2026-10-17：算钱整步撤出（归拢到独立「统计」页）⇒ 五步 → 四步，再少一个。
+    //   2026-11-01（T2-4）：「待发货」清单进页签栏（无步骤号 —— 它不属四步里的任何一步）。
     // ⚠️ 「懒加载」也要验：只断言"页签在"不够 —— 面板若是全量挂载，五个整页视图
     //    （拣货上千行、各自取数）会在进页面时一起跑，表现是打开就很慢。
-    var tabIds = ['overview', 'import', 'classify', 'purchase', 'recon'];
-    report('页签栏：五个页签齐全（总览 + 四步）',
+    var tabIds = ['overview', 'queue', 'import', 'classify', 'purchase', 'recon'];
+    report('页签栏：六个页签齐全（总览 + 待发货清单 + 四步）',
       tabIds.every(function (id) { return !!tabEl(id); }),
       tabIds.map(function (id) { return id + '=' + !!tabEl(id); }).join(' '));
     // 反向守卫：算钱页签**不许回来**（2026-10-17 用户裁定：都归拢到「统计」菜单）。
@@ -1420,7 +1424,8 @@ async function main() {
       KNOWN_TABS.length >= 5 && KNOWN_TABS.indexOf('classify') >= 0 && KNOWN_TABS.indexOf('purchase') >= 0,
       JSON.stringify(KNOWN_TABS));
     report('懒加载：还没点过的页签，面板一个都没挂载（DOM 里查不到）',
-      !document.querySelector('.pu-view') &&
+      !document.querySelector('[data-act="queue-panel"]') &&
+        !document.querySelector('.pu-view') &&
         !document.querySelector('[data-act="classify-panel"]') &&
         !document.querySelector('[data-act="recon-panel"]'), '');
 
@@ -5084,6 +5089,59 @@ async function main() {
     window.__noRecon = false;
     await clickRefresh();
     try { await waitFor(function () { return !!card('rc-table'); }, 8000); } catch (e) {}
+
+    // ---- 待发货清单（T2-4）-----------------------------------------------------
+    // 分段原则同下：**排序、三档图案状态、剩余时间文案都由单测覆盖**
+    // （tests/shippingQueue.spec.ts，16 例），这里只验接线 —— 页签真的在、面板真的读到了
+    // 容器那批行、顺序真的按截止期、状态列真的读的是"图 + 款色"而不是拍脑袋。
+    //
+    // 夹具三行都是"等待发货"（见文件头 IMPORTED / COLLECTED / IMPORTED_OLD）：
+    //   · C-1    —— 1 小时后到截止、有图（imageId 7）、没归类 ⇒ 待绑，**最急**
+    //   · I-1    —— 30 天后到截止、没图、已归类 ⇒ 缺图
+    //   · I-OLD  —— 没有截止期（三天前导入）⇒ 垫底，且**必须出现在清单里**
+    //     最后这条是这个夹具的全部价值：按导入日筛的话它不在，而"昨天没发完的单今天还在"
+    //     正是这一块与上面「今天要发」必须分开的理由。
+    step('queue');
+    function qRows() { return queryAll('[data-act="queue-row"]'); }
+    function qCol(i) {
+      return qRows().map(function (r) { return flat(r.children[i]); }).join(',');
+    }
+    await activateTab('queue');
+    await waitSoft(function () { return qRows().length > 0; }, 8000);
+
+    report('「待发货」页签能打开，并真的渲染出清单（3 行待发货）',
+      !!card('queue-panel') && qRows().length === 3,
+      '面板=' + !!card('queue-panel') + ' 行数=' + qRows().length + ' 单号=' + qCol(0));
+
+    // 顺序：C-1（1 小时）→ I-1（30 天）→ I-OLD（没有截止期，垫底）
+    // ⚠️ 无截止期的**必须垫底**：排最前或按 0 排最前，都会让"不知道"看起来像"最急"。
+    report('清单按最晚发货时间排序：最急的在最上，没有截止期的垫底',
+      qCol(0) === 'C-1,I-1,I-OLD',
+      '单号顺序=' + qCol(0));
+
+    // 图案状态列：C-1 有图没归类 ⇒ 待绑；I-1 / I-OLD 没图 ⇒ 缺图
+    var qChips = qRows().map(function (r) {
+      return flat(r.querySelector('[data-act="queue-pattern"]'));
+    }).join(',');
+    report('图案状态真的读"有没有图 + 归没归类"（有图未归类⇒待绑，没图⇒缺图）',
+      qChips === '待绑,缺图,缺图', '状态列=' + qChips);
+
+    // 同源校验：徽标走容器的 summary.pulse.pending，清单行走 shippingQueue(pulseRows) ——
+    // 两条独立的路必须同一个数。两边各取一份数的典型症状就是"徽标 3 单、清单 2 行"。
+    var qBadge = flat(document.querySelector('[data-act="tab-badge-queue"]'));
+    var qSum = flat(card('queue-sum'));
+    report('清单的"共 N 单"与页签徽标一致（两处各算一遍不算，必须同源）',
+      qBadge === '3 单' && qSum.indexOf('共 3 单') >= 0,
+      '徽标=' + qBadge + ' 汇总=' + qSum);
+
+    // 下钻：总览「现在还没发」那块 →「待发货」页签（就地切，不跳模块）
+    await activateTab('overview');
+    await waitSoft(function () { return !!card('pulse-goto-queue'); }, 4000);
+    var drillBtn = card('pulse-goto-queue');
+    if (drillBtn) drillBtn.click();
+    try { await waitFor(function () { return onTab('queue'); }, 6000); } catch (e) {}
+    report('总览的下钻按钮真的切到「待发货」页签（就地切页签，不跳模块）',
+      !!drillBtn && onTab('queue'), 'button=' + !!drillBtn + ' onQueue=' + onTab('queue'));
 
     // ---- 采集状态条（T2-3）-----------------------------------------------------
     // ⚠️ 分段原则：**四种形态的文案/配色由单测覆盖**（tests/syncBanner.spec.ts，13 例），

@@ -12,6 +12,7 @@
 //     各面板 `watch(token)` 重取 ⇒ 切回该 tab 看到的就是新数据（保活不再等于"看到旧的"）。
 import { inject, type ComputedRef, type InjectionKey, type Ref } from 'vue';
 import type { AutoImportResult } from '@/core/services/importSheet';
+import type { PulseRow } from '@/lib/shippingPulse';
 import type { MangoSyncStatusRow } from '@/types';
 
 /** 发货主线的一步（界面只读；状态由汇总数字推导，不引入新取数） */
@@ -101,6 +102,15 @@ export interface ShippingSummary {
 
 export interface ShippingCtx {
   summary: Ref<ShippingSummary>;
+  /**
+   * 「待发货清单」的行源（2026-11-01 T2-4）。
+   *
+   * 为什么放在容器而不是让清单面板自己再取一次：这一屏与「总览」那四格是**同一批数据**，
+   * 各取一次就必然出现"总览说 3 单待发货、清单列 2 行"——而用户第一眼要判断的正是
+   * "今天还有几单要发"。容器只取一次，两块各自用纯函数算（`shippingPulse` / `shippingQueue`
+   * 同一份实现），数字对不上就只能是代码错了，不会是"取数时机不同"。
+   */
+  pulseRows: Ref<PulseRow[]>;
   /** 四步主线（容器算、总览与 tab 标记都读这一份 —— 两处各自推导必然出现"卡上当前步 ≠ tab 上当前步"） */
   flow: ComputedRef<FlowStep[]>;
   /** 当前该做的那一步（`now` 里第一个；都在可执行步里选，见容器注释） */
@@ -151,6 +161,15 @@ export interface ShippingCtx {
  */
 export const SHIPPING_TAB_NAMES = {
   overview: '总览',
+  /**
+   * 待发货清单（2026-11-01 T2-4）。
+   *
+   * ⚠️ 它**不是某一步**（不带步骤号）：四步是"今天导进来的这批怎么走完"，
+   *    而这一屏回答的是"现在手上还有几单没发"（跨天，按当前状态算）。硬编成第 0 步
+   *    会让主线出现一个永远做不完的节点 —— 待发货永远 > 0 才是正常生意。
+   *    它挂在「总览」右边，是总览那块"现在还没发"的下钻落点。
+   */
+  queue: '待发货',
   import: '导入订单',
   classify: '归类核对',
   purchase: '拿货',

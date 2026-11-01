@@ -52,25 +52,54 @@ export interface VariantKeyParts {
   itemKey: string;
   /** 平台色原文（`产品属性:Color:5` 里的 `5`）；空串合法 */
   colorKey: string;
+  /**
+   * **图键**（`podImageKey.imageKeyOf(url)` 的产物）。**只有色名塌陷的链接才给**。
+   *
+   * 为什么需要第 4 段：真库 7/71 链接里同一色名下挂着多张不同的图（`Color` 全写
+   * `Picture color`），涉及 50 个槽位 —— 3 段键会把它们并成一件实物，绑图案时
+   * 5–12 个图案被并成 1 个，**静默错印**。
+   *
+   * 为什么不给所有行都加：给了就改变了存量 75 行的键（那是 M3 T3-6 的定向重算范围，
+   * 且只对塌陷链接）。**空/缺省 ⇒ 仍拼 3 段键，与本函数改造前逐字节相同**。
+   */
+  imageKey?: string;
 }
 
 /**
  * 拼变体键。**没有商品ID 就不成键**（返回 `''`）——那是唯一不可缺的一段：
  * 少了它，一个店铺的全部无色订单会并成同一件实物。
+ *
+ * 段数：3 段（常规）或 4 段（色名塌陷，末段是图键）。**只有非空图键才追加第 4 段**，
+ * 否则 `['a','b',''].join(SEP)` 会拼出 `a\0b\0` 与 `a\0b` 两种尾巴 —— 同一个槽位两个键。
  */
 export function variantKeyOf(parts: VariantKeyParts): string {
   const item = normSegment(parts?.itemKey);
   if (!item) return '';
-  return [normSegment(parts?.shopKey), item, normSegment(parts?.colorKey)].join(SEP);
+  const segs = [normSegment(parts?.shopKey), item, normSegment(parts?.colorKey)];
+  const img = normSegment(parts?.imageKey);
+  if (img) segs.push(img);
+  return segs.join(SEP);
 }
 
-/** 拆键（展示 / 排障用；非法输入返回三段空串，不抛错——查询路径不该因脏键崩） */
-export function splitVariantKey(key: unknown): VariantKeyParts {
+/**
+ * 拆键（展示 / 排障用；非法输入返回全空串，不抛错——查询路径不该因脏键崩）。
+ *
+ * 接受 3 段与 4 段。**其他长度一律视为脏键**（返回全空）：2 段是"少了色"的半截键，
+ * 5 段是脏文本里带了 NUL —— 两者都说明这一行不是本函数写出来的，按空处理，
+ * 让调用方走"未绑定"路径，而不是猜一个解释。
+ */
+export function splitVariantKey(key: unknown): Required<VariantKeyParts> {
+  const empty = { shopKey: '', itemKey: '', colorKey: '', imageKey: '' };
   const s = typeof key === 'string' ? key : '';
-  if (!s) return { shopKey: '', itemKey: '', colorKey: '' };
+  if (!s) return empty;
   const p = s.split(SEP);
-  if (p.length !== 3) return { shopKey: '', itemKey: '', colorKey: '' };
-  return { shopKey: p[0] ?? '', itemKey: p[1] ?? '', colorKey: p[2] ?? '' };
+  if (p.length < 3 || p.length > 4) return empty;
+  return {
+    shopKey: p[0] ?? '',
+    itemKey: p[1] ?? '',
+    colorKey: p[2] ?? '',
+    imageKey: p[3] ?? '',
+  };
 }
 
 /**

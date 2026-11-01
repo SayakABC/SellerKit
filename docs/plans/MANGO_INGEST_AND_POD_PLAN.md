@@ -150,12 +150,12 @@ grep -rn  "setInterval" electron/main.ts     # 空 → 无调度
 
 | 编号 | 任务 | 落点 | 判据 | 依赖 |
 |---|---|---|---|---|
-| **T0-1** | 迁移 **v13**：`oi_order_items` 加 `item_id TEXT NOT NULL DEFAULT ''`、`sku_code TEXT NOT NULL DEFAULT ''`；`oi_orders` 加 `pay_time`、`shop_auth_id`、`deal_deadline`（TEXT，默认 `''`）。照 `addVariantKeys()` 的幂等模式写；**ALTER 不能写进 `db.exec(SCHEMA)`**（SQLite 无 `ADD COLUMN IF NOT EXISTS`，重复执行报 `duplicate column name`） | `order-db.ts` `orderMigrationSteps()`（当前最新 v12，`order-db.ts:729`） | `npm run schema:smoke` 全绿；真库 `PRAGMA table_info(oi_order_items)` 含 `item_id`/`sku_code` | — |
-| **T0-2** | `upsertCollectedOrder` 落齐四列：`item_id`=line.itemId、`sku_code`=line.skuCode、`image_id`=落地后的图、`variant_key`=`variantKeyOf({shopKey,itemKey,colorKey,imageKey})` | `order-db.ts:4116-4129` | 冒烟脚本插一单，`SELECT item_id<>'' AND variant_key<>'' AND image_id IS NOT NULL` 为 1 | T0-1 |
-| **T0-3** | `raw_fields` 仍存整帧快照（保真不能丢），但**键名改成不会撞的结构**：`{采集帧:…, 商品ID:…, 产品属性:Color:…}` 顶层也给一份可读字段 —— 让既有 `extractSkuFields` 的键名族能命中 | `ae-db.ts:738` | 采集单在「发货台·归类」里**不再显示为未识别** | T0-1 |
-| **T0-4** | `source` 升级：`import → collect` **允许**（同单更好来源），`collect → import` 禁止；抛错改成**不抛**，走"拒绝并回执原因" | `order-db.ts:4084-4090` | 对一个 `import` 单推同号采集帧 → 该单 `source='collect'`，`oi_order_items` 行数不变（整单替换语义） | — |
-| **T0-5** | `skipped` 带原因：`upsertOrderBatch` 返回 `skips: [{orderNo, reason}]`，`/ae/ingest` 与 `/mango/ingest` 回执带上 | `ae-db.ts:697-754`、`ae-receiver.ts:192` | 故意推一条坏帧 → 回执 `skips[0].reason` 非空 | T0-4 |
-| **T0-6** | `variantKeyOfRow` 增加图键参数，回填查询 JOIN `md_images` 取 `source_url` | `order-db.ts` `variantKeyOfRow` 调用链 | 单测：给定 (shop,itemId,color,imgUrl) 得到期望键 | T0-1 |
+| **T0-1** | 迁移 **v13**：`oi_order_items` 加 `item_id TEXT NOT NULL DEFAULT ''`、`sku_code TEXT NOT NULL DEFAULT ''`；`oi_orders` 加 `pay_time`、`shop_auth_id`、`deal_deadline`、**`timeout_at`**（TEXT，默认 `''`；D-2 按推荐"两个时效时点都存"执行）。照 `addVariantKeys()` 的幂等模式写；**ALTER 不能写进 `db.exec(SCHEMA)`**（SQLite 无 `ADD COLUMN IF NOT EXISTS`，重复执行报 `duplicate column name`） | `order-db.ts` `orderMigrationSteps()`（v12 之后新增第 13 步） | `npm run schema:smoke` 全绿；真库副本跑一遍后 `PRAGMA table_info` 六列齐全且 `version=13` | — |
+| **T0-2** | `upsertCollectedOrder` 落齐四列：`item_id`=line.itemId、`sku_code`=line.skuCode、`image_id`=落地后的图、`variant_key`=`variantKeyOf({shopKey,itemKey,colorKey,imageKey})` | `order-db.ts` `upsertCollectedOrder` | 冒烟脚本插一单，`SELECT item_id<>'' AND variant_key<>'' AND image_id IS NOT NULL` 为 1 | T0-1 |
+| **T0-3** | `raw_fields` 仍存整帧快照（保真不能丢），但**每行**叠加 `商品ID` / `产品属性` 两个可识别键 —— 让既有 `extractSkuFields` 与 `parseOrderPropsColor` 的键名族能命中 | `order-db.ts` `upsertCollectedOrder` 的行写入 | 采集单在「发货台·归类」里**不再显示为未识别**；`raw_fields['采集帧']` 仍在 | T0-1 |
+| **T0-4** | `source` 升级：`import → collect` **允许**（同单更好来源），`collect → import` 禁止；抛错改成**不抛**，走"拒绝并回执原因"。另加**行数不缩水**保护：帧行数少于已有行 ⇒ 整单不写（残帧不许静默删历史行） | `order-db.ts` `upsertCollectedOrder` | 对 import 单推同号采集帧 → 该单 `source='collect'` 且行数不变；推 1 行到 2 行的单 → 整单不写 + 原因非空 | — |
+| **T0-5** | `skipped` 带原因：`upsertOrderBatch` 返回 `skips: [{orderNo, reason}]`（上限 50 条），`/ae/ingest` 与 `/mango/ingest` 回执带上；消毒阶段与入库阶段的跳过**原因分开给** | `ae-db.ts` `upsertOrderBatch`、`ae-receiver.ts` | 故意推一条坏帧 → 回执 `skips[0].reason` 非空 | T0-4 |
+| **T0-6** | `variantKeyOf` 加第 4 段 `imageKey`（**只有非空才追加**，存量 3 段键逐字节不变）；`splitVariantKey` 接受 3/4 段、其他长度视为脏键；新建 `electron/podImageKey.ts`（`imageKeyOf(url)` 纯函数，**已把 T3-2 提前做掉**）；`variantKeyOfRow` 加 `imageUrl` 可选参数 | `variantKey.ts`、`order-db.ts`、新 `podImageKey.ts` | 单测：`(shop,itemId,color,imgUrl)` 得 4 段键、不给 URL 与旧实现逐字节相同 | T0-1 |
 
 **阶段门禁**：
 
@@ -171,6 +171,28 @@ WHERE o.source = 'collect';
 
 > ⚠️ **`WHERE variant_key = ''` 是硬陷阱**：存量 75 行键已非空，改了函数**一行都不会更新**。
 > 本轮**不重算存量**（那是 M3 T3-6 的定向重算，且只对塌陷链接）。
+
+#### M0 施工记录（2026-11-01 完成）
+
+| 判据 | 实测结果 |
+|---|---|
+| `npm run schema:smoke` | ✅ 全绿（新库列序自校验 + 老库 v8→v13 升级 + 二次幂等） |
+| 真库副本跑 v13（不动线上库） | ✅ `version=13`；主表 4 列 / 明细 2 列齐全；**70 单 / 75 行 / 75 个变体键逐字节不变**；二次运行无 `duplicate column name` |
+| `npm run order:smoke` | ✅ 全绿（新增 5 条：四列齐 / 无图仍 3 段 / import→collect 升级 / 残帧拒绝 / 重推同源） |
+| `npm run ae:smoke` | ✅ 全绿（新增 `skips[0].reason` 非空断言） |
+| `npx vitest run tests/variantKey tests/podImageKey` | ✅ 24 例（含"不给图键与旧实现逐字节相同"的防回归） |
+
+**与上表的偏离（都已回改上表，此处只记原因）**：
+
+1. **T0-1 多加了 `timeout_at`** —— D-2 的推荐是"两个时效时点都存"，若先只建 `deal_deadline`，
+   等核对完再补一列就要多一次 v15 迁移。一次建两个字段，界面先只显示 `deal_deadline`。
+2. **T0-4 的判据从"整单替换"改为"行数不缩水"** —— 原计划只想到"采集覆盖导入"这一种冲突，
+   实际还有一种更坏：**采集帧本身是残的**（翻页中断 / 某行解析失败），整单替换会静默删掉
+   这单的历史行，之后按行统计"买了几件"就永久偏少。现在任何来源下帧行数少于已有行都整单不写。
+3. **T0-6 不做回填查询的 JOIN**（原计划要 JOIN `md_images` 取 `source_url`）—— 存量 75 行键已非空，
+   回填只会影响"键为空"的行（那些行是没有商品ID的，加图键也拼不出键），JOIN 是死代码。
+   图键能力建在**写入路径**上（采集帧自带 `productImgUrl`），回填留给 M3 T3-6 的定向重算。
+4. **T3-2 提前做掉**：`podImageKey.ts` 是 T0-6 的依赖，先建了（含 6 例单测）。M3 到时不用再做 T3-2。
 
 ---
 

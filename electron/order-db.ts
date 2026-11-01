@@ -64,6 +64,8 @@ import { extractOrderMoney } from './orderMoney';
 import { orderIncomeCcy, parseOrderPropsColor, parseOrderQty, parseSkuProps, toCentsCny } from './aeMoney';
 import { extractSkuFields, productTitleOf } from './shopSku';
 import { splitVariantKey, variantKeyOf } from './variantKey';
+// 图键（色名塌陷链接的第 4 段键）：纯函数，认不出返回 ''（见其文件头）
+import { imageKeyOf } from './podImageKey';
 // 「平台色名 → 我的色名」的查表/归一（纯函数；口径见其文件头）
 import { colorAliasKey, pickColorAlias, translateColor, type ColorAliasRow } from './colorAlias';
 // 店名归一（纯函数；与店铺主表 UNIQUE / 名称映射同一口径）。订单只存店名原文，
@@ -235,6 +237,23 @@ const ORDER_HEADER_COLS: { name: string; ddl: string }[] = [
   { name: 'biz_status', ddl: "biz_status TEXT NOT NULL DEFAULT ''" },
   // `ship_time` **不能删**：拣货的"未发货"判定读它（`picking-db`）
   { name: 'ship_time', ddl: "ship_time TEXT NOT NULL DEFAULT ''" },
+  // ── 芒果同步（2026-11-01，v13）──────────────────────────────────────────
+  // 采集帧里有、而导入报表里没有的**订单级**字段。四个都属"一单一份、不随商品行变化"，
+  // 故进主表（判据见本数组头上那段）。
+  //   · `pay_time`：付款时刻。**发货时效的起点**是它而不是 `order_time`（下单）——
+  //     芒果的时效计时从付款开始，用下单时刻算会把"下单后隔天才付"的单算成更紧急。
+  //   · `shop_auth_id`：芒果的 `authId`（店铺在 ERP 里的 id）。`sk_shops.erp_shop_id`
+  //     是同一口径 ⇒ 订单→店铺是**硬关联**，不必靠店名文本猜（T1-4）。
+  //     存原文不存归一 id：归一 id 的映射在店铺域，订单域不持有别人的 id 语义。
+  //   · `deal_deadline`：芒果 `sendGoodExpiredDate`，"最晚发货日"（界面倒计时用它）。
+  //   · `timeout_at`：芒果 `aeInternetInfoDTO.qualifiedTime`。**与上一个差 6 天**（实测
+  //     3077041601058259：11-11 vs 11-05），规律 `qualifiedTime ≈ 付款 + timeoutType + 39h`。
+  //     两个都存是刻意的：哪个是真倒计时尚未去订单详情页核对（计划 D-2），
+  //     只存一个就得在没证据时选一个，选错了晨报第一天就是错的。界面默认显示 `deal_deadline`。
+  { name: 'pay_time', ddl: "pay_time TEXT NOT NULL DEFAULT ''" },
+  { name: 'shop_auth_id', ddl: "shop_auth_id TEXT NOT NULL DEFAULT ''" },
+  { name: 'deal_deadline', ddl: "deal_deadline TEXT NOT NULL DEFAULT ''" },
+  { name: 'timeout_at', ddl: "timeout_at TEXT NOT NULL DEFAULT ''" },
 ];
 
 /**
@@ -273,6 +292,18 @@ const ORDER_ITEM_COLS: { name: string; ddl: string }[] = [
   //   ② `color` 列会被人改（真库已有 1 行 `5 → 红色`），而键不能被改 —— 落在独立列上，
   //      改名只动标签、不动聚合关系。
   { name: 'variant_key', ddl: "variant_key TEXT NOT NULL DEFAULT ''" },
+  // ── 芒果同步（2026-11-01，v13）──────────────────────────────────────────
+  // 采集通道路径原先**根本不写商品ID**（`upsertCollectedOrder` 的 `ins.run()` 只用了
+  // size/rawJson/color/qty），于是采集进来的行一行都拼不出 `variant_key` ——
+  // 图案绑定、款色归类、成本全部落空，且不报错（人在界面上只看到"未归类"）。
+  // 商品ID 必须有**独立列**而不是只藏在 `raw_fields` 里：态要从 `raw_fields` 的键名族捞
+  // （`商品ID` / `产品ID` / `SKU` / `货号`），而键名族换一家店就可能整批落空（见
+  // `variant_key` 上面那条的 ① ② 两条理由，同一件事）。
+  { name: 'item_id', ddl: "item_id TEXT NOT NULL DEFAULT ''" },
+  // 平台 SKU 唯一 ID（芒果 `skuCode`）。`variant_key` 是"店+商品ID+色名"的**我们拼的**键，
+  // 色名会塌陷（一链接多图同名色）；`sku_code` 是**平台给的**精确标识 ⇒ 图案绑定首选锚点
+  // （计划 D-4：两列并列，`sku_code` 命中不了再回落 `variant_key`）。空 = 采集帧没给。
+  { name: 'sku_code', ddl: "sku_code TEXT NOT NULL DEFAULT ''" },
 ];
 
 /**
@@ -730,6 +761,11 @@ function orderMigrationSteps(): MigrationStep[] {
       name: '订单行 += variant_key（店铺+商品ID+平台色）· 从 raw_fields 回填 · oi_variant_keys 建表',
       up: addVariantKeys,
     },
+    {
+      version: 13,
+      name: '芒果同步：主表 += pay_time/shop_auth_id/deal_deadline/timeout_at · 明细 += item_id/sku_code',
+      up: addMangoSyncColumns,
+    },
   ];
 }
 
@@ -765,13 +801,27 @@ function dropRetiredOrderQueue(): void {
 }
 
 /**
- * 一行的变体键：`(店铺, 商品ID, 平台色原文)`。
+ * 一行的变体键：`(店铺, 商品ID, 平台色原文[, 图键])`。
  *
  * 色**优先取 `raw_fields` 里的规格串**（`产品属性:Color:5`），只在解析不出时才吃 `color` 列 ——
  * `color` 列会被人改（真库已有 1 行 `5 → 红色`），而键必须回到事实。
  * 商品ID 的列名族解析复用 `extractSkuFields`（探测规则只能有一份）。
+ *
+ * `imageUrl`（T0-6）：**只在色名塌陷的链接上有值**。给了就拼第 4 段、不给就是 3 段键。
+ * 调用点现状：
+ *   · 采集写入（`upsertCollectedOrder`）直接传帧里的 `productImgUrl`；
+ *   · v12 存量回填**不传** —— 那 75 行的键已经写好了，重算会改动非塌陷链接的键
+ *     （计划 §T0 的警告：本轮不重算存量，只对塌陷链接做定向重算是 M3 T3-6 的事）；
+ *   · 导入路径（`upsertOrder`）**不传** —— 导入行手上只有 `imageId`（本机自增），
+ *     拿它当键会让同一张图在两台机器上得到不同键；要传也得先反查 `md_images.source_url`，
+ *     而那次 JOIN 只会让每行多一次查询、改的却全是已写好的键，没有收益。
  */
-function variantKeyOfRow(shop: string, rawFieldsJson: string, colorColumn: string): string {
+function variantKeyOfRow(
+  shop: string,
+  rawFieldsJson: string,
+  colorColumn: string,
+  imageUrl?: string,
+): string {
   let rf: Record<string, string> = {};
   try {
     const parsed: unknown = JSON.parse(rawFieldsJson || '{}');
@@ -781,7 +831,7 @@ function variantKeyOfRow(shop: string, rawFieldsJson: string, colorColumn: strin
   }
   const { itemId } = extractSkuFields(rf);
   const colorKey = parseOrderPropsColor(rf) || String(colorColumn ?? '').trim();
-  return variantKeyOf({ shopKey: shop, itemKey: itemId, colorKey });
+  return variantKeyOf({ shopKey: shop, itemKey: itemId, colorKey, imageKey: imageKeyOf(imageUrl) });
 }
 
 /**
@@ -817,6 +867,42 @@ function addVariantKeys(): void {
     // 键为空（无商品ID）的行保持空串：它们仍走"未归类"，不会被这把键吞掉
     if (key) dbRun(`UPDATE oi_order_items SET variant_key = ? WHERE id = ?`, [key, r.id]);
   }
+}
+
+/**
+ * **v13：芒果同步要用的六列**（2026-11-01，M0 T0-1）。
+ *
+ * 只加列、**不回填**：
+ *   · `item_id` / `sku_code` 的存量值在 `raw_fields` 里能捞（导入报表带商品ID），但**不在这里捞** ——
+ *     回填口径必须与采集写入同一份实现（`variantKeyOfRow` 那条链），迁移里再写一份就是两套口径。
+ *     存量行的键在 v12 已经写过了，这里再算一遍只会让"改了函数但键没变"更难发现；
+ *   · `pay_time` / `deal_deadline` 之类导入报表里**根本没有**（芒果独有），回填无从下手。
+ *     空串就是空串 —— 与"付款时刻未知"同义，界面显示"未同步"而不是编一个时间。
+ *
+ * 幂等靠 `PRAGMA table_info` 逐列判，不靠"版本号只跑一次"：脚本/冒烟会拿旧库反复跑
+ * `ensureOrderSchema`，而 SQLite 没有 `ADD COLUMN IF NOT EXISTS`，重复 ALTER 会
+ * `duplicate column name` —— 那会在用户升级那一刻失败（红线 8）。
+ *
+ * 新库走 `ORDER_HEADER_COLS` / `ORDER_ITEM_COLS` 直接建列；此刻明细表还没建出来
+ * （自定义迁移先于 `dbMigrate(SCHEMA)`），故空表时直接返回。
+ */
+function addMangoSyncColumns(): void {
+  const colsOf = (table: string): Set<string> =>
+    new Set(dbQuery<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => String(c.name)));
+  const head = colsOf('oi_orders');
+  // 主表在、明细表不在是不可能的（拆表迁移 v8 一起建）；但两者可能都还没建（新库）→ 空转
+  if (!head.size) return;
+  const item = colsOf('oi_order_items');
+  const add = (table: string, present: Set<string>, name: string, ddl: string): void => {
+    if (present.has(name)) return;
+    dbRun(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  };
+  add('oi_orders', head, 'pay_time', "pay_time TEXT NOT NULL DEFAULT ''");
+  add('oi_orders', head, 'shop_auth_id', "shop_auth_id TEXT NOT NULL DEFAULT ''");
+  add('oi_orders', head, 'deal_deadline', "deal_deadline TEXT NOT NULL DEFAULT ''");
+  add('oi_orders', head, 'timeout_at', "timeout_at TEXT NOT NULL DEFAULT ''");
+  add('oi_order_items', item, 'item_id', "item_id TEXT NOT NULL DEFAULT ''");
+  add('oi_order_items', item, 'sku_code', "sku_code TEXT NOT NULL DEFAULT ''");
 }
 
 /**
@@ -4056,39 +4142,97 @@ export interface CollectedOrderInput {
   shop?: string;
   /** **整单**收入（CNY 分，未扣退款）；`null` = 缺汇率。每行都记整单金额，按件数分摊在算账层做 */
   amountCents: number | null;
-  /** 采集帧原文（保真放进 `raw_fields`；键名前缀 `采集` 以免与报表列名族相撞） */
+  // ── 芒果同步的订单级字段（v13；缺省一律空串，导入通道不传）─────────────────
+  /** 付款时刻（发货时效起点，不是下单时刻） */
+  payTime?: string;
+  /** 芒果 `authId`（店铺在 ERP 里的 id；`sk_shops.erp_shop_id` 同口径） */
+  shopAuthId?: string;
+  /** 最晚发货日（芒果 `sendGoodExpiredDate`） */
+  dealDeadline?: string;
+  /** 另一套时效时点（芒果 `qualifiedTime`，与上者差 6 天，待核对后二选一） */
+  timeoutAt?: string;
+  /**
+   * 采集帧原文（保真放进 `raw_fields`；键名前缀 `采集` 以免与报表列名族相撞）。
+   *
+   * ⚠️ 这是**订单级**快照，写入时每行还会叠加自己的可识别字段（`商品ID` / `产品属性`），
+   * 见下方 `lineRawFields`。行级字段必须每行各一份 —— 一单多商品时共用一份会让整单的
+   * 变体键塌成第一行的值（键一塌，图案绑定与成本全落在错的商品上）。
+   */
   rawFields?: Record<string, string>;
   lines: {
     itemId: string;
     qty: number;
     color: string;
     size: string;
+    /** 平台 SKU 唯一 ID（芒果 `skuCode`）；空 = 帧里没给 */
+    skuCode?: string;
+    /** 已落地到 `md_images` 的图片 id；0/缺省 = 无图（写 NULL，不是 0） */
+    imageId?: number;
+    /**
+     * 本行图的 URL（**算图键用**，不是展示用）。
+     *
+     * 为什么必须给 URL 而不是让函数自己从 `imageId` 反查：`md_images.id` 是**本机**自增，
+     * 同一张图在两台机器上是不同 id ⇒ 拿 id 当键会让"换台机器键就变了"。
+     * 给不出来也没关系 —— 图键为空时仍是 3 段键（与改造前逐字节相同）。
+     */
+    imageUrl?: string;
   }[];
 }
 
-export function upsertCollectedOrder(input: CollectedOrderInput): { rows: number; replaced: boolean } {
+/** 采集单写入的回执。`refusedReason` 非空 ⇒ **一行都没写**，调用方必须把它带进回执日志。 */
+export interface CollectedOrderResult {
+  rows: number;
+  replaced: boolean;
+  /**
+   * 未写入的原因（空 = 已写入）。宁可整单不写、也不半写：
+   * 半写的单行数少了，人工看不出"是这一单只有 2 件还是丢了 3 行"。
+   */
+  refusedReason: string;
+}
+
+export function upsertCollectedOrder(input: CollectedOrderInput): CollectedOrderResult {
   const d = initDb();
   const orderNo = String(input?.orderNo ?? '').trim().slice(0, 64);
   if (!orderNo) throw new Error('upsertCollectedOrder: 订单号不能为空');
   const lines = Array.isArray(input?.lines) ? input.lines : [];
-  const rawJson = JSON.stringify(input?.rawFields ?? {});
+  const rawFields = input?.rawFields ?? {};
   const bizStatus = String(input?.bizStatus ?? '').slice(0, 64);
   const orderTime = String(input?.orderTime ?? '').slice(0, 32);
   const shop = String(input?.shop ?? '').slice(0, 120);
+  const payTime = String(input?.payTime ?? '').slice(0, 32);
+  const shopAuthId = String(input?.shopAuthId ?? '').slice(0, 64);
+  const dealDeadline = String(input?.dealDeadline ?? '').slice(0, 32);
+  const timeoutAt = String(input?.timeoutAt ?? '').slice(0, 32);
   const amount = input?.amountCents === null || input?.amountCents === undefined ? null : Math.round(Number(input.amountCents));
 
   let replaced = false;
   let rows = 0;
+  let refusedReason = '';
   dbTransaction(() => {
     const existed = d
       .prepare(`SELECT id, source FROM oi_orders WHERE order_no = ? LIMIT 1`)
       .get(orderNo) as { id: number; source: string } | undefined;
-    // 通道互斥：导入单是逐行追加（一 SKU 一行、金额来自报表），采集是整单替换。
-    // 采集若覆盖导入单，重推会把导入的行全删掉，而且两套金额口径会落在同一个 order_no 上。
-    if (existed && existed.source !== 'collect') {
-      throw new Error(`订单 ${orderNo} 已由导入通道写入，采集不能整单替换它`);
-    }
+    // 通道**升级**（v13 / T0-4，原先是"非 collect 直接抛错"）：
+    //   · `import → collect` **允许** —— 采集帧是更完整、更新的来源（带付款时刻/时效/店铺 authId，
+    //     这些导入报表里根本没有）。原先直接抛错意味着"采集一开跑，存量导入单全部被拒"，
+    //     而调用方只把它计进 `skipped` 计数，界面上只有一个数字、没有原因。
+    //   · `collect → import` 反向禁止：导入是逐行追加、金额口径不同，覆盖采集单会把它删成半截。
+    // **行数不许缩水**（对任何来源都成立，不只 import→collect）：采集帧若是残的（翻页中断 /
+    // 某行解析失败），整单替换会把这单的行删掉几行，而且删得静默 —— 之后按行统计的
+    // "这单买了几件"就永久偏少，拣货单上少一件都没人发现。
+    // 宁可整单不写、把原因带回执，让人看到"这一单没同步成功"。
     if (existed) {
+      const oldCount = Number(
+        (
+          d.prepare(`SELECT COUNT(*) AS n FROM oi_order_items WHERE order_id = ?`).get(existed.id) as
+            | { n: number }
+            | undefined
+        )?.n ?? 0,
+      );
+      if (lines.length < oldCount) {
+        refusedReason = `采集帧 ${lines.length} 行 < 已有 ${oldCount} 行（疑似帧不完整），保留原单`;
+        return;
+      }
       // 包裹挂在明细行上（`parcel_lines.order_item_id`）。整单替换会换掉全部明细 id：
       // 不先清包裹，它们就变成「0 条明细的空壳」，还继续参与 `parcelTotals` 的运费/重量汇总。
       // 重采集 = 这一单的装箱作废，明确连包裹一起清掉（包裹表属 B2，旧库可能尚未建）。
@@ -4107,28 +4251,66 @@ export function upsertCollectedOrder(input: CollectedOrderInput): { rows: number
     // 主表：一单一行（订单级字段）
     const h = d
       .prepare(
-        `INSERT INTO oi_orders (order_no, shop, order_time, source, amount_cents, biz_status)
-         VALUES (?, ?, ?, 'collect', ?, ?)`,
+        `INSERT INTO oi_orders (order_no, shop, order_time, source, amount_cents, biz_status,
+                                pay_time, shop_auth_id, deal_deadline, timeout_at)
+         VALUES (?, ?, ?, 'collect', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(orderNo, shop, orderTime, amount, bizStatus);
+      .run(orderNo, shop, orderTime, amount, bizStatus, payTime, shopAuthId, dealDeadline, timeoutAt);
     const headerId = Number(h.lastInsertRowid);
     // 明细：逐行插（一单零行也插一行，订单数不能凭空少；件数按 1，不猜 0）
+    //
+    // 四列一次落齐（T0-2）：`item_id` / `sku_code` / `image_id` / `variant_key`。
+    // 改造前这里只写 size/raw_fields/color/qty 且 `image_id` 写死 NULL ⇒ 采集单**一行都
+    // 拼不出变体键**，图案绑定与款色归类全部落空，而且不报错（界面只显示"未归类"）。
     const ins = d.prepare(
-      `INSERT INTO oi_order_items (order_id, image_id, size, raw_fields, color, qty)
-       VALUES (?, NULL, ?, ?, ?, ?)`,
+      `INSERT INTO oi_order_items
+         (order_id, image_id, size, raw_fields, color, qty, item_id, sku_code, variant_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    for (const l of lines.length ? lines : [{ itemId: '', qty: 1, color: '', size: '' }]) {
+    const fallbackLine: CollectedOrderInput['lines'][number] = {
+      itemId: '',
+      qty: 1,
+      color: '',
+      size: '',
+    };
+    const rowsToWrite: CollectedOrderInput['lines'] = lines.length ? lines : [fallbackLine];
+    for (const l of rowsToWrite) {
+      const itemId = String(l?.itemId ?? '').trim().slice(0, 64);
+      const color = String(l?.color ?? '').slice(0, 64);
+      const size = String(l?.size ?? '').slice(0, 64);
+      const skuCode = String(l?.skuCode ?? '').trim().slice(0, 64);
+      const imageId = Math.round(Number(l?.imageId) || 0);
+      // 行级可识别字段（T0-3）：既有解析链（`shopSku.extractSkuFields` 的键名族、
+      // `aeMoney.parseOrderPropsColor` 的规格串）都在**顶层**按列名找值 —— 只存整帧 JSON
+      // 时它们找不到且不报错（`variantKeyOfRow` 于是静默返回空键）。
+      // 顺序很重要：行级字段**放在订单级快照之后**，同键以行为准。
+      const lineRawFields = JSON.stringify({
+        ...rawFields,
+        商品ID: itemId,
+        产品属性: `(产品属性:Color:${color},Size:${size})`,
+      });
+      const key = variantKeyOf({
+        shopKey: shop,
+        itemKey: itemId,
+        colorKey: color,
+        // 图键只在能算出时追加（T0-6）：空串 ⇒ 仍是 3 段键，存量口径不动
+        imageKey: imageKeyOf(l?.imageUrl),
+      });
       ins.run(
         headerId,
-        String(l?.size ?? '').slice(0, 64),
-        rawJson,
-        String(l?.color ?? '').slice(0, 64),
+        imageId > 0 ? imageId : null,
+        size,
+        lineRawFields,
+        color,
         Math.max(1, Math.round(Number(l?.qty) || 1)),
+        itemId,
+        skuCode,
+        key,
       );
       rows += 1;
     }
   });
-  return { rows, replaced };
+  return { rows, replaced, refusedReason };
 }
 
 /** 最近订单列表（联图片指纹/路径），供界面明细展示 */

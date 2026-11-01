@@ -174,14 +174,27 @@ function handleIngest(req: http.IncomingMessage, res: http.ServerResponse): void
         return;
       }
       const clean: AeIngestOrder[] = [];
-      let skipped = 0;
-      for (const raw of p.orders) {
+      /** 消毒阶段被挡下的帧（连订单号都可能没解析出来）—— 与"入库阶段被拒"分开记，原因各自不同 */
+      const invalid: { orderNo: string; reason: string }[] = [];
+      for (const [i, raw] of p.orders.entries()) {
         const { order, error } = sanitizeIngestOrder(raw);
         if (order) clean.push(order);
-        else skipped += 1;
+        else {
+          const no = String((raw as Record<string, unknown>)?.orderId ?? '').trim();
+          if (invalid.length < 50) invalid.push({ orderNo: no || `#${i + 1}`, reason: error || '校验失败' });
+        }
       }
       if (!clean.length) {
-        writeJson(res, 200, { ok: true, received: p.orders.length, inserted: 0, updated: 0, skipped: p.orders.length, error: '全部订单校验失败' });
+        writeJson(res, 200, {
+          ok: true,
+          received: p.orders.length,
+          inserted: 0,
+          updated: 0,
+          skipped: p.orders.length,
+          // 每一条为什么没进来（T0-5）：只回一个数字时，"3 单没进来"和"3 单重复"长得一样
+          skips: invalid,
+          error: '全部订单校验失败',
+        });
         return;
       }
       ensureAeSchema();
@@ -189,7 +202,15 @@ function handleIngest(req: http.IncomingMessage, res: http.ServerResponse): void
       lastIngestAt = new Date().toISOString();
       lastRateMissing = result.rateMissing;
       // 缺汇率不是失败（单已落库），但必须**说出口**：回执带上计数，扩展可据此提示"去补汇率"。
-      writeJson(res, 200, { ok: true, received: p.orders.length, ...result, skipped });
+      writeJson(res, 200, {
+        ...result,
+        ok: true,
+        received: p.orders.length,
+        // 两个阶段的跳过合起来才是"这批有几单没进来"，但原因分开给：消毒失败要改扩展的解析，
+        // 入库被拒要改数据（或去补汇率），处置办法完全不同。
+        skipped: result.skipped + invalid.length,
+        skips: [...invalid, ...result.skips].slice(0, 50),
+      });
     })
     .catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);

@@ -679,16 +679,138 @@ check('采集重推：整单替换，旧包裹一并清掉（不留空壳污染�
   assert.strictEqual(odb.parcelTotals('CH-COLLECT').shipCents, null, '没有包裹时总运费是 null（不是旧包的 999）');
 });
 
-check('采集不能整单替换导入单（通道互斥，反向，且不改导入金额）', () => {
-  // imageId 传 null：本用例只要"整单替换被拒"，图有没有都无关（无图订单行本来就走这条路径）
-  insert({ orderNo: 'IMP-ONLY', imageId: null });
-  assert.throws(
-    () => odb.upsertCollectedOrder({ orderNo: 'IMP-ONLY', orderTime: '', bizStatus: '', amountCents: 1, lines: [] }),
-    /导入/,
+check('采集整单替换采集单：行数与金额都跟着新帧走', () => {
+  const r = odb.upsertCollectedOrder({
+    orderNo: 'CH-COLLECT', orderTime: '', bizStatus: '', amountCents: 300,
+    lines: [{ itemId: 'x', qty: 1, color: '黑', size: 'M' }],
+  });
+  assert.strictEqual(r.refusedReason, '', '同来源重推不该被拒');
+  assert.strictEqual(r.replaced, true);
+  assert.strictEqual(Number(dbGet(`SELECT amount_cents FROM oi_orders WHERE order_no = 'CH-COLLECT'`).amount_cents), 300);
+});
+
+// ── T0-2：采集写入必须落齐四列 ───────────────────────────────────────────────
+// 改造前这里只写 size/raw_fields/color/qty，且 `image_id` 写死 NULL ⇒ 采集单**一行都拼不出
+// 变体键**，图案绑定与款色归类全部落空，而且不报错（界面只显示"未归类"，看起来像没采到数据）。
+check('T0-2 采集行四列齐：item_id / sku_code / variant_key / image_id', () => {
+  odb.upsertCollectedOrder({
+    orderNo: 'T02-COLLECT',
+    orderTime: '2026-10-24 10:03:00',
+    bizStatus: '待发货',
+    shop: '店B',
+    amountCents: 12345,
+    payTime: '2026-10-24 10:01:00',
+    shopAuthId: '88231',
+    dealDeadline: '2026-11-11 23:59:59',
+    timeoutAt: '2026-11-05 12:00:00',
+    rawFields: { 采集帧: '{"orderId":"T02-COLLECT"}' },
+    lines: [
+      {
+        itemId: '1005018888888001',
+        qty: 2,
+        color: 'Picture color',
+        size: 'XL',
+        skuCode: '1200003456789012',
+        imageId: 21,
+        imageUrl: 'https://ae01.alicdn.com/kf/Sabc123.jpg',
+      },
+    ],
+  });
+  const row = dbGet(
+    `SELECT oi.item_id AS item_id, oi.sku_code AS sku_code, oi.variant_key AS variant_key,
+            oi.image_id AS image_id, oi.raw_fields AS raw_fields,
+            o.pay_time AS pay_time, o.shop_auth_id AS shop_auth_id,
+            o.deal_deadline AS deal_deadline, o.timeout_at AS timeout_at
+       FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id
+      WHERE o.order_no = 'T02-COLLECT'`,
   );
-  const h = dbGet(`SELECT source, amount_cents FROM oi_orders WHERE order_no = 'IMP-ONLY'`);
-  assert.strictEqual(h.source, 'import');
-  assert.strictEqual(Number(h.amount_cents), 16518, '被拒的采集帧不许改动导入单');
+  assert.strictEqual(row.item_id, '1005018888888001', '商品ID 必须落独立列（不是只藏在 raw_fields 里）');
+  assert.strictEqual(row.sku_code, '1200003456789012', '平台 SKU ID 要落库（图案绑定的首选锚点）');
+  assert.strictEqual(Number(row.image_id), 21, 'image_id 不许再写死 NULL');
+  // 键 = 店 / 商品ID / 色 / 图键（4 段：本行给了 imageUrl）
+  const segs = String(row.variant_key).split('\u0000');
+  assert.strictEqual(segs.length, 4, `给了图 URL 应拼 4 段键，实际：${JSON.stringify(row.variant_key)}`);
+  assert.strictEqual(segs[0], '店B');
+  assert.strictEqual(segs[1], '1005018888888001');
+  assert.strictEqual(segs[2], 'Picture color');
+  assert.strictEqual(segs[3], 'Sabc123', '图键取 /kf/<id>，不是整串 URL');
+  // 行级可识别字段：既有解析链在**顶层**按键名族找，只存整帧 JSON 会静默落空（T0-3）
+  const rf = JSON.parse(String(row.raw_fields));
+  assert.strictEqual(rf['采集帧'], '{"orderId":"T02-COLLECT"}', '整帧快照必须保真保留');
+  assert.strictEqual(rf['商品ID'], '1005018888888001', 'raw_fields 顶层要有商品ID（键名族可命中）');
+  assert.ok(
+    /Color:Picture color/.test(String(rf['产品属性'])),
+    `raw_fields 的规格串要能被 parseOrderPropsColor 解析，实际：${JSON.stringify(rf['产品属性'])}`,
+  );
+  // 订单级四个芒果字段
+  assert.strictEqual(row.pay_time, '2026-10-24 10:01:00');
+  assert.strictEqual(row.shop_auth_id, '88231');
+  assert.strictEqual(row.deal_deadline, '2026-11-11 23:59:59');
+  assert.strictEqual(row.timeout_at, '2026-11-05 12:00:00');
+});
+
+check('T0-2 不给图 URL 时仍是 3 段键（存量口径逐字节不变）', () => {
+  odb.upsertCollectedOrder({
+    orderNo: 'T02-NOIMG', orderTime: '', bizStatus: '', amountCents: 1,
+    lines: [{ itemId: '1005018888888002', qty: 1, color: '5', size: 'M' }],
+  });
+  const key = String(
+    dbGet(
+      `SELECT oi.variant_key AS k FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id
+        WHERE o.order_no = 'T02-NOIMG'`,
+    ).k,
+  );
+  assert.strictEqual(key.split('\u0000').length, 3, `无图应为 3 段键，实际：${JSON.stringify(key)}`);
+});
+
+// ── T0-4：通道**升级**（原先"非 collect 直接抛错"）────────────────────────────
+// 原先的行为是：存量导入单 + 采集一开跑 ⇒ 全部被拒，调用方只把它计进 skipped 计数，
+// 界面上只有一个数字、没有原因（用户唯一的动作是再点一次同步，然后还是那个数字）。
+check('T0-4 import → collect 允许升级：来源变 collect、行数不变、芒果字段进来', () => {
+  // 造一条两行的导入单（同单号两张图 = 两行）
+  insert({ orderNo: 'IMP-UP', imageId: 1 });
+  insert({ orderNo: 'IMP-UP', imageId: 2 });
+  const before = Number(
+    dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'IMP-UP'`).n,
+  );
+  assert.strictEqual(before, 2, '前置：导入单应有两行');
+  const r = odb.upsertCollectedOrder({
+    orderNo: 'IMP-UP', orderTime: '', bizStatus: '待发货', amountCents: 999,
+    payTime: '2026-10-24 10:01:00',
+    lines: [
+      { itemId: '1005018888888003', qty: 1, color: '黑', size: 'L' },
+      { itemId: '1005018888888004', qty: 1, color: '白', size: 'M' },
+    ],
+  });
+  assert.strictEqual(r.refusedReason, '', `升级不该被拒：${r.refusedReason}`);
+  assert.strictEqual(r.replaced, true);
+  const h = dbGet(`SELECT source, amount_cents, pay_time FROM oi_orders WHERE order_no = 'IMP-UP'`);
+  assert.strictEqual(h.source, 'collect', '来源应升级为 collect（采集帧信息更全）');
+  assert.strictEqual(Number(h.amount_cents), 999, '金额跟采集帧走（同一口径只保留一份）');
+  assert.strictEqual(h.pay_time, '2026-10-24 10:01:00', '导入报表没有的字段只能靠升级补上');
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'IMP-UP'`).n),
+    2,
+    '行数不变（整单替换语义，但帧行数不少于原行数）',
+  );
+});
+
+check('T0-4 采集帧行数比已有少：整单不写 + 回执给原因（不静默删行）', () => {
+  insert({ orderNo: 'IMP-TRUNC', imageId: 1 });
+  insert({ orderNo: 'IMP-TRUNC', imageId: 2 });
+  const r = odb.upsertCollectedOrder({
+    orderNo: 'IMP-TRUNC', orderTime: '', bizStatus: '', amountCents: 5,
+    lines: [{ itemId: '1005018888888005', qty: 1, color: '黑', size: 'L' }],
+  });
+  assert.ok(r.refusedReason.includes('疑似帧不完整'), `必须给出原因，实际：${JSON.stringify(r.refusedReason)}`);
+  assert.strictEqual(r.rows, 0, '拒绝时一行都不许写（半写的单看不出丢了哪几行）');
+  const h = dbGet(`SELECT source FROM oi_orders WHERE order_no = 'IMP-TRUNC'`);
+  assert.strictEqual(h.source, 'import', '被拒的帧不许改动原单来源');
+  assert.strictEqual(
+    Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE o.order_no = 'IMP-TRUNC'`).n),
+    2,
+    '原单两行必须留着',
+  );
 });
 
 // ───────────────────────────────────────────────────────────── [10] 套装部件

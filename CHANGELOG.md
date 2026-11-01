@@ -13,6 +13,46 @@
 
 ## [Unreleased]
 
+### Fixed · 采集路径不再丢字段：商品ID / 图 / 变体键落齐，跳过带原因（2026-11-01，M0）
+
+- **动机（真库取证）**：芒果同步的通道全通，但**一个采集订单都没进来过**。真库现状：
+  `oi_orders.source` 全是 `import`（70 单）、`source='collect'` 为 **0**；`biz_status` 70/70 全空；
+  `pl_shop_items` 71 款只覆盖 2 家店；`pod_*` 表 0 张。四个断点都在这条路上，而且**全部静默**——
+  人在界面上只看到"未归类"，看不出是"没采到"还是"采到了但字段丢了"。
+- **A1 商品ID 被丢弃**：`upsertOrderBatch` 明明算出了 `itemId`，传进 `upsertCollectedOrder`
+  后 `ins.run()` 只写 `size/raw_fields/color/qty` —— 商品ID 一个字都没进库，`oi_order_items`
+  连 `item_id` 列都没有 ⇒ **采集单一行都拼不出 `variant_key`**，图案绑定 / 款色归类 / 成本
+  全部落空。v13 加列并落齐。
+- **A2 `image_id` 写死 NULL**：色名塌陷的链接（7/71，50 个槽位）永远判不出图案。改为写落地后的
+  图 id（无图写 NULL，不写 0 —— 0 会让"没图"看起来像"图 id 是 0"）。
+- **A3 整帧塞进 `raw_fields`**：既有解析链（`extractSkuFields` 的键名族、`parseOrderPropsColor`
+  的规格串）都在**顶层**找值，只存整帧 JSON 时它们找不到且不报错 ⇒ 键静默为空。现在整帧快照
+  仍然保真保留（`采集帧`），另**按行**叠加 `商品ID` / `产品属性` 两个可识别的键。
+  ⚠️ 必须**每行一份**：一单多商品共用一份会让整单的键塌成第一行的值。
+- **A4 通道互斥直接抛错**：`source !== 'collect'` 时抛「已由导入通道写入」⇒ 存量 70 单全是导入单，
+  采集一开跑**全部被拒**，而调用方只 `console.warn` 后计进 `skipped`，界面上只有一个数字、没有原因。
+  改为**允许 `import → collect` 升级**（采集帧信息更全：付款时刻 / 时效 / 店铺 authId 导入报表里根本没有），
+  并加**行数不缩水**保护：帧行数少于已有行 ⇒ 整单不写 + 回执给原因（残帧不许静默删历史行）。
+- **A5 跳过没有原因**：`upsertOrderBatch` 回执新增 `skips: [{orderNo, reason}]`（上限 50），
+  `/ae/ingest` 把"消毒阶段被挡"与"入库阶段被拒"的原因**分开给**（前者要改扩展解析，后者要改数据，
+  处置办法完全不同）。
+- **变体键支持第 4 段（色名塌陷的唯一判别证据）**：新增 `electron/podImageKey.ts`
+  （`imageKeyOf(url)` 纯函数，取 `/kf/<id>`，剥查询串/尺寸后缀，**不动 hash 也不折大小写**）；
+  `variantKeyOf` 只在图键非空时追加第 4 段 —— **不传图键与改造前逐字节相同**（存量 75 行的键一个字没变，
+  真库副本实测键集合完全一致）；`splitVariantKey` 接受 3/4 段，其他长度视为脏键。
+- **迁移 v13**：`oi_order_items` 加 `item_id` / `sku_code`；`oi_orders` 加 `pay_time` /
+  `shop_auth_id` / `deal_deadline` / `timeout_at`。**只加列不回填**（导入报表里没有这些字段，
+  回填就是编数据）。D-2 的"两个时效时点"按推荐都建：芒果 `sendGoodExpiredDate`(11-11) 与
+  `qualifiedTime`(11-05) 实测**差 6 天**，去订单详情页核对前不替用户选一个。
+- **验证**：真库**副本**跑 v13 —— `version=13`、六列齐全、**70 单 / 75 行 / 75 个变体键逐字节不变**、
+  二次运行无 `duplicate column name`；`npm run schema:smoke` / `order:smoke` / `ae:smoke` 全绿；
+  `npm test` **1148 例**（54→55 文件）；`npm run verify` / `verify:docs` / `lint` 全绿。
+  冒烟新增 6 条断言（四列齐 / 无图仍 3 段 / import→collect 升级 / 残帧拒绝 / 同源重推 / skips 带原因）。
+- **环境注记**：本机 `ELECTRON_RUN_AS_NODE=1` 会被子进程继承，`electron scripts/*.cjs` 会退化成
+  node 模式（`app` 为 undefined，`pickingRows` 报 `Cannot read properties of undefined (reading 'getPath')`）。
+  跑 `*:smoke` 要用 `env -u ELECTRON_RUN_AS_NODE npm run …`。**这不是代码问题**，但会让"冒烟失败"
+  看起来像功能坏了。
+
 ### Changed · 颜色板：标准色卡缩小不滚、待归一每行加款图、色名列收窄（2026-10-31）
 
 - **动机（用户口径）**：「标准色卡片尺寸可以小点，不要出现滚动条，要全部都展示出来，带归一列表中需要加款图，

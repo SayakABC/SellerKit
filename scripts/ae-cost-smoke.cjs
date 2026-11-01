@@ -198,6 +198,13 @@ check('缺汇率的币种 → 金额 NULL（**不是 0**）；回执报出缺汇
   const bad = adb.upsertOrderBatch([{ orderId: '', goodsAmount: 1 }]);
   assert.strictEqual(bad.skipped + bad.inserted, 1, '空订单号的帧不该静默消失（写失败要计数）');
   assert.strictEqual(bad.rateMissing, 0, '空订单号是校验失败（skipped），不是缺汇率 —— 两个数别混');
+  // T0-5：跳过**必须带原因**。只回一个数字时，"1 单没进来"和"1 单重复推送"长得一样，
+  // 用户唯一的动作是再点一次同步（然后还是 1）。
+  assert.strictEqual(bad.skips.length, 1, '被挡的帧要逐条进 skips');
+  assert.ok(
+    String(bad.skips[0].reason).length > 0,
+    `skips 里必须有原因，实际：${JSON.stringify(bad.skips)}`,
+  );
 });
 
 check('读口按 source 过滤：collect / import / all 三态分明', () => {

@@ -66,7 +66,7 @@ const PRODUCT_SKU_STEPS = 3;
 // → 12 订单行 += variant_key（店铺+商品ID+平台色）· 从 raw_fields 回填 · oi_variant_keys 建表
 // （2026-10-21 订正：v5–v6 加进来时这两个常数没跟着改，冒烟从那时起一直红着 —— 本轮一并补齐）
 // （2026-10-28 订正：v11 加进来时同样漏改常数，7 条断言一起红 —— 加迁移必须同一提交改这里）
-const ORDER_MAIN_STEPS = 12;
+const ORDER_MAIN_STEPS = 13;
 const AE_MAIN_STEPS = 2; // ae 域：1 成本生效区间重建 → 3 删弃表（v2 补列已随表删除）
 // purchase_orders：1 删 note → 2 purchase_items += style_color_id
 // → 3 purchase_sources += order_item_id（2026-10-22 补：常数漏改，[0] 自证拦下）
@@ -1086,6 +1086,23 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
     2,
     '收口不许新建款色（迁移只写键）',
   );
+  // ⑪ v13：芒果同步六列（老库走 ALTER 补，新库由列数组直建 —— 这里钉的是**升级路径**）
+  const v13Head = dbQuery(`PRAGMA table_info(oi_orders)`).map((c) => String(c.name));
+  for (const c of ['pay_time', 'shop_auth_id', 'deal_deadline', 'timeout_at']) {
+    assert.ok(v13Head.includes(c), `v13 应给 oi_orders 加 ${c}`);
+  }
+  const v13Item = dbQuery(`PRAGMA table_info(oi_order_items)`).map((c) => String(c.name));
+  for (const c of ['item_id', 'sku_code']) {
+    assert.ok(v13Item.includes(c), `v13 应给 oi_order_items 加 ${c}`);
+  }
+  // 幂等：再跑一次不许 `duplicate column name`（SQLite 无 ADD COLUMN IF NOT EXISTS）
+  odb.ensureOrderSchema();
+  assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
+  // 不回填：存量行必须是空串（"没同步过"不能伪装成"付款时刻是 0"）
+  const stale = dbGet(
+    `SELECT COUNT(*) AS n FROM oi_order_items WHERE item_id <> '' OR sku_code <> ''`,
+  );
+  assert.strictEqual(Number(stale.n), 0, 'v13 不许编造存量值');
 });
 closeDb();
 try {

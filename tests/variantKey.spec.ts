@@ -66,20 +66,69 @@ describe('variantKeyOf', () => {
     const forged = variantKeyOf({ shopKey: 'a', itemKey: 'b\u0000c', colorKey: 'd' });
     const legit = variantKeyOf({ shopKey: 'a\u0000b', itemKey: 'c', colorKey: 'd' });
     expect(forged).not.toBe(legit);
-    expect(splitVariantKey(forged)).toEqual({ shopKey: 'a', itemKey: 'bc', colorKey: 'd' });
+    expect(splitVariantKey(forged)).toEqual({
+      shopKey: 'a',
+      itemKey: 'bc',
+      colorKey: 'd',
+      imageKey: '',
+    });
+  });
+
+  // ── T0-6：色名塌陷链接的第 4 段（图键）────────────────────────────────────
+  it('不给图键 ⇒ 与改造前**逐字节相同**的 3 段键（存量 75 行的键一个字都不许变）', () => {
+    const noImg = variantKeyOf(base);
+    expect(noImg.split('\u0000').length).toBe(3);
+    // 显式传空串、传 undefined、不传该键，三者必须同键（否则同一个槽位会出现两种写法）
+    expect(variantKeyOf({ ...base, imageKey: '' })).toBe(noImg);
+    expect(variantKeyOf({ ...base, imageKey: '   ' })).toBe(noImg);
+    expect(variantKeyOf({ ...base, imageKey: undefined })).toBe(noImg);
+    // 尾巴不许留多余分隔符（`a\0b\0` 与 `a\0b` 会被当成两个槽位）
+    expect(noImg.endsWith('\u0000')).toBe(false);
+  });
+
+  it('给了图键 ⇒ 4 段，且同色不同图**不同键**（塌陷链接才能分开）', () => {
+    const k1 = variantKeyOf({ ...base, imageKey: 'S111' });
+    const k2 = variantKeyOf({ ...base, imageKey: 'S222' });
+    expect(k1.split('\u0000').length).toBe(4);
+    expect(k1).not.toBe(k2); // 这是整条链要解决的事：`Picture color` 全都同名，只能靠图分开
+    expect(k1).not.toBe(variantKeyOf(base)); // 加了图键就不是原来那个键（不会被旧绑定吞掉）
+  });
+
+  it('4 段键能拆回四段；2 段/5 段视为脏键（不猜一个解释）', () => {
+    const key = variantKeyOf({ ...base, imageKey: 'S111' });
+    expect(splitVariantKey(key)).toEqual({
+      shopKey: '十店',
+      itemKey: '1005012406132867',
+      colorKey: '5',
+      imageKey: 'S111',
+    });
+    for (const bad of ['a\u0000b', 'a\u0000b\u0000c\u0000d\u0000e']) {
+      expect(splitVariantKey(bad)).toEqual({
+        shopKey: '',
+        itemKey: '',
+        colorKey: '',
+        imageKey: '',
+      });
+    }
   });
 });
 
 describe('splitVariantKey', () => {
   it('往返：拼出来再拆开，三段与输入归一后的值一致', () => {
     const key = variantKeyOf({ shopKey: ' 十店 ', itemKey: '1005', colorKey: ' 5 ' });
-    expect(splitVariantKey(key)).toEqual({ shopKey: '十店', itemKey: '1005', colorKey: '5' });
+    expect(splitVariantKey(key)).toEqual({
+      shopKey: '十店',
+      itemKey: '1005',
+      colorKey: '5',
+      imageKey: '',
+    });
   });
 
-  it('脏键不抛错（查询路径不该因库里的坏值崩），返回三段空串', () => {
-    expect(splitVariantKey('')).toEqual({ shopKey: '', itemKey: '', colorKey: '' });
-    expect(splitVariantKey('a\u0000b')).toEqual({ shopKey: '', itemKey: '', colorKey: '' });
-    expect(splitVariantKey(null)).toEqual({ shopKey: '', itemKey: '', colorKey: '' });
+  it('脏键不抛错（查询路径不该因库里的坏值崩），返回全空串', () => {
+    const empty = { shopKey: '', itemKey: '', colorKey: '', imageKey: '' };
+    expect(splitVariantKey('')).toEqual(empty);
+    expect(splitVariantKey('a\u0000b')).toEqual(empty);
+    expect(splitVariantKey(null)).toEqual(empty);
   });
 });
 

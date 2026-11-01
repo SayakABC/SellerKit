@@ -106,6 +106,14 @@ export interface AeUpsertResult {
   updated: number;
   skipped: number;
   /**
+   * 被挡下的单**逐条带原因**（T0-5）。
+   *
+   * 为什么不能只回一个 `skipped` 数字：调用链末端（扩展 popup / 采集状态条）只有一个数字时，
+   * "3 单没进来"和"3 单是重复推送"长得一模一样，用户唯一的动作是**再点一次同步**（然后还是 3）。
+   * 原因必须回到发起方。上限 50 条 —— 回执不是日志，逐条全带会把 1MB 上限撑爆。
+   */
+  skips: { orderNo: string; reason: string }[];
+  /**
    * 本批里**因缺汇率**而金额落 NULL 的订单数（外币帧在 `ae_rates` 查不到）。
    *
    * 为什么要单独回一个数：缺汇率时 `amount_cents` 只能是 NULL（`null` = "算不出来"，
@@ -695,7 +703,7 @@ export function sanitizeIngestOrder(input: unknown): { order: AeIngestOrder | nu
 
 /** 批量幂等 upsert：存在 order_id 则更新（含 SKU 行/费用科目整批替换），否则插入。整体走事务。 */
 export function upsertOrderBatch(orders: AeIngestOrder[]): AeUpsertResult {
-  if (!orders.length) return { inserted: 0, updated: 0, skipped: 0, rateMissing: 0 };
+  if (!orders.length) return { inserted: 0, updated: 0, skipped: 0, skips: [], rateMissing: 0 };
   ensureAeSchema(); // 直接调用本函数的场景（冒烟/脚本）也要保证汇率表在（默认汇率只种缺的）
   // 汇率（采集帧是原币；主干一律 CNY 分）
   const rates = new Map<string, number>();
@@ -708,7 +716,13 @@ export function upsertOrderBatch(orders: AeIngestOrder[]): AeUpsertResult {
   let updated = 0;
   let skipped = 0;
   let rateMissing = 0;
+  const skips: { orderNo: string; reason: string }[] = [];
+  const noteSkip = (orderNo: string, reason: string): void => {
+    skipped += 1;
+    if (skips.length < 50) skips.push({ orderNo, reason: reason.slice(0, 300) });
+  };
   for (const o of orders) {
+    const orderNo = String(o.orderId ?? '');
     try {
       const currency = String(o.currency ?? '') || 'USD';
       const rate = currency === BASE_CURRENCY ? 1 : (rates.get(currency) ?? 0);
@@ -721,36 +735,48 @@ export function upsertOrderBatch(orders: AeIngestOrder[]): AeUpsertResult {
         : null;
       const lines = (Array.isArray(o.lines) ? o.lines : []).map((l) => {
         const props = parseSkuProps((l as Record<string, unknown>)?.skuProps);
+        const row = l as Record<string, unknown>;
         return {
-          itemId: String((l as Record<string, unknown>)?.productId ?? '').slice(0, 64),
-          qty: Math.max(1, Math.round(Number((l as Record<string, unknown>)?.qty) || 1)),
+          itemId: String(row?.productId ?? '').slice(0, 64),
+          qty: Math.max(1, Math.round(Number(row?.qty) || 1)),
           color: props.color.slice(0, 64),
           size: props.size.slice(0, 64),
+          // 平台 SKU 唯一 ID（`skuId`）。芒果帧叫 `skuCode`，速卖通帧叫 `skuId` —— 语义同一个：
+          // 平台给这一条 SKU 的精确标识（比"商品ID+色名"更不可能塌陷）。
+          skuCode: String(row?.skuId ?? '').slice(0, 64),
+          // 帧里若带 SKU 图就一并给（图键只在能算出时才追加第 4 段键）
+          imageUrl: String(row?.imageUrl ?? row?.productImgUrl ?? ''),
         };
       });
       const res = upsertCollectedOrder({
-        orderNo: String(o.orderId ?? ''),
+        orderNo,
         orderTime: String(o.orderTime ?? ''),
         bizStatus: String(o.status ?? ''),
         shop: String(o.shopName ?? ''),
         amountCents,
-        // 保真：整帧原文放进 raw_fields（**加前缀**，免得与报表列名族相撞）
+        // 保真：整帧原文放进 raw_fields（**加前缀**，免得与报表列名族相撞）。
+        // 行级可识别字段（商品ID / 产品属性）由 `upsertCollectedOrder` 按行补 ——
+        // 那些字段每行不同，在这里合进去会让整单的键塌成第一行的值。
         rawFields: { 采集帧: JSON.stringify(o).slice(0, 20000) },
         lines,
       });
+      if (res.refusedReason) {
+        // 整单没写（如"采集帧比导入单行数少"）：算跳过，但**原因要回到发起方**
+        noteSkip(orderNo, res.refusedReason);
+        continue;
+      }
       if (res.replaced) updated += 1;
       else inserted += 1;
       // 只在**真的落了库**之后才计入 —— 被校验挡掉的行（`skipped`）不是"缺汇率的订单"，
       // 否则回执会把"一条坏帧"和"一条算不出钱的单"混成一个数（两种处置办法完全不同）。
       if (missingRate) rateMissing += 1;
     } catch (err: any) {
-      // 回执只带 skipped 计数、没有原因；通道互斥这类校验会在这里挡单，
-      // 至少留一条主进程日志，别让"整单没进来"变成纯静默。
-      console.warn(`[ae-db] 订单 ${String(o.orderId ?? '')} 未入库：`, err?.message || err);
-      skipped += 1;
+      const reason = String(err?.message || err);
+      console.warn(`[ae-db] 订单 ${orderNo} 未入库：`, reason);
+      noteSkip(orderNo, reason);
     }
   }
-  return { inserted, updated, skipped, rateMissing };
+  return { inserted, updated, skipped, skips, rateMissing };
 }
 
 // ---- 查询 ----

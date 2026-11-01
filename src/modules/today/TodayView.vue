@@ -88,6 +88,7 @@ import { switchModule } from '@/core/services/shell';
 import { selectExcelFile } from '@/core/services/dialog';
 import { detectAndImport, type AutoImportResult } from '@/core/services/importSheet';
 import { dailyShip } from '@/lib/dailyShip';
+import { shippingPulse } from '@/lib/shippingPulse';
 import { coverageInputs } from '@/lib/orderCoverage';
 import { localDayKey } from '@/lib/localDay';
 import type { UnifiedOrderRow } from '@/types';
@@ -169,6 +170,7 @@ const receipt = ref<AutoImportResult | null>(null);
 const summary = ref<ShippingSummary>({
   orders: { total: 0, collect: 0, import: 0, lastTime: '' },
   daily: { orders: 0, pieces: 0, taken: 0, remaining: 0, estimated: false },
+  pulse: { pending: 0, risk: 0, pieces: 0, missingImage: 0, noDeadline: 0, assumedQty: 0 },
   gaps: { style: 0 },
   purchase: { orders: 0, draft: 0, gap: 0, ignored: 0, balance: 0 },
 });
@@ -465,6 +467,23 @@ async function reload(): Promise<void> {
     //    否则总览说"全齐了"、清单说"还差 1 件"是必然会发生的。
     const d = dailyShip(all, { covered, pool });
 
+    // 3b) 「现在手上还有几单没发」（T2-2）：**另取一次全库**，刻意不带 `importDate`。
+    //     待发货是跨天的 —— 昨天没发完的单今天还在，按导入日筛会把它们漏掉，
+    //     于是"今天要发 0 单"而实际还有 7 单在路上。
+    //     `limit: 2000` 对这项够用：SQL 是 `ORDER BY oi.id DESC LIMIT ?`，取的是**最新**的 2000 行，
+    //     而未发货的单必然是最近发生的那些（收集箱 5000 单历史不会挤掉它们）。
+    //     失败按"全 0"处理：这一屏是看数的，不该让一个副指标把整页汇总挂掉。
+    let pulse: ShippingSummary['pulse'] = {
+      pending: 0,
+      risk: 0,
+      pieces: 0,
+      missingImage: 0,
+      noDeadline: 0,
+      assumedQty: 0,
+    };
+    const pr = await ipc.orderShippingRows({ limit: 2000 });
+    if (pr.success && pr.data) pulse = shippingPulse(pr.data);
+
     // 4) 未识别款：只服务「归类核对」页签徽标与主线第 2 步（"缺什么"不再在这里算）
     const gaps = { style: all.length - all.filter((o) => String(o.styleCode ?? '')).length };
 
@@ -483,6 +502,7 @@ async function reload(): Promise<void> {
         remaining: d.remaining,
         estimated: d.estimated,
       },
+      pulse,
       gaps,
       purchase,
     };

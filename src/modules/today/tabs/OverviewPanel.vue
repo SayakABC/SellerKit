@@ -78,6 +78,65 @@
         </button>
       </template>
     </section>
+
+    <!-- 「现在还有多少没发」（2026-11-01 T2-2 新增）—— 与上面「今天要发」**不是同一批**，
+         所以是独立一块而不是第五格：
+           · 上面按**导入日**筛（今天导的这批，服务导入/归类两步）；
+           · 这里按**当前状态**算（全部还没发的，跨天 —— 昨天没发完的今天还在）。
+         把两者并进一行会出现"待发货 0 但今天要发 12 单"这种自相矛盾的画面。
+         ⚠️ 数字全部来自 `summary.pulse`（容器算），本面板一个 ipc 都不调；
+            算法在 `@/lib/shippingPulse`（纯函数，vitest 覆盖）。 -->
+    <section class="td-pulse" data-act="pulse-summary">
+      <header class="td-pulse__head">
+        <h2 class="td-pulse__title">现在还没发</h2>
+        <span class="td-pulse__scope" data-act="pulse-scope">全部待发货 · 跨天</span>
+      </header>
+
+      <template v-if="pulse.pending">
+        <div class="td-pulse__stats">
+          <div class="td-stat td-pulse__stat" data-act="stat-pending">
+            <span class="td-stat__num">{{ pulse.pending }}</span>
+            <span class="td-stat__label">单待发货</span>
+          </div>
+          <!-- 「快超时」是要立刻处理的那一格：>0 才染警示色。
+               口径 = 24h 内到截止**或已过期**（越紧急越要提醒，不能因为在过去就排除）。 -->
+          <div
+            class="td-stat td-pulse__stat"
+            :class="{ 'is-warn': pulse.risk > 0 }"
+            data-act="stat-risk"
+          >
+            <span class="td-stat__num">{{ pulse.risk }}</span>
+            <span class="td-stat__label">单快超时</span>
+          </div>
+          <div class="td-stat td-pulse__stat" data-act="stat-pulse-pieces">
+            <span class="td-stat__num">{{ pulse.pieces }}</span>
+            <span class="td-stat__label">件商品</span>
+          </div>
+          <div
+            class="td-stat td-pulse__stat"
+            :class="{ 'is-warn': pulse.missingImage > 0 }"
+            data-act="stat-missing-image"
+          >
+            <span class="td-stat__num">{{ pulse.missingImage }}</span>
+            <span class="td-stat__label">行缺图</span>
+          </div>
+        </div>
+
+        <!-- 「算不出风险」必须说出来：导入单根本没有截止期这一列，
+             不说的话「快超时 0」会被读成"都不会超时"。 -->
+        <p v-if="pulse.noDeadline" class="td-pulse__hint" data-act="pulse-nodeadline">
+          其中 {{ pulse.noDeadline }} 单没有截止期（导入单没有这一列），算不出会不会超时
+        </p>
+        <p v-if="pulse.assumedQty" class="td-pulse__hint" data-act="pulse-assumed">
+          件数里有 {{ pulse.assumedQty }} 行不知道数量，按 1 件计
+        </p>
+      </template>
+
+      <!-- 空态：说"没有待发货"，不说"没有数据" —— 后者会让人以为采集坏了 -->
+      <p v-else class="td-pulse__empty" data-act="pulse-empty">
+        当前没有待发货订单（芒果那边待发货列表是空的，或还没同步过）
+      </p>
+    </section>
   </div>
 </template>
 
@@ -98,6 +157,8 @@ import { useShipping } from '../flowCtx';
 const { summary, go, importing, importExcel } = useShipping();
 
 const daily = computed(() => summary.value.daily);
+/** 「现在还没发」四数（容器里的 `@/lib/shippingPulse` 算好，这里只摆放） */
+const pulse = computed(() => summary.value.pulse);
 
 /** 已拿占比（0~100）。件数为 0 时进度条不渲染，这里只在有件数时被用到 */
 const percent = computed(() => {
@@ -192,6 +253,77 @@ function onEmptyImport(): void {
 /* 拿齐了 → 回归普通色（红色数字挂在那里会让人以为还有活没干） */
 .td-stat.is-done .td-stat__num {
   color: var(--wb-success);
+}
+
+/* ---- 「现在还没发」第二块（T2-2）---------------------------------------------
+   与上面同一套格子样式（复用 `.td-stat`），但要**解掉上面那条 `:last-child` 规则**：
+   那条是为「还差」写的，在这里会把"行缺图"无条件染红 —— 缺图是常态（导入单没图），
+   常态染红等于没有警示。这里改成「只在 `is-warn` 时染色」，由数据决定。 */
+.td-pulse {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-lg);
+  background: var(--wb-surface);
+  box-shadow: var(--wb-elev-1);
+}
+
+.td-pulse__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.td-pulse__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--wb-text);
+}
+
+.td-pulse__scope {
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
+.td-pulse__stats {
+  display: grid;
+  max-width: 720px;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 10px;
+}
+
+/* 复位上面为「还差」写的 last-child 染色 */
+.td-pulse .td-stat:last-child .td-stat__num {
+  color: var(--wb-text);
+}
+
+.td-pulse .td-stat:last-child {
+  border-left-color: var(--wb-border);
+}
+
+/* 只在真有风险/真缺图时染色（数字与左侧竖条一起染，避免半截感） */
+.td-pulse .td-stat.is-warn .td-stat__num {
+  color: var(--wb-warning);
+}
+
+.td-pulse .td-stat.is-warn {
+  border-left-color: var(--wb-warning);
+}
+
+.td-pulse__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
+.td-pulse__empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--wb-text-muted);
 }
 
 .td-stat.is-done {

@@ -287,14 +287,47 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | **T2-1** | 芒果状态 → 内部 bucket 映射表（`正常/待发货/已发货/已完成/已取消/退款中/部分发货` → `pending/shipped/finished/cancelled`）。**唯一实现**，别在别处再写一套 LIKE | 新 `src/lib/mangoStatus.ts`（纯函数）+ 主进程同一份 | 单测：8 种原文全覆盖，未知值落 `unknown` 不落 `pending` | — |
 | **T2-2** | 「发货台·总览」四数改口径：`待发货 N`（`bucket='pending'`）/ `有截止风险 M`（`deal_deadline` 距今 < 24h）/ `件数` / `缺图 K`。保留现有 `daily` 四数不动，**新增一行**而非替换 | `src/modules/today/tabs/OverviewPanel.vue` + `flowCtx.ts` 汇总 | `npm run today:ui` 全绿，新断言钉在 `data-act="stat-pending"` / `data-act="stat-risk"` | T2-1 |
 | **T2-3** | 采集状态条：`上次同步 今天 09:12 · 抓 3 条 · 入库 3 · partial=false`；失败时红条 + 原因（`登录过期 / 扩展未装 / 抓 0 条但总数 12`） | 总览页顶部 | 断网演练时条变色且文案说明"可能是网络，不是没单" | T1-6 |
+| **T2-4** | 待发货清单：按 `deal_deadline` 升序，列 = 订单号 / 店铺 / 图案 / 件数 / 剩余时间 / 图案状态（已绑/待绑/缺图） | 发货台新 tab 或总览下钻 | 抓 3 单时清单显示 3 行，最紧急的在最上 | T2-2 |
+| **T2-5** | 冒烟断言：空态（0 单）与有数据两种形态都要钉；**空态不能说"今天没有订单"** 而要说"还没同步，点这里" | `scripts/today-ui-smoke.mjs` | 变异测试：把 `pending` 改回 `unshipped` 断言必须变红 | T2-2 |
 
 > **T2-2 的字段口径（D-2 已定，别实现时改）**：`deal_deadline`（= 芒果 `sendGoodExpiredDate`）就是真倒计时，
 > 「有截止风险」**只认这一列**。`timeout_at`（`qualifiedTime`）虽然也存着，但它与前者差 6 天 ——
 > 实现时若"两个取更近的那个"，会把稳定的 6 天偏差纠成一堆假告警，而假告警三天就会让人不再看这个数。
-| **T2-4** | 待发货清单：按 `deal_deadline` 升序，列 = 订单号 / 店铺 / 图案 / 件数 / 剩余时间 / 图案状态（已绑/待绑/缺图） | 发货台新 tab 或总览下钻 | 抓 3 单时清单显示 3 行，最紧急的在最上 | T2-2 |
-| **T2-5** | 冒烟断言：空态（0 单）与有数据两种形态都要钉；**空态不能说"今天没有订单"** 而要说"还没同步，点这里" | `scripts/today-ui-smoke.mjs` | 变异测试：把 `pending` 改回 `unshipped` 断言必须变红 | T2-2 |
 
 **阶段门禁**：打开应用 → 首屏 3 秒内出现四个数字，且「待发货」数 == `SELECT COUNT(*) FROM oi_orders WHERE biz_status IN (待发货集合)`。
+
+#### M2 施工记录（2026-11-01）
+
+已完成 **T2-1 / T2-2**（T2-3 采集状态条、T2-4 待发货清单、T2-5 空态骨化待做）。
+
+| 任务 | 落点 | 验证 |
+|---|---|---|
+| T2-1 状态分桶 | `src/lib/mangoStatus.ts`（5 桶 + 唯一实现） | `tests/mangoStatus.spec.ts` 25 例；变异「认不出→pending」立刻红 |
+| T2-2 第二行四数 | `src/lib/shippingPulse.ts`（纯函数）+ `flowCtx.ShippingSummary.pulse` + `TodayView.reload()` + `OverviewPanel` 新块 | `tests/shippingPulse.spec.ts` 12 例；`today:ui` 3 条新断言；两次变异确认会红 |
+
+**与计划的三处偏离（都是实现时才发现的口径问题）**：
+
+1. **T2-2 不是"给四数改口径"，而是**新开一块**。计划写的是"保留现有 `daily` 四数不动，新增一行"——
+   做的时候确认了这两块**必须分开且不能合并**：`daily` 按**导入日**筛（服务导入/归类两步，看"今天导的这批"），
+   而"今天要发几单"要按**当前状态**算（跨天：昨天没发完的今天还在）。合并会得到
+   "待发货 0 但今天要发 12 单"这种自相矛盾的画面。所以容器里**多了一次取数**（不带 `importDate` 的全库读）。
+2. **`shippingRows` 投影缺列，先补投影**。计划默认"四数在现有投影上算得出来"，实际 `deal_deadline` /
+   `timeout_at` / `pay_time` / `image_id` **一个都没投影**，`UnifiedOrderRow` 也没声明。
+   这四列正好是 2026-09-30"零读者就删"原则删掉的那批 —— 现在有真读者了，按同一条原则加回来。
+3. **「算不出风险」要单独计数**（计划没提）。导入单没有 `deal_deadline` 这一列，若把空截止期当"不超时"，
+   「快超时 0」会被读成"都不会超时" —— 而事实是"算不出来"。所以 `noDeadline` 单独计数并在界面说出来；
+   写成坏格式的日期也归进这一项（否则一个写坏的日期会让风险数永远是 0 而没人知道为什么）。
+
+**一个刻意的实现选择**：`parseLocalTime` **手写**而不用 `new Date(str)`。`yyyy-mm-dd hh:mm:ss` 这种
+带空格的格式在 `Date` 构造器里行为是**实现相关**的（V8 当本地时间，别的引擎可能当 Invalid Date），
+而这一屏显示"还剩几小时"，解析偏一小时就是错的告警。
+
+**变异测试（确认守卫有效，不是"跑了就绿"）**：
+- 去掉 `isWaitingShip` 筛选 → 3 条红
+- 风险窗口 `<= 24h` 改成 `< 0`（只算已过期）→ 2 条红
+- `today:ui` 把第二次取数也带上 `importDate` → 3 条红（正是"两块口径必须不同"那条）
+
+**门禁**：`npm test` 1204 例 / 58 文件 · `today:ui` 308 项 PASS · `verify` · `verify:docs` · `lint`（0 error）全绿。
 
 ---
 

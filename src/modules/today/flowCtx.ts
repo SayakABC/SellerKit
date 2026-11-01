@@ -46,6 +46,31 @@ export interface ShippingSummary {
    */
   daily: { orders: number; pieces: number; taken: number; remaining: number; estimated: boolean };
   /**
+   * 「现在手上还有几单没发」（2026-11-01 T2-2）—— 与上面 `daily` **不是同一批**：
+   *
+   * `daily` 按**导入日**筛（服务导入/归类两步："今天导的这批"），本项按**当前状态**算
+   * （服务早上开机第一问："今天要发几单"）。昨天没发完的单今天还在，所以不能并进 `daily` ——
+   * 并进去会出现"待发货 0 但今天要发 12 单"这种自相矛盾的画面。
+   *
+   * 算法唯一实现在 `@/lib/shippingPulse`（纯函数，vitest 覆盖）；这里只搬结果。
+   * ⚠️ `noDeadline > 0` 时界面必须说明"其中 N 单没有截止期"：导入单根本没有这一列，
+   *    不说明的话「有截止风险 0」会被读成"都不会超时"。
+   */
+  pulse: {
+    /** 待发货**单数**（按单号去重） */
+    pending: number;
+    /** 其中 24h 内到截止或**已过期**的单数 */
+    risk: number;
+    /** 待发货件数（`qty` 缺失按 1 计并计入 `assumedQty`） */
+    pieces: number;
+    /** 待发货里没有行图的行数 */
+    missingImage: number;
+    /** 算不出截止风险的单数（没有截止期 / 格式认不出） */
+    noDeadline: number;
+    /** 件数按 1 兜底的行数 */
+    assumedQty: number;
+  };
+  /**
    * 今天这批里还有多少行没识别出款（「归类核对」页签徽标 + 主线的第 2 步都读它）。
    *
    * ⚠️ 2026-10-22：**只留 style**。原来的缺克重 / 缺成本 / 运价表 / `gapTotal` 只服务

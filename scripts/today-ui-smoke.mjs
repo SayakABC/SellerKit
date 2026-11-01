@@ -103,6 +103,17 @@ const FAKE_BRIDGE = `<script>
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
   /**
+   * 现在 + ms 毫秒，格式化成 yyyy-mm-dd hh:mm:ss（本地时区）—— 截止期夹具用它。
+   * ⚠️ 必须**相对当前时刻**生成，不能写死日期：写死的话「快超时」的断言会随运行日期漂
+   *    （某天跑就恒红、某天跑就恒绿）。
+   */
+  function atOffset(ms) {
+    var d = new Date(Date.now() + ms);
+    var p = function (x) { return String(x).length < 2 ? '0' + x : String(x); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  /**
    * 按种子生成一条**内容不同**的极小图片 dataUrl（8x8 SVG，走 data: 前缀）。
    * 缩略图假桥若对所有路径回同一个 dataUrl，"两行显示的是不是同一张图"就永远验不出来
    * （2026-10-11 用户报"拿货单明细的图片都是一样的"——守卫必须能分辨两张图）。
@@ -159,6 +170,8 @@ const FAKE_BRIDGE = `<script>
     styleCode: 'S1', styleColor: '黑', color: '黑', size: 'L', itemId: 'ITEM1',
     supplierId: 7, supplierName: '厂A', amountCents: 16518, vatCents: 3469, ddpCents: 2294,
     taxPlatform: '平台已税', bizStatus: '等待发货', rawFields: { '商品信息': '【1】 某款 (商品数量:1 piece)' },
+    // 「现在还没发」四数（T2-2）的夹具：截止期很远 ⇒ 不算风险；imageId=0 ⇒ 算缺图。
+    dealDeadline: atOffset(30 * 24 * 3600 * 1000), imageId: 0,
     // ⚠️ createdAt = **导入日**（不是下单日 orderTime）。下单在前天、导入在今天 —— 这正是
     //    真实工作流（每天早上导"昨天 → 现在"的单），也是"按导入日而不是按下单日筛"这条口径的用例。
     createdAt: daysAgo(0) + ' 10:00:00',
@@ -169,6 +182,8 @@ const FAKE_BRIDGE = `<script>
     supplierId: 0, supplierName: '', qty: 2, amountCents: 20000,
     vatCents: null, ddpCents: null, taxPlatform: '', bizStatus: '等待发货', rawFields: {},
     createdAt: daysAgo(0) + ' 08:30:00',
+    // 1 小时后到截止（在 24h 窗口内 ⇒ 算风险）；有图 ⇒ 不算缺图
+    dealDeadline: atOffset(1 * 3600 * 1000), imageId: 7,
   }];
   // 「导入日」过滤的**反向夹具**（2026-10-11 新增）：一行是**三天前**导进来的。
   // 它与上面那两行的 orderTime 同形，**只有 createdAt（导入日）不同** ⇒ 发货台按导入日筛时
@@ -180,6 +195,10 @@ const FAKE_BRIDGE = `<script>
     styleCode: '', styleColor: '', color: '灰', size: 'XL', itemId: '', supplierId: 0, supplierName: '',
     amountCents: 500, vatCents: null, ddpCents: null, taxPlatform: '', bizStatus: '等待发货',
     rawFields: {}, createdAt: daysAgo(3) + ' 11:00:00',
+    // 没有截止期（导入单本来就没有这一列）⇒ 计入 noDeadline，**不算**风险；也缺图。
+    // 这一行是「现在还没发」与「今天要发」**必须分开**的证据：它三天前导进来，
+    // 上面那块（按导入日筛）看不见它，下面那块（按当前状态）必须看见。
+    dealDeadline: '', imageId: 0,
   }];
 
   function b64ToBuf(b64) {
@@ -1406,6 +1425,34 @@ async function main() {
       flat(document.querySelector('[data-act="daily-scope"]')).indexOf('今天导入') >= 0 &&
         flat(document.querySelector('[data-act="daily-scope"]')).indexOf('关闭') >= 0,
       flat(document.querySelector('[data-act="daily-scope"]')));
+
+    // ---- 「现在还没发」第二行（T2-2）------------------------------------------------
+    // 夹具账（算式写在注释里，改夹具时一起改）：
+    //   全部待发货 = IMPORTED(I-1, 1 件, 截止+30天, 无图) + COLLECTED(C-1, 2 件, 截止+1h, 有图)
+    //              + IMPORTED_OLD(I-OLD, 1 件, 无截止期, 无图)  ⇒ 3 单 / 4 件
+    //   快超时 = 1（C-1：1 小时后到期，落在 24h 窗口内）
+    //   行缺图 = 2（I-1 与 I-OLD；C-1 有 imageId）
+    //   算不出截止期 = 1（I-OLD 是导入单，没有这一列）
+    report('还没发四个数：3 单 / 1 快超时 / 4 件 / 2 行缺图',
+      numOf('stat-pending') === '3' && numOf('stat-risk') === '1' &&
+        numOf('stat-pulse-pieces') === '4' && numOf('stat-missing-image') === '2',
+      '待发=' + numOf('stat-pending') + ' 风险=' + numOf('stat-risk') +
+        ' 件=' + numOf('stat-pulse-pieces') + ' 缺图=' + numOf('stat-missing-image'));
+
+    // **这一条是本轮改动的核心**：两块的口径不同，且证据是 IMPORTED_OLD。
+    // 上面那块（按导入日筛）看不见三天前导进来的 I-OLD ⇒ 2 单；
+    // 下面那块（按当前状态，跨天）必须看见它 ⇒ 3 单。
+    // 若有人"顺手"把两块合并、或把下面那块也按 importDate 筛，这条会立刻红。
+    report('两块口径确实不同：还没发(3) > 今天要发(2)，差的正是三天前导入的那单',
+      Number(numOf('stat-pending')) > Number(numOf('stat-orders')) &&
+        Number(numOf('stat-pending')) - Number(numOf('stat-orders')) === 1,
+      '还没发=' + numOf('stat-pending') + ' 今天要发=' + numOf('stat-orders'));
+
+    // 「算不出截止期」必须说出来：不说的话「快超时 0」会被读成"都不会超时"
+    report('没有截止期的要明说（导入单没有这一列）',
+      flat(document.querySelector('[data-act="pulse-nodeadline"]')).indexOf('1') >= 0 &&
+        flat(document.querySelector('[data-act="pulse-nodeadline"]')).indexOf('截止期') >= 0,
+      flat(document.querySelector('[data-act="pulse-nodeadline"]')));
     // 进度条 = 已拿 / 件数（1/3 ⇒ 约 33%）。判据按**几何比例**，不按 class 名：
     // 宽度算错了条子照样"有"，只有比例能抓（±3% 容差给亚像素与四舍五入）。
     var barRatio = (function () {

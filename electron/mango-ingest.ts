@@ -182,7 +182,9 @@ export function toInternal(frame: unknown): MangoToInternalResult {
   }
 
   // 两个时效时点都存（实测差 6 天：`sendGoodExpiredDate` 11-11 / `qualifiedTime` 11-05）。
-  // 哪个是真正倒计时尚未核对（计划 D-2），界面默认显示前者。
+  // **D-2 已定（2026-11-01 用户确认）**：`sendGoodExpiredDate` 就是真倒计时 ⇒ 落 `deal_deadline`，
+  // 「有截止风险」只认这一列。`qualifiedTime` 仍存进 `timeout_at` 但**不参与任何判定** ——
+  // 两者差的是稳定的 6 天，"取更近的那个"会把固定偏差纠成一堆假告警，假告警三天就没人看了。
   const internet = (o.aeInternetInfoDTO ?? null) as Record<string, unknown> | null;
   const dealDeadline = mangoTime(o.sendGoodExpiredDate);
   const timeoutAt = mangoTime(internet?.qualifiedTime);

@@ -1916,6 +1916,9 @@ export interface ProductMoveSupplierInput {
  * 已删掉货值/买家运费/店铺优惠/平台补贴/币种/业务模式/付款·收货时点/发货时点等 9 个**零读者**字段 ——
  * 它们并没有丢：原始整行仍在 `rawFields`（导入侧）与 `raw_json`（采集侧）里保真，**要加回来随时可重新提取**。
  * 金额一律 **CNY 分**；`null` = 源里没有这一项（**不是 0**，0 会让"缺收入"看起来像"收入为零"）。
+ *
+ * 2026-11-01（M2）**加回 4 个字段**，它们现在有真读者了 —— 不是推翻上面的原则，正是执行它：
+ * `payTime` / `dealDeadline` / `timeoutAt` 供「今天要发几单、哪几单快超时」用，`imageId` 供「缺图 K」用。
  */
 export interface UnifiedOrderRow {
   id: number;
@@ -1957,6 +1960,20 @@ export interface UnifiedOrderRow {
   costCents?: number | null;
   /** 行级**实际进价**快照（`oi_order_items.actual_cost_cents`，拿货落账后回写；单位：分）；`null` = 还没落账 */
   actualCostCents?: number | null;
+  /** 付款时点（采集侧写入；导入侧为空串）—— 发货时效的起点 */
+  payTime: string;
+  /**
+   * 最晚发货时点（芒果 `sendGoodExpiredDate`）。**D-2 已定：这就是真倒计时**，
+   * 「有截止风险」只认这一列；空串 = 不知道（导入单没有这一列）。
+   */
+  dealDeadline: string;
+  /**
+   * 芒果 `qualifiedTime`（比 `dealDeadline` 早 6 天）。**只存不用**，不参与任何告警判定 ——
+   * 与 `dealDeadline` 取"更近的那个"会把稳定偏差变成一堆假超时。
+   */
+  timeoutAt: string;
+  /** 行图（`oi_order_items.image_id`；**0 = 没落地**）—— 图案槽位与「缺图」统计读它 */
+  imageId: number;
   /** 原始整行（导入侧保真：件数解析、商品ID 提取都从这里；采集侧为空对象） */
   rawFields: Record<string, string>;
 }

@@ -4375,6 +4375,23 @@ export function shippingRows(
   weightG: number | null;
   costCents: number | null;
   actualCostCents: number | null;
+  /** 付款时点（采集侧 `gmtPayTime` 写入；导入侧没有 → 空串）。发货时效的**起点** */
+  payTime: string;
+  /**
+   * 最晚发货时点（采集侧芒果 `sendGoodExpiredDate`）。
+   *
+   * **D-2 已定：这就是真倒计时**，「有截止风险」只认这一列。空串 = 不知道（导入单没有）。
+   */
+  dealDeadline: string;
+  /**
+   * 芒果 `qualifiedTime`（实测比 `dealDeadline` **早 6 天**）。**只存不用** —— 不参与任何告警判定。
+   *
+   * 留着是为了将来核对"到底哪个是官方倒计时"时有原始值可比；若把它与 `dealDeadline` 取更近的
+   * 那个来告警，稳定的 6 天偏差会变成一堆假"快超时"。
+   */
+  timeoutAt: string;
+  /** 行图（`oi_order_items.image_id`；**0 = 没落地**）—— 图案槽位与「缺图 K」读它 */
+  imageId: number;
   rawFields: Record<string, string>;
 }[] {
   const n = Math.min(Math.max(Number(limit) || 500, 1), 2000);
@@ -4423,6 +4440,7 @@ export function shippingRows(
     `SELECT oi.id, o.order_no, o.shop, o.order_time, oi.raw_fields, oi.color, oi.size,
             o.amount_cents, o.vat_cents, o.ddp_cents, o.tax_platform, o.biz_status, o.source, oi.qty,
             oi.weight_g, oi.cost_cents, oi.actual_cost_cents,
+            oi.image_id, o.pay_time, o.deal_deadline, o.timeout_at,
             COALESCE(s.code, '') AS style_code, COALESCE(sc.color, '') AS style_color,
             COALESCE(sc.id, 0) AS style_color_id,
             ${supplierSel}
@@ -4460,6 +4478,13 @@ export function shippingRows(
     weightG: money(r.weight_g),
     costCents: money(r.cost_cents),
     actualCostCents: money(r.actual_cost_cents),
+    payTime: String(r.pay_time ?? ''),
+    dealDeadline: String(r.deal_deadline ?? ''),
+    timeoutAt: String(r.timeout_at ?? ''),
+    // `image_id` 列在无图时是 NULL（不是 0，见 upsertCollectedOrder 的写法）。
+    // 这里折成 0 是安全的：SQLite 自增从 1 起，0 不可能是一个真实图片 id，
+    // 且下游（缺图统计 / 图案槽位）只需要布尔"有没有图"。
+    imageId: Number(r.image_id ?? 0) || 0,
     rawFields: safeJson(String(r.raw_fields ?? '')),
   }));
 }

@@ -76,10 +76,14 @@
               模块内二级项（2026-10-17）：缩进 + 名称 + 徽标。
               点它只切「这个模块里的哪一屏」—— 不换模块、不产生 TitleBar「返回」，
               所以直接调模块给的 onSelect，走不了 `activate()` 那条换模块的路。
+              2026-11-03（界面方案 §4.4）：去掉行首图标、改左侧引导线（`.wb-nav-sub-row`）——
+              图标是"入口"的语言，而二级项不是入口；带图标时它与一级项同尺寸同色，
+              一列读下来像平级。文字缩进改 pl-10 与一级项**文字**左缘对齐（52px），
+              引导线从一级项图标中心垂下来。位置数值与侧栏宽度的联动写在 index.css 那段注释里。
             -->
             <div
               v-else-if="row.kind === 'sub'"
-              class="w-full flex justify-center flex-shrink-0"
+              class="wb-nav-sub-row w-full flex justify-start pl-9 pr-3 flex-shrink-0"
             >
               <button
                 type="button"
@@ -87,13 +91,12 @@
                 :aria-current="row.active ? 'page' : undefined"
                 @click="row.onSelect()"
                 :class="[
-                  'flex items-center rounded-lg transition-colors w-[calc(100%-1.5rem)] h-8 pl-7 pr-2 gap-2',
+                  'flex items-center rounded-lg transition-colors w-full h-8 pl-4 pr-2 gap-2',
                   row.active
                     ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)] font-medium'
                     : 'text-[var(--wb-text-muted)] hover:bg-[var(--wb-hover)] hover:text-[var(--wb-text)]',
                 ]"
               >
-                <IconGlyph v-if="row.icon" :name="row.icon" :size="15" />
                 <span class="text-[12.5px] truncate flex-1 text-left">{{ row.name }}</span>
                 <!-- 徽标：读不到数就**不渲染**（不拿 0 冒充"没有"）；待办类 > 0 用警示色 -->
                 <span
@@ -120,7 +123,9 @@
                 @click="onModuleRow(row)"
                 :class="[
                   'flex items-center rounded-lg transition-colors',
-                  collapsed ? 'w-9 h-9 justify-center' : 'w-[calc(100%-1rem)] h-10 gap-3 justify-start',
+                  collapsed
+                    ? 'w-9 h-9 justify-center'
+                    : 'w-[calc(100%-1rem)] h-10 gap-3 justify-start',
                   !collapsed && row.depth > 0 ? 'pl-7 pr-3' : 'px-3',
                   activeId === row.id
                     ? 'bg-[var(--wb-primary-soft)] text-[var(--wb-primary)]'
@@ -128,7 +133,27 @@
                 ]"
               >
                 <span v-html="iconSvg(row.icon)"></span>
-                <span v-if="!collapsed" class="text-sm truncate flex-1 text-left">{{ row.name }}</span>
+                <span v-if="!collapsed" class="text-sm truncate flex-1 text-left">{{
+                  row.name
+                }}</span>
+                <!--
+                  一级入口徽标（邮件未读）。数值由主进程算好推来（见 core/services/navBadge.ts）；
+                  `undefined`/`null` 一律**不渲染** —— 拿 0 冒充"没有"会让"还没数完"和
+                  "确实是零"长得一模一样（这条约定与二级项徽标相同，配色也照抄）。
+                -->
+                <span
+                  v-if="!collapsed && row.count !== undefined && row.count !== null"
+                  :title="row.countTitle"
+                  :class="[
+                    'flex-shrink-0 min-w-[18px] px-1.5 rounded-full text-[10.5px] font-semibold text-center leading-[1.6]',
+                    row.todo && row.count > 0
+                      ? 'bg-[var(--wb-warning-soft)] text-[var(--wb-warning)]'
+                      : activeId === row.id
+                        ? 'bg-[var(--wb-surface)] text-[var(--wb-primary)]'
+                        : 'bg-[var(--wb-surface-2)] text-[var(--wb-text-muted)]',
+                  ]"
+                  >{{ row.count }}</span
+                >
                 <!--
                   有二级菜单的模块给一个展开箭头（2026-10-17）。
                   只在**模块还没打开过**时它才是唯一线索 —— 打开后子项直接出现，箭头就是状态位。
@@ -146,6 +171,15 @@
               <span
                 v-if="activeId === row.id"
                 class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[var(--wb-primary)]"
+              ></span>
+              <!--
+                收起态（仅图标 48px）时徽标退化为一个圆点：数字塞不下，但**没有点时**
+                用户根本不知道这一项里还有未读 —— 那正是"自动收信"最需要被看见的时刻。
+              -->
+              <span
+                v-if="collapsed && row.count !== undefined && row.count !== null && row.count > 0"
+                :title="row.countTitle"
+                class="absolute top-1 right-1 w-2 h-2 rounded-full bg-[var(--wb-warning)]"
               ></span>
               <!-- hover 名称气泡（收起时） -->
               <span
@@ -340,20 +374,21 @@
 </template>
 
 <script setup lang="ts">
-import { shallowRef, ref, computed, onMounted, onUnmounted } from 'vue';
+import { shallowRef, ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { createBuiltinPluginManager } from './plugin';
 import TitleBar from './components/TitleBar.vue';
 import ToastHost from './components/ToastHost.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import SettingsModal from './components/SettingsModal.vue';
 import UiIslandView from './components/UiIslandView.vue';
-import IconGlyph from './components/IconGlyph.vue';
 import type { IconName } from './components/icons';
 import { useModuleStorage } from './services/storage';
 import { initTheme, useTheme } from './services/theme';
 import { toast } from './services/toast';
 import { ipc } from './services/ipc';
 import { subNavOf } from './services/subNav';
+import { navBadgeOf, reportNavBadge } from './services/navBadge';
+import { switchModule } from './services/shell';
 import { NAV_GROUPS } from './nav';
 import type { ModuleCommand, ModuleIcon, ModuleMeta } from './types';
 
@@ -393,6 +428,14 @@ type NavModuleRow = {
    * 模板的箭头旋转与 `aria-expanded` 只认这一个布尔（别再各自推一遍条件）。
    */
   subExpanded?: boolean;
+  /**
+   * 一级入口徽标（邮件未读等）。数值由主进程算好推来（`nav-badge`，见
+   * `core/services/navBadge.ts` 头注释）—— 与二级项的 `count` 同语义：
+   * `undefined` / `null` = **不画**，不是画 0。
+   */
+  count?: number | null;
+  countTitle?: string;
+  todo?: boolean;
 };
 type NavGroupRow = {
   key: string;
@@ -438,6 +481,17 @@ const collapsedGroups = ref<string[]>([]);
  */
 const subCollapsedFor = ref<string>('');
 
+/**
+ * 一级行的徽标字段：没有值就返回空对象（模板据 `count !== undefined` 决定画不画）。
+ * 放在这里是刻意的 —— `navRows` 的 computed 依赖 `navBadgeOf` 读的那个 ref，
+ * 徽标一变整行自动重算，不需要谁再 watch 一遍手推。
+ */
+function moduleBadge(moduleId: string): Pick<NavModuleRow, 'count' | 'countTitle' | 'todo'> {
+  const b = navBadgeOf(moduleId);
+  if (!b || b.count === null || b.count === undefined) return {};
+  return { count: b.count, countTitle: b.title, todo: b.todo };
+}
+
 const navRows = computed<NavRow[]>(() => {
   const metas = navMetas.value;
   const known = new Set(NAV_GROUPS.map((g) => g.id));
@@ -450,10 +504,7 @@ const navRows = computed<NavRow[]>(() => {
     // 手动收起是 2026-10-17 下午补的（用户口径：「现在点击基础数据没法收起二级菜单」）——
     // 少了第三个条件，点自己那次 `activate` 会早退（同模块直接 return），收起无路可走。
     const subOpen =
-      !!m.subNav &&
-      activeId.value === m.id &&
-      !collapsed.value &&
-      subCollapsedFor.value !== m.id;
+      !!m.subNav && activeId.value === m.id && !collapsed.value && subCollapsedFor.value !== m.id;
     const rows: NavRow[] = [
       {
         key: `m:${m.id}`,
@@ -464,6 +515,7 @@ const navRows = computed<NavRow[]>(() => {
         depth: 0,
         hasSub: !!m.subNav,
         subExpanded: subOpen,
+        ...moduleBadge(m.id),
       },
     ];
 
@@ -528,6 +580,7 @@ const navRows = computed<NavRow[]>(() => {
           name: c.name,
           icon: c.icon,
           depth: collapsed.value ? 0 : 1,
+          ...moduleBadge(c.id),
         });
       }
     }
@@ -591,6 +644,19 @@ const activeCommands = ref<ModuleCommand[]>([]);
 const pluginCommands = ref<ModuleCommand[]>([]);
 // onStateChange 退订函数（onUnmounted 清理）
 let stopStateWatch: (() => void) | null = null;
+// 主进程 → 界面意图的退订函数（侧栏徽标 / 打开模块）
+let stopNavBadge: (() => void) | null = null;
+let stopOpenModule: (() => void) | null = null;
+/**
+ * 启动阶段收到的「打开模块」意图（通知点击）。
+ *
+ * 为什么要暂存：主进程在 `did-finish-load` 时重放它（`electron/ui-bridge.ts`），而那一刻
+ * 我们可能还在 `await` 恢复上次模块 / 扫描外置插件。直接 `activate()` 会被随后的
+ * "恢复上次模块"覆盖 —— 表现就是"点了通知，还是回到原来那页"。
+ */
+const pendingOpenModule = ref<{ moduleId: string; action?: string } | null>(null);
+/** 启动恢复是否已完成（见上） */
+let shellBooted = false;
 // 更新事件订阅退订函数（onUnmounted 清理）
 let stopUpdaterEvents: (() => void) | null = null;
 // 更新进度浮层状态：idle(隐藏) / downloading(进度条) / downloaded(重启安装) / error(失败信息)
@@ -796,6 +862,25 @@ function onSwitchModule(e: Event) {
 }
 
 /**
+ * 应用一条「打开模块」意图（主进程 → 外壳；典型来源：点新邮件的系统通知）。
+ *
+ * 不用 `activateFromSwitch`：那不是业务流跳转，记一个「返回」到用户上次停的页面没有意义
+ * （用户点通知的语义是"带我去看新邮件"，不是"从这里出发再回来"）。
+ */
+async function applyOpenModule(ev: { moduleId: string; action?: string }): Promise<void> {
+  const id = String(ev?.moduleId || '').trim();
+  if (!id || !pm.has(id) || !pm.isEnabled(id)) return;
+  menuOpen.value = false;
+  await activate(id);
+  if (!ev.action) return;
+  // 带二级动作：复用业务流那条 `switch-module` 通道（模块自己监听并消费 action）。
+  // 必须等目标模块挂载完再派发 —— 否则它的监听还没注册，事件被静默丢掉，
+  // 表现就是"跳过去了，但没切到指定的那一屏"。
+  await nextTick();
+  switchModule(id, ev.action);
+}
+
+/**
  * 全局事件：插件装好/更新后重载正在打开的那个岛（由 `PluginCenter` 派发，见 UX 审查 A3）。
  * 只认"正是当前打开的这个岛" —— 装了别的插件不该把用户正在看的页面刷掉。
  */
@@ -878,6 +963,27 @@ onMounted(async () => {
   document.addEventListener('dragover', onGlobalDragOver, true);
   document.addEventListener('drop', onGlobalDrop, true);
 
+  // 主进程 →「界面意图」的订阅**必须放在所有 await 之前**：主进程在 `did-finish-load`
+  // 时会重放缓存的徽标与待打开模块（见 `electron/ui-bridge.ts` 纪律 ②），晚一步注册就收不到 ——
+  // 表现为"侧栏没有未读角标"或"点了通知没反应"，且日志里一条错都没有。
+  stopNavBadge = ipc.onNavBadge((ev) => {
+    if (!ev?.moduleId) return;
+    reportNavBadge(
+      ev.moduleId,
+      ev.count === null || ev.count === undefined
+        ? null
+        : { count: ev.count, title: ev.title, todo: ev.todo },
+    );
+  });
+  stopOpenModule = ipc.onOpenModule((ev) => {
+    if (!ev?.moduleId) return;
+    if (!shellBooted) {
+      pendingOpenModule.value = { moduleId: ev.moduleId, action: ev.action };
+      return;
+    }
+    void applyOpenModule(ev);
+  });
+
   // 初始化主题（外观设置）
   await initTheme();
 
@@ -918,7 +1024,27 @@ onMounted(async () => {
   } catch {
     /* 忽略读取失败，使用默认模块 */
   }
+  // 启动期间主进程已经点名要打开哪个模块（用户点了上一轮留下的通知）：
+  // **直接以它为目标**。先恢复上次模块再切走会闪一下，用户会以为"我点错了/它没理我"。
+  let bootAction = '';
+  const earlyOpen = pendingOpenModule.value;
+  if (earlyOpen && pm.has(earlyOpen.moduleId) && pm.isEnabled(earlyOpen.moduleId)) {
+    initialId = earlyOpen.moduleId;
+    bootAction = earlyOpen.action || '';
+    pendingOpenModule.value = null;
+  }
   await activate(initialId);
+  shellBooted = true;
+  if (bootAction) {
+    await nextTick();
+    switchModule(initialId, bootAction);
+  }
+  // 极端时序下的兜底：上面这段 `await` 期间又来了新的意图（`shellBooted` 尚未置位，被暂存）
+  const lateOpen = pendingOpenModule.value;
+  if (lateOpen) {
+    pendingOpenModule.value = null;
+    void applyOpenModule(lateOpen);
+  }
 
   // 订阅插件状态变更：
   //  - 插件停用/启用 → 刷新侧栏/⌘K 数据源并持久化停用集；当前视图插件被停用时回退第一个启用插件
@@ -1003,6 +1129,8 @@ onUnmounted(() => {
   document.removeEventListener('drop', onGlobalDrop, true);
   stopStateWatch?.();
   stopUpdaterEvents?.();
+  stopNavBadge?.();
+  stopOpenModule?.();
 });
 
 function iconSvg(icon?: string): string {
@@ -1022,6 +1150,11 @@ function iconSvg(icon?: string): string {
     // 与侧栏里另一个用 box 的入口撞脸）。
     inbox:
       '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h18v12H3z"/><path d="M3 7l9 6 9-6"/></svg>',
+    // 2026-11-01：「图案」页（POD）—— 调色板造型，与发货台（sparkles）、基础数据（table）不撞脸。
+    // 2026-11-02：该模块已撤并 ⇒ 这枚图标现在由「基础数据 › 产品管理」的「颜色 / 图案」两个页签用
+    // （`MasterDataView.vue` 的 KINDS）。
+    palette:
+      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3a9 9 0 100 18h2a2 2 0 010-4h1a3 3 0 003-3 8 8 0 00-6-11z"/><circle cx="8.5" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="15.5" cy="10" r="1.2"/></svg>',
   };
   return map[icon || ''] || map.box;
 }

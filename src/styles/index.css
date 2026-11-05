@@ -71,6 +71,22 @@
   --wb-focus: var(--wb-primary);
   --wb-focus-ring: rgba(43, 47, 54, 0.16);
 
+  /* 字阶（2026-11-03 界面方案 §4.1）。
+     原先五档挤在 12–17px（17/15/13/12.5/12），相邻只差 0.5–2px —— 1440 宽下**肉眼没有层级**，
+     扫屏时找不到"从哪开始读"。改成一列有名字的字阶：只把两处升上去（主数字、面板标题），
+     辅助级反而往下降（表格 13→12.5、表头 12→11.5）——
+     **总密度不变**，这是"拉开"不是"放大"，桌面高密度工具里密度是资产。
+     ⚠️ 新增令牌必须同步 src/core/plugin/uiBridgeHost.ts 的 WB_THEME_TOKENS：
+     tests/uiIslandThemeTokens.spec.ts 双向校验（清单 ⊇ 定义、清单内无孤儿），漏一处直接红；
+     而漏在注入侧时，岛内 var() 解析失败会**整条声明丢弃**（不报错、只是没生效）。 */
+  --wb-fs-hero: 26px; /* 每屏唯一的主数字（"今天要发多少"） */
+  --wb-fs-display: 20px; /* 常规指标数字 */
+  --wb-fs-title: 17px; /* 页标题 */
+  --wb-fs-subtitle: 14px; /* 面板标题 / 空态标题 */
+  --wb-fs-body: 12.5px; /* 正文 / 表格 */
+  --wb-fs-caption: 11.5px; /* 表头 / 说明（可读下限 11px，别再过界） */
+  --wb-fs-micro: 10.5px; /* 徽标 / 单位（配合 tabular-nums） */
+
   /* Tailwind 默认灰阶 / white 的主题化映射（RGB 三元组，供 tailwind.config 引用） */
   --tw-surface: 255 255 255; /* 对应 white */
   --tw-gray-50: 249 250 251;
@@ -597,14 +613,14 @@ body {
     min-width: 0;
   }
   .wb-head__title {
-    font-size: 17px;
+    font-size: var(--wb-fs-title);
     font-weight: 600;
     line-height: 1.3;
     letter-spacing: -0.01em;
     color: var(--wb-text);
   }
   .wb-head__desc {
-    font-size: 12.5px;
+    font-size: var(--wb-fs-caption);
     line-height: 1.45;
     color: var(--wb-text-muted);
   }
@@ -631,13 +647,21 @@ body {
     background: var(--wb-surface);
     box-shadow: var(--wb-elev-1);
   }
+  /* 2026-11-03 界面方案 §4.2：数字要在**上面**、且与标签不在同一行。
+     原先是 `inline-flex` + `baseline`，标签 12.5px / 数字 15px 只差 2.5px 且横向串读 ——
+     「订单行 1　收入合计 165.18」读起来是一句话，用户得逐字读完才知道哪个是数。
+     做法是 `column-reverse`：**视觉顺序反转、DOM 一个字不动**。
+     为什么不把标签与数字拆成两个兄弟元素（那样最直白）：见上面那段 textContent 断言契约。
+     column-reverse 让"视觉顺序"与"读屏 / textContent 顺序"彻底解耦，这是本次唯一纯 CSS 的大收益。 */
   .wb-metric {
     display: inline-flex;
-    align-items: baseline;
-    gap: 5px;
-    padding: 9px 16px 10px;
-    font-size: 12.5px;
-    line-height: 1.3;
+    flex-direction: column-reverse;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0;
+    padding: 7px 18px 8px;
+    font-size: var(--wb-fs-caption);
+    line-height: 1.2;
     color: var(--wb-text-muted);
     border-left: 1px solid var(--wb-border);
   }
@@ -646,11 +670,17 @@ body {
     border-left: 0;
   }
   .wb-metric b {
-    font-size: 15px;
+    font-size: var(--wb-fs-display);
     font-weight: 600;
-    letter-spacing: -0.01em;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
     color: var(--wb-text);
     font-variant-numeric: tabular-nums;
+  }
+  /* 每屏最多一处：真正的"主角数字"（今天要发多少 / 本期结余）。多给几处等于都不重要。 */
+  .wb-metric.is-hero b {
+    font-size: var(--wb-fs-hero);
+    line-height: 1.15;
   }
   /* 异常值（缺克重 / 未关联厂家）用警示色 —— 数字本身变色，不是整块背景变红 */
   .wb-metric.is-warn b {
@@ -676,7 +706,7 @@ body {
     flex-shrink: 0;
     padding: 10px 14px;
     border-bottom: 1px solid var(--wb-border);
-    font-size: 13px;
+    font-size: var(--wb-fs-subtitle);
     font-weight: 600;
     color: var(--wb-text);
   }
@@ -717,13 +747,13 @@ body {
     color: var(--wb-text-muted);
   }
   .wb-empty__title {
-    font-size: 15px;
+    font-size: var(--wb-fs-subtitle);
     font-weight: 600;
     color: var(--wb-text);
   }
   .wb-empty__desc {
     max-width: 54ch;
-    font-size: 13px;
+    font-size: var(--wb-fs-body);
     line-height: 1.65;
     color: var(--wb-text-muted);
   }
@@ -734,6 +764,25 @@ body {
     gap: 8px;
     margin-top: 12px;
   }
+  /* 紧凑空态：给"高度不够说这段空话"的地方用（表体一格 / 抽屉 / 半屏右栏）。
+     整页空态仍用 52px 默认档 —— 大空白里 32px 图标会像加载失败，两种场景需求相反，
+     所以是**一个修饰类**而不是把默认档一起调小。
+     ⚠️ 只压**留白与图标**，不动字号：`.wb-empty__desc` 的字号档位被
+     `tests/uiTypeScale.spec.ts` 钉在 body 档，为了"紧一点"再开一个字号变体
+     等于给同一段话两个档位 —— 那正是这轮要消灭的东西。
+     量的是内边距与图标尺寸（断言取 getComputedStyle），不是"有没有这个 class"。 */
+  .wb-empty--sm {
+    padding: 28px 20px;
+    gap: 2px;
+  }
+  .wb-empty--sm .wb-empty__icon {
+    width: 32px;
+    height: 32px;
+    margin-bottom: 6px;
+  }
+  .wb-empty--sm .wb-empty__actions {
+    margin-top: 10px;
+  }
 
   /* 表格：统一表头 / 行高 / 悬浮 / 分隔。原各模块各写一份，
      表头底色、行距、分隔线各不相同，同一屏两张表看起来像两套系统。 */
@@ -741,7 +790,7 @@ body {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
-    font-size: 13px;
+    font-size: var(--wb-fs-body);
   }
   .wb-table th {
     position: sticky;
@@ -750,7 +799,7 @@ body {
     padding: 8px 10px;
     text-align: left;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: var(--wb-fs-caption);
     font-weight: 600;
     color: var(--wb-text-muted);
     background: var(--wb-surface-2);
@@ -1016,6 +1065,39 @@ body {
   }
   .wb-pager__spacer {
     margin-left: auto;
+  }
+
+  /* ============================================================
+     侧栏二级项（2026-11-03 界面方案 §4.4）
+     ------------------------------------------------------------
+     原先二级项带 15px 图标、与一级项**同尺寸同色**，视觉上读成一列平级项 ——
+     用户分不出"这是模块"还是"这是模块里的某一屏"。
+     改法：去掉图标（图标是"入口"的语言，二级项不是入口），换成一条 1.5px 引导线
+     从一级项图标中心垂下来，文字缩进到与一级项**文字**对齐。
+     引导线是"从属"最省的表达 —— 不需要第二层底色，也不加任何颜色。
+     ⚠️ 下面两个位置是硬数值，改侧栏宽度（w-52）/ 一级项内边距（px-3）/ 图标尺寸（20px）时必须一起挪：
+        引导线 x = 8（一级项按钮左缘 8px）+ 12（一级项 px-3）+ 10（20px 图标的一半）= 30px
+        pill 左缘 = 36px（二级项容器 pl-9）
+        文字   x = 36 + 16（按钮 pl-4）= 52px，正好等于一级项文字左缘 8+12+20+12
+     ⚠️ pill 必须从引导线**右边**开始（36 > 30）：一开始用「居中 + w-[calc(100%-1.5rem)]」，
+        选中行的圆角底色正好盖住引导线（按钮是子节点、画在伪元素之上）——
+        实测选中那一行线断掉 32px，读起来像"线画漏了"。现在线在外侧连续，底色贴着字。
+     引导线要跨过行间 gap（容器是 gap-1 = 4px），所以上下各外扩 2px ——
+     否则每 32px 一行就是一段线，读成虚线。
+     ============================================================ */
+  .wb-nav-sub-row {
+    position: relative;
+  }
+  .wb-nav-sub-row::before {
+    content: '';
+    position: absolute;
+    left: 29px; /* 1.5px 宽的线，取 29 让线心落在 30px */
+    top: -2px;
+    bottom: -2px;
+    width: 1.5px;
+    border-radius: 1px;
+    background: var(--wb-border-strong);
+    pointer-events: none;
   }
 }
 

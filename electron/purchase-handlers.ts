@@ -142,6 +142,11 @@ function sanitizeItems(items: unknown) {
       qty: num(it.qty),
       priceCents: num(it.priceCents),
       suggestionQty: num(it.suggestionQty),
+      // 身份键必须透传（与 preload 的 `sanitizePurchaseItems` 同一字段）：丢了它，
+      // `purchase_items.style_color_id` 恒为 0 ⇒ 已拿扣不掉待拿、编辑器要求重新认色。
+      styleColorId: Math.max(0, Math.round(num(it.styleColorId))),
+      // 下单码（亚洲款加码）：`size` 是拿货码，丢了这一列就再也答不上"这 N 件覆盖的是哪单的哪个码"
+      orderSize: str(it.orderSize, 50),
     }))
     .slice(0, 500);
 }
@@ -157,6 +162,8 @@ function sanitizeSources(sources: unknown) {
       styleName: str(s.styleName, 100),
       color: str(s.color, 50),
       size: str(s.size, 50),
+      // 来源的 size 是**下单码**，这一列是**拿货码**（加码款的明细按它对齐；空串 = 未加码）
+      purchaseSize: str(s.purchaseSize, 50),
       qty: Math.max(1, Math.round(num(s.qty))),
     }))
     .slice(0, 100000);

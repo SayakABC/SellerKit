@@ -147,6 +147,15 @@
                     :data-act="`pue-size-${r.uid}`"
                     @change="onSizeChange(r)"
                   />
+                  <!-- 亚洲款加码：这一行的拿货码是换算来的，下单原文是另一码。
+                       不写出来，用户看着 XL 会以为开单开错了（或手工"改回" L，把加码白做）。 -->
+                  <div
+                    v-if="r.orderSize && r.orderSize !== r.size"
+                    class="pue__sub"
+                    :data-act="`pue-ordersize-${r.uid}`"
+                  >
+                    下单 {{ r.orderSize }}
+                  </div>
                 </td>
                 <td class="wb-num wb-muted">{{ r.suggestionQty || '—' }}</td>
                 <td>
@@ -260,7 +269,10 @@ interface EditRow {
    */
   styleColorId: number;
   color: string;
+  /** **拿货码**（照它拿货；亚洲款加码后与下单码不同） */
   size: string;
+  /** 下单码（订单原文）；'' = 未加码。只用于展示"为什么是 XL"与追溯，改码时不跟着改 */
+  orderSize: string;
   qty: number;
   /** 单价（元）**按用户输入的原文**保留，避免"输入 12.5 → 被改写成 12.50"抢光标 */
   priceText: string;
@@ -279,6 +291,7 @@ const rows = ref<EditRow[]>(
     styleColorId: Number(it.styleColorId) || 0,
     color: it.color ?? '',
     size: it.size ?? '',
+    orderSize: it.orderSize ?? '',
     qty: Number(it.qty) || 0,
     priceText: it.priceCents ? String(centsToYuan(it.priceCents)) : '',
     suggestionQty: Number(it.suggestionQty) || 0,
@@ -517,6 +530,7 @@ function addRow(): void {
     styleColorId: 0,
     color: '',
     size: '',
+    orderSize: '',
     qty: 0,
     priceText: '',
     suggestionQty: 0,
@@ -559,6 +573,8 @@ function syncColorIdFromText(r: EditRow): void {
 
 /** 尺码改完只重查这一行的图 —— 尺码是取图键的一部分，但它与单价无关，**不碰历史价** */
 function onSizeChange(r: EditRow): void {
+  // 手工改了拿货码 ⇒ 这条不再是"加码换算的结果"，下单码不能继续挂着（否则追溯会指错）
+  if (r.orderSize && r.orderSize !== r.size) r.orderSize = '';
   void resolveImages([{ styleCode: r.styleCode, color: r.color, size: r.size, styleColorId: r.styleColorId }]);
 }
 
@@ -590,6 +606,9 @@ async function save(): Promise<void> {
       styleColorId: r.styleColorId,
       color: r.color,
       size: r.size,
+      // 下单码原样带回：宿主是"删明细 + 重插"，漏传 = 这条的"为什么拿 XL"被清空
+      // （主进程虽会按 (款,色,码) 回填旧值，但用户改过尺码时那是另一条事实，不该沿用）。
+      orderSize: r.orderSize,
       qty: Math.max(0, Math.round(Number(r.qty) || 0)),
       priceCents: yuanToCents(r.priceText),
       suggestionQty: Math.max(0, Math.round(Number(r.suggestionQty) || 0)),
@@ -720,6 +739,14 @@ function close(): void {
 .pue__cell {
   width: 100%;
   min-width: 0;
+}
+
+/* 尺码格下方的那行小字（下单码）：加码款的 `XL` 旁边标"下单 L" —— 它不是输入项，别做成链接 */
+.pue__sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--wb-muted, #8a8f98);
+  white-space: nowrap;
 }
 
 /* 款色 / 尺码 = **身份数据**（清单带过来的），默认看起来是文字：无边框、无底色；

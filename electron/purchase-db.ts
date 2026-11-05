@@ -69,6 +69,16 @@ export interface PurchaseItem {
    * 色名是可变标签，不能当身份；开单那一刻把它背后的款色 id 一起存下来。
    */
   styleColorId?: number;
+  /**
+   * **下单尺码**（订单原文码；'' = 未加码，`size` 就是下单码本身）。
+   *
+   * 为什么明细要存两个码（2026-11-02「亚洲款加码」）：`size` 是**拿货码**（要照它拿货、
+   * 也是"已拿"台账的键），而 `oi_order_items.size` 是**下单码**。加码款两者不同，
+   * 于是「这批货覆盖了哪几条订单行」（`autoSourceRows`）必须按下单码去找 ——
+   * 只留拿货码时，XL 去匹配下单 L 的订单行，一条都匹配不上 ⇒ 整单变成"无归属"，
+   * 「哪张单齐了」直接失真。追溯（界面显示 `L→XL`、导出「下单码」列）也读它。
+   */
+  orderSize?: string;
 }
 
 /**
@@ -99,6 +109,15 @@ export interface PurchaseSourceRow {
   qty: number;
   /** 指向 `oi_order_items.id`；0 = 无归属（历史单 / 订单行不够） */
   orderItemId?: number;
+  /**
+   * 这一来源对应的**拿货码**（该拿货明细行的 `size`）。'' = 老数据 / 未加码（= `size`）。
+   *
+   * 为什么必须存（2026-11-02）：`orderCoverage()` 算「无归属已拿」时用
+   * `(款,色,码)` 把明细与来源对齐。加码后明细是 `XL`、来源是下单码 `L`，
+   * 对齐断掉 ⇒ 同一批货既进 `covered` 又进 `unattributed`，界面提前谎报"已齐"。
+   * 存下拿货码作对齐键，`size` 保留订单原文码（追溯用）。
+   */
+  purchaseSize?: string;
 }
 
 /** 店铺对账汇总行（拿货成本按来源订单拆分到店铺） */
@@ -221,6 +240,14 @@ export interface OrderCoverageRow {
   orderNo: string;
   shop: string;
   orderTime: string;
+  /**
+   * 这一单**落进本地库的时刻**（`oi_orders.created_at`，导入/采集写入时打的时间戳）。
+   *
+   * 为什么要单独回这一列：界面上的「今天导入 / 历史导入」问的是**入库日**，
+   * 而下单日（`orderTime`）经常更早（芒果的待发货单可能是几天前下的、今天才抓到）。
+   * 拿 `orderTime` 回答会把今天采集的 4 单说成"今天下单 0 单"。
+   */
+  importedAt: string;
   styleCode: string;
   styleName: string;
   styleColorId: number;
@@ -288,6 +315,8 @@ const SCHEMA = [
     style_name TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '',
     size TEXT NOT NULL DEFAULT '',
+    -- 下单尺码（订单原文）；'' = 未加码（size 即下单码）。加码款的 size 是**拿货码**。
+    order_size TEXT NOT NULL DEFAULT '',
     qty INTEGER NOT NULL DEFAULT 0,
     price_cents INTEGER NOT NULL DEFAULT 0,
     amount_cents INTEGER NOT NULL DEFAULT 0,
@@ -307,6 +336,8 @@ const SCHEMA = [
     style_name TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '',
     size TEXT NOT NULL DEFAULT '',
+    -- 这一来源对应的**拿货码**（'' = 未加码/老数据 ⇒ 等于 size）；与 purchase_items.size 对齐
+    purchase_size TEXT NOT NULL DEFAULT '',
     qty INTEGER NOT NULL DEFAULT 1,
     order_item_id INTEGER NOT NULL DEFAULT 0
   )`,
@@ -350,13 +381,47 @@ export function ensurePurchaseSchema(): void {
   migrate('purchase.main', purchaseMigrationSteps());
   dbMigrate(SCHEMA);
   migrateItemsSize();
+  migrateSizeShiftColumns();
+}
+
+/**
+ * **v4（2026-11-02）：亚洲款加码的两列**
+ *
+ * `purchase_items.order_size`（下单码）与 `purchase_sources.purchase_size`（拿货码）。
+ *
+ * 为什么必须是两列、而不是复用 `size`：
+ *   · 明细的 `size` 是**拿货码** —— 它同时是"已拿"台账的键（`takenLedger` 按它 GROUP BY），
+ *     改了它就没法答"这款这个码拿了几件"；
+ *   · 来源的 `size` 是**订单行的码**（下单码）—— 换掉它等于改写"这批货覆盖了哪条订单行"的事实；
+ *   · 两者需要一条对齐边（`orderCoverage` 的 covered/unattributed 互斥），
+ *     这条边只能显式存（`purchase_size`），靠"再算一遍偏移"是第二套实现。
+ *
+ * 存量两种列都留空串 ⇒ 全部回落成"拿货码 == 下单码"，与加列之前**逐字一致**。
+ */
+function migrateSizeShiftColumns(): void {
+  const itemCols = dbQuery<{ name: string }>(`PRAGMA table_info(purchase_items)`);
+  if (itemCols.length && !itemCols.some((c) => c.name === 'order_size')) {
+    dbRun(`ALTER TABLE purchase_items ADD COLUMN order_size TEXT NOT NULL DEFAULT ''`);
+  }
+  const srcCols = dbQuery<{ name: string }>(`PRAGMA table_info(purchase_sources)`);
+  if (srcCols.length && !srcCols.some((c) => c.name === 'purchase_size')) {
+    dbRun(`ALTER TABLE purchase_sources ADD COLUMN purchase_size TEXT NOT NULL DEFAULT ''`);
+  }
 }
 
 /** `purchase_orders` 的演进步骤（版本化：只跑未应用的，见 `electron/db.ts` 的 `migrate`） */
 function purchaseMigrationSteps(): MigrationStep[] {
   return [
-    { version: 1, name: 'purchase_orders 删 note（零读者列：不进导出/对账/成本）', up: dropOrderNote },
-    { version: 2, name: 'purchase_items += style_color_id（已拿的身份键）· 存量按唯一色回填', up: addItemStyleColor },
+    {
+      version: 1,
+      name: 'purchase_orders 删 note（零读者列：不进导出/对账/成本）',
+      up: dropOrderNote,
+    },
+    {
+      version: 2,
+      name: 'purchase_items += style_color_id（已拿的身份键）· 存量按唯一色回填',
+      up: addItemStyleColor,
+    },
     {
       version: 3,
       name: 'purchase_sources += order_item_id（哪张订单的哪一行被这批货覆盖）· 存量只补唯一确定的',
@@ -406,7 +471,7 @@ function addSourceOrderItem(): void {
        LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
        LEFT JOIN oi_styles s ON sc.style_id = s.id
       WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
-      ORDER BY oi.id`,
+      ORDER BY oi.id`
   );
   const byId = new Map<string, number[]>();
   const byText = new Map<string, number[]>();
@@ -425,19 +490,30 @@ function addSourceOrderItem(): void {
   // 取不到（`0`）时才退回文本匹配 —— 文本是开单那一刻的副本，色名改过就对不上（真库里
   // 「未分类 → 1/2/3」那批全是这种情况），所以身份优先不是洁癖。
   const itemIds = new Map<string, number>();
-  for (const it of dbQuery<{ purchase_id: number; style_code: string; color: string; size: string; style_color_id: number }>(
+  for (const it of dbQuery<{
+    purchase_id: number;
+    style_code: string;
+    color: string;
+    size: string;
+    style_color_id: number;
+  }>(
     `SELECT purchase_id, style_code, color, size, MAX(COALESCE(style_color_id, 0)) AS style_color_id
-       FROM purchase_items GROUP BY purchase_id, style_code, color, size`,
+       FROM purchase_items GROUP BY purchase_id, style_code, color, size`
   )) {
     itemIds.set(
       `${Number(it.purchase_id)}\u0000${it.style_code}\u0000${it.color}\u0000${it.size}`,
-      Number(it.style_color_id) || 0,
+      Number(it.style_color_id) || 0
     );
   }
 
-  const groups = dbQuery<{ id: number; purchase_id: number; style_code: string; color: string; size: string; qty: number }>(
-    `SELECT id, purchase_id, style_code, color, size, qty FROM purchase_sources ORDER BY id`,
-  );
+  const groups = dbQuery<{
+    id: number;
+    purchase_id: number;
+    style_code: string;
+    color: string;
+    size: string;
+    qty: number;
+  }>(`SELECT id, purchase_id, style_code, color, size, qty FROM purchase_sources ORDER BY id`);
   const seen = new Map<string, number>();
   for (const g of groups) {
     const k = `${g.purchase_id}\u0000${g.style_code}\u0000${g.color}\u0000${g.size}`;
@@ -450,18 +526,20 @@ function addSourceOrderItem(): void {
     const gk = `${g.purchase_id}\u0000${g.style_code}\u0000${g.color}\u0000${g.size}`;
     if ((seen.get(gk) ?? 0) !== 1) continue; // 组内多条来源 ⇒ 分不清对应哪一行
     const scId = itemIds.get(gk) ?? 0;
-    const cands = scId > 0
-      ? byId.get(`#${scId}|${g.size}`) ?? []
-      : byText.get(`${g.style_code}\u0000${g.color}\u0000${g.size}`) ?? [];
+    const cands =
+      scId > 0
+        ? (byId.get(`#${scId}|${g.size}`) ?? [])
+        : (byText.get(`${g.style_code}\u0000${g.color}\u0000${g.size}`) ?? []);
     if (cands.length !== 1) continue; // 候选不唯一 ⇒ 不猜
     dbRun(`UPDATE purchase_sources SET order_item_id = ? WHERE id = ?`, [cands[0], g.id]);
     filled += 1;
   }
   if (filled > 0) {
-    console.log(`[migrate] purchase.main v3：${filled} 行来源快照按"款色码只有唯一候选订单行"补上了 order_item_id（其余留 0，归无归属台账）`);
+    console.log(
+      `[migrate] purchase.main v3：${filled} 行来源快照按"款色码只有唯一候选订单行"补上了 order_item_id（其余留 0，归无归属台账）`
+    );
   }
 }
-
 
 /**
  * **v2：给拿货明细补身份列**（2026-10-20）。
@@ -490,10 +568,12 @@ function addItemStyleColor(): void {
       WHERE COALESCE(style_color_id, 0) = 0
         AND (SELECT COUNT(*) FROM oi_style_colors sc JOIN oi_styles s ON s.id = sc.style_id
               WHERE s.code = purchase_items.style_code
-                AND TRIM(COALESCE(sc.color, '')) NOT IN ('', '未分类')) = 1`,
+                AND TRIM(COALESCE(sc.color, '')) NOT IN ('', '未分类')) = 1`
   );
   if (Number(filled.changes) > 0) {
-    console.log(`[migrate] purchase.main v2：${filled.changes} 行拿货明细按"该款唯一色"补上了款色 id（其余留 0 待人工认色）`);
+    console.log(
+      `[migrate] purchase.main v2：${filled.changes} 行拿货明细按"该款唯一色"补上了款色 id（其余留 0 待人工认色）`
+    );
   }
 }
 
@@ -537,11 +617,11 @@ function migrateItemsSize(): void {
         amount_cents INTEGER NOT NULL DEFAULT 0,
         suggestion_qty INTEGER NOT NULL DEFAULT 0,
         UNIQUE(purchase_id, style_code, color, size)
-      )`,
+      )`
     );
     dbRun(
       `INSERT INTO purchase_items_new (id, purchase_id, style_code, style_name, color, qty, price_cents, amount_cents, suggestion_qty)
-       SELECT id, purchase_id, style_code, style_name, color, qty, price_cents, amount_cents, suggestion_qty FROM purchase_items`,
+       SELECT id, purchase_id, style_code, style_name, color, qty, price_cents, amount_cents, suggestion_qty FROM purchase_items`
     );
     dbRun(`DROP TABLE purchase_items`);
     dbRun(`ALTER TABLE purchase_items_new RENAME TO purchase_items`);
@@ -553,7 +633,7 @@ function migrateItemsSize(): void {
 
 export function listSuppliers(): Supplier[] {
   return dbQuery<Record<string, unknown>>(
-    `SELECT id, name, phone, note, created_at FROM suppliers ORDER BY id`,
+    `SELECT id, name, phone, note, created_at FROM suppliers ORDER BY id`
   ).map(mapSupplier);
 }
 
@@ -563,8 +643,12 @@ export function createSupplier(name: string, phone: string, note: string): numbe
   if (!trimmed) throw new Error('厂商名称不能为空');
   return dbRun(`INSERT INTO suppliers (name, phone, note) VALUES (?, ?, ?)`, [
     trimmed,
-    String(phone ?? '').trim().slice(0, 30),
-    String(note ?? '').trim().slice(0, 200),
+    String(phone ?? '')
+      .trim()
+      .slice(0, 30),
+    String(note ?? '')
+      .trim()
+      .slice(0, 200),
   ]).lastInsertRowid;
 }
 
@@ -602,7 +686,7 @@ export function findOrCreateSupplierByName(name: string): { id: number; created:
   ensurePurchaseSchema();
   const key = normSupplierNameKey(raw);
   const hit = dbQuery<{ id: number; name: string }>(`SELECT id, name FROM suppliers`).find(
-    (s) => normSupplierNameKey(s.name) === key,
+    (s) => normSupplierNameKey(s.name) === key
   );
   if (hit) return { id: Number(hit.id) || 0, created: false };
   return { id: createSupplier(raw, '', '产品导入时自动新建'), created: true };
@@ -612,8 +696,12 @@ export function updateSupplier(id: number, phone: string, note: string): void {
   const sup = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [id]);
   if (!sup) throw new Error(`厂商不存在: id=${id}`);
   dbRun(`UPDATE suppliers SET phone = ?, note = ? WHERE id = ?`, [
-    String(phone ?? '').trim().slice(0, 30),
-    String(note ?? '').trim().slice(0, 200),
+    String(phone ?? '')
+      .trim()
+      .slice(0, 30),
+    String(note ?? '')
+      .trim()
+      .slice(0, 200),
     id,
   ]);
 }
@@ -622,7 +710,10 @@ export function updateSupplier(id: number, phone: string, note: string): void {
 export function deleteSupplier(id: number): void {
   const sup = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [id]);
   if (!sup) throw new Error(`厂商不存在: id=${id}`);
-  const po = dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM purchase_orders WHERE supplier_id = ?`, [id]);
+  const po = dbGet<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM purchase_orders WHERE supplier_id = ?`,
+    [id]
+  );
   const pm = dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM payments WHERE supplier_id = ?`, [id]);
   if ((po?.c ?? 0) > 0 || (pm?.c ?? 0) > 0) {
     throw new Error('该厂商已有拿货单或付款记录，不能删除（可归档置灰）');
@@ -647,7 +738,7 @@ export function listPurchaseOrders(): PurchaseOrder[] {
     `SELECT po.id, po.supplier_id, s.name AS supplier_name, po.biz_date, po.mode, po.status,
             po.total_cents, po.edited_at, po.created_at
      FROM purchase_orders po JOIN suppliers s ON po.supplier_id = s.id
-     ORDER BY po.biz_date DESC, po.id DESC`,
+     ORDER BY po.biz_date DESC, po.id DESC`
   );
   return rows.map((r) => ({ ...mapOrderRow(r), items: loadItems(Number(r.id)) }));
 }
@@ -658,7 +749,7 @@ export function getPurchaseOrder(id: number): PurchaseOrder | undefined {
             po.total_cents, po.edited_at, po.created_at
      FROM purchase_orders po JOIN suppliers s ON po.supplier_id = s.id
      WHERE po.id = ?`,
-    [id],
+    [id]
   );
   if (!r) return undefined;
   return { ...mapOrderRow(r), items: loadItems(id) };
@@ -675,7 +766,9 @@ export function createPurchaseOrder(input: {
   items?: PurchaseItemInput[];
   sources?: PurchaseSourceRow[];
 }): number {
-  const supplier = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [input.supplierId]);
+  const supplier = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [
+    input.supplierId,
+  ]);
   if (!supplier) throw new Error(`厂商不存在: id=${input.supplierId}`);
   const date = String(input.bizDate ?? '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式不正确');
@@ -688,13 +781,11 @@ export function createPurchaseOrder(input: {
     const id = dbRun(
       `INSERT INTO purchase_orders (supplier_id, biz_date, mode, status, total_cents)
        VALUES (?, ?, 'detail', 'draft', ?)`,
-      [input.supplierId, date, computeTotal(items)],
+      [input.supplierId, date, computeTotal(items)]
     ).lastInsertRowid;
     insertItems(id, items);
     // 锁定来源订单（店铺归属）；未显式提供时按订单缺口自动推导
-    const sources = input.sources?.length
-      ? sanitizeSources(input.sources)
-      : autoSourceRows(items);
+    const sources = input.sources?.length ? sanitizeSources(input.sources) : autoSourceRows(items);
     if (sources.length) insertSources(id, sources);
     return id;
   });
@@ -704,15 +795,20 @@ export function createPurchaseOrder(input: {
 function sanitizeSources(sources: PurchaseSourceRow[]): PurchaseSourceRow[] {
   const out: PurchaseSourceRow[] = [];
   for (const s of sources) {
-    const code = String(s.styleCode ?? '').trim().slice(0, 50);
+    const code = String(s.styleCode ?? '')
+      .trim()
+      .slice(0, 50);
     if (!code) continue;
     const qty = Math.max(1, Math.round(Number(s.qty ?? 1)));
     out.push({
-      shop: String(s.shop ?? '').trim().slice(0, 100),
+      shop: String(s.shop ?? '')
+        .trim()
+        .slice(0, 100),
       styleCode: code,
       styleName: String(s.styleName ?? '').slice(0, 100),
       color: String(s.color ?? '').slice(0, 50),
       size: String(s.size ?? '').slice(0, 50),
+      purchaseSize: String(s.purchaseSize ?? '').slice(0, 50),
       qty,
       orderItemId: Math.max(0, Math.round(Number(s.orderItemId ?? 0)) || 0),
     });
@@ -744,6 +840,11 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
     const code = String(it.styleCode ?? '').trim();
     const color = String(it.color ?? '');
     const size = String(it.size ?? '');
+    /**
+     * 去订单里找需求行时要用的码 = **下单码**（加码款才有 `orderSize`，其余等于 `size`）。
+     * 拿拿货码（`size`）去匹配下单码，加码款一条都匹配不上 ⇒ 整单无归属（见 `PurchaseItem.orderSize`）。
+     */
+    const orderSize = String(it.orderSize ?? '').trim() || size;
     if (!code) continue;
     const key = `${code}\u0000${color}\u0000${size}`;
     if (seen.has(key)) continue;
@@ -756,7 +857,7 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
       `SELECT COALESCE(SUM(pi.qty), 0) AS t
        FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
        WHERE po.status = 'submitted' AND pi.purchase_id <> ? AND pi.style_code = ? AND pi.color = ? AND pi.size = ?`,
-      [excludePurchaseId, code, color, size],
+      [excludePurchaseId, code, color, size]
     );
     let skipLeft = Number(takenRow?.t ?? 0);
     // 需求订单行（按导入顺序 FIFO；范围与 outstanding() 一致）
@@ -773,7 +874,7 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
        WHERE s.code = ? AND sc.color = ? AND oi.size = ?
          AND o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
        ORDER BY oi.id`,
-      [code, color, size],
+      [code, color, orderSize]
     );
     let pushed = 0;
     for (const row of rows) {
@@ -793,7 +894,9 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
         styleCode: String(row.style_code ?? ''),
         styleName: String(row.style_name ?? ''),
         color: String(row.style_color ?? ''),
+        // `size` = 订单行原文（下单码，追溯用）；`purchaseSize` = 本次拿货码（对齐明细用）
         size: String(row.size ?? ''),
+        purchaseSize: size,
         qty: take,
         orderItemId: Number(row.oid ?? 0) || 0,
       });
@@ -806,9 +909,19 @@ function autoSourceRows(items: PurchaseItemInput[], excludePurchaseId = 0): Purc
 function insertSources(purchaseId: number, sources: PurchaseSourceRow[]): void {
   for (const s of sources) {
     dbRun(
-      `INSERT INTO purchase_sources (purchase_id, shop, style_code, style_name, color, size, qty, order_item_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [purchaseId, s.shop, s.styleCode, s.styleName ?? '', s.color, s.size, s.qty, s.orderItemId ?? 0],
+      `INSERT INTO purchase_sources (purchase_id, shop, style_code, style_name, color, size, purchase_size, qty, order_item_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        purchaseId,
+        s.shop,
+        s.styleCode,
+        s.styleName ?? '',
+        s.color,
+        s.size,
+        s.purchaseSize ?? '',
+        s.qty,
+        s.orderItemId ?? 0,
+      ]
     );
   }
 }
@@ -817,11 +930,14 @@ function insertSources(purchaseId: number, sources: PurchaseSourceRow[]): void {
  * 编辑拿货单（草稿或已提交均可）：明细模式整体替换明细并重算金额；
  * 包价模式更新 totalCents。置 edited_at 留痕。
  */
-export function updatePurchaseOrder(id: number, input: {
-  bizDate?: string;
-  totalCents?: number;
-  items?: PurchaseItemInput[];
-}): void {
+export function updatePurchaseOrder(
+  id: number,
+  input: {
+    bizDate?: string;
+    totalCents?: number;
+    items?: PurchaseItemInput[];
+  }
+): void {
   const order = dbGet<Record<string, unknown>>(`SELECT * FROM purchase_orders WHERE id = ?`, [id]);
   if (!order) throw new Error(`拿货单不存在: id=${id}`);
   dbTransaction(() => {
@@ -834,8 +950,19 @@ export function updatePurchaseOrder(id: number, input: {
       params.push(date);
     }
     if (input.items !== undefined) {
+      // 编辑前先记下旧明细的**下单码**：编辑器只认 (款, 色, 码)，加码款的下单码不在它的表单里，
+      // 整体重写会把 `order_size` 清成空串 ⇒ 追溯（L→XL）与来源匹配同时失联，而且不报错。
+      // 按 (款,色,拿货码) 匹配回填；用户若连尺码一起改了，就回落成"未加码"（拿货码 == 下单码）。
+      const oldOrderSize = new Map<string, string>();
+      for (const r of dbQuery<{ style_code: string; color: string; size: string; order_size: string }>(
+        `SELECT style_code, color, size, order_size FROM purchase_items WHERE purchase_id = ?`,
+        [id]
+      )) {
+        const os = String(r.order_size ?? '');
+        if (os) oldOrderSize.set(`${r.style_code}\u0000${r.color}\u0000${r.size}`, os);
+      }
       dbRun(`DELETE FROM purchase_items WHERE purchase_id = ?`, [id]);
-      insertItems(id, input.items);
+      insertItems(id, input.items, oldOrderSize);
       // 来源快照跟着明细重算（2026-10-22）：原来只重算明细、sources 留在开单那一刻，
       // 改了件数也不动 ⇒ 店铺分摊与"哪单齐了"都按旧数量说话。重算时把自己排除，
       // 否则已提交单的"自己拿的件数"会被当成别人拿的再跳一遍。
@@ -871,15 +998,16 @@ export function deletePurchaseOrder(id: number): void {
 
 function loadItems(purchaseId: number): PurchaseItem[] {
   return dbQuery<Record<string, unknown>>(
-    `SELECT id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty, style_color_id
+    `SELECT id, style_code, style_name, color, size, order_size, qty, price_cents, amount_cents, suggestion_qty, style_color_id
      FROM purchase_items WHERE purchase_id = ? ORDER BY id`,
-    [purchaseId],
+    [purchaseId]
   ).map((r) => ({
     id: Number(r.id),
     styleCode: String(r.style_code ?? ''),
     styleName: String(r.style_name ?? ''),
     color: String(r.color ?? ''),
     size: String(r.size ?? ''),
+    orderSize: String(r.order_size ?? ''),
     qty: Number(r.qty ?? 0),
     priceCents: Number(r.price_cents ?? 0),
     amountCents: Number(r.amount_cents ?? 0),
@@ -888,29 +1016,44 @@ function loadItems(purchaseId: number): PurchaseItem[] {
   }));
 }
 
-function insertItems(purchaseId: number, items: PurchaseItemInput[]): void {
+function insertItems(
+  purchaseId: number,
+  items: PurchaseItemInput[],
+  /** 旧明细的下单码回填表（键 `款\u0000色\u0000码`）：编辑单时渲染层不知道下单码，别把它清掉 */
+  orderSizeOf?: Map<string, string>
+): void {
   for (const it of items) {
     const qty = Math.max(0, Math.round(Number(it.qty ?? 0)));
     const price = Math.max(0, Math.round(Number(it.priceCents ?? 0)));
-    const code = String(it.styleCode ?? '').trim().slice(0, 50);
+    const code = String(it.styleCode ?? '')
+      .trim()
+      .slice(0, 50);
     if (!code) continue;
+    const size = String(it.size ?? '').slice(0, 50);
+    const color = String(it.color ?? '').slice(0, 50);
+    const orderSize = String(
+      it.orderSize ?? orderSizeOf?.get(`${code}\u0000${color}\u0000${size}`) ?? ''
+    )
+      .trim()
+      .slice(0, 50);
     dbRun(
       `INSERT INTO purchase_items
-         (purchase_id, style_code, style_name, color, size, qty, price_cents, amount_cents, suggestion_qty, style_color_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (purchase_id, style_code, style_name, color, size, order_size, qty, price_cents, amount_cents, suggestion_qty, style_color_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchaseId,
         code,
         String(it.styleName ?? '').slice(0, 100),
-        String(it.color ?? '').slice(0, 50),
-        String(it.size ?? '').slice(0, 50),
+        color,
+        size,
+        orderSize,
         qty,
         price,
         qty * price,
         Math.max(0, Math.round(Number(it.suggestionQty ?? 0))),
         // 身份由调用方在开单那一刻带上（来自缺口行）；不带就 0，靠文本兜底，绝不现猜
         Math.max(0, Math.round(Number(it.styleColorId ?? 0))) || 0,
-      ],
+      ]
     );
   }
 }
@@ -940,7 +1083,11 @@ function mapOrderRow(r: Record<string, unknown>): Omit<PurchaseOrder, 'items'> {
 
 // ---- 付款 ----
 
-export function listPayments(filter?: { supplierId?: number; from?: string; to?: string }): Payment[] {
+export function listPayments(filter?: {
+  supplierId?: number;
+  from?: string;
+  to?: string;
+}): Payment[] {
   const conds: string[] = [];
   const params: (string | number)[] = [];
   if (filter?.supplierId) {
@@ -961,7 +1108,7 @@ export function listPayments(filter?: { supplierId?: number; from?: string; to?:
             p.method, p.note, p.created_at
      FROM payments p JOIN suppliers s ON p.supplier_id = s.id ${where}
      ORDER BY p.pay_date DESC, p.id DESC`,
-    params,
+    params
   );
   return rows.map((r) => ({
     id: Number(r.id),
@@ -985,7 +1132,9 @@ export function addPayment(input: {
   method: string;
   note: string;
 }): number {
-  const supplier = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [input.supplierId]);
+  const supplier = dbGet<{ id: number }>(`SELECT id FROM suppliers WHERE id = ?`, [
+    input.supplierId,
+  ]);
   if (!supplier) throw new Error(`厂商不存在: id=${input.supplierId}`);
   const date = String(input.payDate ?? '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式不正确');
@@ -999,9 +1148,13 @@ export function addPayment(input: {
       date,
       input.type === 'refund' ? 'refund' : 'payment',
       amount,
-      String(input.method ?? '').trim().slice(0, 20),
-      String(input.note ?? '').trim().slice(0, 200),
-    ],
+      String(input.method ?? '')
+        .trim()
+        .slice(0, 20),
+      String(input.note ?? '')
+        .trim()
+        .slice(0, 200),
+    ]
   ).lastInsertRowid;
 }
 
@@ -1039,13 +1192,31 @@ export function reconciliation(from?: string, to?: string): ReconciliationRow[] 
     // SQL 共 6 处窗口子查询（purchase/paid/refund/order_count/payment_count/ORDER BY），每处 4 个占位符
     // （两个 (? IS NULL OR 列 >= ?)，两个 (? IS NULL OR 列 <= ?)），合计 24 个，必须一一对应。
     [
-      from ?? null, from ?? null, to ?? null, to ?? null, // purchase_cents
-      from ?? null, from ?? null, to ?? null, to ?? null, // paid_cents
-      from ?? null, from ?? null, to ?? null, to ?? null, // refund_cents
-      from ?? null, from ?? null, to ?? null, to ?? null, // order_count
-      from ?? null, from ?? null, to ?? null, to ?? null, // payment_count
-      from ?? null, from ?? null, to ?? null, to ?? null, // ORDER BY 排序子查询
-    ],
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // purchase_cents
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // paid_cents
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // refund_cents
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // order_count
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // payment_count
+      from ?? null,
+      from ?? null,
+      to ?? null,
+      to ?? null, // ORDER BY 排序子查询
+    ]
   );
   return rows.map((r) => {
     const purchaseCents = Number(r.purchase_cents ?? 0);
@@ -1080,7 +1251,7 @@ export function takenLedger(): TakenRow[] {
             pi.size AS size, SUM(pi.qty) AS taken
      FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
      WHERE po.status = 'submitted'
-     GROUP BY pi.style_color_id, pi.style_code, pi.color, pi.size`,
+     GROUP BY pi.style_color_id, pi.style_code, pi.color, pi.size`
   ).map((r) => ({
     styleColorId: Number(r.style_color_id ?? 0) || 0,
     styleCode: String(r.style_code ?? ''),
@@ -1165,13 +1336,13 @@ export function outstanding(): OutstandingRow[] {
      WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
      GROUP BY COALESCE(sc.id, 0), oi.size,
               CASE WHEN COALESCE(sc.id, 0) = 0 THEN COALESCE(json_extract(oi.raw_fields, '$."产品ID"'), '') ELSE '' END,
-              CASE WHEN COALESCE(sc.id, 0) = 0 THEN COALESCE(oi.color, '') ELSE '' END`,
+              CASE WHEN COALESCE(sc.id, 0) = 0 THEN COALESCE(oi.color, '') ELSE '' END`
   );
   const { byId, byText } = takenMaps();
   const ignored = new Set(
     dbQuery<{ style_code: string; color: string }>(
-      `SELECT style_code, color FROM purchase_ignore`,
-    ).map((r) => `${r.style_code}|${r.color}`),
+      `SELECT style_code, color FROM purchase_ignore`
+    ).map((r) => `${r.style_code}|${r.color}`)
   );
 
   const result: OutstandingRow[] = [];
@@ -1186,7 +1357,8 @@ export function outstanding(): OutstandingRow[] {
     // 身份优先；老明细（id=0）按文本兜底（只在"该款该色该码"完全相等时算数）
     const have = unclassified
       ? 0
-      : (byId.get(`${styleColorId}|${size}`) ?? 0) + (byText.get(`${styleCode}|${color}|${size}`) ?? 0);
+      : (byId.get(`${styleColorId}|${size}`) ?? 0) +
+        (byText.get(`${styleCode}|${color}|${size}`) ?? 0);
     const missing = demand - have;
     // 未归类组**永远返回**：它就是"还不准"的那部分，藏起来等于谎报已拿全
     if (!unclassified && missing <= 0) continue;
@@ -1224,11 +1396,15 @@ export function outstanding(): OutstandingRow[] {
  * 为什么不用 `outstanding()`：那个是「还缺什么」，缺为 0 的行会被它自己过滤掉
  * ⇒ 拿齐的行根本不返回，没法回答"这张单齐了"（`TakenRow` 注释里记的那次事故同一个坑）。
  * 为什么不用 `shippingRows()`：那个带 `limit` 且按导入日筛，这里是**全部未发货**、只要最小列。
+ *
+ * ⚠️ 2026-11-02 起多回一列 `created_at`（→ `importedAt`）：范围说明要分「今天导入 / 历史导入」，
+ *    这件事只能看入库时刻。**筛选口径不变**（仍是全部未发货；时间窗在渲染层 `scopeCoverageByDays`）。
  */
 export function orderCoverage(): OrderCoveragePayload {
   const n = styleNameJoin();
   const rows = dbQuery<Record<string, unknown>>(
     `SELECT oi.id AS order_item_id, o.order_no AS order_no, o.shop AS shop, o.order_time AS order_time,
+            o.created_at AS imported_at,
             oi.raw_fields AS raw_fields, oi.qty AS qty, oi.size AS size,
             COALESCE(sc.id, 0) AS style_color_id, COALESCE(sc.color, '') AS style_color,
             COALESCE(sc.image_id, 0) AS style_color_image_id,
@@ -1247,7 +1423,7 @@ export function orderCoverage(): OrderCoveragePayload {
           GROUP BY ps.order_item_id
        ) oc ON oc.oid = oi.id
       WHERE o.ship_time = '' AND oi.status <> 'shipped' AND NOT ${TERMINAL_BIZ_STATUS_SQL}
-      ORDER BY oi.id`,
+      ORDER BY oi.id`
   );
 
   // 无归属台账：已提交拿货明细的件数，减去**同一张单里已经指到订单行**的那部分。
@@ -1260,11 +1436,15 @@ export function orderCoverage(): OrderCoveragePayload {
         WHERE po.status = 'submitted'
         GROUP BY pi.purchase_id, COALESCE(pi.style_color_id, 0), pi.style_code, pi.color, pi.size
      ), at AS (
+       -- 对齐键必须用**拿货码**（purchase_size，空串回落 size）：加码款的明细是 XL、
+       -- 来源行记的是下单码 L，按下单码对齐会一条都配不上 ⇒ 同一批货既算 covered 又算
+       -- unattributed（界面提前谎报"已齐"）。存量 purchase_size 为空 ⇒ 等价于 size，行为不变。
        SELECT ps.purchase_id AS purchase_id, ps.style_code AS style_code,
-              ps.color AS color, ps.size AS size,
+              ps.color AS color, COALESCE(NULLIF(ps.purchase_size, ''), ps.size) AS size,
               SUM(CASE WHEN ps.order_item_id > 0 THEN ps.qty ELSE 0 END) AS attributed
          FROM purchase_sources ps
-        GROUP BY ps.purchase_id, ps.style_code, ps.color, ps.size
+        GROUP BY ps.purchase_id, ps.style_code, ps.color,
+                 COALESCE(NULLIF(ps.purchase_size, ''), ps.size)
      )
      SELECT it.style_color_id AS style_color_id, it.style_code AS style_code,
             it.color AS color, it.size AS size,
@@ -1273,7 +1453,7 @@ export function orderCoverage(): OrderCoveragePayload {
          ON at.purchase_id = it.purchase_id AND at.style_code = it.style_code
         AND at.color = it.color AND at.size = it.size
       GROUP BY it.style_color_id, it.style_code, it.color, it.size
-     HAVING SUM(MAX(0, it.q - COALESCE(at.attributed, 0))) > 0`,
+     HAVING SUM(MAX(0, it.q - COALESCE(at.attributed, 0))) > 0`
   ).map((r) => ({
     styleColorId: Number(r.style_color_id ?? 0) || 0,
     styleCode: String(r.style_code ?? ''),
@@ -1307,6 +1487,7 @@ export function orderCoverage(): OrderCoveragePayload {
         orderNo: String(r.order_no ?? ''),
         shop: String(r.shop ?? ''),
         orderTime: String(r.order_time ?? ''),
+        importedAt: String(r.imported_at ?? ''),
         styleCode: String(r.style_code ?? ''),
         styleName: String(r.style_name ?? ''),
         styleColorId,
@@ -1317,8 +1498,8 @@ export function orderCoverage(): OrderCoveragePayload {
         rawFields,
         // 款色代表图优先（图跟着色走）；没有才用本行订单图
         imagePath:
-          (colorImageId > 0 ? imagePaths.get(colorImageId) ?? '' : '') ||
-          (orderImageId > 0 ? imagePaths.get(orderImageId) ?? '' : ''),
+          (colorImageId > 0 ? (imagePaths.get(colorImageId) ?? '') : '') ||
+          (orderImageId > 0 ? (imagePaths.get(orderImageId) ?? '') : ''),
         covered: Math.max(0, Number(r.covered ?? 0)),
         unclassified: styleColorId <= 0,
       };
@@ -1329,23 +1510,33 @@ export function orderCoverage(): OrderCoveragePayload {
 
 /** 标记某款色无需补货（已线下拿/放弃/退单），缺口不再提示；同款色新需求差额会重新出现 */
 export function addIgnore(styleCode: string, color: string, reason: string): void {
-  dbRun(
-    `INSERT OR IGNORE INTO purchase_ignore (style_code, color, reason) VALUES (?, ?, ?)`,
-    [String(styleCode ?? '').trim().slice(0, 50), String(color ?? '').slice(0, 50), String(reason ?? '').slice(0, 100)],
-  );
+  dbRun(`INSERT OR IGNORE INTO purchase_ignore (style_code, color, reason) VALUES (?, ?, ?)`, [
+    String(styleCode ?? '')
+      .trim()
+      .slice(0, 50),
+    String(color ?? '').slice(0, 50),
+    String(reason ?? '').slice(0, 100),
+  ]);
 }
 
 /** 恢复某款色的待拿货提示 */
 export function removeIgnore(styleCode: string, color: string): void {
   dbRun(`DELETE FROM purchase_ignore WHERE style_code = ? AND color = ?`, [
-    String(styleCode ?? '').trim().slice(0, 50),
+    String(styleCode ?? '')
+      .trim()
+      .slice(0, 50),
     String(color ?? '').slice(0, 50),
   ]);
 }
 
-export function listIgnores(): { styleCode: string; color: string; reason: string; createdAt: string }[] {
+export function listIgnores(): {
+  styleCode: string;
+  color: string;
+  reason: string;
+  createdAt: string;
+}[] {
   return dbQuery<Record<string, unknown>>(
-    `SELECT style_code, color, reason, created_at FROM purchase_ignore ORDER BY id DESC`,
+    `SELECT style_code, color, reason, created_at FROM purchase_ignore ORDER BY id DESC`
   ).map((r) => ({
     styleCode: String(r.style_code ?? ''),
     color: String(r.color ?? ''),
@@ -1377,7 +1568,7 @@ function allocateToShops(from?: string, to?: string): ShopAllocationDetailRow[] 
     `SELECT po.id, po.biz_date, s.name AS supplier_name
      FROM purchase_orders po JOIN suppliers s ON po.supplier_id = s.id ${where}
      ORDER BY po.biz_date, po.id`,
-    params,
+    params
   );
   if (orders.length === 0) return [];
   const ids = orders.map((o) => Number(o.id));
@@ -1385,12 +1576,13 @@ function allocateToShops(from?: string, to?: string): ShopAllocationDetailRow[] 
   const itemRows = dbQuery<Record<string, unknown>>(
     `SELECT purchase_id, style_code, style_name, color, size, qty, price_cents
      FROM purchase_items WHERE purchase_id IN ${idIn}`,
-    ids,
+    ids
   );
   const srcRows = dbQuery<Record<string, unknown>>(
-    `SELECT purchase_id, shop, style_code, style_name, color, size, qty
+    `SELECT purchase_id, shop, style_code, style_name, color, size,
+            COALESCE(NULLIF(purchase_size, ''), size) AS link_size, qty
      FROM purchase_sources WHERE purchase_id IN ${idIn} ORDER BY id`,
-    ids,
+    ids
   );
 
   // 每单：款色码 bucket（qty 上限 + 单价 + 已消费 used）
@@ -1414,7 +1606,9 @@ function allocateToShops(from?: string, to?: string): ShopAllocationDetailRow[] 
     const pid = Number(src.purchase_id);
     const buckets = orderBuckets.get(pid);
     if (!buckets) continue;
-    const key = `${src.style_code}\u0000${src.color}\u0000${src.size}`;
+    // 对齐键用**拿货码**（`link_size`）：明细的 `size` 是拿货码，来源的 `size` 是下单码，
+    // 直接拿来源的 size 找 bucket 会在加码款上一条都找不到 ⇒ 该来源被静默跳过、分摊少算。
+    const key = `${src.style_code}\u0000${src.color}\u0000${String(src.link_size ?? '')}`;
     const bucket = buckets.get(key);
     if (!bucket) continue;
     const srcQty = Number(src.qty ?? 1);
@@ -1466,7 +1660,11 @@ export function shopAllocation(from?: string, to?: string): ShopAllocationRow[] 
 }
 
 /** 指定店铺的对账明细行（按拿货日期、单号排序） */
-export function shopAllocationDetail(shop: string, from?: string, to?: string): ShopAllocationDetailRow[] {
+export function shopAllocationDetail(
+  shop: string,
+  from?: string,
+  to?: string
+): ShopAllocationDetailRow[] {
   return allocateToShops(from, to)
     .filter((l) => l.shop === shop)
     .sort((a, b) => a.bizDate.localeCompare(b.bizDate) || a.purchaseId - b.purchaseId);
@@ -1506,7 +1704,7 @@ export function costSnapshot(): CostSnapshotItem[] {
      JOIN purchase_orders po ON pi.purchase_id = po.id
      WHERE po.status = 'submitted' AND pi.qty > 0 AND pi.amount_cents > 0
      GROUP BY pi.style_code, po.biz_date
-     ORDER BY pi.style_code, po.biz_date`,
+     ORDER BY pi.style_code, po.biz_date`
   );
   return rows
     .map((r) => {
@@ -1536,7 +1734,7 @@ export function priceHistory(supplierId: number, styleCode: string, color: strin
        FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
        WHERE po.supplier_id = ? AND pi.style_code = ? AND pi.color = ? AND pi.qty > 0
        ORDER BY po.biz_date DESC, pi.id DESC LIMIT 1`,
-      [supplierId, code, clr],
+      [supplierId, code, clr]
     );
     if (r) return Number(r.price_cents ?? 0);
   }
@@ -1545,7 +1743,7 @@ export function priceHistory(supplierId: number, styleCode: string, color: strin
      FROM purchase_items pi JOIN purchase_orders po ON pi.purchase_id = po.id
      WHERE pi.style_code = ? AND pi.color = ? AND pi.qty > 0
      ORDER BY po.biz_date DESC, pi.id DESC LIMIT 1`,
-    [code, clr],
+    [code, clr]
   );
   return g ? Number(g.price_cents ?? 0) : 0;
 }

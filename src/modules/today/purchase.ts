@@ -156,6 +156,17 @@ export function shopAllocationDetail(payload: {
 
 // ---- 待拿货缺口 / 忽略清单 / 单价记忆 ----
 
+/**
+ * 缺口行（`missing > 0` 才返回）。
+ *
+ * ⚠️ **不做亚洲款加码换算**（2026-11-02 判定）：加码只在"拿货侧"生效，而本函数在主进程用 SQL
+ * 聚合（`purchase-db.outstanding`）。要在这里换算就得把 `lib/sizeShift` 的码序算法复制进主进程
+ * —— 那正是"同一件事两套实现"的起点（两处对不上时用户只会认为坏了）。
+ * 现状的消费方只有两处，都不看码：① 本文件的 `purchaseCounts().gap` 按**款色**去重计数；
+ * ② UI 岛经 `host.ts` 读缺口。**要码级缺口请走拣货清单**（`PickingView` 的 `summary`，
+ * 它读的是同一份换算后的行）。将来若有新消费方要码级数字，先把它接进清单那条链路，
+ * 不要在这里补一套偏移计算。
+ */
 export function outstanding(): Promise<OutstandingRow[]> {
   return rows(ipc.purchaseOutstanding());
 }

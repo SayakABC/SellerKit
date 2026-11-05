@@ -15,8 +15,14 @@
             （`oi_orders.ship_time` 来自导入报表），应用内没有这个动作 —— 造一个本地开关
             只会和平台数据打架。这里只回答"货到齐了没有"。
          ⚠️ 折叠头就带着答案（可以发货 N 单 / 还差 N 单），展开才看**是哪几单** ——
-            拿货页的主活是开单，别让一长串订单号把厂家卡压到屏幕外。 -->
-    <section v-if="cover.orders > 0 || coverError" class="wb-panel pu-cover" data-act="pu-cover">
+            拿货页的主活是开单，别让一长串订单号把厂家卡压到屏幕外。
+         ⚠️ 2026-11-02：这里有**两个不同的数**，界面必须把范围说全 ——
+            总览「今天同步 4 单」按**导入日**筛；这里的「还差」是**全部未发货**（跨天结转，
+            历史导入单也算）。只给一个 73 会被读成"今天同步出了 73 单"。
+            **默认就是全量**（不筛窗口，不给用户加一步）：折叠头写「含历史导入 N 单」，
+            展开写「全部未发货 N 单 = 今天导入 N + 历史导入 N」。超过 30 天的老单在列表里
+            折成一行「更早 N 单」——点一下才展开，既不静默藏单，也不把日常要拿的单挤下去。 -->
+    <section v-if="coverAllCount > 0 || coverError" class="wb-panel pu-cover" data-act="pu-cover">
       <button
         type="button"
         class="wb-panel__head pu-cover-head"
@@ -31,10 +37,25 @@
         <span v-else-if="coverError" class="pu-cover-head__err" data-act="pu-cover-error">
           {{ coverError }}
         </span>
+        <!-- 范围必须写在折叠头上（2026-11-02）：只给「还差 N 单」会被读成"今天同步了 N 单"，
+             而它其实是**全部未发货**（跨天结转，历史导入单也在内）。 -->
+        <span v-if="coverAllCount" class="pu-cover-head__scope" data-act="pu-cover-scope">
+          {{ coverScopeText }}
+        </span>
         <span class="pu-cover-head__toggle">{{ showCover ? '收起' : '展开' }}</span>
       </button>
 
       <div v-if="showCover" class="wb-panel__body">
+        <!-- 数据来源说清"这些单从哪来"：今天导入 / 历史导入按**入库日**分（不是下单日 ——
+             芒果今天采集的往往是前几天下、今天才抓到的待发货单）。
+             ⚠️ 这里**不设时间窗控件**（2026-11-02 用户反馈：多一个下拉 = 多一步操作）。
+             默认就是全量；只是把超过 30 天的老单在下面两段里各自折成一行，点开才看。 -->
+        <p class="pu-cover-source wb-muted" data-act="pu-cover-source">
+          全部未发货 {{ coverAllCount }} 单：今天导入 {{ coverImports.today }} 单 · 历史导入
+          {{ coverImports.history }} 单<template v-if="coverImports.undated">
+            · 导入日未知 {{ coverImports.undated }} 单</template
+          >
+        </p>
         <p class="pu-cover-note wb-muted" data-act="pu-cover-note">
           按已提交拿货单记下的订单行判定 · 共 {{ cover.pieces }} 件，已拿 {{ cover.covered }} 件
         </p>
@@ -50,11 +71,12 @@
           <p v-if="!doneOrders.length" class="pu-cover-seg__empty wb-muted">
             还没有拿齐的单 —— 下面的「还差」里补齐就能发
           </p>
-          <ul v-else class="pu-cover-list">
+          <ul v-if="doneVisible.length" class="pu-cover-list">
             <li
-              v-for="(o, i) in doneOrders"
+              v-for="(o, i) in doneVisible"
               :key="`d-${o.orderNo}-${i}`"
               class="pu-cover-item"
+              :class="{ 'pu-cover-item--older': i >= doneRecent.length }"
               data-act="pu-cover-done-item"
             >
               <span class="pu-cover-item__no wb-mono">{{ o.orderNo || '（无单号）' }}</span>
@@ -63,6 +85,17 @@
               <span v-if="o.estimated" class="pu-cover-tag">推算</span>
             </li>
           </ul>
+          <!-- 更早的单（超过 30 天）折成一行：日常要拿的单排前面，老单点开才看（不静默丢） -->
+          <button
+            v-if="doneOlder.length"
+            type="button"
+            class="pu-cover-older wb-btn wb-btn--ghost wb-btn--sm"
+            data-act="pu-cover-done-older"
+            @click="showDoneOlder = !showDoneOlder"
+          >
+            更早 {{ doneOlder.length }} 单（{{ doneOlderPieces }} 件）·
+            {{ showDoneOlder ? '收起' : '展开' }}
+          </button>
         </div>
 
         <!-- 还差什么 -->
@@ -71,11 +104,12 @@
           <p v-if="!partialOrders.length" class="pu-cover-seg__empty wb-muted">
             全部齐了，按上面的单子发货就行
           </p>
-          <ul v-else class="pu-cover-list">
+          <ul v-if="partialVisible.length" class="pu-cover-list">
             <li
-              v-for="(o, i) in partialOrders"
+              v-for="(o, i) in partialVisible"
               :key="`p-${o.orderNo}-${i}`"
               class="pu-cover-item pu-cover-item--partial"
+              :class="{ 'pu-cover-item--older': i >= partialRecent.length }"
               data-act="pu-cover-partial-item"
             >
               <div class="pu-cover-item__head">
@@ -85,7 +119,12 @@
                 <span v-if="o.unclassified" class="pu-cover-tag pu-cover-tag--warn">未识别款</span>
               </div>
               <div class="pu-cover-item__missing">
-                <span v-for="(r, j) in missingOf(o)" :key="j" class="pu-cover-chip" data-act="pu-cover-chip">
+                <span
+                  v-for="(r, j) in missingOf(o)"
+                  :key="j"
+                  class="pu-cover-chip"
+                  data-act="pu-cover-chip"
+                >
                   <!-- 缩略图（源 64px、显示 18px）：核对"这行要的色"时图比文字快；没图就只给文字。 -->
                   <img
                     v-if="coverThumbOf(r)"
@@ -106,6 +145,17 @@
               </div>
             </li>
           </ul>
+          <!-- 更早的单（超过 30 天）—— 与「可以发货」段同一个折法，翻出来才能看到缺什么 -->
+          <button
+            v-if="partialOlder.length"
+            type="button"
+            class="pu-cover-older wb-btn wb-btn--ghost wb-btn--sm"
+            data-act="pu-cover-partial-older"
+            @click="showPartialOlder = !showPartialOlder"
+          >
+            更早 {{ partialOlder.length }} 单（{{ partialOlderPieces }} 件）·
+            {{ showPartialOlder ? '收起' : '展开' }}
+          </button>
         </div>
       </div>
     </section>
@@ -129,7 +179,7 @@
       :supplier-orders="ordersBySupplier"
       :ignore-reasons="ignoreReasonMap"
       :supplier-phones="phoneMap"
-      @go-import="go('import')"
+      @go-import="go('queue')"
       @generated="onPickRows"
       @ignore="askIgnore"
       @unignore="onUnignore"
@@ -248,7 +298,9 @@
       @confirm="runAssignSupplier"
     >
       <p>{{ [assigning.styleCode, assigning.styleName].filter(Boolean).join(' ') }}</p>
-      <p class="wb-muted">厂家挂在款上：这一款的 {{ assigning.colors }} 个款色会一起改（与拖拽改厂家同一件事）。</p>
+      <p class="wb-muted">
+        厂家挂在款上：这一款的 {{ assigning.colors }} 个款色会一起改（与拖拽改厂家同一件事）。
+      </p>
       <label v-if="suppliers.length" class="wb-field pu-field">
         <span class="wb-field__label">厂家</span>
         <select v-model.number="assignTarget" class="wb-input" data-act="pu-assign-supplier">
@@ -327,13 +379,21 @@ import { orderImageThumbBatch, productMoveSupplier } from '@/core/services/ipc';
 import ProductPicker from '@/modules/goods/components/ProductPicker.vue';
 import { skuMap } from '@/modules/goods/api';
 import type { IgnoreRow, PurchaseOrder, Supplier } from '@/types';
-import { ignoreKey, pendingOf, purchaseGateOf, type PickingGroup } from '@/lib/picking';
 import {
+  ignoreKey,
+  pendingOf,
+  purchaseGateOf,
+  DEFAULT_PICKING_DAYS,
+  type PickingGroup,
+} from '@/lib/picking';
+import {
+  coverageImportSplit,
   coverageInputs,
   coverageSummary,
   groupByOrder,
   missingLabel,
   planCoverage,
+  scopeCoverageByDays,
   type CoverageSummary,
   type OrderCoverageOrder,
   type RowCoverage,
@@ -385,18 +445,57 @@ const fixing = ref<{ itemId: string; pieces: number; shops: string[] } | null>(n
 //    总览说"全齐了"、这里说"还差 1 件"是必然会发生的。
 const showCover = ref(false);
 const coverError = ref('');
-const coverOrders = ref<OrderCoverageOrder[]>([]);
-const cover = ref<CoverageSummary>({
-  orders: 0,
-  done: 0,
-  partial: 0,
-  pieces: 0,
-  covered: 0,
-  remaining: 0,
-  estimated: false,
-});
+/**
+ * 全部未发货单（宿主原样返回的**跨天结转**口径）。
+ *
+ * 2026-11-02：这里以前把 `groupByOrder` 的结果叫 `coverOrders`、汇总叫 `cover` ——
+ * 折叠头因此只有「还差 73 单」一个数，而总览的「今天同步 4 单」按导入日筛，
+ * 用户把两个数读成"今天同步出了 73 单"。现在：
+ *   · 折叠头与两段的**数字永远是全部**（不筛窗口，用户不用多点一步）；
+ *   · 来源按**入库日**拆成今天 / 历史（回答"73 从哪来"）；
+ *   · 只有**超过 30 天**的单在两段里各折成一行「更早 N 单」，点开才看 ——
+ *     既不让老单把日常要拿的单挤下去，也不静默丢（那一行就写着单数）。
+ */
+const coverAllOrders = ref<OrderCoverageOrder[]>([]);
+const coverOrders = computed(() => coverAllOrders.value);
+const coverAllCount = computed(() => coverAllOrders.value.length);
+const coverImports = computed(() => coverageImportSplit(coverAllOrders.value, localDay()));
+/** 折叠头的范围：一眼看出"这些单里有多少是历史结转的"（不展开也能回答 73 从哪来） */
+const coverScopeText = computed(() =>
+  coverImports.value.history > 0
+    ? `全部未发货 · 含历史导入 ${coverImports.value.history} 单`
+    : '全部未发货'
+);
+const cover = computed<CoverageSummary>(() => coverageSummary(coverOrders.value));
 const doneOrders = computed(() => coverOrders.value.filter((o) => o.done));
 const partialOrders = computed(() => coverOrders.value.filter((o) => !o.done));
+
+/** 「更早」的界线：与同页拣货宫格同一个 30 天口径（只是折叠分组，不是筛选） */
+const OLDER_DAYS = DEFAULT_PICKING_DAYS;
+function splitOlder(list: OrderCoverageOrder[]): {
+  recent: OrderCoverageOrder[];
+  older: OrderCoverageOrder[];
+} {
+  const w = scopeCoverageByDays(list, { days: OLDER_DAYS, today: localDay() });
+  return { recent: w.visible, older: w.hidden };
+}
+const doneSplit = computed(() => splitOlder(doneOrders.value));
+const partialSplit = computed(() => splitOlder(partialOrders.value));
+const doneRecent = computed(() => doneSplit.value.recent);
+const doneOlder = computed(() => doneSplit.value.older);
+const partialRecent = computed(() => partialSplit.value.recent);
+const partialOlder = computed(() => partialSplit.value.older);
+const showDoneOlder = ref(false);
+const showPartialOlder = ref(false);
+const doneVisible = computed(() =>
+  showDoneOlder.value ? [...doneRecent.value, ...doneOlder.value] : doneRecent.value
+);
+const partialVisible = computed(() =>
+  showPartialOlder.value ? [...partialRecent.value, ...partialOlder.value] : partialRecent.value
+);
+const olderPieces = (list: OrderCoverageOrder[]) => list.reduce((sum, o) => sum + o.pieces, 0);
+const doneOlderPieces = computed(() => olderPieces(doneOlder.value));
+const partialOlderPieces = computed(() => olderPieces(partialOlder.value));
 
 /** 一张单还差的明细，**最多 6 条**（多的一行"还有 N 项"，别用 30 个 chip 铺满屏） */
 function missingOf(o: OrderCoverageOrder): RowCoverage[] {
@@ -439,7 +538,7 @@ async function loadCoverThumbs(orders: OrderCoverageOrder[]): Promise<void> {
 
 /** chip 上那张图（没图/取失败给 ''，模板按空处理，不画占位） */
 function coverThumbOf(r: RowCoverage): string {
-  return r.imagePath ? coverThumbs.value[r.imagePath] ?? '' : '';
+  return r.imagePath ? (coverThumbs.value[r.imagePath] ?? '') : '';
 }
 
 type ConfirmSpec = {
@@ -512,16 +611,20 @@ async function load(): Promise<void> {
 
     // 逐行覆盖 → 每张单齐没齐（算法在 `@/lib/orderCoverage`，纯函数、vitest 覆盖）
     const ins = coverageInputs(cv);
-    coverOrders.value = groupByOrder(planCoverage(ins.rows, ins).rows);
-    cover.value = coverageSummary(coverOrders.value);
-    // 缩略图只有**展开着**才去拉（收起时不上取数、不占往返）
-    if (showCover.value) void loadCoverThumbs(coverOrders.value);
+    coverAllOrders.value = groupByOrder(planCoverage(ins.rows, ins).rows);
+    // 缩略图在展开/翻出更早的单时才拉（见下方 watch；收起时不上取数、不占往返）
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '读取拿货数据失败';
   } finally {
     loading.value = false;
   }
 }
+
+// 缩略图只在**展开着**才拉；翻出「更早」的单（`partialVisible` 变了）也要跟着换 ——
+// 新露出来的缺口行要配图，否则用户只看到别名对不上颜色。
+watch([showCover, partialVisible], () => {
+  if (showCover.value) void loadCoverThumbs(partialVisible.value);
+});
 
 /** 卡尾「生成拿货单（N 件）」的意图（`PickingView` 只发厂家 id） */
 function onSupplierAction(supplierId: number): void {
@@ -533,7 +636,10 @@ function onSupplierAction(supplierId: number): void {
  * ⚠️ 找不到就**什么都不做**（不 toast"单子不存在"）：这些按钮只可能点在本页刚渲染出来的行上，
  *    找不到意味着数据刚被别处改走，此刻任何提示都是噪声；下一次 `bump` 重取后行自己就更新了。
  */
-function onOrderAction(intent: { kind: 'edit' | 'submit' | 'export' | 'delete'; id: number }): void {
+function onOrderAction(intent: {
+  kind: 'edit' | 'submit' | 'export' | 'delete';
+  id: number;
+}): void {
   const o = orders.value.find((x) => x.id === intent.id);
   if (!o) return;
   if (intent.kind === 'edit') void openEditor(o.id);
@@ -559,14 +665,18 @@ async function moveStyleSupplier(
   busy.value = true;
   error.value = '';
   try {
-    const r = await productMoveSupplier({ code: intent.styleCode, supplierId: intent.toSupplierId });
+    const r = await productMoveSupplier({
+      code: intent.styleCode,
+      supplierId: intent.toSupplierId,
+    });
     if (!r.success) throw new Error(r.error || '改厂家失败');
     if (r.data?.changed === false) {
       toast('厂家没有变化', 'info');
       return false;
     }
     const toName = intent.toSupplierId
-      ? (suppliers.value.find((s) => s.id === intent.toSupplierId)?.name ?? `#${intent.toSupplierId}`)
+      ? (suppliers.value.find((s) => s.id === intent.toSupplierId)?.name ??
+        `#${intent.toSupplierId}`)
       : '未指定厂家';
     const label = [intent.styleCode, intent.styleName].filter(Boolean).join(' ');
     toast(`${label}（该款共 ${intent.colors} 个款色）已${verb}「${toName}」`, 'success');
@@ -657,9 +767,7 @@ async function createFromPick(supplierId: number): Promise<void> {
   if (!gate.ok) {
     const parts: string[] = [];
     if (gate.unclassifiedRows > 0) {
-      parts.push(
-        `${gate.unclassifiedRows} 行还没归到款色（开进单里以后改个色名就再也对不上账）`,
-      );
+      parts.push(`${gate.unclassifiedRows} 行还没归到款色（开进单里以后改个色名就再也对不上账）`);
     }
     if (gate.noSupplierRows > 0) {
       parts.push(`${gate.noSupplierRows} 个款色还没指定厂家（开单会直接报"厂商不存在"）`);
@@ -683,13 +791,31 @@ async function createFromPick(supplierId: number): Promise<void> {
         styleColorId: g.styleColorId,
         color: g.color,
         size: g.size,
+        /**
+         * **下单码**（亚洲款加码才有）：`size` 是拿货码，主进程要拿下单码才找得到
+         * 「这批货覆盖了哪几条订单行」。空串 = 未加码（主进程回落 `size`）。
+         * 封顶时多个下单码并到同一拿货码（L/XL 都→XXL），无法唯一追溯 ⇒ 传空串，
+         * 那部分会落进「无归属已拿」被界面列出来 —— 不猜、不谎报已齐。
+         */
+        orderSize: g.orderSizes.length === 1 ? g.orderSizes[0] : '',
         qty: g.remaining,
         priceCents: 0,
         suggestionQty: g.remaining,
       })),
     });
     bump();
-    toast(`已生成拿货单 #${r.id}（草稿）—— 它在本卡的「已开单」里，填好单价再提交`, 'success');
+    // 这家厂原来就有草稿时，必须**说清这是第二张**（2026-11-05）：主按钮已经在有草稿时改成
+    // 「继续 #N」，能走到这里说明用户点的是「再开一张」—— 但用户也可能是从旧习惯/提示里点进来的，
+    // 一句话就能让他确认"我没开出重复单"（还是真开出了、只是我知道）。
+    const draftBefore = orders.value.find(
+      (o) => o.supplierId === supplierId && o.status !== 'submitted'
+    );
+    toast(
+      draftBefore
+        ? `已生成拿货单 #${r.id}（草稿）—— 本卡原有草稿 #${draftBefore.id}，这次是另一单；两张都要填好单价再提交`
+        : `已生成拿货单 #${r.id}（草稿）—— 它在本卡的「已开单」里，填好单价再提交`,
+      'success'
+    );
     await openEditor(r.id);
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '生成拿货单失败';
@@ -712,7 +838,12 @@ function onFixUnclassified(intent: { itemId: string; pieces: number; shops: stri
   fixing.value = intent;
 }
 
-async function onPickProduct(p: { id: number; code: string; name: string; color: string }): Promise<void> {
+async function onPickProduct(p: {
+  id: number;
+  code: string;
+  name: string;
+  color: string;
+}): Promise<void> {
   const target = fixing.value;
   if (!target) return;
   busy.value = true;
@@ -961,6 +1092,14 @@ watch(showCover, (open) => {
   color: var(--wb-danger, #c0392b);
 }
 
+/* 范围（全部未发货 · 含历史导入 N 单）—— 与汇总同处折叠头，字号更轻，避免抢答案 */
+.pu-cover-head__scope {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--wb-text-muted);
+}
+
 .pu-cover-head__toggle {
   margin-left: auto;
   font-weight: 400;
@@ -968,6 +1107,23 @@ watch(showCover, (open) => {
 }
 
 .pu-cover-note {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+/* 「更早 N 单」折叠行：一行轻按钮，不占版面；它自己就写着单数，不静默藏 */
+.pu-cover-older {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+/* 老单在列表里视觉降级（点开后才出现），别与日常要拿的单抢注意力 */
+.pu-cover-item--older {
+  opacity: 0.72;
+}
+
+/* 「全部未发货 N 单：今天导入 N / 历史导入 N」—— 这些单从哪来，必须写出来 */
+.pu-cover-source {
   margin: 0 0 4px;
   font-size: 12px;
 }

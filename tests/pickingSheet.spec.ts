@@ -8,7 +8,7 @@
 // ⚠️ 用例一律用**显式 `today`**（或 orderTime 留空），别让断言随系统日期漂移。
 import { describe, expect, it } from 'vitest';
 import { aggregatePicking, type PickingGroup, type PickingRow } from '../src/lib/picking';
-import { amountText, centsMoney, money, noPriceNote, sheetModelOf, sheetTextOf } from '../src/lib/pickingSheet';
+import { amountText, centsMoney, money, noPriceNote, sheetImageModelOf, sheetModelOf, sheetTextOf } from '../src/lib/pickingSheet';
 
 const infoBlock = (qty: number) => `【1】 某款 (产品属性:Color:黑、Size:L)\n(商品数量:${qty} piece)`;
 
@@ -186,6 +186,63 @@ describe('sheetModelOf：发厂清单模型', () => {
       { taken: { 'S1|黑|M': 2 } },
     ).groups;
     expect(sheetModelOf(rev, META)!.lines.map((l) => l.key)).toEqual(['S1 · 黑', 'S2 · 白']);
+  });
+});
+
+describe('sheetImageModelOf：发出去的图只画"要拿什么"（2026-11-02 用户要求）', () => {
+  /**
+   * 判据的三条都写成**"整张图模型的序列化文本里不许出现"**，而不是逐字段查：
+   * 图是画布逐字 `fillText` 出来的，渲染层的取数面就是这份模型 —— 只要模型里没有这些串，
+   * 图上就画不出来。逐字段断言会漏掉"换个字段名又把它加回去"这种改法。
+   */
+  function imgModel() {
+    const g = aggregatePicking([
+      row({ id: 1, orderNo: 'O1', size: 'L', costCents: 1000, rawFields: { 商品信息: infoBlock(3) } }),
+      row({ id: 2, orderNo: 'O2', size: 'M', costCents: 1000, rawFields: { 商品信息: infoBlock(2) } }),
+      row({ id: 3, orderNo: 'O3', styleCode: 'S2', styleName: '款二', color: '白', size: 'XL', imagePath: '', rawFields: { 商品信息: infoBlock(2) } }),
+    ], { taken: { 'S1|黑|L': 1 } }).groups;
+    return sheetImageModelOf(sheetModelOf(g, META)!);
+  }
+
+  it('款名、款编码、厂家名、金额 —— 一条都不许进图（序列化后逐串查）', () => {
+    const blob = JSON.stringify(imgModel());
+    expect(blob).not.toContain('¥'); // 单价 / 小计 / 合计金额
+    expect(blob).not.toContain('预估');
+    expect(blob).not.toContain('款一'); // 自家商品标题
+    expect(blob).not.toContain('款二');
+    expect(blob).not.toContain('厂A'); // 图就发给这一家，标题不再挂名
+    expect(blob).not.toContain('S1'); // 款编码是内部身份，一直不上图
+    expect(blob).not.toContain('S2');
+  });
+
+  it('行上只剩「颜色 + 尺码×件数 + 件数」，口径与文字清单同源（不另算一遍）', () => {
+    const img = imgModel();
+    expect(img.rows).toHaveLength(2);
+    expect(img.rows[0]).toEqual({
+      colorText: '黑',
+      hasColor: true,
+      localPath: '/tmp/a.jpg',
+      sizesText: 'M×2  L×2', // 两码都还差；按码序排（`sizeOrder`，与屏上/xlsx 同一份）
+      pieces: 4,
+    });
+    expect(img.rows[1].colorText).toBe('白');
+    expect(img.rows[1].localPath).toBe(''); // 无图照发：渲染层画「缺图」占位
+  });
+
+  it('缺色写「未标色」并标 hasColor=false（渲染层据此走告警色，不画成正常行）', () => {
+    const g = aggregatePicking([row({ color: '', styleName: '款一' })]).groups;
+    const img = sheetImageModelOf(sheetModelOf(g, META)!);
+    expect(img.rows[0].colorText).toBe('未标色');
+    expect(img.rows[0].hasColor).toBe(false);
+    expect(JSON.stringify(img)).not.toContain('款一'); // 缺色时**不回落款名**（否则等于把款名加回图）
+  });
+
+  it('标题 / 日期 / 落款：`拿货单` + 日期 + `共 N 款色 · M 件`（落款不含金额）', () => {
+    const img = imgModel();
+    expect(img.title).toBe('拿货单');
+    expect(img.date).toBe('2026-10-10');
+    expect(img.hint).toBe('按图备货 · L×2 = L 码拿 2 件');
+    expect(img.footer).toBe('共 2 款色 · 6 件');
   });
 });
 

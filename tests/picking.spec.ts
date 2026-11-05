@@ -644,8 +644,9 @@ describe('groupByColor：款色折叠', () => {
     const r = rows[0];
     expect(r.key).toBe('S1 · 黑');
     expect(r.sizes).toEqual([
-      { size: 'L', pieces: 6, taken: 4, remaining: 2 },
-      { size: 'XL', pieces: 4, taken: 0, remaining: 4 },
+      // `orderSizes` 是亚洲款加码的"下单码"（此处两行都没加码 ⇒ 空数组）
+      { size: 'L', orderSizes: [], pieces: 6, taken: 4, remaining: 2 },
+      { size: 'XL', orderSizes: [], pieces: 4, taken: 0, remaining: 4 },
     ]);
     expect([r.pieces, r.taken, r.remaining]).toEqual([10, 4, 6]);
   });

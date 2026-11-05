@@ -12,6 +12,8 @@
 //   product-summary    汇总（总数 / 按状态 / 厂家分布 + 全量厂家下拉）
 //   product-import     Excel 批量导入落库（单事务；行明细已在渲染层解析校验；进价随行写 `pl_products.cost_cents`）
 //   product-cost-set   只改「当前进价」一列（成本面板逐款改价）
+//   product-size-shift-load 亚洲款加码：一次取回「款 → 偏移」与「款 → 码链」（拣货清单换算用）
+//   product-size-shift-set  设/撤一款的加码偏移（0 = 撤）
 //   product-priced-codes 有当前进价的款编码集合（「今天」缺口卡用；不返回金额）
 //   product-export     导出/模板：主进程用 exceljs 生成 xlsx（按行嵌图）并弹保存框
 //   product-extract-images 从导入的 xlsx 里抽**嵌入图片**，落盘登记后按锚点行报回
@@ -59,6 +61,9 @@ import {
   variantUpsert,
   SKU_MAP_STATUSES,
   setProductCostByCode,
+  sizeShiftMap,
+  sizeChains,
+  setSizeShift,
   type ProductUpsertInput,
   type ProductImportRow,
   type SkuMapInput,
@@ -170,6 +175,23 @@ handle('product-cost-set', (payload: any) => {
   const cents = Number(payload?.costCents);
   if (!Number.isFinite(cents) || cents < 0) throw new Error('进价必须是非负数字（分）');
   return setProductCostByCode(code, Math.round(cents));
+});
+
+/**
+ * 亚洲款加码：**一次往返**取回「款 → 偏移」与「款 → 码链」。
+ *
+ * 为什么合并成一条：拣货清单换算时两样都必须有（偏移决定动不动、码链决定"下一个码是谁"），
+ * 分两条通道就必然出现"第一条回来了第二条失败"的半截状态 —— 那种状态下清单会按**不加码**算，
+ * 数字看着正常、货拿错。码链按本次清单涉及的款取，不做全库预取（真库款数远大于一屏）。
+ */
+handle('product-size-shift-load', (payload: any) => ({
+  shifts: sizeShiftMap(),
+  chains: sizeChains(payload?.codes),
+}));
+
+handle('product-size-shift-set', (payload: any) => {
+  ensureProductSchema();
+  return setSizeShift(payload);
 });
 
 /** 有当前进价的款编码集合（缺口卡的存在性检查；不返回金额） */

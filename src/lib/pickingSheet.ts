@@ -12,6 +12,10 @@
 //
 // 金额展示口径（`money` / `amountText` / `noPriceNote`）也住在本文件、由界面 import ——
 // 图与屏上必须是同一套字面：`¥0.00` 与"不知道多少钱"是两件事，这条纪律只留一个实现。
+//
+// ⚠️ 两种出口**故意不同口径**（2026-11-02 用户要求）：**文字清单**给自家留存/转发，含款名与金额；
+//    **图**发出去给对方照着备货，只画"要拿什么"（无款名 / 无预估金额 / 无厂家名）——
+//    见 `sheetImageModelOf` 的头注。
 
 import { groupByColor, pendingOf, pendingRollup, type PickingGroup } from './picking';
 import { sizeQtyBadge } from './pickingExport';
@@ -75,9 +79,13 @@ export interface SheetLine {
 export interface SheetModel {
   /** 标题：`拿货单 · 厂A · 2026-10-10` */
   title: string;
+  /** 单据日期（文字清单的标题里已含；图要单独一行，见 `sheetImageModelOf`） */
+  date: string;
   lines: SheetLine[];
   /** 合计行：`共 2 款色 · 3 件 · 预估 ¥20.00（不含 1 件无进价）` */
   footer: string;
+  /** 合计的两个**数**（与 `footer` 同源 `pendingRollup`；图上的落款只要这两个数，不要金额） */
+  totals: { colors: number; pieces: number };
 }
 
 /**
@@ -111,8 +119,10 @@ export function sheetModelOf(
   }));
   return {
     title: `拿货单 · ${meta.supplierName || '未指定厂家'} · ${meta.date}`,
+    date: meta.date,
     lines,
     footer: `共 ${t.colors} 款色 · ${t.pieces} 件 · 预估 ${amountText(t.amount, t.noPricePieces, t.pieces)}${noPriceNote(t.noPricePieces, t.pieces)}`,
+    totals: { colors: t.colors, pieces: t.pieces },
   };
 }
 
@@ -134,18 +144,91 @@ export function sheetTextOf(model: SheetModel): string {
   return out.join('\n');
 }
 
+// ───────────────────────────── 图上画什么（对外口径，与文字清单**故意不同**） ─────────────────────────────
+//
+// 2026-11-02 用户要求（原话）：「复制出来的拿货单图片重新设计，不显示款名、预估金额、供应商」。
+// 于是图与文字清单**分成两个模型**：`sheetTextOf` 照旧（自家留存/转发，含款名与金额），
+// 图只画"要把什么货拿回来"。
+//
+// 撤掉三样的代价必须自己补回来，否则这张图就不可核对了：
+//   · 撤款名 ⇒ 一行只剩「图 + 颜色」，对方点名只能靠**行号** ⇒ 图上加序号（1、2、3…）；
+//   · 撤金额 ⇒ 右侧那一列空出来 ⇒ 让给**件数大字**（点货时最常扫的就是它，原先被金额挤在次行）；
+//   · 撤厂家 ⇒ 标题只剩「拿货单 + 日期」。
+// ⚠️ 这张图是**对外**的：行上的字一律取"对方看得懂的事实"（颜色/尺码/件数），
+//    内部身份（款编码 `key`）、内部估算（进价/预估金额）、自家商品标题（款名）都不上图。
+//    要改这里，先问"这句话对方看得懂吗、会不会被当成报价"。
+
+export interface SheetImageRow {
+  /** 图上唯一的文字身份 = 颜色（缺色写「未标色」，见 `hasColor`） */
+  colorText: string;
+  /** 这一行到底有没有颜色。`false` ⇒ 图上用告警色写 `colorText`（数据缺口要看得见，不能画成正常行） */
+  hasColor: boolean;
+  /** 本地图片路径（渲染时由 `imageOf` 换成 dataUrl） */
+  localPath: string;
+  /** 「L×2  XL×1」各码**还要拿**的件数 */
+  sizesText: string;
+  /** 这一行还要拿的件数合计（图上右侧大字） */
+  pieces: number;
+}
+
+export interface SheetImageModel {
+  /** 固定写「拿货单」—— 不挂厂家名 */
+  title: string;
+  /** 日期（`2026-11-02`） */
+  date: string;
+  /** 图上那句口径说明 */
+  hint: string;
+  rows: SheetImageRow[];
+  /** 落款：`共 2 款色 · 3 件`（不含金额） */
+  footer: string;
+}
+
+/**
+ * 清单模型 → **图片**模型（纯函数，被 vitest 钉住"图上不许出现什么"）。
+ *
+ * 只做减法与换位，不重新算数：行数/件数/尺码文字全部来自 `SheetModel`（⇒ 与屏上、xlsx、
+ * 文字清单同一个 `pendingOf` 口径）。`title` / `date` / `hint` / `footer` 是措辞，住在这里。
+ */
+export function sheetImageModelOf(model: SheetModel): SheetImageModel {
+  return {
+    title: '拿货单',
+    date: model.date,
+    hint: '按图备货 · L×2 = L 码拿 2 件',
+    rows: model.lines.map((l) => ({
+      colorText: l.color || '未标色',
+      hasColor: !!l.color,
+      localPath: l.localPath,
+      sizesText: l.sizesText,
+      pieces: l.pieces,
+    })),
+    footer: `共 ${model.totals.colors} 款色 · ${model.totals.pieces} 件`,
+  };
+}
+
 // ─────────────────────────────── 画布渲染（浏览器实现） ───────────────────────────────
 // 配色是**画布像素**（不参与主题切换，见 AGENTS §1.6 的"非 UI 像素"条款）：
 // 这张图要**离开应用**去别的软件里显示（微信/打印），跟随宿主深色主题反而会在对方那里失真。
 
 const SHEET_FONT = '-apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
-/** 图宽（CSS px；实际画布按 2 倍渲染，粘到微信里清晰） */
-const SHEET_W = 760;
-const SHEET_PAD = 24;
-const SHEET_HEAD = 92;
-const SHEET_ROW = 104;
-const SHEET_FOOT = 68;
-const SHEET_IMG = 80;
+/**
+ * 图宽（CSS px；实际画布按 2 倍渲染，粘到微信里清晰）。
+ * ⚠️ 760 → 620（2026-11-02 重设计）：这张图**主要在手机聊天窗里看**（约 360pt 宽 ⇒ 缩放 ~0.58），
+ *    760 宽时颜色只剩 8pt 左右、尺码几乎读不出。收窄 + 放字号，缩略图状态下才认得出"哪个色几件"。
+ */
+const SHEET_W = 620;
+const SHEET_PAD = 22;
+const SHEET_HEAD = 96;
+const SHEET_ROW = 96;
+const SHEET_FOOT = 60;
+const SHEET_IMG = 84;
+/** 行号列宽（撤掉款名后，序号是"第几行"的唯一把手 —— 见 `sheetImageModelOf` 头注） */
+const SHEET_IDX_W = 20;
+
+const SHEET_INK = '#111111';
+const SHEET_SUB = '#555555';
+const SHEET_MUTED = '#999999';
+const SHEET_LINE = '#eeeeee';
+const SHEET_WARN = '#b45309';
 
 /** dataUrl → 已解码的图（`null` = 解码失败） */
 function loadImageEl(src: string): Promise<HTMLImageElement | null> {
@@ -166,8 +249,15 @@ async function drawSheetImage(
 ): Promise<void> {
   const img = dataUrl ? await loadImageEl(dataUrl) : null;
   if (!img) {
-    ctx.fillStyle = '#f3f3f3';
+    // 缺图占位：底色 + **虚线框**。纯灰块在方图上会被当成"这张图就是这么灰"，
+    // 虚线框才读得出"这里本该有图、但没取到"（对方会来问"这个是什么"，比闷着发出去好）。
+    ctx.fillStyle = '#f6f6f6';
     ctx.fillRect(x, y, SHEET_IMG, SHEET_IMG);
+    ctx.strokeStyle = '#d5d5d5';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(x + 0.5, y + 0.5, SHEET_IMG - 1, SHEET_IMG - 1);
+    ctx.setLineDash([]);
     ctx.fillStyle = '#aaaaaa';
     ctx.font = `12px ${SHEET_FONT}`;
     ctx.textAlign = 'center';
@@ -187,16 +277,50 @@ async function drawSheetImage(
 }
 
 /**
- * 把模型画成一张 PNG（dataURL）。**永不 reject**：画布不可用 / 编码失败返回 `null`
+ * 一段字的**限宽**（超了按字符砍 + 省略号）。调用前先 `ctx.font = …`（量宽度用的是当前字体）。
+ *
+ * 为什么必须有：画布**不会换行也不会裁**，`fillText` 超宽就是直接盖到右边去。颜色名是用户自己
+ * 填的自由文本（"藏青蓝拼白"这种），而右边是件数大字 —— 不量宽度就画，长色名会压在数字上，
+ * 图上就会出现"3"和"件"被糊在一起的读数错误。裁成 `…` 至少看得出"这里还有字"。
+ */
+function fitText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let s = text;
+  while (s.length > 1 && ctx.measureText(`${s}…`).width > maxW) s = s.slice(0, -1);
+  return `${s}…`;
+}
+
+/**
+ * 把**图像模型**画成一张 PNG（dataURL）。**永不 reject**：画布不可用 / 编码失败返回 `null`
  * （调用方按"复制失败"提示，不静默）。
+ *
+ * ⚠️ 入参是 `SheetImageModel` 而**不是** `SheetModel`（2026-11-02）：这是"图上不许出现款名 /
+ *    预估金额 / 厂家名"的**结构性保证** —— 渲染层手里根本没有这些字段可画，
+ *    比写一条"画出来的字符串里不含 ¥"的断言更难绕过（断言只在有人记得维护它时有效）。
+ *    要加内容，先在 `sheetImageModelOf` 里想清楚"对方看得懂吗、会不会被当成报价"。
+ *
+ * 版式（2026-11-02 重设计）：
+ *
+ * ```
+ * 拿货单                                              2026-11-02
+ * 按图备货 · L×2 = L 码拿 2 件
+ * ─────────────────────────────────────────────────────────────
+ *  1  [img]  黑                                        2 件
+ *            L×2
+ * ─────────────────────────────────────────────────────────────
+ * 共 2 款色 · 3 件
+ * ```
+ *
+ * 三列的信息优先级 = 对方干活时的顺序：**先按号码找行 → 再看图认货 → 再看颜色/尺码拿几件**。
+ * 所以件数从"次行小字"升成右侧大字（撤掉金额后空出来的那一列），颜色与尺码上下叠（同一视线内）。
  */
 export async function renderSheetPng(
-  model: SheetModel,
+  img: SheetImageModel,
   imageOf: (localPath: string) => string,
 ): Promise<string | null> {
   try {
     const scale = 2;
-    const H = SHEET_HEAD + model.lines.length * SHEET_ROW + SHEET_FOOT;
+    const H = SHEET_HEAD + img.rows.length * SHEET_ROW + SHEET_FOOT;
     const c = document.createElement('canvas');
     c.width = SHEET_W * scale;
     c.height = H * scale;
@@ -209,54 +333,90 @@ export async function renderSheetPng(
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, SHEET_W, H);
 
-    // 标题 + 一句用途说明（"单价是预估"要先说 —— 对方拿它报价时才不会把预估当实付）
-    ctx.fillStyle = '#111111';
-    ctx.font = `600 22px ${SHEET_FONT}`;
-    ctx.fillText(model.title, SHEET_PAD, 44);
-    ctx.fillStyle = '#888888';
+    // ── 头：标题（左）+ 日期（右）+ 一句口径 ──
+    ctx.textAlign = 'left';
+    ctx.fillStyle = SHEET_INK;
+    ctx.font = `700 24px ${SHEET_FONT}`;
+    ctx.fillText(img.title, SHEET_PAD, 46);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = SHEET_MUTED;
+    ctx.font = `13px ${SHEET_FONT}`;
+    ctx.fillText(img.date, SHEET_W - SHEET_PAD, 48);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = SHEET_MUTED;
     ctx.font = `12px ${SHEET_FONT}`;
-    ctx.fillText('按此清单备货；单价为预估进价，以实际结算为准', SHEET_PAD, 72);
+    ctx.fillText(img.hint, SHEET_PAD, 78);
+
+    // 表头线比行线重一档 —— 它是"这里是表头、下面是货"的信号
+    const headerY = SHEET_HEAD - 6;
+    ctx.strokeStyle = '#dddddd';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(SHEET_PAD, headerY + 0.5);
+    ctx.lineTo(SHEET_W - SHEET_PAD, headerY + 0.5);
+    ctx.stroke();
 
     let y = SHEET_HEAD;
-    for (const ln of model.lines) {
-      ctx.strokeStyle = '#eeeeee';
+    for (let i = 0; i < img.rows.length; i++) {
+      const row = img.rows[i];
+      const cy = y + SHEET_ROW / 2;
+
+      ctx.strokeStyle = SHEET_LINE;
       ctx.beginPath();
       ctx.moveTo(SHEET_PAD, y + 0.5);
       ctx.lineTo(SHEET_W - SHEET_PAD, y + 0.5);
       ctx.stroke();
 
-      await drawSheetImage(ctx, imageOf(ln.localPath), SHEET_PAD, y + (SHEET_ROW - SHEET_IMG) / 2);
-
-      // 左：款名·颜色（主） + 尺码×件数（次）。⚠️ 款编码是内部身份（`key`），**不画进图** ——
-      // 这张图直接发给厂家，对外文案一律走 `label`。
-      ctx.fillStyle = '#111111';
-      ctx.font = `600 16px ${SHEET_FONT}`;
-      ctx.fillText(ln.label, SHEET_PAD + SHEET_IMG + 16, y + 34);
-      ctx.fillStyle = '#444444';
-      ctx.font = `14px ${SHEET_FONT}`;
-      ctx.fillText(ln.sizesText, SHEET_PAD + SHEET_IMG + 16, y + 64);
-
-      // 右：小计（主） + 件数/单价（次）—— 右对齐在留白侧，扫一眼就能对到行
-      ctx.textAlign = 'right';
-      ctx.fillStyle = '#111111';
-      ctx.font = `600 16px ${SHEET_FONT}`;
-      ctx.fillText(ln.amountText, SHEET_W - SHEET_PAD, y + 34);
-      ctx.fillStyle = '#888888';
+      // ① 行号（撤掉款名后，"第几行"是唯一的点名方式）
+      ctx.textAlign = 'left';
+      ctx.fillStyle = SHEET_MUTED;
       ctx.font = `12px ${SHEET_FONT}`;
-      ctx.fillText(`${ln.pieces} 件 · ${ln.unitPriceText}/件`, SHEET_W - SHEET_PAD, y + 64);
+      ctx.fillText(String(i + 1), SHEET_PAD, cy);
+
+      // ② 图
+      await drawSheetImage(
+        ctx,
+        imageOf(row.localPath),
+        SHEET_PAD + SHEET_IDX_W,
+        y + (SHEET_ROW - SHEET_IMG) / 2,
+      );
+
+      // ③ 颜色（主）+ 尺码×件数（次）—— 上下叠，同一视线内。
+      //    字号偏大一档：这张图在微信里是被**缩小预览**的（620px 宽 ≈ 手机 1/1.7），
+      //    17px 缩完只剩 9px 左右，颜色认不出来（颜色是这版**唯一的文字身份**）。
+      //    宽度上限 = 到件数列之前（留 88px 给「3 件」），长色名/多码会裁成 `…` 而不是盖住数字。
+      const tx = SHEET_PAD + SHEET_IDX_W + SHEET_IMG + 14;
+      const maxTextW = SHEET_W - SHEET_PAD - 88 - tx;
+      ctx.fillStyle = row.hasColor ? SHEET_INK : SHEET_WARN;
+      ctx.font = `700 22px ${SHEET_FONT}`;
+      ctx.fillText(fitText(ctx, row.colorText, maxTextW), tx, cy - 15);
+      ctx.fillStyle = SHEET_SUB;
+      ctx.font = `16px ${SHEET_FONT}`;
+      ctx.fillText(fitText(ctx, row.sizesText, maxTextW), tx, cy + 17);
+
+      // ④ 右侧件数大字 + 小号单位（点货时最常扫的数）
+      //    单位与数字之间留 19px：三位数（105）时 16px 会贴成"105件"一坨，读起来像另一种数量写法。
+      ctx.textAlign = 'right';
+      ctx.fillStyle = SHEET_MUTED;
+      ctx.font = `12px ${SHEET_FONT}`;
+      ctx.fillText('件', SHEET_W - SHEET_PAD, cy + 9);
+      ctx.fillStyle = SHEET_INK;
+      ctx.font = `700 28px ${SHEET_FONT}`;
+      ctx.fillText(String(row.pieces), SHEET_W - SHEET_PAD - 19, cy);
       ctx.textAlign = 'left';
 
       y += SHEET_ROW;
     }
 
+    // ── 落款：只要款色数 + 件数（不写金额） ──
     ctx.strokeStyle = '#dddddd';
     ctx.beginPath();
     ctx.moveTo(SHEET_PAD, y + 0.5);
     ctx.lineTo(SHEET_W - SHEET_PAD, y + 0.5);
     ctx.stroke();
     ctx.fillStyle = '#333333';
-    ctx.font = `600 14px ${SHEET_FONT}`;
-    ctx.fillText(model.footer, SHEET_PAD, y + SHEET_FOOT / 2);
+    ctx.font = `600 15px ${SHEET_FONT}`;
+    ctx.fillText(img.footer, SHEET_PAD, y + SHEET_FOOT / 2);
 
     return c.toDataURL('image/png');
   } catch {

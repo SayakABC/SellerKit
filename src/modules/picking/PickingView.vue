@@ -115,6 +115,150 @@
       </div>
     </section>
 
+    <!-- 亚洲款加码（2026-11-02）：**本页唯一的加码设置入口**，按"款"列出、逐款设幅度。
+         ① 幅度是按客户反馈反复调的（+1 不够就 +2）⇒ 必须有一处把"哪几款 · 现在几码 · 待拿几件"
+            连现状一起看全，而不是逐行翻；
+         ② 没有加码款时**折成一行**（不占版面），但那行标题本身就是入口 —— 上一版把下拉藏在
+            "有加码才显示"的提示条里，结果第一批款永远加不上码；
+         ③ 行内只留只读标记（`+2 码`），点它跳到这里并高亮。
+         ⚠️ 封顶与"认不出"分开说：前者仍按最大码拿（拿得到），后者是**没加**（照原码拿），
+         两种后果完全不同，并成一句会让用户以为都加好了。 -->
+    <section
+      v-if="styleShiftRows.length"
+      ref="shiftPanelRef"
+      class="wb-panel pk-shift"
+      :class="{ 'is-open': shiftPanelOpen, 'is-on': shiftStats.shiftedStyles > 0 }"
+      data-act="pk-shift"
+    >
+      <button
+        type="button"
+        class="pk-shift__head"
+        data-act="pk-shift-toggle"
+        :aria-expanded="shiftPanelOpen"
+        @click="toggleShiftPanel"
+      >
+        <span class="pk-shift__badge" data-act="pk-shift-tag">加码</span>
+        <span class="pk-shift__title" data-act="pk-shift-title">{{ shiftTitle }}</span>
+        <!-- 白话解释（2026-11-05）：只写「下单 L 拿 XL」是在解释**现象**，"为什么要加码"
+             仍然要用户自己知道（亚洲码偏小）。加半句成本为零，换人不至于看不懂这一块。 -->
+        <span class="wb-muted pk-shift__why">亚洲码偏小：下单 L 就照 XL 拿 · 订单与利润不变</span>
+        <span class="pk-bar__spacer"></span>
+        <span class="wb-muted pk-shift__count">{{ styleShiftRows.length }} 款可选</span>
+        <span class="pk-shift__chev" data-act="pk-shift-chev">
+          {{ shiftPanelOpen ? '收起' : '设置加码' }}
+          <span class="pk-shift__caret" aria-hidden="true">{{ shiftPanelOpen ? '▴' : '▾' }}</span>
+        </span>
+      </button>
+
+      <div v-if="shiftPanelOpen" class="pk-shift__body">
+        <div class="pk-shift__filter">
+          <input
+            v-model="shiftQuery"
+            class="wb-input wb-input--sm pk-shift__search"
+            placeholder="搜款号 / 款名"
+            data-act="pk-shift-search"
+          />
+          <label class="pk-field">
+            <input v-model="onlyShifted" type="checkbox" data-act="pk-shift-only" />
+            只看已加码
+          </label>
+          <span class="wb-muted pk-shift__hint">同款所有颜色一起生效</span>
+        </div>
+
+        <!-- `is-all` = 「展开全部」已点：放开高度上限，让用户真能一屏看全（2026-11-02 用户实报
+             "点开展开全部还是被裁"——上限不撤的话这个按钮等于没点）。 -->
+        <div class="pk-shift__list" data-act="pk-shift-list">
+          <div class="pk-shift__cols" aria-hidden="true">
+            <span>款 · 款号 / 款名</span>
+            <span class="pk-shift__cols-meta">款色 · 待拿</span>
+            <span class="pk-shift__cols-pick">加几码</span>
+          </div>
+          <div class="pk-shift__rows" :class="{ 'is-all': showAllShiftRows }">
+            <div
+              v-for="s in visibleShiftRows"
+              :key="s.styleCode"
+              class="pk-shift__row"
+              :class="{ 'is-on': s.shift > 0, 'is-focus': shiftFocusCode === s.styleCode }"
+              :data-act="`pk-shift-style-${s.styleCode}`"
+            >
+              <!-- 款图 + 款号/款名（竖排）。款号在上是因为**厂家单据上写的是号码**，
+                   用户找行先扫号码；款名是辅助。图取本款本批首个有图的款色（见 `styleShiftRows`）。 -->
+              <span class="pk-shift__cell">
+                <img
+                  v-if="shiftThumbOf(s)"
+                  class="pk-shift__img"
+                  :src="shiftThumbOf(s)"
+                  :alt="s.styleCode"
+                  :title="shiftImgTitle(s)"
+                  draggable="false"
+                />
+                <span
+                  v-else
+                  class="pk-shift__img pk-shift__img--none"
+                  :title="`「${s.styleName || s.styleCode}」本批没有款图`"
+                  v-html="ICON.noimg"
+                  aria-hidden="true"
+                ></span>
+                <span class="pk-shift__ident">
+                  <span class="pk-shift__code wb-mono">{{ s.styleCode }}</span>
+                  <span class="pk-shift__name" :title="s.styleName || s.styleCode">
+                    {{ s.styleName || '(无款名)' }}
+                  </span>
+                </span>
+              </span>
+              <span class="pk-shift__meta">
+                <span class="wb-muted">{{ s.colors }} 色 · 待拿 {{ s.remaining }} 件</span>
+                <span v-if="s.ignored" class="wb-muted pk-shift__flag">整款已忽略</span>
+                <span v-if="s.clampedRows" class="pk-shift__flag is-warn">
+                  封顶 {{ s.clampedRows }} 行
+                </span>
+                <span v-if="s.unknownRows" class="pk-shift__flag is-warn">
+                  认不出 {{ s.unknownRows }} 行（照原码）
+                </span>
+              </span>
+              <select
+                class="wb-input wb-input--sm pk-shift__pick"
+                :value="s.shift"
+                :disabled="loading"
+                :title="`「${s.styleName || s.styleCode}」拿货时加几码（同款所有颜色一起；只改拿货尺码）`"
+                :data-act="`pk-shift-pick-${s.styleCode}`"
+                @change="onShiftChange(s.styleCode, $event)"
+              >
+                <option v-for="o in SIZE_SHIFT_OPTIONS" :key="o.value" :value="o.value">
+                  {{ o.label }}
+                </option>
+              </select>
+            </div>
+            <p v-if="!filteredShiftRows.length" class="wb-muted pk-shift__empty">
+              没有匹配的款（换个款号 / 清掉「只看已加码」）
+            </p>
+          </div>
+        </div>
+
+        <div class="pk-shift__foot">
+          <button
+            v-if="filteredShiftRows.length > SHIFT_ROW_MAX"
+            type="button"
+            class="wb-link pk-shift__more"
+            data-act="pk-shift-more"
+            @click="showAllShiftRows = !showAllShiftRows"
+          >
+            {{ showAllShiftRows ? '收起' : `展开全部 ${filteredShiftRows.length} 款` }}
+          </button>
+          <span class="wb-muted pk-shift__foot-note">
+            改完立刻按新码重算清单；已开的草稿单不自动改
+          </span>
+        </div>
+
+        <p v-if="shiftStats.clampedRows > 0" class="pk-shift__warn" data-act="pk-shift-clamped">
+          {{ shiftStats.clampedRows }} 行加码后超出码段，已按最大码拿（多个下单码会并到同一个码上）
+        </p>
+        <p v-if="shiftStats.unknownRows > 0" class="pk-shift__warn" data-act="pk-shift-unknown">
+          {{ shiftStats.unknownRows }} 行的尺码认不出（如 F / 均码），没有加码，照原码拿
+        </p>
+      </div>
+    </section>
+
     <div v-if="showMore" class="pk-more">
       <div class="pk-actions--wrap">
         <label class="pk-field">
@@ -181,11 +325,12 @@
       <template v-else>
         <p class="wb-empty__title">一行订单都没扫到</p>
         <p class="wb-empty__desc">
-          这批条件下一行订单都没扫到 —— 若还没导过订单，去「发货台」点「导入 Excel」导一份订单报表。
+          这批条件下一行订单都没扫到 —— 若还没导过订单，去「发货台」的「待发货」页采集（芒果为主），
+          或展开那里的「Excel 导入（备选）」导一份订单报表。
         </p>
         <div class="wb-empty__actions">
           <button class="wb-btn wb-btn--primary" data-act="empty-import" @click="goImport">
-            去「发货台」导入
+            去「待发货」页
           </button>
         </div>
       </template>
@@ -199,6 +344,7 @@
              暂不拿与已拿收成瘦卡（同格宽，一行高起）；
            · 款色行只留"照它拿货"要看的：**SKU 图 + 款名·颜色 + 尺码×件数 + 还差 + 忽略** ——
              款编码是内部身份（`data-key` 仍带，供拖拽/断言定位），**不在界面上展示**；
+             **已拿完的款色整行不渲染**（2026-11-05 用户要求：这页只回答"还要拿什么"）；
              预估金额只在卡底合计行出现，缺口（缺图/缺供应商/无进价）由占位图与合计行的
              说明文字承担，不再逐行贴标签；
            · **已开单 + 复制/开单动作吸在卡底**（`margin-top:auto`）：宫格里多卡高矮不一，
@@ -238,8 +384,10 @@
           </header>
 
           <div class="pu-scard__rows">
+            <!-- 只列还差 > 0 的款色（`shownRows`）——已拿完的行不再出现（2026-11-05）。
+                 判据是**已提交拿货单**算出来的还差，不是本地开关：删单/撤销提交后它会自己回来。 -->
             <div
-              v-for="r in c.rows"
+              v-for="r in c.shownRows"
               :key="r.key"
               class="pu-srow"
               data-act="pu-srow"
@@ -247,7 +395,6 @@
               :data-style="r.styleCode"
               :class="{
                 'is-off': r.ignored,
-                'is-done': !r.ignored && r.remaining <= 0,
                 'is-dragging': dragCode === r.styleCode && dragFrom === c.supplierId,
               }"
               :title="rowTitle(r)"
@@ -279,9 +426,8 @@
                   <span class="pu-srow__name">{{ rowName(r) }}</span>
                   <span v-if="r.styleName && r.color" class="pu-srow__color">{{ r.color }}</span>
                   <span class="pu-srow__spacer"></span>
-                  <span class="pu-srow__qty">{{
-                    r.ignored ? '已忽略' : r.remaining > 0 ? `还差 ${r.remaining} 件` : '已拿完'
-                  }}</span>
+                  <!-- 只剩两种：已忽略 / 还差 N 件（已拿完的行整行不渲染 ⇒ 不再有"已拿完"这一态） -->
+                  <span class="pu-srow__qty">{{ r.ignored ? '已忽略' : `还差 ${r.remaining} 件` }}</span>
                 </div>
                 <div class="pu-srow__sub">
                   <!-- 尺码角标：`L×2` = 这一码**还要拿** 2 件；`L✓` = 已拿完。
@@ -332,6 +478,19 @@
                     >
                       取消忽略
                     </button>
+                    <!-- 亚洲款加码：这里只**标**不**设**（动作在上面的「款列表」里）。
+                         为什么不留在款色行上做下拉：它是**款级**生效，挂在某个款色行上会让人以为
+                         只改了这一个色（同款其余色一起变），改完才发现就晚了。点它跳过去并高亮。 -->
+                    <button
+                      v-if="r.styleCode && shiftOf(r.styleCode)"
+                      type="button"
+                      class="wb-link pk-rowshift"
+                      :data-act="`pk-shift-goto-${r.key}`"
+                      :title="`本款按 ${shiftText(shiftOf(r.styleCode))} 码拿货（同款所有颜色）—— 点这里去改幅度`"
+                      @click="jumpToShift(r.styleCode)"
+                    >
+                      加码 {{ shiftText(shiftOf(r.styleCode)) }}
+                    </button>
                   </span>
                 </div>
               </div>
@@ -349,7 +508,24 @@
                与"要拿什么"同卡对照；单子上的动作与旧「按订单」视图同一套 data-act。 -->
           <div class="pu-scard__bottom">
             <div v-if="c.orders.length" class="pu-scard__orders" data-act="pu-scard-orders">
-              <span class="pu-scard__orders-title">已开单</span>
+              <div class="pu-scard__orders-head">
+                <span class="pu-scard__orders-title">已开单</span>
+                <!-- 再开一张（2026-11-05）：草稿不扣待拿 ⇒ 只按"还有待拿"渲染卡尾主按钮，会让人
+                     在开过草稿后再点一次、得到第二张同内容的单。有草稿时主按钮改成"继续"，
+                     真正的"我想再开一单（分批：这批只到一部分 / 隔几天补）"降到这里 ——
+                     语义也在这：已经有一张，再加一张。 -->
+                <button
+                  v-if="supplierAction && c.pending.pieces > 0 && c.draftId"
+                  type="button"
+                  class="wb-link pu-scard__neworder"
+                  data-act="pk-new-order"
+                  :data-supplier="c.supplierId"
+                  :title="`同一家厂再开一张（分批拿货：这次只到一部分、或隔几天再补）—— 现有草稿 #${c.draftId} 不会动`"
+                  @click="emit('supplier-action', c.supplierId)"
+                >
+                  再开一张（{{ c.pending.pieces }} 件）
+                </button>
+              </div>
               <div v-for="o in c.orders" :key="o.id" class="pu-orow" :data-act="`pu-orow-${o.id}`">
                 <span class="pu-orow__no wb-mono">#{{ o.id }}</span>
                 <span class="pu-orow__date wb-muted">{{ o.bizDate }}</span>
@@ -434,8 +610,25 @@
                   {{ copyingId !== null && copyingId === c.supplierId ? '生成中…' : '复制清单图' }}
                 </button>
               </span>
+              <!-- 主按钮两态（2026-11-05）：**有草稿 ⇒ 继续那张草稿**，没草稿 ⇒ 照旧生成新单。
+                   判据是"这家厂有没有未提交的单"，不是"用户点过没有" —— 草稿不扣待拿
+                   （`purchase-taken` 只算已提交），所以"还有 N 件待拿"与"已经开过一张"可以同时成立；
+                   只按"还有待拿"渲染"生成拿货单"，第二次点就是同一批货的第二张单（用户 2026-11-05 提问的由来）。
+                   "继续"走 `order-action:edit`，与"已开单"行上的「查看 / 编辑」是同一个动作，不新开通道。 -->
               <button
-                v-if="supplierAction && c.pending.pieces > 0"
+                v-if="supplierAction && c.pending.pieces > 0 && c.draftId"
+                type="button"
+                class="wb-btn wb-btn--sm wb-btn--primary"
+                data-act="pk-continue-draft"
+                :data-order="c.draftId"
+                :data-supplier="c.supplierId"
+                title="这张草稿还没提交（草稿不扣待拿）—— 接着填单价、提交，不必再开一张"
+                @click="emit('order-action', { kind: 'edit', id: c.draftId })"
+              >
+                继续 #{{ c.draftId }} 草稿
+              </button>
+              <button
+                v-else-if="supplierAction && c.pending.pieces > 0"
                 type="button"
                 class="wb-btn wb-btn--sm wb-btn--primary"
                 data-act="pk-create-order"
@@ -523,7 +716,7 @@
               <button
                 v-if="o.status !== 'submitted'"
                 type="button"
-                class="wb-link"
+                class="wb-link wb-link--strong"
                 :data-act="`pu-submit-${o.id}`"
                 @click="emit('order-action', { kind: 'submit', id: o.id })"
               >
@@ -594,7 +787,7 @@
 // 三分区撤掉 → **单宫格一种卡**（待拿 → 暂不拿 → 已拿 排序，瘦卡与全卡同一外壳）；
 // 款色行瘦身（图 + 款名·颜色 + 尺码×件数 + 忽略；款编码/金额/缺口/涉及订单不再上卡）；
 // 已开单 + 复制/开单动作 `margin-top:auto` 吸卡底。
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { toast } from '@/core/services/toast';
 import { switchModule } from '@/core/services/shell';
 import { writeClipboard, writeClipboardImage } from '@/core/services/clipboard';
@@ -614,12 +807,14 @@ import {
   type PickingSummary,
 } from '@/lib/picking';
 import { settleQtyKey, type SettleQtyInfo } from '@/lib/orderCost';
+import { applySizeShift, sizeChain, SIZE_SHIFT_OPTIONS, type SizeShiftStats } from '@/lib/sizeShift';
 import { domToJpeg, encodeImagesForExport, sizeQtyBadge } from '@/lib/pickingExport';
 import {
   amountText,
   centsMoney,
   noPriceNote,
   renderSheetPng,
+  sheetImageModelOf,
   sheetModelOf,
   sheetTextOf,
 } from '@/lib/pickingSheet';
@@ -636,7 +831,11 @@ import type { IgnoreRow, PurchaseOrder, TakenRow } from '@/types';
  *   而并进「拿货」后它是那一步的**入口视图**（"要拿什么"应当一眼可读，还得让
  *   「按此生成拿货单」有东西可拿）⇒ 两种语义都真实存在，写成一个 prop 才不会互相改坏。
  * `rowAction` = 款色行给「忽略 / 取消忽略」链接（宿主提供，本组件只发意图，不碰拿货数据）。
- * `supplierAction` = 卡上给「生成拿货单（N 件）」（宿主提供，本组件只发"这家厂"的意图）。
+ * `supplierAction` = 卡上给「生成拿货单（N 件）」/「继续 #N 草稿」（宿主提供，本组件只发意图）。
+ *   两态（2026-11-05）：该厂有未提交的草稿时主按钮是「继续 #N 草稿」（发 `order-action:edit`），
+ *   「再开一张」降为"已开单"标题旁的链接（发 `supplier-action`）；没有草稿时才直接给「生成拿货单」。
+ *   为什么必须分：草稿不扣待拿 ⇒ "还有 N 件"与"已经开过一张"同时成立，只按前者渲染会让用户
+ *   连点两次得到两张同内容的单（2026-11-05 用户提问的由来）。
  *   为什么钉在**厂家卡**上而不是页级一个按钮：一张拿货单只能挂**一个厂家**（下游按厂家发单/对账），
  *   页级按钮必然先拉一个"选厂家"的下拉——那一步对用户是白问的，数据里已经分好卡了。
  * `supplierOrders` = 宿主注入的各厂家拿货单（按 supplierId；草稿 + 已提交）。
@@ -770,6 +969,213 @@ const unclassifiedPieces = computed(() =>
   unclassifiedRows.value.reduce((sum, it) => sum + it.pieces, 0)
 );
 
+/* ---- 亚洲款加码（2026-11-02）----------------------------------------------------------
+ * 口径：只有**拿货侧**的尺码被换（下单 L → 拿 XL）；订单原文、利润、发货台一个字不动。
+ * 换算必须在 `aggregatePicking` **之前**做 —— 清单的尺码格、开单明细（`g.size`）、已拿抵扣、
+ * 导出全部读聚合后的 `size`，改在后面就要在五处各改一遍，且必然有一处忘掉。
+ *
+ * ⭐ 第二次改（用户口径）：**设置动作集中在本页的「款列表」里**，按**款**列出、逐款设幅度，
+ *    不再挂在每个款色行的操作条上。三条理由：
+ *    ① 行内那个下拉挂在**款色行**上、生效却是**款级**（同款三个色一起变）—— 语义错位，
+ *       用户会以为只改了眼前这一个色；
+ *    ② 幅度是**按客户反馈反复调**的（+1 不够就 +2），调的时候视线在页面上、心里记着"哪几款"，
+ *       需要一处能把"哪几款 · 现在几码 · 待拿几件"连现状一起看全，而不是逐行翻；
+ *    ③ 款列表列的是**本批所有款**，所以它同时也是"入口"：上一版把入口藏在"有加码才显示"的
+ *       提示条里，结果**第一批款永远加不上码**（没有加码款 ⇒ 提示条不渲染 ⇒ 没有下拉）。
+ *    行内只留一个只读标记（`+2 码`），点它跳到款列表里那一款并高亮 —— 感知在行上，动作在列表里。
+ */
+const shiftStats = ref<SizeShiftStats>({
+  shiftedRows: 0,
+  shiftedStyles: 0,
+  clampedRows: 0,
+  unknownRows: 0,
+  styles: [],
+});
+/** 本次清单读到的「款 → 偏移」：款列表下拉的当前值，也是重算时的输入 */
+const shiftMap = ref<Record<string, number>>({});
+/** 款名取**本批订单行**的 `styleName`：拿货页的款常常还没入库，不能指望 `pl_products` 给名字 */
+const shiftNames = ref<Record<string, string>>({});
+
+/** 款列表的一行（**款级**，不是款色级） */
+interface StyleShiftRow {
+  styleCode: string;
+  styleName: string;
+  /** 本批该款的款色数 */
+  colors: number;
+  /** 需求件数（Σ 各色） */
+  pieces: number;
+  /** 待拿件数（Σ 未忽略的还差） */
+  remaining: number;
+  shift: number;
+  /** 本款撞到码段边界的行数 / 尺码认不出的行数 */
+  clampedRows: number;
+  unknownRows: number;
+  /** 整款都被标了「暂不拿」—— 加码照样生效，但要说明"清单上不会多出来" */
+  ignored: boolean;
+  /**
+   * 款图（款级只有一张）：取本批该款**首个有图**的款色的 `imagePath`。
+   * 为什么不按"件数最多 / 第一个色"取：同款各色的图常常不一样（不同色拍不同张），
+   * 而款列表是按款号升序的稳定顺序 —— 取"本批第一个有图的色"是唯一不随件数变的可解释口径
+   * （件数一变主图就换，用户会以为图配错了）。图只用于**认货**，不承担"这是哪个色"的职责。
+   */
+  imagePath: string;
+  /** 上面那张图属于哪个色（tooltip 用：同款多色时得说清图取自重哪一张） */
+  imageColor: string;
+}
+
+/**
+ * 款列表：**本批所有款**（不只是加了码的）。
+ * 顺序按**款号升序**：稳定。按件数排或"已加码优先"排，都会在改完一个档位之后重排，
+ * 用户刚点的那一行跳走 ⇒ 以为改错了。已加码靠左侧色条 + `+N 码` 标记"感知"，不靠位置。
+ */
+const styleShiftRows = computed<StyleShiftRow[]>(() => {
+  const stat = new Map(shiftStats.value.styles.map((s) => [s.styleCode, s]));
+  const agg = new Map<string, StyleShiftRow>();
+  for (const r of groupByColor(summary.value.groups)) {
+    const code = String(r.styleCode ?? '');
+    if (!code) continue;
+    const cur = agg.get(code) ?? {
+      styleCode: code,
+      styleName: r.styleName || shiftNames.value[code] || '',
+      colors: 0,
+      pieces: 0,
+      remaining: 0,
+      shift: shiftOf(code),
+      clampedRows: stat.get(code)?.clampedRows ?? 0,
+      unknownRows: stat.get(code)?.unknownRows ?? 0,
+      // 先按"整款被忽略"假设，遇到任一款色未忽略就翻过来（忽略键是款色级，款级只是汇总）
+      ignored: true,
+      imagePath: '',
+      imageColor: '',
+    };
+    cur.colors += 1;
+    cur.pieces += r.pieces;
+    if (!r.ignored) {
+      cur.remaining += r.remaining;
+      cur.ignored = false;
+    }
+    if (!cur.styleName && r.styleName) cur.styleName = r.styleName;
+    // 款图取"本批第一个有图的色"：一旦取到就不再覆盖（见 `StyleShiftRow.imagePath` 头注）
+    if (!cur.imagePath && r.imagePath) {
+      cur.imagePath = r.imagePath;
+      cur.imageColor = r.color;
+    }
+    agg.set(code, cur);
+  }
+  return [...agg.values()].sort((a, b) =>
+    a.styleCode < b.styleCode ? -1 : a.styleCode > b.styleCode ? 1 : 0
+  );
+});
+
+/**
+ * 款列表一屏最多铺几行（再多给「展开全部」）。
+ * ⚠️ 与 `.pk-shift__rows` 的 `max-height` **同源**：10 行 × 45px（上下内边距 4+4 +
+ *    款图 36 + 分割线 1；行内 `wb-input--sm` 控件 28 比图矮、不决定行高）。行数或行高改一边、
+ *    另一边不改，就会出现"一屏 N 行"实际只看到六七行的裁切（用户实报过两次）。
+ *    2026-11-03 加款图：行高 37 → 45、行数 12 → 10（总高 444 → 450，面板整体高度基本不变）。
+ */
+const SHIFT_ROW_MAX = 10;
+const shiftQuery = ref('');
+const onlyShifted = ref(false);
+const showAllShiftRows = ref(false);
+
+const filteredShiftRows = computed(() => {
+  const q = shiftQuery.value.trim().toLowerCase();
+  return styleShiftRows.value.filter((r) => {
+    if (onlyShifted.value && !r.shift) return false;
+    if (!q) return true;
+    return r.styleCode.toLowerCase().includes(q) || r.styleName.toLowerCase().includes(q);
+  });
+});
+const visibleShiftRows = computed(() =>
+  showAllShiftRows.value
+    ? filteredShiftRows.value
+    : filteredShiftRows.value.slice(0, SHIFT_ROW_MAX)
+);
+
+/**
+ * 面板展开态：**用户手动点过就以用户的为准**，没点过跟随"本批有没有加码款"
+ * （有 ⇒ 自动展开，让用户看到"这批加了码"；没有 ⇒ 折成一行，不占版面，但标题就是入口）。
+ */
+const shiftPanelUser = ref<boolean | null>(null);
+const shiftPanelOpen = computed(
+  () => shiftPanelUser.value ?? shiftStats.value.shiftedStyles > 0
+);
+function toggleShiftPanel(): void {
+  shiftPanelUser.value = !shiftPanelOpen.value;
+}
+
+/** 行内标记 → 跳到款列表并高亮 1.6s（淡出靠 CSS 过渡；用 ref 存定时器避免连点堆一串） */
+const shiftPanelRef = ref<HTMLElement | null>(null);
+const shiftFocusCode = ref('');
+let shiftFocusTimer = 0;
+async function jumpToShift(styleCode: string): Promise<void> {
+  shiftPanelUser.value = true;
+  // 被"只看已加码"/搜索过滤掉的款跳过去会是一片空 ⇒ 清掉过滤再跳
+  if (onlyShifted.value || shiftQuery.value) {
+    onlyShifted.value = false;
+    shiftQuery.value = '';
+  }
+  shiftFocusCode.value = styleCode;
+  await nextTick();
+  shiftPanelRef.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  window.clearTimeout(shiftFocusTimer);
+  shiftFocusTimer = window.setTimeout(() => {
+    shiftFocusCode.value = '';
+  }, 1600);
+}
+
+/** `+2` / `-1`（负数留给减码；0 不该出现在标记里） */
+function shiftText(n: number): string {
+  return n > 0 ? `+${n}` : String(n);
+}
+
+/**
+ * 标题：**行数为 0 时不能说"（0 行）"** —— 整款都封顶/认不出时款是真的加了码，
+ * 写 0 行会读成"设置没生效"（用户会回去再点一遍）。此时改说"本批没有一行能加"，
+ * 与下面那条封顶/认不出的说明接上。
+ */
+const shiftTitle = computed(() => {
+  const s = shiftStats.value;
+  if (!s.shiftedStyles) return '本批没有加码的款';
+  if (s.shiftedRows > 0) return `${s.shiftedStyles} 款已加码（${s.shiftedRows} 行）`;
+  return `${s.shiftedStyles} 款已设加码，本批没有一行能加`;
+});
+
+function shiftOf(styleCode: string): number {
+  return shiftMap.value[styleCode] ?? 0;
+}
+
+/**
+ * 改加码：**写产品域通道 + 立刻重算**。
+ *
+ * 为什么入口放在拿货页（而不是只放产品档案）：发现"这牌是亚洲款"的时刻就是**看清单的时候**，
+ * 让人切到产品页找这款、改完再切回来，实际上没人会去改，最后就是照错码拿货。
+ * 写的是产品域主数据（`pl_size_shift`），本组件直接调（与读同一通道），不经宿主转发。
+ */
+async function onShiftChange(styleCode: string, ev: Event): Promise<void> {
+  if (!styleCode) return;
+  const shift = Math.trunc(Number((ev.target as HTMLSelectElement)?.value) || 0);
+  const r = await ipc.productSizeShiftSet({ styleCode, shift });
+  if (!r.success) {
+    toast(r.error || '设置加码失败', 'error');
+    return;
+  }
+  if (shift) shiftMap.value = { ...shiftMap.value, [styleCode]: shift };
+  else {
+    const next = { ...shiftMap.value };
+    delete next[styleCode];
+    shiftMap.value = next;
+  }
+  toast(
+    shift
+      ? `已设「${styleCode}」加 ${shift} 码 —— 清单按新码重算；已开的草稿单不自动改`
+      : `已取消「${styleCode}」的加码`,
+    'success'
+  );
+  await generate();
+}
+
 /** 天数窗的中文说法。
  * ⚠️ `0` **不能说成「近 0 天」** —— 它的含义是"不限"（`cutoffDate` 见 `lib/picking`），
  * 说成 0 天会读成"只看今天的单"，正好相反。
@@ -786,8 +1192,19 @@ function daysText(d: number): string {
 interface SupplierCard {
   supplierId: number;
   supplierName: string;
-  /** 该厂的全部款色行（含已拿完 / 已忽略 —— 合并视图要一眼看全，不是只列还差的） */
+  /** 该厂的全部款色行（含已拿完 / 已忽略 —— 统计口径要全，不只是要显示的那些） */
   rows: PickingColorGroup[];
+  /**
+   * **卡上真正渲染的行** = 还差 > 0 的款色（含被忽略的，它们要能就地取消忽略）。
+   *
+   * 已拿完（`remaining <= 0`）的行不再出现（2026-11-05 用户要求）：这一页的活是"还要拿什么"，
+   * 拿满的行昨天还占着一整块版面，扫一眼分不清"这行还要不要管"。
+   * ⚠️ 与 `rows` 分开而不是直接过滤 `rows`：卡合计、已拿件数、忽略数都按**全部**行算 ——
+   *    只留一个数组，迟早有人拿被过滤过的那份去求和，合计就会随"看不看得见"变化。
+   * ⚠️ 消失不是删除：拿满的依据是**已提交拿货单**（`purchase-taken`），删单 / 撤销提交后
+   *    `remaining` 回升，下一次重算（`bump` ⇒ `refreshToken`）这行自己回来。
+   */
+  shownRows: PickingColorGroup[];
   /** 待拿合计（口径 = `pendingOf` 的款色折叠版；卡面合计行与「生成拿货单（N 件）」同源） */
   pending: PendingRollup;
   /** 被忽略且还差 > 0 的款色数（"暂不拿"区的口径） */
@@ -796,6 +1213,16 @@ interface SupplierCard {
   takenPieces: number;
   /** 宿主注入的该厂拿货单（草稿 + 已提交，按日期倒序） */
   orders: PurchaseOrder[];
+  /**
+   * 该厂**最近一张草稿**的单号（0 = 没有草稿）—— 卡尾主按钮据此分流。
+   *
+   * 为什么界面非要知道它：**草稿不扣待拿**（`purchase-taken` 只算已提交），所以"还差多少件"
+   * 在开过草稿之后仍然照旧 ⇒ 卡尾若一直叫「生成拿货单（N 件）」，用户再点一次就得到
+   * **第二张内容完全相同的草稿**（2026-11-05 用户问"为什么能生成多个拿货单"时确认的洞）。
+   * 有草稿时主按钮改成「继续 #N 草稿」（走 `order-action:edit`，与"已开单"行同一个动作），
+   * 「再开一张」降为"已开单"标题旁的次要入口 —— 真分批照样开得出来，重复开单要多一步。
+   */
+  draftId: number;
   phone: string;
   zone: 'pending' | 'skip' | 'done';
 }
@@ -820,17 +1247,26 @@ function zoneOf(c: Omit<SupplierCard, 'zone'>): 'pending' | 'skip' | 'done' {
   return 'done';
 }
 
+/** 该厂最近一张草稿的单号（0 = 没有草稿）；`orders` 已按 `byOrderRecency` 排过 ⇒ 取第一条命中的 */
+function draftIdOf(orders: PurchaseOrder[]): number {
+  return orders.find((o) => o.status !== 'submitted')?.id ?? 0;
+}
+
 const supplierCards = computed<SupplierCard[]>(() => {
   const out: SupplierCard[] = summary.value.suppliers.map((sg: PickingSupplierGroup) => {
     const rows = groupByColor(sg.groups);
+    const orders = [...(props.supplierOrders?.[sg.supplierId] ?? [])].sort(byOrderRecency);
     const card = {
       supplierId: sg.supplierId,
       supplierName: sg.supplierName,
       rows,
+      // 只滤"拿完的"：忽略行 remaining 仍 > 0（忽略不扣需求），照旧显示（要能就地取消忽略）
+      shownRows: rows.filter((r) => r.remaining > 0),
       pending: pendingRollup(rows),
       ignoredColors: rows.filter((r) => r.ignored && r.remaining > 0).length,
       takenPieces: rows.reduce((n, r) => n + r.taken, 0),
-      orders: [...(props.supplierOrders?.[sg.supplierId] ?? [])].sort(byOrderRecency),
+      orders,
+      draftId: draftIdOf(orders),
       phone: props.supplierPhones?.[sg.supplierId] ?? '',
     };
     return { ...card, zone: zoneOf(card) };
@@ -841,14 +1277,17 @@ const supplierCards = computed<SupplierCard[]>(() => {
   for (const [sid, list] of Object.entries(props.supplierOrders ?? {})) {
     const id = Number(sid);
     if (!id || seen.has(id) || !list || !list.length) continue;
+    const orders = [...list].sort(byOrderRecency);
     const card = {
       supplierId: id,
       supplierName: list[0]?.supplierName ?? '',
       rows: [],
+      shownRows: [],
       pending: EMPTY_ROLLUP,
       ignoredColors: 0,
       takenPieces: 0,
-      orders: [...list].sort(byOrderRecency),
+      orders,
+      draftId: draftIdOf(orders),
       phone: props.supplierPhones?.[id] ?? '',
     };
     out.push({ ...card, zone: zoneOf(card) });
@@ -883,9 +1322,12 @@ const copyingId = ref<number | null>(null);
 
 /**
  * 「复制清单图」：把**这一家**的待拿行画成一张清单图，写进系统剪贴板（用户粘到微信里发出去）。
- * 为什么是图而不是文字：厂家要照着备货，图里有货名、款色、尺码件数、单价的排版 ——
- * 纯文字粘进微信会丢表格结构，截屏又会把页签、别家的货一起发出去（见 `lib/pickingSheet` 头部）。
+ * 为什么是图而不是文字：对方要照着备货，图里是「号码 + 图 + 颜色 + 尺码×件数 + 件数」的版式 ——
+ * 纯文字粘进微信会丢版式，截屏又会把页签、别家的货一起发出去（见 `lib/pickingSheet` 头部）。
  * 数字全部与屏上同源（`sheetModelOf` 走 `pendingOf`），发出去的图与卡上的数不可能两套。
+ * ⚠️ **图上没有款名 / 预估金额 / 厂家名**（2026-11-02 用户要求，口径住在 `sheetImageModelOf`）：
+ *    这张是**对外**的图；自家的款名与进价估算不外发。文字清单（`sheetTextOf`）仍带这两样 ——
+ *    它是给自家留存/转发的，两个出口故意不同口径。
  * ⚠️ 与「复制拿货清单」（文字）是**两个按钮**：图给"照着备货"，文字给"转发/存备忘录"——
  *    合成一个按钮就得让用户在"要图还是要字"里先选一次，那一步是白问的。
  */
@@ -902,7 +1344,9 @@ async function copyForSupplier(c: SupplierCard): Promise<void> {
       toast('这家没有要拿的货', 'info');
       return;
     }
-    const dataUrl = await renderSheetPng(model, (p) => thumbs.value[p] ?? '');
+    // 图与文字**不同口径**：`sheetImageModelOf` 只留"要拿什么"（无款名 / 无预估金额 / 无厂家名），
+    // 渲染层的入参类型就是它 —— 想往上加回款名或金额，得先改那个函数（那里有为什么的注）。
+    const dataUrl = await renderSheetPng(sheetImageModelOf(model), (p) => thumbs.value[p] ?? '');
     if (!dataUrl) throw new Error('清单图生成失败');
     const ok = await writeClipboardImage(dataUrl);
     if (!ok) throw new Error('写入剪贴板失败');
@@ -988,7 +1432,7 @@ const emptyReason = computed<{ text: string; widen: boolean }>(() => {
     return {
       text:
         `都被「已终结」排除了：这 ${fin} 行是关闭 / 已完成的单，拣了也白拣，放宽条件也变不出来。` +
-        `若你确认它们还没终结，去「发货台」页的「导入订单」页签核一下那份报表有没有「订单状态」列 ——` +
+        `若你确认它们还没终结，去「发货台」的「待发货」页展开「Excel 导入（备选）」核一下那份报表有没有「订单状态」列 ——` +
         `没有这一列就判不出终结，也就不会误剔。`,
       widen: false,
     };
@@ -1028,15 +1472,28 @@ function sizeName(s: string): string {
   return s || '(无尺码)';
 }
 
-/** 尺码角标：`L×2` = 这一码**还要拿** 2 件；`L✓` = 已拿完
+/** 下单码前缀：加码款显示 `L→`，未加码返回空串（不给正常款加噪音）。
+ *  封顶时可能有多个下单码并到同一拿货码（L/XL 都→XXL），用 `/` 串起来；
+ *  其中"下单码 == 拿货码"的那一项（6XL→6XL）不重复画出来 —— 它是封顶后留在组里的来源。 */
+function orderPrefix(c: PickingSizeCell): string {
+  const from = c.orderSizes.filter((s) => s !== c.size);
+  return from.length ? `${from.map(sizeName).join('/')}→` : '';
+}
+
+/** 尺码角标：`L×2` = 这一码**还要拿** 2 件；`L✓` = 已拿完；加码款是 `L→XL×2`
  *  （写 `L×0` 会读成"要拿 0 件"—— 与 `badgeOf` 同一取舍）。 */
 function chipText(c: PickingSizeCell): string {
-  return c.remaining > 0 ? `${sizeName(c.size)}×${c.remaining}` : `${sizeName(c.size)}✓`;
+  const base = c.remaining > 0 ? `${sizeName(c.size)}×${c.remaining}` : `${sizeName(c.size)}✓`;
+  return `${orderPrefix(c)}${base}`;
 }
 
 /** 尺码角标 tooltip：这一码的「需求 · 已拿 · 还差」—— 折叠展示，三个数一个都没丢 */
 function chipTitle(c: PickingSizeCell): string {
-  return `${sizeName(c.size)}：需求 ${c.pieces} · 已拿 ${c.taken} · 还差 ${c.remaining}`;
+  const base = `需求 ${c.pieces} · 已拿 ${c.taken} · 还差 ${c.remaining}`;
+  // 加码款把"为什么拿这个码"说全：下单 L、拿货 XL —— 否则用户会以为清单把码算错了
+  const from = c.orderSizes.filter((s) => s !== c.size);
+  if (!from.length) return `${sizeName(c.size)}：${base}`;
+  return `下单 ${from.map(sizeName).join(' / ')} → 拿货 ${sizeName(c.size)}：${base}`;
 }
 
 /** 「暂不拿」灰条上的一行话：几款无需补货 + 用户标的忽略原因（标的时候敲的那句话） */
@@ -1101,6 +1558,24 @@ function rowTitle(r: PickingColorGroup): string {
 /** 款色行的缩略图（生成时已合批取回；'' = 这款没图，走占位框） */
 function thumbOf(r: PickingColorGroup): string {
   return (r.imagePath && thumbs.value[r.imagePath]) || '';
+}
+
+/**
+ * 加码行的款图。与 `thumbOf` 共用同一批 `thumbs`：缩略图是按**清单里的 imagePath** 合批取的，
+ * 而加码行的 `imagePath` 正是从这些行里挑出来的 ⇒ 不会多一次 IPC，也不会出现"款色行有图、
+ * 加码行没图"的分叉（两处都读同一个 `thumbs`，取不到就是真的没取到）。
+ */
+function shiftThumbOf(s: StyleShiftRow): string {
+  return (s.imagePath && thumbs.value[s.imagePath]) || '';
+}
+
+/** 款图的 tooltip：同款多色时**必须说清图取自哪个色**，否则用户会拿它当"这款就长这样" */
+function shiftImgTitle(s: StyleShiftRow): string {
+  const color = s.imageColor || '';
+  if (!color) return `「${s.styleName || s.styleCode}」款图`;
+  return s.colors > 1
+    ? `「${s.styleName || s.styleCode}」款图取自本批「${color}」色（同款 ${s.colors} 色，图可能不同）`
+    : `「${s.styleName || s.styleCode}」款图（${color}）`;
 }
 
 // ───────────────────────── 拖拽改厂家（2026-10-17 合并后第二轮） ─────────────────────────
@@ -1213,6 +1688,35 @@ async function generate(): Promise<void> {
     if (!res.success || !res.data) throw new Error(res.error || '读取待拣订单失败');
     const rows = res.data.rows;
 
+    // ── 亚洲款加码（2026-11-02）：先把行的尺码换成**拿货码**，再聚合 ──────────────────
+    // 为什么必须在聚合**之前**：清单尺码格、开单明细（`g.size`）、已拿抵扣、导出全读聚合后的
+    // `size`；换在聚合之后就要在五处各改一遍，而且必然有一处忘掉（忘了那处不报错、只是拿错货）。
+    // ⚠️ 读配置失败**不回落成"不加码"**：静默少加一个码 = 照错码拿货，比报错贵得多。
+    const codes = [...new Set(rows.map((r) => String(r.styleCode ?? '')).filter(Boolean))];
+    const sm = await ipc.productSizeShiftLoad({ codes });
+    if (!sm.success) throw new Error(sm.error || '读取加码配置失败（不能按未加码继续算）');
+    const shifts = sm.data?.shifts ?? {};
+    // 行内下拉读它（`shiftOf`）；换一份对象而不是就地改，避免下游误以为还是旧配置
+    shiftMap.value = shifts;
+    // 码链：该款实际有哪些码，决定"数字码 38 的下一个码是谁"（38→40 由链说话，不靠猜）
+    const chains: Record<string, string[]> = {};
+    for (const [code, list] of Object.entries(sm.data?.chains ?? {})) chains[code] = sizeChain(list);
+    const shifted = applySizeShift(
+      rows,
+      (code) => shifts[code] ?? 0,
+      (code) => chains[code] ?? null
+    );
+    shiftStats.value = shifted.stats;
+    // 款名：本批订单行自己带的（首个非空），**不查主数据** —— 拿货页的款常常还没入库
+    const names: Record<string, string> = {};
+    for (const r of rows) {
+      const c = String(r.styleCode ?? '');
+      if (!c) continue;
+      const n = String(r.styleName ?? '');
+      if (n && !names[c]) names[c] = n;
+    }
+    shiftNames.value = names;
+
     // 结算商品行的件数（真值）：按可见订单号批量取一次，铺成查表（键口径由 `settleQtyKey` 单源给出）
     const settleQty: Record<string, SettleQtyInfo> = {};
     const orderNos = [...new Set(rows.map((r) => String(r.orderNo ?? '')).filter(Boolean))];
@@ -1250,7 +1754,7 @@ async function generate(): Promise<void> {
       ((ig.success ? (ig.data ?? []) : []) as IgnoreRow[]).map((r) => ignoreKey(r.styleCode, r.color)),
     );
 
-    summary.value = aggregatePicking(rows, {
+    summary.value = aggregatePicking(shifted.rows, {
       settleQty,
       taken,
       ignored,
@@ -1316,6 +1820,8 @@ async function exportXlsx(): Promise<void> {
       styleCode: g.styleCode,
       color: g.color,
       size: g.size,
+      // 加码款：`XL` + 下单码 `L` ⇒ 表里渲染成 `XL（下单L）`（厂家照 XL 拿，来源可追溯）
+      orderSize: g.orderSizes.join('/'),
       pieces: g.pieces,
       taken: g.taken,
       remaining: g.remaining,
@@ -1398,6 +1904,17 @@ onMounted(async () => {
   padding: 0;
 }
 
+/* ⚠️ 2026-11-02：**本页每一块子区都不许被 flex 压缩**。
+   `.wb-page` 是 `display:flex; flex-direction:column; height:100%; overflow:auto`，
+   子项默认 `flex-shrink:1`：内容一超过一屏，可滚动的那几块（加码款列表 `overflow-y:auto`）
+   自动最小尺寸是 **0**，会被压成十几像素，再被 `.wb-panel` 的 `overflow:hidden` 裁掉 ——
+   用户看到的就是"一条空白"（实测 `.pk-shift` 高 18px、`.pk-shift__head` 却被要求 28px）。
+   正确形态是**整页滚动**（`.wb-page` 本来就 `overflow:auto`），不是压缩某一区。
+   冒烟只查元素在不在、文案对不对，抓不到这种"在但看不见" ⇒ 判据补在 today-ui-smoke 的几何守卫里。 */
+.pk-view > * {
+  flex: 0 0 auto;
+}
+
 /* 内嵌时页头整块不渲染（标题由外层页签交代，动作在下面的精简条上）——
    原先那条"把页头按钮靠左"的规则随页头一起没了，别再加回来。 */
 
@@ -1444,6 +1961,328 @@ onMounted(async () => {
   gap: 10px;
   flex-wrap: wrap;
   padding: 10px 14px;
+}
+
+/* 亚洲款加码：与「未归类」同一种卡片语言（都是"这条清单的口径说明"），
+   但颜色走中性系 —— 加码是**正常业务**，不是数据有问题。
+   ⚠️ 这一块是**设置入口**（不只是提示）：标题行是可点开的按钮（键盘可聚焦、可 Enter）。
+   ⚠️ 2026-11-02 重做：折叠/展开两态都**按内容自然撑高**（`flex: 0 0 auto`，见文件头
+      `.pk-view > *`）—— 上一版缺这条，面板被页面纵向 flex 压成 18px、标题行整条被裁，
+      用户实报"加码区域完全看不到"。视觉上把"能点"做成明摆着的按钮，不再靠一行灰字暗示。 */
+.pk-shift {
+  flex: 0 0 auto;
+  padding: 0;
+}
+
+/* 有加码款时整块换强调边框：一屏扫过去就知道"这批改过码" */
+.pk-shift.is-on {
+  border-color: var(--wb-accent, var(--wb-border));
+}
+
+/* 标题行 = 开关。用 `<button>` 而不是 `<div @click>`：这个入口是**设置动作**不是装饰，
+   键盘用户得能聚焦、Enter 打开。默认按钮样式全部抹掉，高度由 min-height 撑到 40px
+   （低于 32px 的一行在密集页面里会被读成"分隔条"，而不是可点的入口）。 */
+.pk-shift__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: 40px;
+  padding: 6px 14px;
+  background: none;
+  border: 0;
+  border-radius: var(--wb-radius-lg) var(--wb-radius-lg) 0 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.pk-shift__head:hover {
+  background: var(--wb-hover);
+}
+
+/* 展开后标题行与内容之间要有一条分界，否则 40px 标题行与下面的筛选行糊成一片 */
+.pk-shift.is-open .pk-shift__head {
+  border-bottom: 1px solid var(--wb-border);
+}
+
+/* 「加码」徽标：中性底 + 弱文字；有加码款时换强调浅底，与右侧那句状态一起读 */
+.pk-shift__badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface-2);
+  color: var(--wb-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.pk-shift.is-on .pk-shift__badge {
+  background: var(--wb-accent-soft);
+  color: var(--wb-text);
+}
+
+.pk-shift__title {
+  font-weight: 600;
+}
+
+.pk-shift__why,
+.pk-shift__count {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 「设置加码」= 明摆着的按钮（边框 + 底色 + 箭头）。折叠态下它是这一块唯一的动作 ——
+   上一版做成右侧一行灰字，用户读成"说明文字"，于是整批款从来没被加过码。
+   `margin-left:auto` 是为**窄窗口折行**准备的：一行放不下时它落到第二行，仍然贴右边，
+   不会孤零零掉到左下角（820px 实测）。 */
+.pk-shift__chev {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 1px solid var(--wb-border-strong);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-surface);
+  color: var(--wb-text);
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pk-shift__head:hover .pk-shift__chev {
+  background: var(--wb-primary-soft);
+  border-color: var(--wb-text-muted);
+}
+
+.pk-shift__caret {
+  font-size: 10px;
+}
+
+.pk-shift__body {
+  padding: 0 14px 12px;
+}
+
+.pk-shift__filter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 0 8px;
+  font-size: 12px;
+}
+
+.pk-shift__search {
+  max-width: 16em;
+}
+
+/* 列表 = 表头 + 滚动区。表头与行用**同一套 grid 轨道**（fr 由容器宽度统一解算 ⇒ 天然对齐），
+   款号 / 款名 / 待拿 / 下拉四列在任意宽度下都成列 —— 上一版是 flex + spacer，
+   款名长短一变，右侧下拉的左缘就跟着跳，扫读时找不到"加几码"那一列。 */
+.pk-shift__list {
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-md);
+  overflow: hidden;
+}
+
+.pk-shift__cols,
+.pk-shift__row {
+  display: grid;
+  /* 第一列 = 款图 + 款号/款名（2026-11-03 加图前是"款号 / 款名"两列）。
+     第一列给**上限**而不是纯 fr：纯 fr 会把款名那格撑到半屏，第二列「N 色 · 待拿 N 件」
+     于是被推到中间，眼睛要在两片空白之间跳。上限 22em（≈264px）够放款图 + 长款名，
+     多出来的宽度留给「待拿」那一列（含两条警告标签，它才是宽度不定的一列）。 */
+  grid-template-columns: minmax(0, 22em) minmax(0, 1fr) 6.8em;
+  align-items: center;
+  gap: 8px;
+}
+
+.pk-shift__cols {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--wb-border);
+  background: var(--wb-surface-2);
+  color: var(--wb-text-muted);
+  font-size: 11px;
+}
+
+.pk-shift__cols-pick {
+  justify-self: end;
+}
+
+/* 收起态固定高度 + 内部滚动：款列表是"设置面板"，不能随款数增长把清单挤走。
+   ⚠️ 上限必须**装得下 10 行**（10 × 45px = 450px，与 `SHIFT_ROW_MAX` 同源）：
+      上一版按 35px 估、实际行更高，页面上"一屏 N 行"的承诺就破了
+      （2026-11-02 用户实报"列表被裁"）。改行高或改行数，这里必须同改。 */
+.pk-shift__rows {
+  max-height: 450px;
+  overflow-y: auto;
+}
+
+/* 「展开全部」= 真的全部展开：用户已明确要一次看全，再留高度上限等于没展开。
+   高清单会把下面的清单顶下去，但那是用户自己点的，且「收起」就在旁边。 */
+.pk-shift__rows.is-all {
+  max-height: none;
+}
+
+.pk-shift__row {
+  /* 左侧色条留位：已加码时染色，**不留位会让整行文字左右跳**（列表里最容易被当成"改错了"） */
+  padding: 4px 10px 4px 8px;
+  border-bottom: 1px solid var(--wb-border);
+  border-left: 2px solid transparent;
+  font-size: 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pk-shift__row:last-child {
+  border-bottom: 0;
+}
+
+.pk-shift__row:hover {
+  background: var(--wb-surface-2);
+}
+
+/* 已加码：左色条 + 淡底。靠**视觉**说"这款加了码"，不靠排序 —— 排序会让改完的那一行跳走 */
+.pk-shift__row.is-on {
+  border-left-color: var(--wb-accent, currentColor);
+  background: var(--wb-accent-soft);
+}
+
+/* 从款色行跳过来时闪一下（1.6s 后由脚本摘掉 class） */
+.pk-shift__row.is-focus {
+  outline: 1px solid var(--wb-accent, currentColor);
+  outline-offset: -1px;
+}
+
+/* 第一列：款图 + 身份（款号 / 款名）。图与文字**同高对齐**（align-items:center），
+   行高由图决定（36px），文字两行加起来不超过它 —— 所以下拉与款色列看起来仍在同一中线上。 */
+.pk-shift__cell {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+/* 款图：与款色行的 `.pu-srow__img` 同一语言（方角圆边、细边框），但小一号 ——
+   这里是"设置面板"（一行要看/要比），款色清单才是"照着拿货"（图要大）。 */
+.pk-shift__img {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface-2);
+  object-fit: cover;
+}
+
+/* 无图 = 虚线占位框（与款色行同口径）：藏掉会让一行看起来"缺了左边那格"，
+   而"这款本批没图"本身是要去补的信息。 */
+.pk-shift__img--none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--wb-text-muted);
+}
+
+.pk-shift__ident {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.pk-shift__code {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 款名可以被挤（长名字省略），款号与幅度**不能** —— 它们才是识别与核对的那两位。
+   款名降一档字号 + 次要色：加了图之后第一列是"图 + 两行字"，两行同样粗细会显得吵。 */
+.pk-shift__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--wb-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 待拿件数与两条警告并在**同一列**：警告跟着款走，别单独占一列把款名挤掉。
+   宽度不够时整列省略（而不是让警告溢出盖住下拉），全量口径在下面的汇总句里另有说明。 */
+.pk-shift__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pk-shift__flag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: var(--wb-radius-sm);
+  background: var(--wb-surface-2);
+  color: var(--wb-text-muted);
+  font-size: 11px;
+}
+
+.pk-shift__flag.is-warn {
+  background: var(--wb-warning-soft);
+  color: var(--wb-warning);
+}
+
+.pk-shift__pick {
+  width: 100%;
+}
+
+.pk-shift__empty {
+  margin: 10px 0;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.pk-shift__foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+/* 后果说明贴右：左边是「展开全部」这类动作，两种东西不混在一处 */
+.pk-shift__foot-note {
+  margin-left: auto;
+  font-size: 12px;
+  text-align: right;
+}
+
+.pk-shift__more {
+  font-size: 12px;
+}
+
+.pk-shift__warn {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--wb-warning);
+}
+
+/* 款色行上的**只读**加码标记（动作在款列表里）：小一号、不抢眼，
+   它的作用是"让人在行的位置就知道这款加过码"，不是提供第二个改值入口 */
+.pk-rowshift {
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .pk-unclass__title {
@@ -1722,11 +2561,6 @@ onMounted(async () => {
   text-decoration: line-through;
 }
 
-/* 已拿完：调暗（"这行处理过了"是信息，只是不再抢眼） */
-.pu-srow.is-done {
-  color: var(--wb-text-muted);
-}
-
 /* 款名 = 行上第一显眼的东西（款编码不展示，见 rowName） */
 .pu-srow__name {
   font-weight: 600;
@@ -1742,6 +2576,9 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 4px;
 }
+
+/* 加码下拉：宽度只够放下"不加码 / +3 码"（不抢款名的位置），高度与行内链接齐平 */
+/* 加码设置在页顶的「款列表」里；款色行只留 `.pk-rowshift` 那个只读标记 */
 
 .pu-srow__qty {
   font-variant-numeric: tabular-nums;
@@ -1803,6 +2640,20 @@ onMounted(async () => {
   color: var(--wb-text-muted);
 }
 
+/* "再开一张"所在的一行：标题左、次动作用 wb-link 右贴（2026-11-05）。
+   放在这里而不是卡尾，是为了不跟卡尾那三颗按钮抢同一行宽度（324 最小列宽下一行只放得下三个）。 */
+.pu-scard__orders-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pu-scard__neworder {
+  margin-left: auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .pu-orow {
   display: flex;
   align-items: baseline;
@@ -1836,6 +2687,15 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 2px 12px;
+}
+
+/* 「提交」是这一行唯一的主操作（2026-11-05）：原来它和"导出/删除"一样是 13px 常规字重，
+   一张草稿单上四个同等重量的动作，用户要点哪个得先读一遍。
+   ⚠️ 只加**字重**、不改尺寸/形状：换 `wb-btn` 会把行高撑起来，而这张卡每涨 6px
+   一屏就少一行（与 2026-10-12「行高被排版细节决定」是同一类坑）。
+   ⚠️ 也不能靠颜色 —— `.wb-link` 基座本来就是主色，再染一次等于没变。 */
+.pu-orow__ops .wb-link--strong {
+  font-weight: 600;
 }
 
 /* 卡尾动作：复制文字清单 / 复制清单图 / 生成拿货单（2026-10-17 第六轮：三个按钮**一行**）。

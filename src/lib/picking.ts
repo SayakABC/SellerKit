@@ -66,14 +66,21 @@ export function takenKey(styleCode: unknown, color: unknown, size: unknown): str
  * 两边各拼一套键就会出现"已拿算两遍"（缺口提前变 0 ⇒ 漏货）或"一遍都算不上"（全待拿，用户实报）。
  * 台账侧与清单侧**只能调这一个函数**。
  */
-export function takenKeyOf(row: {
-  styleColorId?: unknown;
-  styleCode?: unknown;
-  color?: unknown;
-  size?: unknown;
-} | null | undefined): string {
+export function takenKeyOf(
+  row:
+    | {
+        styleColorId?: unknown;
+        styleCode?: unknown;
+        color?: unknown;
+        size?: unknown;
+      }
+    | null
+    | undefined
+): string {
   const id = Number(row?.styleColorId) || 0;
-  return id > 0 ? `#${id}|${String(row?.size ?? '')}` : takenKey(row?.styleCode, row?.color, row?.size);
+  return id > 0
+    ? `#${id}|${String(row?.size ?? '')}`
+    : takenKey(row?.styleCode, row?.color, row?.size);
 }
 
 /**
@@ -94,7 +101,7 @@ export function takenFrom(
     styleCode?: unknown;
     color?: unknown;
     size?: unknown;
-  },
+  }
 ): number {
   if (!map || typeof map !== 'object') return 0;
   const n = (k: string): number => Math.max(0, Number(map[k]) || 0);
@@ -156,6 +163,15 @@ export interface PickingGroup {
   /** 组内**第一个非 0** 的款色 id（身份键，0 = 未归类）。"已拿"匹配优先用它，见 `takenKeyOf`。 */
   styleColorId: number;
   size: string;
+  /**
+   * **下单尺码**（加码款才有；空数组 = 这一组没加过码）。
+   *
+   * 亚洲款偏小：客户下单 L，实际要拿 XL（偏移来自 `pl_size_shift`，换算见 `lib/sizeShift`）。
+   * 换算发生在聚合**之前**，所以 `size` 是**拿货码**（也是"已拿"的键）；这里留下单码，
+   * 只为把"为什么拿 XL 而不是 L"说清楚（界面 `L→XL`、拿货单记下单码、导出「下单码」列）。
+   * 封顶时**多个下单码会并到同一个拿货码**（L 和 XL 都→XXL），所以是数组，不是单值。
+   */
+  orderSizes: string[];
   /** **要拣几件** = 组内各行件数之和（分不清件数的行按 1 件，见 `missingQty`） */
   pieces: number;
   /**
@@ -288,8 +304,13 @@ export interface PickingSummary {
   undated: number;
 }
 
-/** 天数窗下界（yyyy-mm-dd）：`today - days`；`days<=0` 返回 ''（不限） */
-function cutoffDate(today: string, days: number): string {
+/**
+ * 天数窗下界（yyyy-mm-dd）：`today - days`；`days<=0` 返回 ''（不限）。
+ *
+ * 导出给「按单核对」的时间窗用（2026-11-02）：两处口径必须同一份实现，
+ * 否则同一页上的拣货宫格与按单核对会在"哪一天算进了窗口"上分叉。
+ */
+export function cutoffDate(today: string, days: number): string {
   if (!(days > 0) || !today) return '';
   const d = new Date(`${today}T00:00:00`);
   if (Number.isNaN(d.getTime())) return '';
@@ -326,7 +347,7 @@ function todayLocal(): string {
  */
 export function aggregatePicking(
   rows: PickingRow[] | null | undefined,
-  opts: { settleQty?: Record<string, SettleQtyInfo> | null } & PickingScope = {},
+  opts: { settleQty?: Record<string, SettleQtyInfo> | null } & PickingScope = {}
 ): PickingSummary {
   const list = Array.isArray(rows) ? rows : [];
   const days = Number.isFinite(Number(opts?.days)) ? Number(opts.days) : DEFAULT_PICKING_DAYS;
@@ -337,7 +358,10 @@ export function aggregatePicking(
   const agg = new Map<string, PickingGroup>();
   const allOrders = new Set<string>();
   /** 未归类（无款色身份）行 → 按商品ID 聚合（口径与主循环完全一致：同一过滤、同一 qty） */
-  const unclassified = new Map<string, { itemId: string; pieces: number; rows: number; shops: string[] }>();
+  const unclassified = new Map<
+    string,
+    { itemId: string; pieces: number; rows: number; shops: string[] }
+  >();
   const summary: PickingSummary = {
     groups: [],
     suppliers: [],
@@ -385,7 +409,7 @@ export function aggregatePicking(
     const key = skuKey(r);
     const { qty, qtySource } = resolveQty(
       { orderNo: r?.orderNo, itemId: r?.itemId, rawFields: r?.rawFields },
-      opts?.settleQty,
+      opts?.settleQty
     );
     // 进价三档：实付真值 > 进价预估 > 产品当前价（见函数头注释；0 一律当"没有"）
     const unitCents =
@@ -409,6 +433,7 @@ export function aggregatePicking(
         color: String(r?.color ?? ''),
         styleColorId: 0,
         size: String(r?.size ?? ''),
+        orderSizes: [],
         pieces: 0,
         // 已拿 / 还差 / 忽略在**组维度**上算（见下方 `for (const g of agg.values())`），
         // 逐行累加会把同一行的 taken 加 N 次（taken 是"这款色码总共拿了多少"，不是"每行拿了多少"）。
@@ -465,6 +490,11 @@ export function aggregatePicking(
       if (nm) g.styleName = nm;
     }
     if (qtySource === 'assumed') g.missingQty += 1;
+    // 下单码：换算阶段打在行上（`applySizeShift` 的产物）；同组可能来自多个下单码（封顶合并）。
+    // ⚠️ 不能加 `os !== g.size` 的过滤：封顶行的下单码**就等于**拿货码（6XL→6XL），
+    //    滤掉它会让"5XL→6XL 与 6XL→6XL 并成一组"看起来只来自 5XL（少说了一半来源）。
+    const os = String((r as { orderSize?: unknown })?.orderSize ?? '').trim();
+    if (os && !g.orderSizes.includes(os)) g.orderSizes.push(os);
 
     agg.set(key, g);
 
@@ -489,6 +519,8 @@ export function aggregatePicking(
   for (const g of agg.values()) {
     g.orders = g.orderNos.length;
     g.orderNos.sort();
+    // 下单码按码序排，界面/导出不随输入顺序跳位
+    g.orderSizes.sort((a, b) => sizeOrder(a, b));
     g.shops.sort();
     g.supplierNames.sort();
     // 进价 = 有价件数的加权均价（同一 SKU 的各行可能一个用实付、一个用预估 → 表里给的是均价）
@@ -504,12 +536,14 @@ export function aggregatePicking(
     if (g.remaining > 0 && !g.ignored) summary.remainingGroups += 1;
   }
   summary.groups = [...agg.values()].sort(
-    (a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+    (a, b) => b.pieces - a.pieces || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
   );
   summary.orders = allOrders.size;
   summary.unclassifiedItems = [...unclassified.values()]
     .map((it) => ({ ...it, shops: [...it.shops].sort() }))
-    .sort((a, b) => b.pieces - a.pieces || (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0));
+    .sort(
+      (a, b) => b.pieces - a.pieces || (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0)
+    );
   summary.suppliers = groupBySupplier(summary.groups);
   return summary;
 }
@@ -551,7 +585,7 @@ function groupBySupplier(groups: PickingGroup[]): PickingSupplierGroup[] {
     (a, b) =>
       (a.supplierId ? 0 : 1) - (b.supplierId ? 0 : 1) ||
       b.pieces - a.pieces ||
-      (a.supplierName < b.supplierName ? -1 : a.supplierName > b.supplierName ? 1 : 0),
+      (a.supplierName < b.supplierName ? -1 : a.supplierName > b.supplierName ? 1 : 0)
   );
 }
 
@@ -565,6 +599,8 @@ function groupBySupplier(groups: PickingGroup[]): PickingSupplierGroup[] {
 /** 款色行里的一个尺码格：主数是**还差**，需求/已拿进 tooltip（界面拼 title 用） */
 export interface PickingSizeCell {
   size: string;
+  /** **下单码**（加码款才有；空 = 未加码）。展示成 `L→XL`，不是两张格 */
+  orderSizes: string[];
   /** 需求件数 */
   pieces: number;
   /** 已拿件数 */
@@ -593,6 +629,8 @@ export interface PickingColorGroup {
   imagePath: string;
   /** 尺码并排（**排序与输入顺序无关** —— 让同一行的格子不随件数/数据顺序跳位） */
   sizes: PickingSizeCell[];
+  /** 本行涉及的下单码（各码并集，升序；空 = 未加码）—— 行级提示"这款加了 1 码"用 */
+  orderSizes: string[];
   /** 需求件数合计（Σ 各码） */
   pieces: number;
   /** 已拿件数合计（Σ 各码） */
@@ -629,7 +667,20 @@ export interface PickingColorGroup {
 
 /** 尺码的自然序：字母码 XS→XXXL、数字码按数值、其余按原串（`''` 的"无尺码"排最后）。
  *  为什么要排序而不是随手用输入顺序：格子若随件数/取数顺序跳位，同一行两次生成会长得不一样。 */
-const SIZE_LETTER_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '2XL', '3XL', '4XL', '5XL'];
+const SIZE_LETTER_ORDER = [
+  'XXS',
+  'XS',
+  'S',
+  'M',
+  'L',
+  'XL',
+  'XXL',
+  'XXXL',
+  '2XL',
+  '3XL',
+  '4XL',
+  '5XL',
+];
 
 function sizeOrder(a: string, b: string): number {
   const rank = (raw: string): [number, number, string] => {
@@ -672,6 +723,7 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
           supplierName: '',
           imagePath: '',
           sizes: [],
+          orderSizes: [],
           pieces: 0,
           taken: 0,
           remaining: 0,
@@ -692,7 +744,13 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
     }
     b.groups.push(g);
     const row = b.row;
-    row.sizes.push({ size: g.size, pieces: g.pieces, taken: g.taken, remaining: g.remaining });
+    row.sizes.push({
+      size: g.size,
+      orderSizes: [...g.orderSizes],
+      pieces: g.pieces,
+      taken: g.taken,
+      remaining: g.remaining,
+    });
     row.pieces += g.pieces;
     row.taken += g.taken;
     row.remaining += g.remaining;
@@ -706,6 +764,7 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
     row.missingQty += g.missingQty;
     row.missingStyle += g.missingStyle;
     row.noPricePieces += g.noPricePieces;
+    for (const os of g.orderSizes) if (!row.orderSizes.includes(os)) row.orderSizes.push(os);
     // 还差件按进价估：只统计**有价**的还差件（缺价的报出来，不按 0 蒙 —— 与 `aggregatePicking` 同一条纪律）
     if (g.remaining > 0) {
       if (g.unitPrice === null) row.pendingNoPricePieces += g.remaining;
@@ -715,6 +774,7 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
   const out: PickingColorGroup[] = [];
   for (const { row, groups: gs } of buckets.values()) {
     row.sizes.sort((a, b) => sizeOrder(a.size, b.size));
+    row.orderSizes.sort((a, b) => sizeOrder(a, b));
     // 进价 = 有价需求件的加权均价（与 `PickingGroup.unitPrice` 同一口径，只是再向上折一层）
     let paid = 0;
     let paidPieces = 0;
@@ -746,14 +806,14 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
  */
 export function pendingOf(
   groups: PickingGroup[] | null | undefined,
-  supplierId?: number | null,
+  supplierId?: number | null
 ): PickingGroup[] {
   const list = Array.isArray(groups) ? groups : [];
   return list.filter(
     (g) =>
       !g.ignored &&
       g.remaining > 0 &&
-      (supplierId === undefined || supplierId === null || g.supplierId === supplierId),
+      (supplierId === undefined || supplierId === null || g.supplierId === supplierId)
   );
 }
 

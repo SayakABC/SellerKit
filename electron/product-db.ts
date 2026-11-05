@@ -133,6 +133,19 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_pl_products_supplier ON pl_products(supplier_id)`,
   `CREATE INDEX IF NOT EXISTS idx_pl_products_status ON pl_products(status)`,
+  // `pl_size_shift`：**亚洲款加码**（款级码位偏移，一行 = 一个款）。
+  // 为什么不塞进 `pl_products`：`ProductUpsertInput` 是**全量提交**语义（缺省即空），
+  // 多加一列就会被"只改了个名字"的提交清成 0 —— 与 `cost_cents` 必须开 `undefined=不覆盖`
+  // 特例是同一类事故。主图已经走 `imageAttach` 窄接口，本表同理：一个写入口、一个读入口。
+  // 键是 `style_code`（跨域锚点 `oi_styles.code ≡ pl_products.code`，见文件头"编码锚点"），
+  // 不要求该款已入库 —— 拿货页上发现"这牌是亚洲款"时，款可能还没建产品行。
+  `CREATE TABLE IF NOT EXISTS pl_size_shift (
+    -- 用途：款级码位偏移（亚洲款拿货要加 1-3 码）；读 = 拣货/需求换算，写 = 产品抽屉 / 拿货页。
+    style_code TEXT PRIMARY KEY,
+    shift INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`,
 ];
 
 /**
@@ -206,6 +219,91 @@ export function ensureProductSchema(): void {
  */
 export function productSchemaReady(): boolean {
   return !!dbGet(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pl_products'`);
+}
+
+// ---- 亚洲款加码（`pl_size_shift`）：一个读口、一个写口 ----------------------------------
+//
+// 为什么独立窄接口而不进 `upsertProduct`：那边是**全量提交**，产品抽屉"只改了个名字"的
+// 提交会把加码清成 0（`cost_cents` 已经因此开过 `undefined=不覆盖` 的特例）。偏移量是
+// "拿货照哪个码拿"的经营规则，改动频率和产品档案完全不同，混在一起必然互相误伤。
+//
+// 偏移的**换算**不在这里做：主进程只存数字，`size → 下一个码` 的判定只写一份
+// （`src/lib/sizeShift.ts`，有单测）。主进程 import 不了渲染层（两套 tsconfig），
+// 所以本文件只回"这款偏几码"和"这款有哪些码"，判断留给上层。
+
+/** 允许的偏移范围（与 `src/lib/sizeShift.ts` 的 `MAX_SIZE_SHIFT` 同口径；负数是给"偏大减码"留的位） */
+const SIZE_SHIFT_LIMIT = 3;
+
+/** 全部**非 0** 的加码配置（款编码 → 码位数）。0 的款不落库，这里也就不会出现。 */
+export function sizeShiftMap(): Record<string, number> {
+  ensureProductSchema();
+  const out: Record<string, number> = {};
+  for (const r of dbQuery<Record<string, unknown>>(
+    `SELECT style_code, shift FROM pl_size_shift WHERE shift <> 0`
+  )) {
+    const code = String(r.style_code ?? '').trim();
+    const n = Math.trunc(Number(r.shift) || 0);
+    if (code && n) out[code] = n;
+  }
+  return out;
+}
+
+/**
+ * 码链：款编码 → 该款 SKU 矩阵里出现过的码（**升序由调用方排**）。
+ *
+ * 用途：数字码/异形码（`170/92A`）的"下一个码"只能看这款实际有哪些码，
+ * 靠字典猜会把 38 的下一个码算错。矩阵没建/没采到的款返回空数组 ⇒ 调用方回落字典规则。
+ */
+export function sizeChains(codes: unknown): Record<string, string[]> {
+  ensureProductSchema();
+  const list = Array.isArray(codes)
+    ? [...new Set(codes.map((c) => String(c ?? '').trim()).filter(Boolean))].slice(0, 500)
+    : [];
+  const out: Record<string, string[]> = {};
+  if (!list.length || !tableExists('pl_variants')) return out;
+  const ph = list.map(() => '?').join(',');
+  for (const r of dbQuery<Record<string, unknown>>(
+    `SELECT p.code AS code, v.size AS size
+       FROM pl_variants v JOIN pl_products p ON p.id = v.product_id
+      WHERE p.code IN (${ph}) AND v.size <> ''
+      GROUP BY p.code, v.size`,
+    list
+  )) {
+    const code = String(r.code ?? '');
+    const size = String(r.size ?? '');
+    if (!code || !size) continue;
+    (out[code] ??= []).push(size);
+  }
+  return out;
+}
+
+/**
+ * 写一款的加码偏移。`0` = 取消（**删行**，不留"0 的行"—— 否则以后没法用"表里有没有这行"
+ * 判断"这款是不是设过"，而那种判断迟早会被写成业务条件）。
+ *
+ * 只接受 `-3..3` 的整数：偏移写错一位就是拿错一个码的货，宁可报错也不截断。
+ */
+export function setSizeShift(input: unknown): { styleCode: string; shift: number } {
+  ensureProductSchema();
+  const o = (input ?? {}) as Record<string, unknown>;
+  const code = str(o.styleCode, MAX.code);
+  if (!code) throw new Error('款编码不能为空');
+  const n = Math.trunc(Number(o.shift ?? 0));
+  if (!Number.isFinite(n) || Math.abs(n) > SIZE_SHIFT_LIMIT) {
+    throw new Error(`加码只能是 -${SIZE_SHIFT_LIMIT}…${SIZE_SHIFT_LIMIT} 的整数`);
+  }
+  if (n === 0) {
+    dbRun(`DELETE FROM pl_size_shift WHERE style_code = ?`, [code]);
+  } else {
+    dbRun(
+      `INSERT INTO pl_size_shift (style_code, shift, note, updated_at)
+       VALUES (?, ?, ?, datetime('now','localtime'))
+       ON CONFLICT(style_code) DO UPDATE SET
+         shift = excluded.shift, note = excluded.note, updated_at = excluded.updated_at`,
+      [code, n, str(o.note, MAX.note)]
+    );
+  }
+  return { styleCode: code, shift: n };
 }
 
 // ---- 字段规整 ----

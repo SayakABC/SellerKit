@@ -38,7 +38,16 @@ export interface PickingExportRow {
   supplierName: string;
   styleCode: string;
   color: string;
+  /** **拿货码**（厂家照它拿）；加码款与下单码不同，下单码见 `orderSize` */
   size: string;
+  /**
+   * **下单码**（亚洲款加码才有；'' = 未加码）。
+   *
+   * 为什么拼在「尺码」列而不新增一列：厂家照着**拿货码**拿货，两个码分两列时一线工人极易
+   * 看错列（而这一列错了就是整批货拿错码）；拼成 `XL（下单L）` 主值在前、来源在后，
+   * 既不影响照单拿货，也保留了"为什么是 XL"的追溯。列数不变也让既有断言不用跟着挪位。
+   */
+  orderSize?: string;
   /** 要拣几件（需求） */
   pieces: number;
   /** 已拿件数（已提交拿货单合计；与 `purchase-db.outstanding()` 同一口径） */
@@ -135,7 +144,8 @@ export async function buildPickingWorkbook(rows: PickingExportRow[]): Promise<Bu
         undefined, // 图片占位（下面嵌图）
         it.styleCode || '(未识别款)',
         it.color || '(无颜色)',
-        it.size || '(无尺码)',
+        // 主值是**拿货码**（照它拿）；加码款在后面括注下单码，一眼看出"为什么是 XL"
+        it.orderSize ? `${it.size || '(无尺码)'}（下单${it.orderSize}）` : it.size || '(无尺码)',
         Number(it.pieces) || 0,
         Number(it.taken) || 0,
         Number(it.remaining) || 0,

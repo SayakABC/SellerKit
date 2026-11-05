@@ -187,7 +187,17 @@
       </div>
 
       <div class="wb-panel__body">
-        <table class="wb-table gd-pane__table" data-act="product-table">
+        <!-- `tabindex="0"`：这张表本身是一个键盘操作对象（↑↓ 移动 / 空格勾选 / 回车编辑，
+             见 `@/core/composables/useRowNav`）。没有它，鼠标点过行之后按方向键什么都不会发生 ——
+             「手不离键」就成了"必须先 Tab 十几次才能用"。 -->
+        <table
+          ref="tableEl"
+          class="wb-table gd-pane__table"
+          data-act="product-table"
+          tabindex="0"
+          aria-label="产品列表：上下键移动当前行，空格勾选，回车打开编辑"
+          @keydown="onKeydown"
+        >
           <thead>
             <tr>
               <th class="gd-c-check">
@@ -271,7 +281,7 @@
             </template>
             <tr v-if="!rows.length && !loading">
               <td :colspan="gdColspan" class="gd-list__empty">
-                <div class="wb-empty">
+                <div class="wb-empty wb-empty--sm">
                   <div class="wb-empty__icon" aria-hidden="true">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
                       <path d="M21 8l-9-5-9 5 9 5 9-5z" />
@@ -333,6 +343,13 @@
         </table>
       </div>
 
+      <!-- 面板脚：多页时是分页条，**单页时是收束行**（2026-11-03 界面方案 §5.9）。
+           原来只在多页时才挂页脚，而常见情况正是一页装完 —— 于是表格直接断在一段空白上，
+           用户分不清"到底了"还是"还在加载 / 被我裁掉了"。
+           ⚠️ 收束行放在表**外**（挂在面板脚），不要加成 tbody 的收尾 `<tr>`：那会吃到
+              斑马纹与 hover 热区、长得像一条数据行，且以后任何"数行"的判据都会被它带偏。
+           ⚠️ 单位跟分页那条保持一致写「条」（"共 N 条，第 x / y 页"）：同一个面板里出现
+              "条"和"款"两个单位词，用户会以为在数两样东西。 -->
       <div v-if="totalPages > 1" class="wb-panel__foot gd-list__foot">
         <span class="wb-muted">共 {{ total }} 条，第 {{ page }} / {{ totalPages }} 页</span>
         <span class="wb-pager__spacer"></span>
@@ -348,6 +365,9 @@
           下一页
         </button>
       </div>
+      <p v-else-if="total > 0" class="wb-panel__foot gd-list__cap" data-act="product-cap">
+        共 {{ total }} 条 · 已全部显示
+      </p>
     </section>
 
     <ProductEditorDrawer
@@ -453,6 +473,7 @@
 //      现在各归各位：档案进「编辑」抽屉、反查进右栏「已认」的「只看当前款」。
 //   ② 把"当前款"报给外壳（`select-product`）—— 跨栏通信只能经外壳，两个子组件互不认识。
 import { computed, reactive, ref, watch } from 'vue';
+import { useRowNav } from '@/core/composables/useRowNav';
 import { useProductList } from '../useProductList';
 import * as api from '../api';
 import ProductEditorDrawer from './ProductEditorDrawer.vue';
@@ -579,6 +600,9 @@ const gdColspan = 7;
 /** 当前选中的款（也是右栏动作条的落点；**不再是"展开的那一行"**） */
 const currentId = ref(0);
 
+/** 表格元素：既是键盘动线的挂载点，也是"点完行把焦点收回表上"的落点（见 `selectRow`）。 */
+const tableEl = ref<HTMLTableElement | null>(null);
+
 /**
  * 单击一行 = 选中它。
  *
@@ -588,13 +612,17 @@ const currentId = ref(0);
  * "不选任何款"不需要出口：不认款就是不选，那件事用不着按钮。
  */
 function selectRow(id: number): void {
-  if (currentId.value === id) return;
-  currentId.value = id;
-  // 走同一个 `selectProduct`：它顺手清掉上一条保存回执（回执是"刚才那一行"的，
-  // 换一行还挂着会让人以为新那行也保存过了）
-  selectProduct(id);
-  const p = rows.value.find((x) => x.id === id);
-  emit('select-product', p ? { id: p.id, code: p.code, name: p.name } : null);
+  if (currentId.value !== id) {
+    currentId.value = id;
+    // 走同一个 `selectProduct`：它顺手清掉上一条保存回执（回执是"刚才那一行"的，
+    // 换一行还挂着会让人以为新那行也保存过了）
+    selectProduct(id);
+    const p = rows.value.find((x) => x.id === id);
+    emit('select-product', p ? { id: p.id, code: p.code, name: p.name } : null);
+  }
+  // 点完一行把焦点交给表：`tr` 不可获焦，不收回来的话"鼠标点了行、接着按 ↓"什么都不会发生
+  // （键盘动线成了只对纯键盘用户有效的东西）。`preventScroll`：行本来就在眼皮底下，别顺带滚页。
+  tableEl.value?.focus({ preventScroll: true });
 }
 
 /**
@@ -626,6 +654,23 @@ watch(rows, (list) => {
     currentId.value = 0;
     emit('select-product', null);
   }
+});
+
+/* ---- 键盘动线（方案 §6）：↑↓ 移动 / Space 勾选 / Enter 编辑 ------------
+   为什么挂在 `<table>` 上而不是每一行：`tr` 不可获焦，`tabindex` 加在行上会造出 N 个
+   焦停点（表一长，Tab 就废了）。表本身一个焦停点 + 表内移动，才是"手不离键"的形状。
+   焦点在行内 checkbox / 行尾「编辑」上时由 `useRowNav` 让路（不判会勾上又立刻取消）。 */
+const { onKeydown } = useRowNav({
+  rows,
+  idOf: (p) => p.id,
+  currentId,
+  onSelect: (id) => selectRow(id),
+  onToggle: (id) => toggleOne(id),
+  onOpen: (id) => {
+    const p = rows.value.find((x) => x.id === id);
+    if (p) openEditor(p);
+  },
+  rowEl: (id) => tableEl.value?.querySelector(`tr[data-product-id="${id}"]`) ?? null,
 });
 
 /* ---- 已关联反查已搬到右栏「已认」段（P2 · S4）---------------------------
@@ -724,6 +769,16 @@ watch(rows, (list) => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+/* 收束行（单页时替代分页条）：只回答"到底了没有"这一件事，所以不发声音 ——
+   无按钮、无实底色，文字压到说明级。它的价值在**边界**（一条横线 + 一句话），
+   不在信息量：没有它，表格末尾与画布之间没有任何分界，用户读不出"结束"还是"没加载完"。 */
+.gd-list__cap {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  font-size: var(--wb-fs-caption);
+  color: var(--wb-text-muted);
 }
 .gd-list__empty {
   padding: 0;

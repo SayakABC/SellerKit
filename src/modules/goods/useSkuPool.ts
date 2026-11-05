@@ -391,6 +391,46 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
   );
 
   /**
+   * 「未登记店铺」**合并名单**（2026-11-03 界面方案 §5.1）。
+   *
+   * 原先并排两条几乎一模一样的橙条（订单侧 / 采集侧各一条）：根因同一个（店铺没登记）、
+   * 出口同一个（店名归一），两句只差"卖出去的 / 采回来的"。同屏两处警告会把警告色变成
+   * 背景噪音 —— 真正"还差多少"反而不显眼。合并后一条报**并集数量** + 两侧各自的后果。
+   *
+   * ⚠️ 口径是**取并集，不是相加**：两侧唯一能用来对齐的就是店名（这些店正因为"没登记"，
+   *    压根没有可比的 `shopId`）；同名只算一次，否则"1 家店"会被报成"2 家"。
+   *    同一个店两侧写法不同时会算成两家 —— 这是诚实的：那两个串本来就对不上，
+   *    而对上它们正是要用户去「店名归一」做的事。
+   * ⚠️ 顺序：订单侧在前（队列是用户当下正在处理的那一段），采集侧在后。
+   */
+  const unresolvedShopsAll = computed(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const name of [...unresolvedShops.value, ...unresolvedItemStores.value]) {
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+    return out;
+  });
+
+  /** 两侧是否各有未登记店铺 —— 决定合并后那句话说**哪几种后果**（没遇到的事不替用户说） */
+  const unresolvedHasOrder = computed(() => unresolvedShops.value.length > 0);
+  const unresolvedHasItems = computed(() => unresolvedItemStores.value.length > 0);
+
+  /** 合并提示条的悬停长解释：两侧的"为什么必须先登记"各自不同，按实际有的一侧拼 */
+  const unresolvedHintTitle = computed(() => {
+    const parts: string[] = [];
+    if (unresolvedHasOrder.value) {
+      parts.push('订单里没有平台字段，平台只能从已登记的店铺取 —— 先到「店名归一」登记这些店，这几行才能写映射');
+    }
+    if (unresolvedHasItems.value) {
+      parts.push('到「店名归一」把店铺地址一填，之后的采集自动归位，这些商品就能认款了');
+    }
+    return parts.join('；');
+  });
+
+  /**
    * 手贴商品ID导入（保底通道：扩展选择器全落空时，用户从后台复制商品ID贴进来）。
    * 数据层走与采集帧**同一个写路径**（`importManualItems` → `upsertShopItems`），
    * 只是 source='manual'，表上和"采来的"分得开。shopId=0 = 落未登记桶。
@@ -951,6 +991,34 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     pendingRows.value.filter((r) => pendingSelected.value.has(r.key) && r.canRelate)
   );
   const pendingSelectionCount = computed(() => pendingSelectedRows.value.length);
+
+  /**
+   * 动作条的**作用域说明**（2026-11-03 界面方案 §5.1 第 8 项）。
+   *
+   * 只说「已选 2 项」不够：用户滚到第 30 行再回来看这条吸底栏，已经不知道自己勾了哪几个，
+   * 只能回去一行行找。报前 3 个商品ID，多的用「等 N 项」收口（完整名单在 title 里）。
+   *
+   * ⚠️ 用商品ID 而不是"第几行"：行号会随筛选/排序全变，是个假身份（本仓已踩过三次）。
+   * ⚠️ 不加成按钮文案：按钮上的「认到 S2（2 项）」已经很长，再塞款名会在窄窗口挤成两行 ——
+   *    款名走按钮的 title（"S2 是什么"只在看不清左栏时才需要，属低频信息）。
+   */
+  const pendingScopeText = computed(() => {
+    // ⚠️ 必须 trim：`itemId` 是**订单原文**，可能带首尾空格（本仓已踩过这个坑：拿原文去查归一键
+    //    会落空且不报错）。表格里那格显示的是同一个串、HTML 会把结尾空格吃掉 ⇒ 不 trim 的话
+    //    "栏里点名的" 与 "行里的 ID" 字面不等（只差一个看不见的空格），用户对不上、断言也踩空。
+    const ids = pendingSelectedRows.value
+      .map((r) => (r.itemId || '').trim())
+      .filter((s) => !!s);
+    if (!ids.length) return '';
+    const head = ids.slice(0, 3).join('、');
+    return ids.length > 3 ? `${head} 等 ${ids.length} 项` : head;
+  });
+  const pendingScopeTitle = computed(() =>
+    pendingSelectedRows.value
+      .map((r) => (r.itemId || '').trim())
+      .filter((s) => !!s)
+      .join('、')
+  );
 
   function togglePendingAll(e: Event): void {
     const next = new Set(pendingSelected.value);
@@ -1661,6 +1729,10 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     receiverStatus,
     itemStats,
     unresolvedItemStores,
+    unresolvedShopsAll,
+    unresolvedHasOrder,
+    unresolvedHasItems,
+    unresolvedHintTitle,
     selectableItems,
     itemSelectedRows,
     itemAllChecked,
@@ -1679,6 +1751,8 @@ export function useSkuPool(opts: SkuPoolOptions = {}) {
     pendingSomeChecked,
     pendingSelectedRows,
     pendingSelectionCount,
+    pendingScopeText,
+    pendingScopeTitle,
     togglePendingAll,
     togglePendingOne,
     clearPendingSelection,

@@ -1417,6 +1417,18 @@ async function narrowViewportChecks() {
   report('空态那一格横跨**全部列**（简洁模式少一列，colspan 必须跟着变，否则右边缺一块）',
     !!emptyCell && emptyCell.colSpan === thCount,
     'colspan=' + (emptyCell ? emptyCell.colSpan : 'missing') + ' 表头=' + thCount);
+  // 紧凑空态（方案 P2-12）：表体一格里的空态必须是**紧凑档** —— 52px 的内边距会把
+  // 一句"还没有产品"撑成半屏，而它上面只有一行表头、下面什么都没有。
+  // 量的是算出来的内边距与图标尺寸，不是「有没有 wb-empty--sm 这个 class」（后者恒绿）。
+  var emptyBox = document.querySelector('.gd-list__empty .wb-empty');
+  var emptyIcon = document.querySelector('.gd-list__empty .wb-empty__icon');
+  var emptyCs = emptyBox ? getComputedStyle(emptyBox) : null;
+  var emptyIconW = emptyIcon ? Math.round(emptyIcon.getBoundingClientRect().width) : 0;
+  report('表内空态用紧凑档（内边距 28/20、图标 32px：一格空话不该撑成半屏）',
+    !!emptyCs && emptyCs.paddingTop === '28px' && emptyCs.paddingLeft === '20px' && emptyIconW === 32,
+    emptyCs
+      ? 'pad=' + emptyCs.paddingTop + '/' + emptyCs.paddingLeft + ' icon=' + emptyIconW + 'px'
+      : 'missing');
   // 反向守卫（首次动线 R3）：这一遍是"零款 + **队列非空**" —— 引导卡不该出现。
   // 这是与 empty-entry 那一条**不同的组合**（那条是"有款 + 空队列"），两条合起来才说明
   // 判据真的是"两端同时为零"，而不是跟着其中一个开关走。
@@ -1601,6 +1613,17 @@ async function main() {
     await waitFor(function () { return document.querySelector('.gd-view'); }, 10000);
     report('挂载：基础数据 › 货品档案渲染（原「货与成本」整页）', true);
     await waitFor(function () { return productRows().length >= 2; }, 8000);
+
+    // 收束行（2026-11-03 界面方案 §5.9）：一页装完时表格也要"收住"。
+    // 原来只在多页时才挂页脚 —— 而最常见的情况正是一页装完，于是表格末尾直接贴画布，
+    // 用户分不清"到底了"还是"还在加载 / 被我裁了"。
+    // 判据两条：① 单页时**确实**挂着收束行（不是又变成"只有多页才有页脚"）；
+    //          ② 行里的数与行数**同源**（各算一遍的典型症状："显示 2 行却说共 5 条"）。
+    var gdCap = document.querySelector('[data-act="product-cap"]');
+    var gdCapTxt = gdCap ? flat(gdCap) : '';
+    report('单页时表格有收束行（"共 N 条 · 已全部显示"，把表收住而不是断在空白上）',
+      !!gdCap && gdCapTxt.indexOf('共 2 条') >= 0 && gdCapTxt.indexOf('已全部显示') >= 0,
+      'cap=' + JSON.stringify(gdCapTxt) + ' rows=' + productRows().length);
 
     // ── 两栏工作台外壳（S0 建的锚点；S4 起恒两栏）─────────────────────────
     // 守着三件事：
@@ -1839,6 +1862,91 @@ async function main() {
     report('点行**不再**产生任何展开行（撤干净了，不是"藏起来"）',
       !document.querySelector('[data-act="row-detail"]'),
       'detail=' + !!document.querySelector('[data-act="row-detail"]'));
+
+    // ── 键盘动线（方案 §6「手不离键」）────────────────────────────────
+    // ↑↓ 移动当前行 / Space 勾选 / Enter 进详情。三条都必须**真派发 keydown**：
+    // 只断言"表上有 tabindex"会恒绿 —— 属性在、行为完全可以没有。
+    // ⚠️ 这里还钉一条**看不出、只按得出**的：焦点落在行内勾选框上时，动线必须让路。
+    //    不判的话 Space 会"原生切换 + 我们又一次" ⇒ 勾上又立刻取消，用户看到的是"按了没反应"。
+    //    （纯函数那半条在 tests/rowNav.spec.ts，这里验真 DOM 里的接线。）
+    step('row-keyboard');
+    var kbTable = document.querySelector('[data-act="product-table"]');
+    report('产品表本身是键盘操作对象（tabindex=0：鼠标点过行之后 ↑↓ 才有地方落）',
+      !!kbTable && kbTable.getAttribute('tabindex') === '0',
+      'tabindex=' + (kbTable ? kbTable.getAttribute('tabindex') : 'missing'));
+    if (kbTable) kbTable.focus();
+    await sleep(80);
+    report('表真的拿到了焦点（拿不到的话下面几条全是在测空气）',
+      !!kbTable && document.activeElement === kbTable,
+      'active=' + (document.activeElement ? document.activeElement.tagName : 'none'));
+
+    // ↑ 从第 2 行回到第 1 行，且**不改勾选**（移动是"看下一行"，勾选是"标记要处理"）
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await settle(function () {
+      return !!productRows()[0] && productRows()[0].classList.contains('is-on');
+    }, 2000);
+    report('↑ 把当前行移到上一行（不动勾选：两件事不混在一起）',
+      productRows()[0].classList.contains('is-on') &&
+        !productRows()[1].classList.contains('is-on') &&
+        !document.querySelector('[data-act="selection-bar"]'),
+      'r0=' + productRows()[0].classList.contains('is-on') +
+        ' r1=' + productRows()[1].classList.contains('is-on') +
+        ' selbar=' + !!document.querySelector('[data-act="selection-bar"]'));
+
+    // 到顶停住：环绕会让长表里的人瞬间失去位置感
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await sleep(120);
+    var kbLast = productRows()[productRows().length - 1];
+    report('↑ 到第一行就停住，不环绕到最后一行',
+      productRows()[0].classList.contains('is-on') && !kbLast.classList.contains('is-on'),
+      'r0=' + productRows()[0].classList.contains('is-on') + ' rLast=' + kbLast.classList.contains('is-on'));
+
+    // ↓ 回到第 2 行
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await settle(function () {
+      return !!productRows()[1] && productRows()[1].classList.contains('is-on');
+    }, 2000);
+    report('↓ 把当前行移到下一行', productRows()[1].classList.contains('is-on'));
+
+    // Space = 勾选当前行（不用去够那个 1rem 的方框）
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    await settle(function () { return !!document.querySelector('[data-act="selection-bar"]'); }, 2000);
+    var kbBox = productRows()[1].querySelector('input[type="checkbox"]');
+    report('Space 勾上当前行（勾选是"标记要处理"，与移动分得开）',
+      !!kbBox && kbBox.checked && !!document.querySelector('[data-act="selection-bar"]'),
+      'checked=' + (kbBox ? kbBox.checked : 'missing') +
+        ' selbar=' + !!document.querySelector('[data-act="selection-bar"]'));
+    // 再按一次 = 取消（开关，不是"只能勾上"）
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    await settle(function () { return !document.querySelector('[data-act="selection-bar"]'); }, 2000);
+    report('再按一次 Space 取消勾选（判定成"开关"，否则用户没法用键盘撤掉勾错的行）',
+      !!kbBox && !kbBox.checked && !document.querySelector('[data-act="selection-bar"]'),
+      'checked=' + (kbBox ? kbBox.checked : 'missing'));
+
+    // 焦点在行内勾选框上：动线必须让路（否则这一段会变红，而肉眼看是"按了没反应"）
+    if (kbBox) {
+      kbBox.focus();
+      kbBox.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    }
+    await sleep(150);
+    report('焦点在行内勾选框上时**不接管** Space（接管了就是"勾上又被原生切回去"）',
+      !!kbBox && !kbBox.checked && !document.querySelector('[data-act="selection-bar"]'),
+      'active=' + (document.activeElement ? document.activeElement.tagName : 'none') +
+        ' checked=' + (kbBox ? kbBox.checked : 'missing'));
+
+    // Enter = 进详情（等价于点行尾「编辑」，不是"再选中一次"）
+    if (kbTable) kbTable.focus();
+    if (kbTable) kbTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(function () { return !!document.querySelector('.wb-drawer [data-act="ed-code"]'); }, 4000);
+    report('Enter 进详情（打开这一行的编辑抽屉，且是**当前行**）',
+      !!document.querySelector('.wb-drawer [data-act="ed-code"]') &&
+        productRows()[1].classList.contains('is-on'),
+      'drawer=' + !!document.querySelector('.wb-drawer') +
+        ' r1=' + productRows()[1].classList.contains('is-on'));
+    // 收干净：这一步没改字段，✕ 直接关（不在夹具上留一个开着的抽屉）
+    var kbClose = document.querySelector('.wb-drawer .ed-x');
+    if (kbClose) kbClose.click();
+    await settle(function () { return !document.querySelector('.wb-drawer'); }, 4000);
 
     // ── 档案搬进抽屉（S4 的能力新家）──────────────────────────────────
     // 展开区里的供应商 / 类目 / 编辑 / 删除必须有**一处真的还在**的地方。
@@ -3480,6 +3588,112 @@ async function main() {
     report('来源收窄到「订单」后是 3 行（2 待关联 + 1 店铺未归一）',
       all('[data-act="pending-table"] tbody tr[data-item-id]').length === 3,
       'rows=' + all('[data-act="pending-table"] tbody tr[data-item-id]').length);
+
+    // ── 待认表的键盘动线（方案 §6）────────────────────────────────────
+    // 认款是每天做的事：↑↓ 走行、空格勾上、回车凑近看 —— 全程不用离开键盘。
+    // 三条必须真派发：① 移动只改"当前行"不改勾选；② Space 走的是唯一的 togglePendingOne
+    // （所以 disabled 的行按不动）；③ Enter 的判据必须与行内「对比」按钮**同一条件**
+    // （阻断行、采集行都没有那个按钮 ⇒ 键盘也不该开出一条界面上不存在的路）。
+    step('pending-keyboard');
+    var pkTable = document.querySelector('[data-act="pending-table"]');
+    var pkRows = function () { return all('[data-act="pending-table"] tbody tr[data-item-id]'); };
+    var pkCur = function () { return document.querySelector('[data-act="pending-table"] tbody tr.is-on'); };
+    var pkKey = function (key) {
+      if (pkTable) pkTable.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
+    };
+    // ⚠️ 判"有没有勾选"**不能**看动作条在不在：那条动作条是**常驻**的（2026-10-25 裁定 ——
+    //    勾之前就得看得见唯一入口），没勾时它写着「勾选商品后可认款」。
+    //    真正随勾选变的是那一行计数文案，判据取它。
+    var pkSel = function () {
+      var el = document.querySelector('[data-act="pending-selcount"]');
+      return el ? flat(el) : '';
+    };
+    // 先把可能残留的勾选清掉：这一段断言的是"按了几个键之后状态怎么变"，
+    // 带着上一段的残留跑，红了也说不清是谁造成的。
+    var pkClear = document.querySelector('[data-act="pending-clear"]');
+    if (pkClear && !pkClear.disabled) pkClear.click();
+    await sleep(120);
+    report('这一段从"什么都没勾"开始（否则下面的移动/勾选断言分不清是谁造成的）',
+      pkSel().indexOf('已选') < 0, 'sel=' + pkSel());
+    report('待认表是键盘操作对象（tabindex=0）',
+      !!pkTable && pkTable.getAttribute('tabindex') === '0',
+      'tabindex=' + (pkTable ? pkTable.getAttribute('tabindex') : 'missing'));
+    if (pkTable) pkTable.focus();
+    await sleep(80);
+    report('待认表真的拿到了焦点', !!pkTable && document.activeElement === pkTable,
+      'active=' + (document.activeElement ? document.activeElement.tagName : 'none'));
+    // 行的键盘身份必须是**复合键**（o: 订单 / i: 采集 + 主键），不是商品ID：
+    // 队列按「店铺 + 商品」分组，同一商品在两个店铺下是两行、商品ID 相同 ——
+    // 拿商品ID 当键会在两行之间来回跳（而且看起来像"按了没反应"）。
+    // ⚠️ 夹具里目前**没有**这种重复商品ID 的行（订单原文还带尾随空格，与采集行拼不成同一个键），
+    //    所以这条是"钉住身份来源"，不是"钉住重复场景"；后者要等夹具补了双店铺同商品的行才验得到。
+    var pkKeys = pkRows().map(function (r) { return r.getAttribute('data-row-key') || ''; });
+    report('行的键盘身份是复合键（o:/i: + 主键），不是商品ID',
+      pkKeys.length === 3 &&
+        pkKeys.every(function (k) { return k.charAt(0) !== '' && (k.indexOf('o:') === 0 || k.indexOf('i:') === 0); }) &&
+        new Set(pkKeys).size === 3,
+      'keys=' + pkKeys.join(','));
+
+    // ↓ 从"没有当前行"开始 ⇒ 第一行
+    pkKey('ArrowDown');
+    await sleep(120);
+    report('↓ 从没有当前行开始 ⇒ 落在第 1 行（不是"按了什么都不发生"）',
+      !!pkCur() && pkCur() === pkRows()[0],
+      'cur=' + (pkCur() ? pkCur().getAttribute('data-item-id') : 'none'));
+    // ↓ 再走一行，且**不改勾选**
+    pkKey('ArrowDown');
+    await sleep(120);
+    report('↓ 走到第 2 行，且没有顺手勾上任何一行（移动 ≠ 勾选）',
+      !!pkCur() && pkCur() === pkRows()[1] && pkSel().indexOf('已选') < 0,
+      'cur=' + (pkCur() ? pkCur().getAttribute('data-item-id') : 'none') + ' sel=' + pkSel());
+
+    // Space = 勾上当前行（底部动作条是唯一的认款出口）
+    var pkBox2 = pkRows()[1].querySelector('input[type="checkbox"]');
+    pkKey(' ');
+    await settle(function () { return pkSel().indexOf('已选') >= 0; }, 2000);
+    report('Space 勾上当前行（计数文案变成「已选 1 项」—— 认款只有这一条出口）',
+      !!pkBox2 && pkBox2.checked && pkSel().indexOf('已选') >= 0,
+      'checked=' + (pkBox2 ? pkBox2.checked : 'missing') + ' sel=' + pkSel());
+    pkKey(' ');
+    await settle(function () { return pkSel().indexOf('已选') < 0; }, 2000);
+    report('再按 Space 取消勾选（开关，不是"只能勾上"）',
+      !!pkBox2 && !pkBox2.checked && pkSel().indexOf('已选') < 0,
+      'checked=' + (pkBox2 ? pkBox2.checked : 'missing') + ' sel=' + pkSel());
+
+    // 走到"店铺未归一"那一行：它也在列表里（要能看），但**勾不上**（勾选框 disabled）
+    for (var pkStep = 0; pkStep < 4 && !(pkCur() && pkCur().classList.contains('is-blocked')); pkStep += 1) {
+      pkKey('ArrowDown');
+      await sleep(100);
+    }
+    var pkBlocked = pkCur();
+    var pkBlockedBox = pkBlocked ? pkBlocked.querySelector('input[type="checkbox"]') : null;
+    report('↓ 能走到「店铺未归一」那一行（阻断不等于不存在，它还得能被看见）',
+      !!pkBlocked && pkBlocked.classList.contains('is-blocked') && !!pkBlockedBox && pkBlockedBox.disabled,
+      'blocked=' + !!pkBlocked + ' disabled=' + (pkBlockedBox ? pkBlockedBox.disabled : 'missing'));
+    pkKey(' ');
+    await sleep(150);
+    report('阻断行按 Space **勾不上**（勾选框 disabled，键盘不许绕过它）',
+      !!pkBlockedBox && pkBlockedBox.disabled && !pkBlockedBox.checked && pkSel().indexOf('已选') < 0,
+      'checked=' + (pkBlockedBox ? pkBlockedBox.checked : 'missing') + ' sel=' + pkSel());
+    pkKey('Enter');
+    await sleep(200);
+    report('阻断行按 Enter **不开**对比弹层（那一行界面上本来就没有「对比」按钮）',
+      !document.querySelector('[data-act="compare-modal"]'),
+      'modal=' + !!document.querySelector('[data-act="compare-modal"]'));
+
+    // 回到可认的订单行，Enter 必须开得出对比（否则上面那条"阻断行不开"是靠"全都开不出来"蒙对的）
+    for (var pkBack = 0; pkBack < 4 && !(pkCur() && !pkCur().classList.contains('is-blocked')); pkBack += 1) {
+      pkKey('ArrowUp');
+      await sleep(100);
+    }
+    pkKey('Enter');
+    await settle(function () { return !!document.querySelector('[data-act="compare-modal"]'); }, 4000);
+    report('Enter 在可认的订单行上打开对比（与行内「对比」同一个判据）',
+      !!document.querySelector('[data-act="compare-modal"]'),
+      'modal=' + !!document.querySelector('[data-act="compare-modal"]'));
+    var pkCmpClose = document.querySelector('[data-act="compare-close"]');
+    if (pkCmpClose) pkCmpClose.click();
+    await settle(function () { return !document.querySelector('[data-act="compare-modal"]'); }, 3000);
     // 两栏**同屏且有内容** —— 这是重构相对旧形态的**新增能力**：
     // 旧形态下"产品表"与"待关联队列"分属两个页签，永远不可能同时出现在屏幕上。
     // ⚠️ 判可见性而不是只判存在：合并页签前池栏容器是"有意留在 DOM 里但 display:none"的，
@@ -4064,6 +4278,87 @@ async function main() {
     await waitFor(function () { return flat(mappedRow('SKU-A1')).indexOf('已确认') >= 0; }, 5000);
     report('改绑结果落到列表（已确认）', true, flat(mappedRow('SKU-A1')));
 
+    // ── 已认表的键盘动线（方案 §6 / P2-11 第三张表）──────────────────────
+    // 与待认表**不同**的地方就在这张表上验：它没有勾选概念。
+    // ⚠️ "Space 没反应"这种断言**恒绿**（把 handler 删掉也绿），所以判据取
+    //    dispatchEvent 的返回值：false = 有人 preventDefault 了（被吞）。
+    //    Space 必须**不被吞**（页面照常滚），↓ 必须**被吞**（不许滚屏）。
+    var mkTable = document.querySelector('[data-act="mapped-table"]');
+    var mk = function (key) { mkTable.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true })); };
+    var mkRaw = function (key) {
+      return mkTable.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true, cancelable: true }));
+    };
+    // ⚠️ 一律**以这张表为根**去查（不要用 document 全局选择器）：
+    //    SkuMappingView 里也有 data-act="mapped-table"，全局查会串到另一张表上，
+    //    症状是"当前行是 955、首行是 501"这种看不懂的对不上。
+    var mOn = function () { return Array.prototype.slice.call(mkTable.querySelectorAll('tbody tr.is-on')); };
+    var mRows = function () { return Array.prototype.slice.call(mkTable.querySelectorAll('tbody tr[data-item-id]')); };
+    report('已认表自己是个键盘对象（tabindex=0）', !!mkTable && mkTable.tabIndex === 0,
+      'tabindex=' + (mkTable ? mkTable.tabIndex : 'missing'));
+    mkTable.focus();
+    report('已认表真的拿到了焦点', document.activeElement === mkTable,
+      'active=' + (document.activeElement ? document.activeElement.tagName : 'none'));
+
+    // ⚠️ 这里**不假设"没有当前行"**：上面改绑那步点过行内按钮（点行即标记当前行），
+    //    所以进来时当前行早就落在某一行上了。先用 ↑ 顶到第一行 —— 这一步本身就是
+    //    "到顶不环绕"的判据（连按 6 次仍停在第 1 行，不是转圈）。
+    for (var mu = 0; mu < 6; mu++) mk('ArrowUp');
+    await sleep(60);
+    report('↑ 连按到顶就停住，不环绕（第 1 行再按还在第 1 行，不是转回表尾）',
+      mOn().length === 1 && mOn()[0] === mRows()[0],
+      '当前=' + (mOn()[0] ? mOn()[0].getAttribute('data-map-id') : 'none') +
+        ' 首行=' + (mRows()[0] ? mRows()[0].getAttribute('data-map-id') : 'none') +
+        ' 行数=' + mRows().length);
+
+    mk('ArrowDown');
+    await sleep(60);
+    report('↓ 走一行，且**只标一行**（旧那行要退掉，否则两行同时亮 = 看不出当前在哪）',
+      mOn().length === 1 && mOn()[0] === mRows()[1],
+      'on=' + mOn().length + ' 当前=' +
+        (mOn()[0] ? mOn()[0].getAttribute('data-map-id') : 'none') +
+        ' 期望=' + (mRows()[1] ? mRows()[1].getAttribute('data-map-id') : 'none'));
+
+    mk('ArrowUp');
+    await sleep(60);
+    report('↑ 回到第 1 行（上下对称，不是"只能往下走"）',
+      mOn().length === 1 && mOn()[0] === mRows()[0],
+      '当前=' + (mOn()[0] ? mOn()[0].getAttribute('data-map-id') : 'none'));
+
+    // 成对判据：Space 不被吞（这张表没有勾选概念，按键该留给页面滚动）
+    var spaceKept = mkRaw(' ');
+    await sleep(60);
+    report('Space **不被吞**（这张表没有勾选概念，按键留给页面滚动，而不是抢下来什么也不做）',
+      spaceKept === true, 'dispatchEvent=' + spaceKept);
+    report('Space 也不开弹层、不动当前行（"不吞"不等于"乱来"）',
+      !document.querySelector('.wb-mask') && mOn().length === 1 && mOn()[0] === mRows()[0],
+      'mask=' + !!document.querySelector('.wb-mask'));
+    // 反证：↓ 必须被吞，否则"没被吞"可能只是整条 keydown 都没接上
+    var downKept = mkRaw('ArrowDown');
+    report('↓ 被吞掉（否则翻页/滚屏会跟着动 —— 上面那条"没被吞"就成了恒真）',
+      downKept === false, 'dispatchEvent=' + downKept);
+
+    // Enter = 行内第一个操作「改绑」：判据与那个按钮完全一致（busy 时按钮灰、键盘也不开）
+    mk('Enter');
+    await waitFor(function () { return !!document.querySelector('.wb-mask .pk-search'); }, 6000)
+      .catch(function () {
+        throw new Error('Enter 没开出改绑弹层：mask=' + all('.wb-mask').length +
+          ' 当前行=' + (mOn()[0] ? mOn()[0].getAttribute('data-map-id') : 'none'));
+      });
+    var mTitle = document.querySelector('.wb-mask .wb-dialog__head');
+    report('Enter 开出的是**改绑**弹层（不是"关联 N 项"那种批量标题）',
+      !!mTitle && flat(mTitle) === '改绑到产品', 'title=' + (mTitle ? flat(mTitle) : 'missing'));
+    document.querySelector('.wb-mask').click();
+    await waitFor(function () { return !document.querySelector('.wb-mask'); }, 4000);
+    report('改绑弹层关掉后表格还在（键盘这条路没有顺手改动数据）',
+      mRows().length >= 1 && !document.querySelector('.wb-mask'), 'rows=' + mRows().length);
+
+    // 鼠标点行 → 焦点回到表上：不然"点了一行再按 ↓"毫无反应，动线只对纯键盘用户有效
+    mRows()[0].querySelector('td.gd-c-product').click();
+    await sleep(60);
+    report('点行（非按钮处）把焦点收回到表上（否则鼠标用户按 ↓ 没有任何反应）',
+      document.activeElement === mkTable && mOn().length === 1 && mOn()[0] === mRows()[0],
+      'active=' + (document.activeElement ? document.activeElement.tagName : 'none'));
+
     // ── 悬停信息改常显（报告 P2-1 / C-3）────────────────────────────────
     // 原先「来源 / 更新时间」整行折进 title —— 悬停约 1 秒才浮出来，触屏拿不到，
     // 不熟鼠标的人根本发现不了。现在：**来源**改成行内常显小字（它回答"这条凭什么信"，
@@ -4369,12 +4664,21 @@ async function main() {
     // ⚠️ 只判 order 侧（open-registry）：采集侧（items-open-registry）是一份**独立的名单**
     //    （unresolvedItemStores，按"采集时对上的店"算），本步登记的店不在那份名单里，
     //    它的提示条照常留着是**对的** —— 别把两条名单当成一条。
+    // ⭐ 2026-11-03：两条提示条**合并成一条**了（根因与出口都同一个，并排两条把警告色变成噪音）。
+    //    于是"整条消失"不再是正确判据 —— 采集侧那份独立名单还挂着店，现在它是同一条里的另一段名字。
+    //    守的那件事没变、而且更准了：**刚登记的那家店不许再出现在提示条里**（否则就是
+    //    "登记了还留着假待办"）。两份名单仍是两份（口径不同），只是**共用一行**来报。
     await settle(function () {
-      return !document.querySelector('[data-act="open-registry"]');
+      var n = document.querySelector('[data-act="hint-shops"]');
+      return !n || flat(n).indexOf('新奇怪物店') < 0;
     }, 6000);
-    report('登记完那行不再卡店铺 → 提示条整条消失（不留假待办），徽标照常报剩余',
-      !document.querySelector('[data-act="open-registry"]') && pendingBadgeNum() > 0,
-      'reg=' + !!document.querySelector('[data-act="open-registry"]') +
+    report('登记完那行不再卡店铺 → 提示条不再点名这家店（不留假待办），徽标照常报剩余',
+      (function () {
+        var n = document.querySelector('[data-act="hint-shops"]');
+        return (!n || flat(n).indexOf('新奇怪物店') < 0) && pendingBadgeNum() > 0;
+      })(),
+      'hint=' + (document.querySelector('[data-act="hint-shops"]')
+        ? flat(document.querySelector('[data-act="hint-shops"]')).slice(0, 40) : 'gone') +
         ' badge=' + pendingBadgeNum());
 
     // ── W4：单项时不说「批量」（2026-10-08 R2）────────────────────────
@@ -4410,6 +4714,31 @@ async function main() {
       flat(document.querySelector('[data-act="pending-selcount"]')).indexOf('已选 2 项') >= 0,
       flat(document.querySelector('[data-act="pending-selcount"]')) + ' / ' +
         flat(document.querySelector('[data-act="pending-relate"]')));
+
+    // 作用域（2026-11-03 界面方案 §5.1 第 8 项）：只报「2 项」不够 —— 这是吸底栏，
+    // 用户滚到第 30 行再回来看，不知道自己勾的是哪几个，只能回去一行行找。
+    // 判据取**同源**：动作条里点名的商品ID 必须与表里真正 checked 的那几行逐一对得上。
+    // （各算一遍的典型症状：栏里说 C-1、C-3，实际勾的是 C-1、C-5 —— 数字对、名单错。）
+    var checkedIds = Array.from(
+      document.querySelectorAll('[data-act="pending-table"] tbody tr[data-item-id]')
+    )
+      .filter(function (r) {
+        var c = r.querySelector('input[type="checkbox"]');
+        return !!c && c.checked;
+      })
+      // ⚠️ 比对前 trim：data-item-id 是订单原文，**可能带首尾空格**（夹具里 B0XYZ1234 就带一个），
+      //    而表格与动作条显示时 HTML 会把结尾空格吃掉 —— 不 trim 就会"字面不等、肉眼看一样"，
+      //    这正是本仓踩过的"两个串看起来一样却匹配不上"。
+      .map(function (r) { return (r.getAttribute('data-item-id') || '').trim(); });
+    var nameable = checkedIds.filter(function (id) { return !!id; });
+    var scopeEl = document.querySelector('[data-act="pending-scope"]');
+    var scopeTxt = scopeEl ? flat(scopeEl) : '';
+    // 三条一起判：① 有作用域这一格；② 勾上的行**每一行都有可点名的 ID**（没有 ID 的行
+    // 根本没法被写进作用域，那是另一个缺陷，不能靠"过滤掉"混过去）；③ 点名的 ID 与勾选行一致。
+    report('动作条写明勾了哪几个商品（点名的 ID 与真正勾上的行逐一对得上）',
+      !!scopeEl && nameable.length > 0 && nameable.length === checkedIds.length &&
+        nameable.every(function (id) { return scopeTxt.indexOf(id) >= 0; }),
+      'ids=' + JSON.stringify(checkedIds) + ' scope=' + scopeTxt);
     await clickText('[data-act="pending-clear"]', '清空');
     await settle(function () {
       return flat(document.querySelector('[data-act="pending-selcount"]')).indexOf('勾选') >= 0;
@@ -4820,11 +5149,17 @@ async function main() {
       flat(iStatus).indexOf('4') >= 0 && flat(iStatus).indexOf('认了 2') >= 0 &&
       (iStatus.getAttribute('title') || '').indexOf('46211') >= 0,
       iStatus ? flat(iStatus) + ' / title=' + (iStatus.getAttribute('title') || '').slice(0, 40) : 'missing');
-    var hint = document.querySelector('[data-act="items-hint-shops"]');
-    report('未登记店警告条点名「芒果旗舰店」+「去「店名归一」」出口（与队列 hint-shops 同构）',
+    // ⭐ 2026-11-03：两侧提示条合并成一条（根因、出口都同一个）。判据跟着换落点，
+    //    守的东西**更严**了：合并后那一条必须仍然点名采集侧的「芒果旗舰店」（别把采集侧吞掉），
+    //    且旧的两条 / 两个同名按钮**不许复活**。原来"采集侧有没有自己的出口"这个问题
+    //    在新形态里没有对象（一个目标一个按钮），换成"第二条不许回来"。
+    var hint = document.querySelector('[data-act="hint-shops"]');
+    report('未登记店警告条已合并：采集侧的「芒果旗舰店」并进同一条，出口只剩一个（没有第二条/第二个按钮）',
       !!hint && flat(hint).indexOf('芒果旗舰店') >= 0 &&
-      !!hint.querySelector('[data-act="items-open-registry"]'),
-      hint ? flat(hint).slice(0, 60) : 'missing');
+      !!hint.querySelector('[data-act="open-registry"]') &&
+      !document.querySelector('[data-act="items-hint-shops"]') &&
+      !document.querySelector('[data-act="items-open-registry"]'),
+      hint ? flat(hint).slice(0, 80) : 'missing');
     // ⭐ 2026-10-25（用户口径）两条**版面**守卫 —— 这类问题 DOM 断言抓不住（元素都在、文案都对，
     //    就是"看着不对"），只能量几何 / 活体测令牌：
     // ① 动作条底色必须**活在主题令牌上**：此前它写的是不存在的 var(--wb-bg-panel, #fff)，
@@ -4842,9 +5177,11 @@ async function main() {
     })();
     // ② 未登记店提示条必须是**单行轻提示**（此前是两块半屏告警把队列顶出首屏）。
     //    店名串 nowrap + 省略号 ⇒ 高度恒 ~26px；哪天又换行/加大，这里先红。
-    var hintBox = document.querySelector('[data-act="items-hint-shops"]');
+    //    ⚠️ 2026-11-03 合并成一条后这条守卫**更有必要**了：两个店名串接在同一行里，
+    //       串一变长就可能折行/撑高 —— 这正是合并最容易带来的退化。
+    var hintBox = document.querySelector('[data-act="hint-shops"]');
     var hintH = hintBox ? Math.round(hintBox.getBoundingClientRect().height) : 0;
-    report('未登记店提示条是单行轻提示（高度 ≤ 34px，不是半屏告警块）',
+    report('未登记店提示条是单行轻提示（高度 ≤ 34px，不是半屏告警块；合并两条店名后仍单行）',
       !!hintBox && hintH > 0 && hintH <= 34, 'h=' + hintH);
     var rA = itemRow('1005001234567890'), rB = itemRow('B0XYZ1234'), rC = itemRow('1005009876543210');
     // ⭐ 2026-10-25（P2）：合并段整段就是"待认"，逐行再写「未认款」是废话（已撤掉）。

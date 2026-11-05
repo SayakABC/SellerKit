@@ -91,31 +91,26 @@
            ⭐ 2026-10-25（用户口径）：压缩成单行轻提示 —— 原先一整块橙色告警把队列顶到半屏以下。
            长解释（为什么必须先登记）收进 title 悬停里；店名仍是重点（要照着去登记的就是它们）。 -->
       <div v-if="hasQueueHints || unresolvedItemStores.length" class="gd-hints">
-        <p v-if="unresolvedShops.length" class="wb-notice wb-notice--warn gd-hint-shops" data-act="hint-shops">
-          <span
-            :title="`订单里没有平台字段，平台只能从已登记的店铺取 —— 先到「店名归一」登记这些店，这几行才能写映射`"
-          >
-            <b>{{ unresolvedShops.length }}</b> 家店还没登记，卖出去的先挂不上款：
-            <b>{{ unresolvedShops.join('、') }}</b>
+        <!-- 「未登记店铺」**只留一条**（2026-11-03 界面方案 §5.1）：
+             订单侧与采集侧根因同一个（店铺没登记）、出口同一个（店名归一），原先并排两条
+             几乎一样的橙条，只差"卖出去的 / 采回来的"—— 同屏两处警告把警告色变成背景噪音。
+             现在一条报**并集数量** + **两侧各自的后果**：后果按"哪一侧真的有"分别说，
+             没有那一侧就不说（别替用户编一句他没遇到的事）。
+             ⚠️ 出口仍只有一个（`open-registry`），不再有第二个同名按钮：一个目标一个按钮。
+             ⚠️ 店名串 must `nowrap` + 省略号，整条保持单行（≤34px 有断言守着）。 -->
+        <p v-if="unresolvedShopsAll.length" class="wb-notice wb-notice--warn gd-hint-shops" data-act="hint-shops">
+          <span :title="unresolvedHintTitle">
+            <b>{{ unresolvedShopsAll.length }}</b> 家店还没登记<template
+              v-if="unresolvedHasOrder && unresolvedHasItems"
+              >，卖出去的先挂不上款、采回来的先认不了</template
+            ><template v-else-if="unresolvedHasOrder">，卖出去的先挂不上款</template
+            ><template v-else>，采回来的先认不了</template>：
+            <b>{{ unresolvedShopsAll.join('、') }}</b>
           </span>
           <button
             class="wb-btn wb-btn--sm gd-hint-shops__act"
             type="button"
             data-act="open-registry"
-            @click="goRegistry()"
-          >
-            去「店名归一」
-          </button>
-        </p>
-        <p v-if="unresolvedItemStores.length" class="wb-notice wb-notice--warn gd-hint-shops" data-act="items-hint-shops">
-          <span :title="`到「店名归一」把店铺地址一填，之后的采集自动归位，这些商品就能认款了`">
-            <b>{{ unresolvedItemStores.length }}</b> 家店还没登记，采回来的先认不了：
-            <b>{{ unresolvedItemStores.join('、') }}</b>
-          </span>
-          <button
-            class="wb-btn wb-btn--sm gd-hint-shops__act"
-            type="button"
-            data-act="items-open-registry"
             @click="goRegistry()"
           >
             去「店名归一」
@@ -305,7 +300,14 @@
 
         <section class="wb-panel gd-panel">
           <div class="wb-panel__body">
-            <table class="wb-table gd-pending" data-act="pending-table">
+            <table
+              ref="pendingTableEl"
+              class="wb-table gd-pending"
+              data-act="pending-table"
+              tabindex="0"
+              aria-label="待认商品：上下键移动当前行，空格勾选，回车对比"
+              @keydown="onKeydown"
+            >
               <thead>
                 <tr>
                   <th class="gd-c-check">
@@ -332,7 +334,9 @@
                   :key="r.key"
                   :data-item-id="r.itemId"
                   :data-origin="r.origin"
-                  :class="{ 'is-blocked': !r.canRelate }"
+                  :data-row-key="r.key"
+                  :class="{ 'is-blocked': !r.canRelate, 'is-on': r.key === pendingCurrentKey }"
+                  @click="markPendingRow(r.key, $event)"
                 >
                   <td class="gd-c-check">
                     <input
@@ -454,7 +458,7 @@
                 </tr>
                 <tr v-if="!pendingVisible.length && !loading">
                   <td colspan="4" class="gd-panel__empty">
-                    <div class="wb-empty">
+                    <div class="wb-empty wb-empty--sm">
                       <div class="wb-empty__icon" aria-hidden="true">
                         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
                           <path d="M20 6L9 17l-5-5" />
@@ -495,10 +499,19 @@
              根本不知道这一步存在（认款入口收敛成一个之后，它必须一眼看得见）。
              没选款时按钮是「先选一个款」——同一个选择器、同一条提交路径，不另开一条动线。
              只勾了一个采集行时多给「新建款并关联」：那是"还没有这个款"时的出口，
-             与"有款、认过去"不是同一件事（所以它不属于"第二个认款入口"）。 -->
+             与"有款、认过去"不是同一件事（所以它不属于"第二个认款入口"）。
+             ⭐ 2026-11-03（界面方案 §5.1 第 8 项）：**只补作用域，没有改成"勾了才出现"**。
+                方案原话是"常驻 → 有勾选才出现"，但那条与上面 2026-10-25 的裁定直接冲突：
+                隐藏只会在用户勾选前把唯一入口藏起来。所以做的是另一半个真问题 ——
+                「已选 2 项」不说清**是哪几个**（吸底栏，滚远了根本不知道自己勾了什么），
+                现在补商品ID；「认到 S2」里的 S2 是什么，挂在按钮 title 上（低频、占宽大）。 -->
         <div v-if="pendingVisible.length" class="gd-actbar" data-act="pending-actbar">
-          <span class="gd-actbar__count" data-act="pending-selcount">
-            <template v-if="pendingSelectionCount">已选 <b>{{ pendingSelectionCount }}</b> 项</template>
+          <span class="gd-actbar__count" data-act="pending-selcount" :title="pendingScopeTitle">
+            <template v-if="pendingSelectionCount"
+              >已选 <b>{{ pendingSelectionCount }}</b> 项<template v-if="pendingScopeText"
+                ><span class="gd-actbar__scope" data-act="pending-scope">：{{ pendingScopeText }}</span></template
+              ></template
+            >
             <template v-else>勾选商品后可认款</template>
           </span>
           <button
@@ -506,6 +519,7 @@
             type="button"
             data-act="pending-relate"
             :disabled="busy || !pendingSelectionCount"
+            :title="currentProduct ? `${currentProduct.code} ${currentProduct.name}` : ''"
             @click="currentProduct ? relatePending() : openPendingPicker()"
           >
             {{ currentProduct
@@ -628,7 +642,13 @@
 
       <section class="wb-panel gd-panel">
         <div class="wb-panel__body">
-          <table class="wb-table gd-mapped" data-act="mapped-table">
+          <table
+            ref="mappedTableEl"
+            class="wb-table gd-mapped"
+            data-act="mapped-table"
+            tabindex="0"
+            @keydown="onMappedKeydown"
+          >
             <thead>
               <tr>
                 <th class="gd-c-img">图</th>
@@ -646,7 +666,10 @@
                 :key="r.id"
                 :data-item-id="r.itemId"
                 :data-map-id="r.id"
+                :data-row-key="r.id"
+                :class="{ 'is-on': r.id === mappedCurrentId }"
                 :title="`更新：${r.updatedAt}`"
+                @click="markMappedRow(r.id, $event)"
               >
                 <td class="gd-c-img">
                   <img
@@ -732,7 +755,7 @@
               </tr>
               <tr v-if="!mappedRows.length && !loading">
                 <td colspan="4" class="gd-panel__empty">
-                  <div class="wb-empty">
+                  <div class="wb-empty wb-empty--sm">
                     <div class="wb-empty__icon" aria-hidden="true">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1" />
@@ -941,6 +964,7 @@
 // 以及对比弹层的初始候选。它由外壳转一手（两个子组件互不认识，见 `GoodsWorkbenchView`）。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useSkuPool, SKU_STATUS_LABEL as STATUS_LABEL, SKU_STATUS_CLASS as STATUS_CLASS, SKU_SOURCE_LABEL as SOURCE_LABEL, type PendingRow } from '../useSkuPool';
+import { useRowNav } from '@/core/composables/useRowNav';
 import ProductPicker from './ProductPicker.vue';
 import PoolMetrics from './PoolMetrics.vue';
 import CompareModal from './CompareModal.vue';
@@ -997,6 +1021,8 @@ const {
   pendingSelected,
   pendingSelectedRows,
   pendingSelectionCount,
+  pendingScopeText,
+  pendingScopeTitle,
   pendingSelectable,
   pendingAllChecked,
   pendingSomeChecked,
@@ -1027,7 +1053,10 @@ const {
   imgBusy,
   currentProduct,
   compareItemImage,
-  unresolvedShops,
+  unresolvedShopsAll,
+  unresolvedHasOrder,
+  unresolvedHasItems,
+  unresolvedHintTitle,
   shopOptions,
   hasQueueHints,
   selectableQueue,
@@ -1110,6 +1139,90 @@ const {
   initialSub: 'pending',
   // 存量补图补到了款主图 → 请外壳重拉（左栏产品图由 `useProductList` 自己管）
   onImagesAdopted: () => emit('images-adopted'),
+});
+
+/* ---- 键盘动线（方案 §6）：↑↓ 移动 / Space 勾选 / Enter 对比 ------------
+   ⚠️ 行 id 用 `r.key`（`o:` / `i:` + 主键），**不能用 `r.itemId`**：同一个商品可能同时来自
+   订单与采集（两行同一个商品ID），拿 itemId 当键会在两行之间来回跳 —— 而且看起来完全正常，
+   只是"按一下 ↓ 停在原地"。这条在真机上是查不出来的，只能靠键本身不重复。
+   ⚠️ Space 走的仍是唯一的 `togglePendingOne`（它自己会挡 `canRelate=false` 的行）：
+   勾选框是 disabled 的行，键盘也不许勾 —— 否则"按空格悄悄勾上了"会绕过 disabled。 */
+const pendingCurrentKey = ref('');
+const pendingTableEl = ref<HTMLTableElement | null>(null);
+
+function markPendingRow(key: string, e: MouseEvent): void {
+  pendingCurrentKey.value = key;
+  // 点行内的按钮（对比 / 缩略图 / 删除）时不抢焦点：那个按钮马上要开弹层，
+  // 把焦点抢回表上，弹层关掉之后焦点就落在一个看不见的位置了。
+  if ((e.target as HTMLElement | null)?.closest('button')) return;
+  pendingTableEl.value?.focus({ preventScroll: true });
+}
+
+const { onKeydown } = useRowNav({
+  rows: pendingVisible,
+  idOf: (r) => r.key,
+  currentId: pendingCurrentKey,
+  onSelect: (key) => {
+    pendingCurrentKey.value = key;
+    pendingTableEl.value?.focus({ preventScroll: true });
+  },
+  onToggle: (key) => {
+    const r = pendingVisible.value.find((x) => x.key === key);
+    if (r) togglePendingOne(r);
+  },
+  onOpen: (key) => {
+    const r = pendingVisible.value.find((x) => x.key === key);
+    // 与行内「对比」按钮**同一个判据**（`canRelate && origin === 'order'`）：
+    // 按钮不在的行，回车也不该开弹层 —— 否则键盘能给出一条界面上不存在的路。
+    if (r && r.canRelate && r.origin === 'order') openPendingCompare(r);
+  },
+  rowEl: (key) => pendingTableEl.value?.querySelector(`tr[data-row-key="${key}"]`) ?? null,
+});
+
+/** 筛选 / 认掉之后当前行可能已不在列表里 —— 撤回，别让下一次 ↑↓ 从"没有当前行"重来。 */
+watch(pendingVisible, (list) => {
+  if (pendingCurrentKey.value && !list.some((r) => r.key === pendingCurrentKey.value)) {
+    pendingCurrentKey.value = '';
+  }
+});
+
+/* ---- 已认表（映射表）的键盘动线 -----------------------------------------
+   与待认表**不同**的三处（照抄上一张会错的地方）：
+   ① 行身份用 `r.id`（映射行主键）：`itemId` 在这里同样不唯一 —— 同一商品在两个店铺各有一条映射；
+   ② **没有勾选概念**（无 checkbox、无批量出口）⇒ 不传 `onToggle`，Space 交还页面滚动。
+      硬塞一个"勾选"会勾出界面上看不见的状态，比没反应更糟；
+   ③ `Enter` = 行内第一个操作「改绑」，判据与那个按钮**完全一致**（`busy` 时它是灰的）。
+*/
+const mappedCurrentId = ref(0);
+const mappedTableEl = ref<HTMLTableElement | null>(null);
+
+function markMappedRow(id: number, e: MouseEvent): void {
+  mappedCurrentId.value = id;
+  // 点行内按钮（设图 / 改绑 / 标失效）时不抢焦点：弹层马上要开，抢回来关掉弹层后焦点会落在看不见的地方。
+  if ((e.target as HTMLElement | null)?.closest('button')) return;
+  mappedTableEl.value?.focus({ preventScroll: true });
+}
+
+const { onKeydown: onMappedKeydown } = useRowNav({
+  rows: mappedRows,
+  idOf: (r) => r.id,
+  currentId: mappedCurrentId,
+  onSelect: (id) => {
+    mappedCurrentId.value = id;
+    mappedTableEl.value?.focus({ preventScroll: true });
+  },
+  onOpen: (id) => {
+    const r = mappedRows.value.find((x) => x.id === id);
+    if (r && !busy.value) openRebindPicker(r);
+  },
+  rowEl: (id) => mappedTableEl.value?.querySelector(`tr[data-row-key="${id}"]`) ?? null,
+});
+
+/** 改筛选 / 改绑后那一行可能已不在可见列表里：撤回当前行，否则下一次 ↑↓ 会从"没有当前行"重来。 */
+watch(mappedRows, (list) => {
+  if (mappedCurrentId.value && !list.some((r) => r.id === mappedCurrentId.value)) {
+    mappedCurrentId.value = 0;
+  }
 });
 
 /**
@@ -1850,5 +1963,15 @@ tr.is-blocked :deep(td) {
   font-size: 12.5px;
   color: var(--wb-text-muted);
   white-space: nowrap;
+}
+/* 作用域：勾了哪几个商品（报商品ID，不报"第几行"—— 行号会随筛选/排序全变）。
+   超长裁掉，完整名单在 title 里：吸底栏一旦被撑成两行就会盖住表格最后一行，
+   而"哪几个"是辅助信息，不值得用两行去换。 */
+.gd-actbar__scope {
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 </style>

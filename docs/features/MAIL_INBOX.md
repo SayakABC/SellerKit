@@ -1,15 +1,18 @@
-# 集中邮件收件箱（Mail Inbox）— M1 / M2 / M3 已落地
+# 集中邮件收件箱（Mail Inbox）— M1 / M2 / M3 + 正文渲染通道 已落地
 
-> 更新：2026-09-15
-> 代码入口：`electron/mail-*.ts`（主进程）、`extensions/shop-accounts/`（渲染层插件包）
-> 相关文档：`AGENTS.md`（架构基线）、`docs/features/PROFIT_TRACKER.md`（ae 利润模块）
+> 更新：2026-10-15（收件箱所在模块 2026-10-14 更名「基础数据」并整页重设计，本页位置表述已同步）
+> 代码入口：`electron/mail-*.ts`（主进程）、`src/modules/shop-accounts/`（渲染层，内建模块；曾为 UI 岛，2026-10-14 迁回宿主，见 `docs/notes/2026-10-30-shop-account-merge-and-status.md`）
+> 相关文档：`AGENTS.md`（架构基线）、`docs/features/PROFIT_TRACKER.md`（ae 利润模块）、
+> `docs/notes/2026-10-30-mail-and-today-pages.md`（正文图片为什么坏 / `sk-mail://` 的两条实测取证）
 
 ---
 
 ## 1. 功能定位与范围
 
-「店铺账号管家」下的**集中收件箱**：把每个店铺套绑定的邮箱（163/126 为主）聚合到一个本地 inbox，
-支持按店铺套筛选、关键词搜索、未读过滤、时间窗口过滤。
+「基础数据 › 店铺账号」下的**集中收件箱**：把每家店铺绑定的邮箱（163/126 为主）聚合到一个本地 inbox，
+支持按店铺筛选、关键词搜索、未读过滤、时间窗口过滤。
+（⚠️ 2026-10-22 物理合并：账号不再叫"店铺套"，`sk_mail_accounts` 外键已由 `sk_shop_sets(id)` 改指
+`sk_shops(id) ON DELETE CASCADE`，见 `docs/decisions/ADR-003-shop-account-physical-merge.md`。）
 
 **边界（务必守住）**
 
@@ -17,6 +20,11 @@
   绝不改变用户邮箱里的已读状态——「已读」= 服务端 `seen` **或**本地 `read_at`（详见 §3 决策 6）。
 - **本地优先**：列表/搜索/详情全部查本地 SQLite，**列表渲染路径绝不触网**（秒开的前提）。
 - **凭据不出引擎**：授权码经 `shop-accounts-db` 解密后只在主进程引擎内使用，绝不回传渲染层。
+- **接入态谁读谁初始化**：账号清单由 `mailStore.ensureAccountState()` 提供（prefs + providers + accounts，
+  **不含**轮询与同步事件）；「基础数据」的账号行与「接入邮箱」抽屉自己 await 它，**不能假设收件箱先被打开过**
+  —— 否则冷启动直接进「基础数据」时每行恒显示「未接入」、抽屉是空表单（2026-10-25 修，见
+  `docs/notes/2026-10-30-mail-and-today-pages.md`）。`ensureReady()` 负责收件箱自己
+  的轮询/事件订阅，内部复用同一个加载。
 
 ---
 
@@ -29,16 +37,18 @@
 | 主进程 | `electron/mail-db.ts` | 邮件库 schema（`sk_mail_*`）+ 全部 CRUD / 列表 / 统计 |
 | 主进程 | `electron/mail-providers.ts` | 服务商预设（连接参数 + 授权码获取指引），**不含任何凭据** |
 | 主进程 | `electron/mail-cache.ts` | 附件本地磁盘缓存（`<userData>/mail-cache`，LRU 淘汰 + GC，M3-1） |
+| 主进程 | `electron/mail-html.ts` | 正文 HTML 纯函数层：cid 引用识别/改写、远程图计数、回填判据（无 Electron/DB 依赖，可直接单测） |
+| 主进程 | `electron/mail-body-protocol.ts` | 正文渲染协议 `sk-mail://`：把正文跑在自带 CSP 的独立来源文档里（内联图/远程图显示的**唯一**通路） |
 | 主进程 | `electron/mail-engine.ts` | IMAP 只读同步引擎：连接测试 / 增量同步 / 并发限流 / 进度广播 |
 | 主进程 | `electron/mail-handlers.ts` | IPC 通道定义（`mail-*`）与入参消毒 |
-| 渲染层 | `extensions/shop-accounts/src/mailStore.ts` | Pinia store（列表/详情/同步状态机/事件订阅） |
-| 渲染层 | `extensions/shop-accounts/src/components/MailInboxView.vue` | 收件箱主视图 |
-| 渲染层 | `extensions/shop-accounts/src/components/MailAccessDrawer.vue` | 邮箱接入抽屉（含授权码指引、连接测试） |
+| 渲染层 | `src/modules/mail/MailInboxView.vue` / `src/modules/shop-accounts/components/MailAccessDrawer.vue` / `src/modules/mail/mailStore.ts` | 收件箱视图 + 邮箱接入（页内闭环：填授权码 → 测试连接 → 保存并同步）与收件箱 store（同步状态机 / 未读统计）。正文 iframe 指向 `sk-mail://body/<id>`；远程图**默认放行**（该收件箱的正文图全是远程图），横条可一键切回拦截 |
+| 嵌正文的 CSP | 宿主 `index.html`（内迁前是岛根 index.html 的 meta CSP） | ⚠️ **嵌正文的页面所处文档的 CSP 必须含 `frame-src sk-mail:`** —— CSP 取交集，任何一层缺这条正文 iframe 就 `ERR_BLOCKED_BY_CSP`（正文区整块空白、只在 Electron 日志里报）。守卫 `tests/islandMailFrameCsp.spec.ts`（2026-10-14 起改为钉宿主 `index.html` 与内建模块） |
+| 渲染层 | `src/core/services/ipc.ts`（mail 能力域包装） | 邮件 API 经宿主统一 IPC 服务调用（原岛内 `api.js`/`bridge.js` 桥桩已随岛删除） |
 
 ### 2.2 数据模型（`sk_mail_*`）
 
 ```
-sk_mail_accounts     id / shop_set_id(UNIQUE) / email / provider_id /
+sk_mail_accounts     id / shop_id(UNIQUE, FK → sk_shops(id) ON DELETE CASCADE) / email / provider_id /
                      imap_host / imap_port / imap_secure / proxy / folder /
                      sync_enabled / sync_days(默认30) / max_body_bytes(默认200KB) /
                      status / last_error / last_synced_at /
@@ -47,7 +57,8 @@ sk_mail_messages     UNIQUE(account_id, folder, uid)   ← 幂等 upsert 的基�
                      envelope 字段 + seen/flagged/has_attachment/body_cached/preview
                      read_at TEXT NOT NULL DEFAULT ''   ← 本地已读标记（有效已读 = seen || read_at≠''）
 sk_mail_bodies       message_id(PK) / text_body / html_body / truncated
-sk_mail_attachments  message_id / filename / mime / size   ← 仅元信息，M2 起支持按需落盘
+sk_mail_attachments  message_id / filename / mime / size / content_id  ← 仅元信息，M2 起支持按需落盘
+                                                          content_id 是正文内联图（src="cid:..."）唯一的映射键
 sk_mail_folders      UNIQUE(account_id, path)               ← M3-3 每文件夹独立游标（uid_validity/last_uid）
 sk_mail_attachment_cache  attachment_id(PK)                  ← M3-1 只存路径，二进制不入库
 sk_mail_meta         key(PK) / value                         ← FTS 回填游标等运行时元数据
@@ -81,7 +92,7 @@ sk_mail_fts          fts5 虚表（M3-2，rowid = sk_mail_messages.id）
 | `mail-provider-list` | invoke | 服务商预设（授权码指引） |
 | `mail-sync-now` / `mail-sync-cancel` / `mail-sync-state` | invoke | 同步控制与队列状态 |
 | `mail-messages-list` | invoke | 列表（**纯本地查询**） |
-| `mail-message-get` | invoke | 详情（正文 + 附件元信息） |
+| `mail-message-get` | invoke | 详情（正文 + 附件元信息）；正文含 `cid:` 引用而附件行还没有映射时，**顺带重解析一次回填 `content_id`**（6s 超时兜底，超时按现状返回、回填在后台继续） |
 | `mail-message-read` | invoke | 本地已读标记（单个/批量/整账号，返回 `{ changed, unread }`） |
 | `mail-body-fetch` | invoke | 按需补拉正文（M2-1） |
 | `mail-attachment-save` | invoke | 附件另存（M2-2，弹保存对话框后落盘） |
@@ -289,7 +300,60 @@ mailAttachmentSave({ messageId: number; attachmentId: number }) -> ApiResult<{ p
 
 ---
 
-## 6. 验收与冒烟
+## 6. 正文渲染通道（`sk-mail://`，2026-10-04）
+
+> 起因：正文里的图片「一张都显示不出来」。根因取证与实测日志见
+> [`docs/notes/2026-10-30-mail-and-today-pages.md`](../notes/2026-10-30-mail-and-today-pages.md)。
+
+### 6.1 为什么要另起一个协议
+
+原先正文用 `<iframe sandbox="" :srcdoc="htmlBody">` 渲染，同时撞上两堵墙：
+
+- **`srcdoc` 文档继承父文档的 CSP** —— 父文档是 `sk-plugin://` 下的岛页面（`img-src 'self' data:`），
+  邮件里的远程图一律被 CSP 拦（实测 `Loading the image ... violates "img-src 'self' data:"`）；
+- **`cid:` 没有映射键** —— `<img src="cid:image001.png@01D9...">` 是 MIME 的 Content-ID，
+  浏览器不认这个 scheme，而附件表原先没有 `content_id` 列，宿主无从把它换成真图片。
+
+**独立来源的文档不继承父文档 CSP**（实测：父 CSP 加 `frame-src sk-mail:` 后，
+子文档与其图片子资源都正常发起请求），所以正文改由 `sk-mail://` 提供。
+
+### 6.2 两个 host
+
+| URL | 作用 |
+| --- | --- |
+| `sk-mail://body/<messageId>[?remote=1]` | 正文文档。`cid:` 引用在返回前改写为下面的 att URL；响应自带 CSP |
+| `sk-mail://att/<messageId>/<attachmentId>` | 内联图片二进制。磁盘缓存优先，未命中才重拉原文（复用按需限流），会话内可缓存 10 分钟 |
+
+### 6.3 三层安全边界（互不依赖）
+
+1. **岛页面 CSP**：只多一条 `frame-src sk-mail:`（放行"被嵌入"，不放开 img / connect / script）；
+2. **正文文档 CSP**：`default-src 'none'` + `img-src sk-mail: data:` + `script-src 'none'`；
+   **远程图默认不放行**（防追踪像素），`?remote=1` 才加 `https: http:`；
+3. **iframe `sandbox=""`**：邮件 HTML 里的 JS 一律不跑。
+
+越权面与 `mail` 能力域已暴露的读能力同级（附件只按 `(messageId, attachmentId)` 取，
+且会校验该附件确属这封邮件），**未新增 IPC 通道、未新增能力域 op**。
+
+### 6.4 远程图默认拦截 + 一键放行
+
+正文上方出「已拦截 N 张远程图片（防发件方追踪）」+「显示远程图片」按钮（点击即带 `?remote=1` 重载）。
+计数由**岛侧**基于 `detail.htmlBody` 判定 —— sandbox 的正文文档无法与岛通话，必须由岛自己算。
+换一封邮件自动回到"拦截"默认态。
+
+### 6.5 存量邮件的惰性回填
+
+`content_id` 是后加的列，已同步过的邮件附件行补出来是空串；而**增量同步只处理新 UID**
+（正文已缓存的邮件不再进正文轮），老邮件不会自己好。故 `mail-message-get` 增加回填触发：
+判定 = 正文含 `cid:` 引用 ∧ 该邮件附件行**一条 `content_id` 都没有**（`needsInlineBackfill`）。
+回填后正文里的内联图即正常，且不会反复触发。
+
+> ⚠️ **红线**：`content_id` **不进** `replaceMailAttachments` 的合并键。该键（`filename+mime+size`）的
+> 作用是保留原 `attachment_id`，content_id 进键会让老行被判成另一个附件而换 id，
+> `sk_mail_attachment_cache` 索引与已落盘文件整批失效。命中时只在旧值为空时 UPDATE 该列。
+
+---
+
+## 7. 验收与冒烟
 
 | 项 | 命令 / 操作 | 期望 |
 | --- | --- | --- |
@@ -297,6 +361,9 @@ mailAttachmentSave({ messageId: number; attachmentId: number }) -> ApiResult<{ p
 | 渲染层类型 | `npx vue-tsc --noEmit -p tsconfig.json` | 无错误 |
 | 构建 | `npm run build` | 通过（registry 自动重生成） |
 | 引擎冒烟（需真实凭据） | `MAIL_USER=xxx MAIL_AUTH=xxx npm run mail:smoke` | 连接测试 + 同步 N 封 + 正文/附件可读 |
+| 正文图片离线冒烟（**无需凭据**） | `npm run mail:inline:smoke` | 存量库补出 `content_id` 且老数据不丢 · 重解析保留原 `attachment_id` · cid 改写为 `sk-mail://att/...` · 远程图两态 |
+| 协议端到端冒烟（**无需凭据**，起真窗口） | `npm run mail:body:smoke` | 正文文档 200 / cid 改写命中 / 附件返回真实字节 / 三种 404 语义 / sandbox iframe 里正文与内联图都取到 200 / 远程图**默认零请求**且 `?remote=1` 真取到 200（本机非 loopback http 服务）/ **用岛真实 `index.html` 的 meta CSP 复刻第二层 CSP** |
+| 两层 CSP 静态守卫（无需 Electron） | `npx vitest run tests/islandMailFrameCsp.spec.ts` | 岛若引用 `sk-mail://` ⇒ 其 `index.html` 的 meta CSP **必须**含 `frame-src sk-mail:`，宿主 `UI_CSP` 也必须含（两层缺一即红） |
 | 手动 | 接入 163 邮箱 → 同步 → 列表/搜索/未读过滤 → 详情 → 补拉正文 → 下载附件 | 全程列表无阻塞 |
 | M2-1 手动 | 找一封超 `maxBodyBytes` 的邮件 → 详情显示「正文未缓存」→ 点「拉取完整正文」 | 正文/附件出现；断网时 toast 报错且列表不受影响 |
 | M2-2 手动 | 带附件的邮件 → 附件行点「下载」→ 系统保存对话框（默认文件名=附件名） | 确认后落盘、大小与元信息一致；取消不报错 |
@@ -306,13 +373,21 @@ mailAttachmentSave({ messageId: number; attachmentId: number }) -> ApiResult<{ p
 | M3-3 手动 | 设置页「同步文件夹」→ 选邮箱 → 读服务器文件夹 → 勾选 → 保存并重同步 | 列表头出现「全部文件夹」下拉，可按路径过滤 + 显示每文件夹邮件数；已有 INBOX 不触发全量重拉 |
 | M3-4 手动 | 点开一封未读邮件 → 看列表小点与「N 未读」角标 | 小点消失、角标 -1；再点「同步」后仍为已读（不会被服务端 `seen=0` 冲回） |
 | M3-4 手动 | 详情头「标记未读」/ 列表头「全部已读」 | 未读恢复后角标 +1；全部已读后角标归零、「只看未读」列表清空 |
+| 正文图片 手动 | 打开一封**内联图**邮件（签名 logo / 商品图，`src="cid:..."`） | 图片正常显示（不再裂图）；老邮件首次打开时地图会出现（触发了一次惰性回填），之后再开不再重拉 |
+| 正文图片 手动 | 打开一封**外链图**邮件 → 看正文上方横条 | 远程图默认不显示且出「已拦截 N 张远程图片」→ 点「显示远程图片」后图片出现 |
+| 正文图片 手动 | 打开一封正文里带 `<script>` / 表单的邮件 | 脚本一律不执行（正文文档 CSP `script-src 'none'` + iframe `sandbox=""` 两层） |
 
 ---
 
-## 7. 风险与后续（M4+）
+## 8. 风险与后续（M4+）
 
 - **163/126 限流**：高频重拉单封可能触发频控，按需拉取已限并发；后续可视情况加退避。
 - **正文体积**：`ON_DEMAND_MAX_BYTES` 只放宽到 25MB，更大的邮件仍只留预览（可再加"分段拉取"）。
+- **远程图默认拦截是产品决策**（防追踪像素 / 已读回执），不是能力缺失：需要时点正文上方的「显示远程图片」即可。
+  若哪天要改成默认放行，只改 `mail-body-protocol.ts` 的 `bodyCsp()` 与岛侧默认值 —— 别把 `frame-src sk-mail:`
+  之外的图片能力放开到岛 CSP 上（那会让所有岛都能外链取图）。
+- **正文文档是浅色渲染**（与常见邮件客户端一致，`.html-frame` 也硬编码白底）：深色主题下正文区域仍是白底，
+  如需跟随主题，要同时改文档外壳 CSS 与正文里发件方自带的颜色，收益不大。
 - **非图片内联预览**（M4）：PDF/文本类目前走系统应用打开，如需内联需再引 viewer 或落盘后用系统预览。
 - **附件全文**（M4）：FTS 目前只索引正文；附件内容（PDF/Office）需先提取文本再入索引。
 - **草稿/发件箱**：多文件夹已具备读取能力，但发送侧（SMTP / 回复）尚未规划。

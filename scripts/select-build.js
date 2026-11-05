@@ -28,6 +28,7 @@ const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm');
 // ---------- 1. 扫描可用模块（双根：src/modules 内建 + extensions 视图插件包） ----------
 // 判定规则与 vite.config.ts 完全一致，统一由 scripts/lib/module-roots.cjs 提供，
 // 避免「选择器扫到的模块」与「构建期实际可打包的模块」不一致而静默产出残缺安装包。
+// 返回三分：modules 可打包 / migrated 已下记为市场 UI 岛（绝不可打包，红线 23）/ skipped 无入口。
 function scanModules() {
   return enumerateModules(root);
 }
@@ -157,15 +158,31 @@ async function main() {
   const listOnly = args.includes('--list');
   const platform = args.find((a) => a.startsWith('--platform='))?.split('=')[1];
 
-  const { modules, skipped } = scanModules();
+  const { modules, migrated, skipped } = scanModules();
   if (modules.length === 0) {
-    console.error('未发现任何可打包模块（src/modules 与 extensions 下均无 meta.ts 入口）。');
+    console.error('未发现任何可打包模块（src/modules 与 extensions 下均无未下记的 meta.ts 入口）。');
+    if (migrated.length) {
+      console.error(
+        `\x1b[2m${migrated.length} 个目录已下记为市场 UI 岛，不可打包: ${migrated.map((m) => m.id).join(', ')}\x1b[0m`,
+      );
+    }
     process.exit(1);
   }
 
   if (listOnly) {
     console.log('可打包模块:');
     modules.forEach((m) => console.log(`  ${m.id}  (${m.name})  [${m.label}]`));
+    if (migrated.length) {
+      console.error(
+        `\x1b[33m已下记为市场 UI 岛，不可打包（${migrated.length} 个）: ${migrated.map((m) => m.id).join(', ')}\x1b[0m`,
+      );
+      console.error(
+        '\x1b[2m  ↑ 这些 id 已交给市场岛注册。若再打进宿主 registry 会先占住 id，\x1b[0m',
+      );
+      console.error(
+        '\x1b[2m    使从市场安装的同名岛没有侧栏入口（AGENTS 红线 23），且其依赖链会被重新打进包。\x1b[0m',
+      );
+    }
     if (skipped.length) {
       const names = skipped.map((s) => s.id).join(', ');
       console.error(`\x1b[2m忽略 ${skipped.length} 个目录（无 meta.ts 入口，不参与打包裁剪）: ${names}\x1b[0m`);
@@ -174,6 +191,11 @@ async function main() {
   }
 
   console.log('\x1b[2mSellerKit · 交互式打包\x1b[0m\n');
+  if (migrated.length) {
+    console.log(
+      `\x1b[2m（已下记为市场 UI 岛、不在候选内: ${migrated.map((m) => m.id).join(', ')}）\x1b[0m`,
+    );
+  }
   const ids = modules.map((m) => m.id);
   const initial = loadLastSelection(ids);
   const chosen = await promptSelect(modules, initial);

@@ -4,9 +4,13 @@
 // 来源：源码原为内建视图插件包 extensions/ae-profit/src，已于 2026-09-16 迁入本岛并删除原目录。
 // 纪律：一律走桥，不直连 window.electronAPI / 裸 IPC（AGENTS 红线 16）；
 //      能力需在 manifest.json 的 capabilities 中显式声明，否则权限门拒绝并写入审计。
+//
+// ⚠️ 1.1.0（2026-09-30，C9 收编）起本岛只剩**接收端状态**：`summary` / `orderList` /
+//    `profitStats` / `costMap*` / `rate*` / `purchase.costSnapshot` 六个 op 随「利润统计 / 订单明细 /
+//    成本与汇率」一起移除（那些页已并入宿主「算钱」）。**删 op 必须同步删 manifest 的声明** ——
+//    `tests/pluginTriage.spec.ts` 双向守卫：声明了不调用、或调用了没声明，都会红。
 
 const DOMAIN_AE = 'ae';
-const DOMAIN_PURCHASE = 'purchase';
 
 /** 取桥；未就绪返回 null（纯浏览器预览场景） */
 function bridge() {
@@ -32,7 +36,7 @@ async function dbCall(domain, op, payload) {
   }
 }
 
-// —— 利润追踪业务域（ae） ——
+// —— 采集接收端（ae）——
 
 /** 建库/迁移（幂等） */
 export function aeDbEnsure() {
@@ -42,49 +46,6 @@ export function aeDbEnsure() {
 /** 收单状态：订单总数 / 最后入库时间 */
 export function aeReceiverStatus() {
   return dbCall(DOMAIN_AE, 'receiverStatus');
-}
-
-/** 订单汇总（收入/成本/毛利/净利） */
-export function aeSummary() {
-  return dbCall(DOMAIN_AE, 'summary');
-}
-
-/** 订单明细分页查询 */
-export function aeOrderList(payload) {
-  return dbCall(DOMAIN_AE, 'orderList', payload);
-}
-
-/** 利润引擎统计（趋势/分类/爆品） */
-export function aeProfitStats(payload) {
-  return dbCall(DOMAIN_AE, 'profitStats', payload);
-}
-
-/** 成本表列表 */
-export function aeCostMapList() {
-  return dbCall(DOMAIN_AE, 'costMapList');
-}
-
-/** 成本表全量替换导入（源：拿货对账快照） */
-export function aeCostMapImport(items) {
-  return dbCall(DOMAIN_AE, 'costMapImport', { items });
-}
-
-/** 汇率列表 */
-export function aeRateList() {
-  return dbCall(DOMAIN_AE, 'rateList');
-}
-
-/** 汇率写入/更新 */
-export function aeRateUpsert(fromCurrency, rateToCny) {
-  return dbCall(DOMAIN_AE, 'rateUpsert', { fromCurrency, rateToCny });
-}
-
-/**
- * 拿货对账 → 利润追踪单向只读成本快照。
- * @returns {Promise<{success: boolean, data?: {count: number, items: Array<{styleCode: string, styleName: string, unitPriceCents: number, sampleCount: number, lastBizDate: string}>}, error?: string}>}
- */
-export function purchaseCostSnapshot() {
-  return dbCall(DOMAIN_PURCHASE, 'costSnapshot');
 }
 
 /**

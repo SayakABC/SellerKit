@@ -7,12 +7,20 @@ directories:
   output: release
 files:
   - dist/**/*
+  # 桥运行时源码文本：不参与 tsc 编译（见 tsconfig.electron.json 注释），必须原样进包
+  # —— plugin-ui-protocol.ts#loadRuntimeSource 的第 1 个候选就是 <appPath>/electron/plugin-ui-runtime.js。
+  # 漏掉它：打包版不注入 sk-plugin:// 桥 → 所有 UI 岛 window.__sk 缺失 → 点导航一片空白（2026-09-24 定位）。
+  - electron/plugin-ui-runtime.js
   - "!node_modules/**/{test,tests,__tests__,spec}/**"
   - "!node_modules/**/*.md"
   - "!node_modules/**/*.ts"
 extraResources:
   - from: 默认模板.txt
     to: 默认模板.txt
+  # 托盘图标（M5·T5-1）：`main.ts#trayIconPath()` 打包版读 `<resources>/icon.png`。
+  # 漏了它 = 打包版没有托盘 = 关窗就退出 = 开机自启之后找不到应用。
+  - from: build/icon.png
+    to: icon.png
 afterPack: ./scripts/afterPack.js
 # macOS 双架构：arm64（Apple Silicon）+ x64（Intel），dmg / zip 各自产出（zip 供 electron-updater 更新）
 mac:

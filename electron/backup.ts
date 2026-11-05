@@ -1,8 +1,8 @@
 // electron/backup.ts
 // 数据备份与恢复（换机迁移）：把本机全部业务数据打包/还原为一个备份文件夹。
 // 备份内容（均位于 userData 目录）：
-//   sellerkit.db    SQLite 库（订单 / 识别结果 / 款式库 / 款色 / 附加指纹）
-//   order-images/   订单主图缓存（缩略图/预览依赖）
+//   sellerkit.db    SQLite 库（订单 / 款式库 / 款色 / 图片登记 / 颜色尺码主数据）
+//   images/         图片仓（订单主图 / 产品图 / 采集图共用一处，R1 起唯一图片目录）
 //   config.json     electron-store（外壳状态 / TV模版配置 / 模块业务状态）
 // 关键点：
 //   - 库文件经 VACUUM INTO 生成一致副本（WAL 安全，无需停止应用）
@@ -70,7 +70,7 @@ ipcMain.handle('select-directory', async () => {
   }
 });
 
-// 导出数据备份：targetDir/SellerKit备份_<ts>/（sellerkit.db + order-images/ + config.json）
+// 导出数据备份：targetDir/SellerKit备份_<ts>/（sellerkit.db + images/ + config.json）
 ipcMain.handle('backup-export', async (_e: any, payload: any) => {
   try {
     if (!isValidPath(payload?.targetDir)) return { success: false, error: 'invalid target dir' };
@@ -85,11 +85,11 @@ ipcMain.handle('backup-export', async (_e: any, payload: any) => {
     // 1. 数据库一致快照
     vacuumInto(path.join(backupDir, 'sellerkit.db'));
     const dbBytes = fs.statSync(path.join(backupDir, 'sellerkit.db')).size;
-    // 2. 图片缓存
-    const imageDir = path.join(userData, 'order-images');
+    // 2. 图片仓
+    const imageDir = path.join(userData, 'images');
     const images = dirStats(imageDir);
     if (fs.existsSync(imageDir) && images.count > 0) {
-      fs.cpSync(imageDir, path.join(backupDir, 'order-images'), { recursive: true });
+      fs.cpSync(imageDir, path.join(backupDir, 'images'), { recursive: true });
     }
     // 3. electron-store 配置
     const configPath = path.join(userData, 'config.json');
@@ -124,8 +124,8 @@ ipcMain.handle('backup-import', async (_e: any, payload: any) => {
     fs.mkdirSync(safety, { recursive: true });
     const curDb = path.join(userData, 'sellerkit.db');
     if (fs.existsSync(curDb)) fs.copyFileSync(curDb, path.join(safety, 'sellerkit.db'));
-    const curImages = path.join(userData, 'order-images');
-    if (fs.existsSync(curImages)) fs.cpSync(curImages, path.join(safety, 'order-images'), { recursive: true });
+    const curImages = path.join(userData, 'images');
+    if (fs.existsSync(curImages)) fs.cpSync(curImages, path.join(safety, 'images'), { recursive: true });
     const curConfig = path.join(userData, 'config.json');
     if (fs.existsSync(curConfig)) fs.copyFileSync(curConfig, path.join(safety, 'config.json'));
     // 2. 关闭当前库连接（覆盖文件前必须释放句柄，SQLite close 时自动 checkpoint WAL）
@@ -133,8 +133,11 @@ ipcMain.handle('backup-import', async (_e: any, payload: any) => {
     // 3. 覆盖
     fs.copyFileSync(dbSrc, curDb);
     fs.rmSync(curImages, { recursive: true, force: true });
-    const imgSrc = path.join(backupDir, 'order-images');
-    if (fs.existsSync(imgSrc)) fs.cpSync(imgSrc, curImages, { recursive: true });
+    // 兼容 R1 之前的旧备份（图片目录名是 `order-images`）：新名优先，旧名兜底
+    const imgSrc = [path.join(backupDir, 'images'), path.join(backupDir, 'order-images')].find((d) =>
+      fs.existsSync(d),
+    );
+    if (imgSrc) fs.cpSync(imgSrc, curImages, { recursive: true });
     const configSrc = path.join(backupDir, 'config.json');
     if (fs.existsSync(configSrc)) fs.copyFileSync(configSrc, curConfig);
     // 4. 重启（新进程惰性重开数据库）

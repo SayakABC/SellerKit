@@ -20,7 +20,7 @@ const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const { downloadFile } = require('./http-client');
-const yauzl = require('yauzl');
+const yauzl = require('yauzl') as typeof import('yauzl');
 
 /** 插件根目录（与 plugins-handlers.ts 同源：<userData>/plugins） */
 function pluginsRoot(): string {
@@ -197,7 +197,8 @@ ipcMain.handle('plugins-market-catalog', async (_e: any, payload: any) => {
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
     // downloadFile 不抛错，须检查 ok（失败时不会写文件）
-    const dl = await downloadFile(url, tmpFile); // 协议白名单 + ≤20MB + 30s 超时（http-client 内建）
+    // noCache: true —— catalog 是同 URL 内容会变的易变资源，必须回源验证，否则会被 Chromium 启发式缓存钉住旧目录
+    const dl = await downloadFile(url, tmpFile, { noCache: true }); // 协议白名单 + ≤20MB + 30s 超时（http-client 内建）
     if (!dl.ok) {
       return { success: false, error: `获取市场目录失败: HTTP ${dl.status}${dl.error ? `（${dl.error}）` : ''}` };
     }
@@ -226,7 +227,8 @@ ipcMain.handle('plugins-market-install', async (_e: any, payload: any) => {
   const tmpUnzip = path.join(tmpRoot, 'out');
   try {
     // 1) 下载（白名单/≤20MB/超时）；downloadFile 不抛错，须检查 ok
-    const dl = await downloadFile(item.downloadUrl, tmpZip);
+    // noCache: true —— 防止「同 URL 重发同版本」时吃到旧 zip（错版会由下方 sha256 校验拦下，但拦下即安装失败）
+    const dl = await downloadFile(item.downloadUrl, tmpZip, { noCache: true });
     if (!dl.ok) {
       return { success: false, error: `下载插件包失败: HTTP ${dl.status}${dl.error ? `（${dl.error}）` : ''}` };
     }

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // scripts/plugins-install-demo.js
-// Phase 3 外置插件演示安装：把 extensions/sk-hello 复制到 <userData>/plugins/sk-hello。
+// Phase 3 外置插件演示安装：把 scripts/templates/l2-demo 复制到 <userData>/plugins/sk-hello。
+// （2026-09-22 归位：示例源原在 extensions/sk-hello，与「extensions/ = 随宿主分发的视图插件包」语义冲突）
 // userData 默认路径（未打包 dev 运行）：
 //   macOS: ~/Library/Application Support/<appName>/plugins
 //   Windows: %APPDATA%/<appName>/plugins
@@ -12,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PKG_NAME = 'seller-kit'; // 需与 package.json name 一致（Electron userData 默认名）
-const SOURCE = path.resolve(__dirname, '..', 'extensions', 'sk-hello');
+const SOURCE = path.resolve(__dirname, 'templates', 'l2-demo');
 const TARGET_ID = 'sk-hello';
 
 function defaultUserData() {

@@ -1,8 +1,8 @@
 // electron/mail-db.ts
 // 「集中邮件收件箱」主进程数据访问层，基于 electron/db.ts 公共层。
 //
-// 业务模型：一个店铺套（sk_shop_sets，业务主键=邮箱）可接入一个邮箱账号（sk_mail_accounts），
-//   账号下的邮件按 (account_id, folder, uid) 唯一定位；正文分表懒存，附件只存元信息。
+// 业务模型：一家店铺（sk_shops，2026-10-22 物理合并后店铺与账号同一行）可接入一个邮箱账号
+//   （sk_mail_accounts.shop_id），账号下的邮件按 (account_id, folder, uid) 唯一定位；正文分表懒存，附件只存元信息。
 //
 // 设计要点（吸收 Mailspring / Thunderbird 的做法）：
 //   - 窄列 + 分表：**不**把整封邮件塞进单个 JSON 列（Mailspring 已公开反思该设计导致行过宽、扫描变慢）；
@@ -16,11 +16,12 @@
 //     better-sqlite3 未编译 FTS5 时自动降级为 LIKE（见 isMailFtsAvailable）；
 //   - 附件本地缓存：sk_mail_attachment_cache 只存**落盘路径**（二进制不入库，见 mail-cache.ts）。
 //
-// 依赖：better-sqlite3（同步 API）；关联表 sk_shop_sets（外键级联删除）。
+// 依赖：better-sqlite3（同步 API）；关联表 sk_shops（外键级联删除）。
 
 export {};
 
 import { getDb, dbMigrate, dbTransaction, dbRun } from './db';
+import { normalizeContentId } from './mail-html';
 
 /**
  * 预处理语句类型。
@@ -42,7 +43,8 @@ export const MAIL_ACCOUNT_STATUSES: MailAccountStatus[] = ['idle', 'syncing', 'e
 /** 账号行（DB 列名 → 本文件统一转驼峰输出） */
 export interface MailAccountRow {
   id: number;
-  shopSetId: number;
+  /** 所属店铺行（`sk_shops.id`；物理合并后店铺与账号同一行） */
+  shopId: number;
   email: string;
   providerId: string;
   imapHost: string;
@@ -66,7 +68,8 @@ export interface MailAccountRow {
 
 export interface MailAccountUpsertInput {
   id?: number;
-  shopSetId: number;
+  /** 所属店铺行（`sk_shops.id`） */
+  shopId: number;
   email: string;
   providerId?: string;
   imapHost?: string;
@@ -140,6 +143,12 @@ export interface MailAttachmentRow {
   filename: string;
   mime: string;
   size: number;
+  /**
+   * MIME `Content-ID`（已剥掉尖括号，如 `image001.png@01D9...`）。
+   * 正文里的 `<img src="cid:...">` 靠它映射到本行——这是内联图片能显示的唯一依据
+   * （见 electron/mail-body-protocol.ts）。非内联附件为空串。
+   */
+  contentId: string;
 }
 
 /** 同步批次内待落库的邮件元数据 */
@@ -162,9 +171,13 @@ export interface MailMessageUpsertRow {
 }
 
 const MAIL_SCHEMA: string[] = [
+  // `sk_mail_accounts`：邮件账号（一行 = 一个店铺邮箱），`shop_id` UNIQUE → `sk_shops(id) ON DELETE CASCADE`
+  //（删店铺行会连带清掉账号与本地邮件缓存，确认框已明说）。`last_uid` / `uid_validity` 是单文件夹增量游标。
+  // 写 = 账号设置页 / 同步引擎状态回写；读 = 同步调度、邮件列表归属。
   `CREATE TABLE IF NOT EXISTS sk_mail_accounts (
+    -- 用途：邮件账号（一行 = 一个店铺邮箱，shop_id 唯一并级联删除）；单文件夹游标为兼容列，多文件夹见 sk_mail_folders。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shop_set_id INTEGER NOT NULL UNIQUE REFERENCES sk_shop_sets(id) ON DELETE CASCADE,
+    shop_id INTEGER NOT NULL UNIQUE REFERENCES sk_shops(id) ON DELETE CASCADE,
     email TEXT NOT NULL DEFAULT '',
     provider_id TEXT NOT NULL DEFAULT '',
     imap_host TEXT NOT NULL DEFAULT '',
@@ -172,6 +185,7 @@ const MAIL_SCHEMA: string[] = [
     imap_secure INTEGER NOT NULL DEFAULT 1,
     proxy TEXT NOT NULL DEFAULT '',
     folder TEXT NOT NULL DEFAULT 'INBOX',
+    folders TEXT NOT NULL DEFAULT '',
     sync_enabled INTEGER NOT NULL DEFAULT 1,
     sync_days INTEGER NOT NULL DEFAULT 30,
     max_body_bytes INTEGER NOT NULL DEFAULT 204800,
@@ -184,7 +198,11 @@ const MAIL_SCHEMA: string[] = [
     updated_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_accounts_sync ON sk_mail_accounts(sync_enabled, status)`,
+  // `sk_mail_messages`：邮件元数据（一行 = 一封），业务唯一键 `(account_id,folder,uid)` —— 幂等 upsert 的基石。
+  // 正文拆到 `sk_mail_bodies`、附件拆到 `sk_mail_attachments`；`body_cached` / `preview` 只是列表用的派生标记。
+  // 写 = 同步引擎 `upsertMailMessages`；读 = 邮件列表、全文检索、未读/标记筛选。
   `CREATE TABLE IF NOT EXISTS sk_mail_messages (
+    -- 用途：邮件元数据（一账号×文件夹×UID 一行，幂等 upsert 的基石）；正文与附件分表，列表只读本表。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL REFERENCES sk_mail_accounts(id) ON DELETE CASCADE,
     folder TEXT NOT NULL DEFAULT 'INBOX',
@@ -208,22 +226,32 @@ const MAIL_SCHEMA: string[] = [
   `CREATE UNIQUE INDEX IF NOT EXISTS uidx_sk_mail_messages ON sk_mail_messages(account_id, folder, uid)`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_messages_received ON sk_mail_messages(received_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_messages_from ON sk_mail_messages(from_addr)`,
+  // `sk_mail_bodies`：邮件正文（`message_id` 主键，与消息一对一），把大文本从列表行里拆开以免全表膨胀。
+  // 写 = 按需拉取正文（同步/详情）；读 = 详情页、FTS 索引重建（`body` 列来源）。
   `CREATE TABLE IF NOT EXISTS sk_mail_bodies (
+    -- 用途：邮件正文（与消息一对一，大文本拆出列表行以免膨胀）；读 = 详情页与 FTS 的 body 来源。
     message_id INTEGER PRIMARY KEY REFERENCES sk_mail_messages(id) ON DELETE CASCADE,
     text_body TEXT NOT NULL DEFAULT '',
     html_body TEXT NOT NULL DEFAULT '',
     truncated INTEGER NOT NULL DEFAULT 0
   )`,
+  // `sk_mail_attachments`：附件**元数据**（文件名 / MIME / 大小 / `content_id`），二进制**不入库**。
+  // `content_id` 是内联图片映射键（`mail-html.ts` 用它把 cid 换成宿主可读的本地资源）。
+  // 写 = 同步引擎；读 = 邮件详情、附件下载、内联图渲染。落盘缓存另见 `sk_mail_attachment_cache`。
   `CREATE TABLE IF NOT EXISTS sk_mail_attachments (
+    -- 用途：附件元数据（文件名/MIME/大小/content_id）；content_id 是正文内联图的映射键，二进制不入库。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL REFERENCES sk_mail_messages(id) ON DELETE CASCADE,
     filename TEXT NOT NULL DEFAULT '',
     mime TEXT NOT NULL DEFAULT '',
-    size INTEGER NOT NULL DEFAULT 0
+    size INTEGER NOT NULL DEFAULT 0,
+    content_id TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sk_mail_attachments_msg ON sk_mail_attachments(message_id)`,
-  // 多文件夹：每个文件夹独立记录增量游标（M3）
+  // `sk_mail_folders`：多文件夹增量游标（一行 = 账号×文件夹，`UNIQUE(account_id,path)`），M3。
+  // 写 = 同步引擎每轮刷新；读 = 决定下一轮从哪个 UID 续拉。
   `CREATE TABLE IF NOT EXISTS sk_mail_folders (
+    -- 用途：多文件夹增量游标（账号×文件夹一行，唯一键 account_id+path）；决定下一轮从哪个 UID 续拉。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL REFERENCES sk_mail_accounts(id) ON DELETE CASCADE,
     path TEXT NOT NULL DEFAULT '',
@@ -233,18 +261,36 @@ const MAIL_SCHEMA: string[] = [
     created_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uidx_sk_mail_folders ON sk_mail_folders(account_id, path)`,
-  // 附件本地缓存索引：只记落盘路径，二进制永不入库（M3，文件读写见 mail-cache.ts）
+  // `sk_mail_attachment_cache`：附件**本地缓存索引**（`attachment_id` 主键，一对一），只记落盘路径，
+  // 二进制永不入库（M3，文件读写见 `mail-cache.ts`）。0 行是正常态 —— 只有用户真正下载过的附件才有行。
+  // 写 = `mail-cache.ts` 缓存/清理；读 = 附件下载命中、缓存容量统计、删邮件时失效。
   `CREATE TABLE IF NOT EXISTS sk_mail_attachment_cache (
+    -- 用途：附件本地缓存索引（只记落盘路径与大小，二进制永不入库）；0 行是正常态，只有下载过的附件才有行。
     attachment_id INTEGER PRIMARY KEY REFERENCES sk_mail_attachments(id) ON DELETE CASCADE,
     message_id INTEGER NOT NULL DEFAULT 0,
     file_path TEXT NOT NULL DEFAULT '',
     size INTEGER NOT NULL DEFAULT 0,
     cached_at TEXT NOT NULL DEFAULT ''
   )`,
-  // 轻量键值表：FTS 回填游标等内部状态
+  // `sk_mail_meta`：**内部**轻量 KV 表（`key` 主键），存 FTS 回填游标等非业务状态；
+  // 写/读都只在本域（`getMailMeta` / `setMailMeta`）。它不计业务表，属基础设施。
   `CREATE TABLE IF NOT EXISTS sk_mail_meta (
+    -- 用途：内部 KV（FTS 回填游标等非业务状态）；基础设施表，不计入业务表。
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
+  )`,
+  // `sk_mail_todo_dismissed`：**用户手工划掉待办**的记号（一行 = 一单），只存"人已经处理过了"这个事实。
+  // 待办本身是读时计算的派生结果（不落库），本表不复制待办字段，只当覆盖层 —— 避免
+  // "原始邮件被 30 天窗口 purge 了、派生表还留着"的漂移（见 mail-triage.ts 头部）。
+  // `last_message_id` 是划掉那一刻最新事件的邮件 id：之后同单再来新邮件（id 更大）会自动浮出，
+  // 所以划掉**不会永久吞掉**后续进展（罚单升级、纠纷判决这类必须重新看见）。
+  // 写 = `dismissMailTodo` / `restoreMailTodo`；读 = `listMailTodos` 判是否压掉。
+  `CREATE TABLE IF NOT EXISTS sk_mail_todo_dismissed (
+    -- 用途：用户手工划掉的待办（一行一单）；只存覆盖层，不复制派生字段。
+    todo_key TEXT PRIMARY KEY,
+    last_message_id INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT '',
+    dismissed_at TEXT NOT NULL DEFAULT ''
   )`,
 ];
 
@@ -274,6 +320,7 @@ export function ensureMailSchema(): void {
   dbMigrate(MAIL_SCHEMA);
   ensureMailAccountColumns();
   ensureMailMessageColumns();
+  ensureMailAttachmentColumns();
   ensureMailFtsTable();
   seedMailFolders();
   backfillMailFts();
@@ -295,6 +342,19 @@ function ensureMailMessageColumns(): void {
     String(c.name),
   );
   if (!cols.includes('read_at')) dbRun(`ALTER TABLE sk_mail_messages ADD COLUMN read_at TEXT NOT NULL DEFAULT ''`);
+}
+
+/**
+ * 存量库补列：sk_mail_attachments.content_id（内联图片映射键）。
+ * 已同步过的行补出来是空串——旧数据的内联图要等该邮件被**重解析**一次才会显示；
+ * 重解析由 mail-body-protocol.ts 在渲染正文时惰性触发（见 refreshMailAttachmentContentIds）。
+ */
+function ensureMailAttachmentColumns(): void {
+  const cols = (getDb().prepare(`PRAGMA table_info(sk_mail_attachments)`).all() as { name: string }[]).map((c) =>
+    String(c.name),
+  );
+  if (!cols.includes('content_id'))
+    dbRun(`ALTER TABLE sk_mail_attachments ADD COLUMN content_id TEXT NOT NULL DEFAULT ''`);
 }
 
 /** 有效已读态：服务端 seen 或 本地已读过（列表/详情/统计统一用它，避免口径不一致） */
@@ -366,6 +426,10 @@ export function isMailFtsAvailable(): boolean {
   return ftsAvailable;
 }
 
+// `sk_mail_fts`：FTS5 全文索引**虚拟表**（rowid = `sk_mail_messages.id`，列 subject/from_name/from_addr/body）。
+// 由 `indexMailMessages` 增量维护；搜索 `listMailMessages` 优先 MATCH，FTS5 不可用时回落 LIKE。
+// ⚠️ `sk_mail_fts_{config,content,data,docsize,idx}` 五张是 SQLite 自建的**影子表**，只随本虚表存在，
+//    绝不可单独 DROP —— 删本虚表时它们才会一起消失。
 function ensureMailFtsTable(): void {
   if (ftsChecked) return;
   ftsChecked = true;
@@ -520,10 +584,27 @@ function setMailMeta(key: string, value: string): void {
   ).run(key, String(value || ''));
 }
 
+/**
+ * 读 `sk_mail_meta` 的 KV 值（**跨层**入口：供 `mail-scheduler` 读自动同步间隔）。
+ *
+ * 为什么不由那一层自己建表/自己读：`sk_mail_meta` 是本域的**基础设施表**，
+ * 表 owner 只能有一个（与 `shop-db.ts` 对 `sk_shops` 的约定一致）。
+ */
+export function getMailMetaValue(key: string): string {
+  ensureMailSchema();
+  return getMailMeta(String(key || ''));
+}
+
+/** 写 `sk_mail_meta` 的 KV 值（同上；表 owner 仍是本文件） */
+export function setMailMetaValue(key: string, value: string): void {
+  ensureMailSchema();
+  setMailMeta(String(key || ''), String(value ?? ''));
+}
+
 function toAccountRow(r: Record<string, any>): MailAccountRow {
   return {
     id: Number(r.id),
-    shopSetId: Number(r.shop_set_id),
+    shopId: Number(r.shop_id),
     email: String(r.email || ''),
     providerId: String(r.provider_id || ''),
     imapHost: String(r.imap_host || ''),
@@ -573,19 +654,22 @@ function toMessageRow(r: Record<string, any>): MailMessageRow {
 
 const ACCOUNT_SELECT = `SELECT * FROM sk_mail_accounts`;
 
-/** 新增或更新账号（shop_set_id 唯一，重复接入同一店铺套即覆盖配置） */
+/** 新增或更新账号（shop_id 唯一，重复接入同一店铺即覆盖配置） */
 export function upsertMailAccount(input: MailAccountUpsertInput): number {
   ensureMailSchema();
   const now = new Date().toISOString();
-  const shopSetId = Number(input.shopSetId);
-  if (!Number.isFinite(shopSetId) || shopSetId <= 0) throw new Error('店铺套不存在或已被删除');
+  const shopId = Number(input.shopId);
+  if (!Number.isFinite(shopId) || shopId <= 0) throw new Error('店铺不存在或已被删除');
+  // 外键在，但错误信息要说人话：指向不存在的店铺时先自己拦一道
+  const owner = stmt(`SELECT id FROM sk_shops WHERE id = ?`).get(shopId) as { id: number } | undefined;
+  if (!owner) throw new Error('店铺不存在或已被删除');
 
-  const existing = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_set_id = ?`).get(shopSetId) as
+  const existing = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_id = ?`).get(shopId) as
     | Record<string, any>
     | undefined;
 
   const values = {
-    shopSetId,
+    shopId,
     email: String(input.email || existing?.email || '').trim().slice(0, 200),
     providerId: String(input.providerId ?? existing?.provider_id ?? '').slice(0, 40),
     imapHost: String(input.imapHost ?? existing?.imap_host ?? '').trim().slice(0, 200),
@@ -611,7 +695,7 @@ export function upsertMailAccount(input: MailAccountUpsertInput): number {
          imap_secure = @imapSecure, proxy = @proxy, folder = @folder, folders = @folders,
          sync_enabled = @syncEnabled,
          sync_days = @syncDays, max_body_bytes = @maxBodyBytes, updated_at = @now
-       WHERE shop_set_id = @shopSetId`,
+       WHERE shop_id = @shopId`,
     ).run(values);
     const accountId = Number(existing.id);
     replaceMailFolders(accountId, JSON.parse(String(values.folders || '[]')) as string[]);
@@ -620,11 +704,11 @@ export function upsertMailAccount(input: MailAccountUpsertInput): number {
 
   const info = stmt(
     `INSERT INTO sk_mail_accounts
-       (shop_set_id, email, provider_id, imap_host, imap_port, imap_secure, proxy, folder, folders,
+       (shop_id, email, provider_id, imap_host, imap_port, imap_secure, proxy, folder, folders,
         sync_enabled, sync_days, max_body_bytes, status, last_error, last_synced_at,
         uid_validity, last_uid, created_at, updated_at)
      VALUES
-       (@shopSetId, @email, @providerId, @imapHost, @imapPort, @imapSecure, @proxy, @folder, @folders,
+       (@shopId, @email, @providerId, @imapHost, @imapPort, @imapSecure, @proxy, @folder, @folders,
         @syncEnabled, @syncDays, @maxBodyBytes, 'idle', '', '', 0, 0, @now, @now)`,
   ).run(values);
   const accountId = Number(info.lastInsertRowid);
@@ -663,10 +747,10 @@ export function getMailAccount(id: number): MailAccountRow | undefined {
   return row ? toAccountRow(row) : undefined;
 }
 
-/** 按店铺套 id 取账号 */
-export function getMailAccountByShopSet(shopSetId: number): MailAccountRow | undefined {
+/** 按店铺 id 取账号（物理合并后店铺与账号同一行） */
+export function getMailAccountByShop(shopId: number): MailAccountRow | undefined {
   ensureMailSchema();
-  const row = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_set_id = ?`).get(Number(shopSetId) || 0) as
+  const row = stmt(`SELECT * FROM sk_mail_accounts WHERE shop_id = ?`).get(Number(shopId) || 0) as
     | Record<string, any>
     | undefined;
   return row ? toAccountRow(row) : undefined;
@@ -838,7 +922,7 @@ export function saveMailBody(
  */
 export function replaceMailAttachments(
   messageId: number,
-  items: { filename: string; mime: string; size: number }[],
+  items: { filename: string; mime: string; size: number; contentId?: string }[],
 ): void {
   ensureMailSchema();
   const mid = Number(messageId);
@@ -846,10 +930,11 @@ export function replaceMailAttachments(
     filename: String(it.filename || '').slice(0, 300),
     mime: String(it.mime || '').slice(0, 120),
     size: Number(it.size) || 0,
+    contentId: normalizeContentId(it.contentId),
   }));
   dbTransaction(() => {
     const existing = (
-      stmt(`SELECT id, filename, mime, size FROM sk_mail_attachments WHERE message_id = ? ORDER BY id ASC`).all(
+      stmt(`SELECT id, filename, mime, size, content_id FROM sk_mail_attachments WHERE message_id = ? ORDER BY id ASC`).all(
         mid,
       ) as Record<string, any>[]
     ).map((r) => ({
@@ -857,9 +942,15 @@ export function replaceMailAttachments(
       filename: String(r.filename || ''),
       mime: String(r.mime || ''),
       size: Number(r.size || 0),
+      contentId: String(r.content_id || ''),
     }));
-    const insert = stmt(`INSERT INTO sk_mail_attachments (message_id, filename, mime, size) VALUES (?, ?, ?, ?)`);
+    const insert = stmt(
+      `INSERT INTO sk_mail_attachments (message_id, filename, mime, size, content_id) VALUES (?, ?, ?, ?, ?)`,
+    );
     const remove = stmt(`DELETE FROM sk_mail_attachments WHERE id = ?`);
+    // content_id 单独回填：**不进合并键**——否则旧行（空 content_id）会被判成"另一个附件"而换 id，
+    // 已落盘的附件缓存与 sk_mail_attachment_cache 索引会整批失效。
+    const setContentId = stmt(`UPDATE sk_mail_attachments SET content_id = ? WHERE id = ?`);
     const pool = new Map<string, number[]>();
     // 复合键同 collectMessageIds：filename / mime 都可能含空格或 '-'，故用 \x00 分隔（转义写法，见上）
     for (const e of existing) {
@@ -871,10 +962,14 @@ export function replaceMailAttachments(
       const key = `${it.filename}\x00${it.mime}\x00${it.size}`;
       const bucket = pool.get(key);
       if (bucket && bucket.length) {
-        kept.add(Number(bucket.shift()));
+        const reuseId = Number(bucket.shift());
+        kept.add(reuseId);
+        const prev = existing.find((e) => e.id === reuseId);
+        // 只在"新解析出了值、旧行还空着"时写，避免重名附件互相覆盖
+        if (it.contentId && prev && !prev.contentId) setContentId.run(it.contentId, reuseId);
         continue;
       }
-      insert.run(mid, it.filename, it.mime, it.size);
+      insert.run(mid, it.filename, it.mime, it.size, it.contentId);
     }
     for (const e of existing) {
       if (!kept.has(e.id)) remove.run(e.id);
@@ -1025,6 +1120,7 @@ export function getMailMessage(id: number): MailMessageDetail | null {
       filename: String(a.filename || ''),
       mime: String(a.mime || ''),
       size: Number(a.size || 0),
+      contentId: String(a.content_id || ''),
     })),
   };
 }
@@ -1149,8 +1245,61 @@ export function mailStats(): {
   };
 }
 
-/** 账号实际参与同步的文件夹列表（folders 为空时回退单文件夹 folder） */
-export function resolveMailFolders(account: { folder: string; folders?: string[] }): string[] {
+/**
+ * 当前最大邮件 id。
+ *
+ * 用法：同步**开始前**取一次基准，结束后用 `countMailMessagesAfter(基准)` 得到
+ * "本轮新落库了几封"。为什么不用 `date('now')` 或未读数差值：
+ *   · 未读数差值会把"用户刚点开一封未读"算成负数，把"服务端标记已读"算成 0；
+ *   · `id` 是 AUTOINCREMENT 单调递增，新插入的行一定大于基准 —— 这是唯一
+ *     不受已读状态、清理任务、同秒插入干扰的口径。
+ */
+export function maxMailMessageId(): number {
+  ensureMailSchema();
+  const row = stmt(`SELECT COALESCE(MAX(id), 0) AS m FROM sk_mail_messages`).get() as { m: number };
+  return Number(row?.m) || 0;
+}
+
+/**
+ * 某账号在基准 id 之后**新落库**的邮件封数。
+ *
+ * 为什么必须带 `accountId`：多个账号是并发同步的（`MAX_GLOBAL_CONNECTIONS`）。
+ * 若只按 `id > 基准` 全局过滤，A 还在同步时 B 插进来的行会被 A 也算一遍 ——
+ * 两个账号各弹一条"新邮件"，数字还都是合并后的（2026-11-04 自测踩到）。
+ */
+export function countMailMessagesAfter(id: number, accountId: number): number {
+  ensureMailSchema();
+  const row = stmt(`SELECT COUNT(*) AS c FROM sk_mail_messages WHERE id > ? AND account_id = ?`).get(
+    Number(id) || 0,
+    Number(accountId) || 0,
+  ) as { c: number };
+  return Number(row?.c) || 0;
+}
+
+/** 某账号在基准 id 之后的新邮件样本（系统通知正文用：谁发的、什么主题） */
+export function listMailMessagesAfter(
+  id: number,
+  accountId: number,
+  limit = 3,
+): { id: number; subject: string; fromName: string; folder: string }[] {
+  ensureMailSchema();
+  const rows = stmt(
+    `SELECT id, subject, from_name, folder FROM sk_mail_messages
+       WHERE id > ? AND account_id = ? ORDER BY id ASC LIMIT ?`,
+  ).all(
+    Number(id) || 0,
+    Number(accountId) || 0,
+    Math.max(1, Math.min(20, Number(limit) || 3)),
+  ) as Record<string, any>[];
+  return rows.map((r) => ({
+    id: Number(r.id) || 0,
+    subject: String(r.subject || ''),
+    fromName: String(r.from_name || ''),
+    folder: String(r.folder || ''),
+  }));
+}
+
+/** 账号实际参与同步的文件夹列表（folders 为空时回退单文件夹 folder） */export function resolveMailFolders(account: { folder: string; folders?: string[] }): string[] {
   const list = (account.folders || []).map((p) => String(p || '').trim()).filter(Boolean);
   return list.length ? list : [String(account.folder || 'INBOX') || 'INBOX'];
 }
@@ -1242,6 +1391,7 @@ export function getMailAttachmentRow(id: number): MailAttachmentRow | null {
     filename: String(row.filename || ''),
     mime: String(row.mime || ''),
     size: Number(row.size || 0),
+    contentId: String(row.content_id || ''),
   };
 }
 

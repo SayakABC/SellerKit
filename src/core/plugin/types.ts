@@ -67,6 +67,24 @@ export interface PluginManifest {
   kind?: 'ui';
   /** 能力声明；内建插件（Level 0）恒放行，外置插件（Level 1）缺省 = 全部拒绝 */
   capabilities?: PluginCapability[];
+  /**
+   * UI 岛设置面板贡献（仅 kind === 'ui' 有意义）：
+   * 声明后宿主设置中心自动出现该岛的分类（id = `<pluginId>:settings`），内容区以同源 iframe 岛承载，
+   * 复用 __sk 受控桥（同一 capability 白名单，无额外权限）。缺省不贡献。
+   */
+  settings?: UiIslandSettingsContrib;
+}
+
+/** UI 岛设置面板贡献声明（manifest.settings） */
+export interface UiIslandSettingsContrib {
+  /** 设置页入口：岛目录相对路径（须以 ./ 开头，形如 ./dist/settings.html） */
+  entry: string;
+  /** 设置中心左侧分类名（缺省取 manifest.displayName || name） */
+  displayName?: string;
+  /** 分类图标（SettingsModal 图标白名单 key；缺省 box） */
+  icon?: string;
+  /** 分类排序（越小越靠前；general=0、插件贡献默认 100、插件管理=999） */
+  order?: number;
 }
 
 /** 贡献点类型（宿主定义的扩展槽位） */
@@ -89,6 +107,16 @@ export interface ViewContribSpec {
   order?: number;
   /** true 时不出现在侧栏与 ⌘K 切换列表（仍可被跨模块跳转激活），对应 ModuleMeta.navHidden */
   navHidden?: boolean;
+  /**
+   * 该模块有二级菜单（侧栏里点进来后展开若干缩进项），对应 `ModuleMeta.subNav`。
+   *
+   * ⚠️ 这个字段与 `navHidden` 一样是"从 meta 搬到 spec 再搬回 meta"的**过路字段**：
+   * `managerDiscover` 建 manifest 时抄一遍、`metasFromContributions` 往回映射时再抄一遍。
+   * 少抄任何一处，模块自己写的 `subNav: true` 就在到达 `AppShell` 之前**静默消失** ——
+   * 表现为"二级菜单怎么都不出现"，而 TypeScript 一句话都不报（两处都是白名单字面量）。
+   * 2026-10-17 建这个字段时就踩了一次。
+   */
+  subNav?: boolean;
   /** host=Vue 组件直渲（Level 0 内建）；webview/declared 留给 Phase 3+ 外置插件 */
   container: 'host' | 'webview' | 'declared';
 }

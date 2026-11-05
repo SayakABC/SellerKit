@@ -100,8 +100,8 @@ describe('handle · 由本层包装成 { success, data }', () => {
 describe('通道注册本身', () => {
   it('通道名原样交给 ipcMain.handle，不做归一化', () => {
     register('order-db-ensure', () => ({ success: true }));
-    handle('ae-summary', () => 1);
-    expect([...registered.keys()]).toEqual(['order-db-ensure', 'ae-summary']);
+    handle('t-channel-name', () => 1);
+    expect([...registered.keys()]).toEqual(['order-db-ensure', 't-channel-name']);
   });
 
   it('两个封装互不串用：register 的 handler 返回裸数据不会被当成功', async () => {

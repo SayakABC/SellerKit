@@ -6,17 +6,18 @@
 //  3. 响应：目录回退 index.html、扩展名→MIME、注入 CSP 头、单文件大小上限（对齐 §15.4 分层阈值 ≤16MB）；
 //  4. P1 桥运行时注入：HTML 文档尾部注入同源 <script src="sk-plugin://<id>/__sk__/runtime.js">，
 //     runtime（electron/plugin-ui-runtime.js，纯浏览器 JS 文本）经保留路径 /__sk__/runtime.js 下发——
-//     桥代码版本由宿主控制，UI 包不携带桥实现；
-//  5. 开发模式（!app.isPackaged）：把 scripts/poc-ui-hello/ 种子 UI 包同步到 <userData>/plugins/sk-ui-hello。
+//     桥代码版本由宿主控制，UI 包不携带桥实现。
 // 依赖：仅 electron/node 标准模块；由 electron/main.ts 顶层 require（scheme 特权须在 app ready 前注册）。
 // 纪律：本文件为宿主能力面新增项，能力放行/路径边界收紧须与渲染层 externalManifest 双防线同步（AGENTS 红线 18/19）。
+//
+// 已移除（2026-09-24）：原 P0 开发期种子 demo —— `UI_POC_ID` / `seedDevPocPackage()` /
+// `ensurePocPackageSeeded()`（把 `scripts/poc-ui-hello/` 同步到 `<userData>/plugins/sk-ui-hello`）。
+// 该种子岛 `sk-ui-hello` 已随实例删除，dev 启动不再自动播种；要手工造演示岛请用
+// `npm run plugins:create:ui <id>`（模板 `scripts/ui-plugin-template`）。
 
 import { app, protocol } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-
-/** P0 演示插件 id（与 scripts/poc-ui-hello/manifest.json 的 name 一致） */
-export const UI_POC_ID = 'sk-ui-hello';
 
 /** 单资源大小上限（对齐 §15.4 建议：单资源 ≤16MB；目录总大小由安装链路另行约束） */
 const UI_MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -45,16 +46,30 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 };
 
-/** 注入 CSP：插件文档只能加载自身（sk-plugin:// 同源）+ data: 内联资源；不设 frame-ancestors（允许被宿主嵌入） */
-const UI_CSP =
+/**
+ * 注入 CSP：插件文档只能加载自身（sk-plugin:// 同源）+ data: 内联资源；不设 frame-ancestors（允许被宿主嵌入）。
+ * `frame-src sk-mail:` 是为邮件正文留的口子：正文必须跑在**独立来源文档**里才能拿到自己的 CSP
+ * （srcdoc 会继承本 CSP，`img-src 'self' data:` 会把邮件里的图全拦掉）。
+ * 这里只放开"能被嵌入"，图片与网络能力仍由 sk-mail 文档自己的 CSP 决定。
+ *
+ * 导出仅为让 `scripts/mail-body-protocol-smoke.cjs` 用**真值**当宿主页 CSP（避免冒烟里抄一份副本后
+ * 与本文件漂移 —— 那会让"frame-src 被误删"这种回归在冒烟里恒绿）。
+ */
+export const UI_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
-  "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'";
+  "frame-src sk-mail:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'";
 
 /** 必须在 app ready 之前调用（module 顶层即可：main.ts 顶层 require） */
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'sk-plugin',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
   },
 ]);
 
@@ -99,13 +114,17 @@ function resolvePluginFile(id: string, rawPath: string): string | null {
   return target;
 }
 
-/** P1：iframe 端桥运行时源（electron/plugin-ui-runtime.js 纯文本）。懒加载一次；dev 读项目源码，打包读 asar 内（files 收 electron/**）。 */
+/**
+ * P1：iframe 端桥运行时源（electron/plugin-ui-runtime.js 纯文本）。懒加载一次。
+ * 分发形态：dev 读项目根源码；打包读 asar 内同路径 —— 由 electron-builder.yml 的 `files`
+ * **显式收录该单个文件**（tsc 不搬运未 import 的 .js，见 tsconfig.electron.json 注释）。
+ */
 let runtimeSourceCache: string | null = null;
 function loadRuntimeSource(): string | null {
   if (runtimeSourceCache !== null) return runtimeSourceCache || null;
   const candidates = [
-    path.join(app.getAppPath(), 'electron', 'plugin-ui-runtime.js'), // dev：项目根源码；打包：asar 根（若 files 含 electron/**）
-    path.join(__dirname, 'plugin-ui-runtime.js'), // 打包：dist/electron 邻位
+    path.join(app.getAppPath(), 'electron', 'plugin-ui-runtime.js'), // dev：项目根源码；打包：asar 根（files 需显式收录）
+    path.join(__dirname, 'plugin-ui-runtime.js'), // 打包：dist/electron 邻位（仅在改用构建期拷贝时才有）
   ];
   for (const p of candidates) {
     try {
@@ -116,6 +135,14 @@ function loadRuntimeSource(): string | null {
     }
   }
   runtimeSourceCache = '';
+  // 静默失效止血：缺运行时 = 所有 UI 岛无 window.__sk、点导航一片空白。这里必须留下可检索的痕迹，
+  // 否则又变成「用户报障 → 手工冒烟才发现」。只在首个 miss 的请求上打一次（候选路径全列出）。
+  console.warn(
+    `[ui-island] 桥运行时源码缺失：${candidates.join(' | ')}\n` +
+      '  → sk-plugin:// 不再注入 __sk 桥，所有 UI 岛将表现为「点导航一片空白」。\n' +
+      '  修：确认 electron-builder.yml 的 files 收录 electron/plugin-ui-runtime.js（打包版），' +
+      '或项目根存在该文件（dev）。'
+  );
   return null;
 }
 
@@ -175,24 +202,6 @@ function devDenyLog(id: string, pathname: string): void {
   devLog(`拒绝访问 sk-plugin://${id}${pathname}（id 非法或路径越界）`);
 }
 
-/** 开发模式：同步种子 UI 包 → <userData>/plugins/<UI_POC_ID>（每次启动覆盖，保持与仓库源一致） */
-function seedDevPocPackage(): void {
-  if (app.isPackaged) return;
-  const srcDir = path.join(app.getAppPath(), 'scripts', 'poc-ui-hello');
-  if (!fs.existsSync(srcDir)) {
-    devLog(`跳过种子同步（找不到 ${srcDir}）`);
-    return;
-  }
-  const destDir = path.join(pluginsRoot(), UI_POC_ID);
-  try {
-    fs.mkdirSync(destDir, { recursive: true });
-    fs.cpSync(srcDir, destDir, { recursive: true, force: true });
-    devLog(`已同步 demo UI 包 → ${destDir}`);
-  } catch (err: any) {
-    console.error(`[plugin-ui] 同步 demo UI 包失败: ${err?.message ?? err}`);
-  }
-}
-
 let initialized = false;
 
 /** 注册 sk-plugin:// 请求处理（app ready 后调用一次） */
@@ -229,9 +238,4 @@ export function initPluginUiProtocol(): void {
     return serveFile(target, id);
   });
   devLog('sk-plugin:// 协议已注册（根映射 <userData>/plugins）');
-}
-
-/** 开发模式种子入口（app ready 后、协议注册前调用） */
-export function ensurePocPackageSeeded(): void {
-  seedDevPocPackage();
 }

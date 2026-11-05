@@ -5,6 +5,19 @@ release/
 .vite/
 *.log
 
+# ---- 例外：无构建步骤的岛，dist/ 即手写源码 ----
+# excel-copy 没有 package.json 与 vite.config，源码直接写在 dist/ 下
+# （manifest.entry = ./dist/index.html）。若不放开例外，`git add -A` 只会收录
+# manifest.json + README.md，仓库里会存下一个 entry 指向不存在文件的坏岛。
+# 新增此类岛时要同法补一行；有 src/ + 构建脚本的岛（ae-profit / shop-accounts）
+# 保持忽略，它们提交的是 src/。（原样例岛 sk-ui-starter 已于 2026-09-24 删除，见
+# docs/plans/PLUGIN_TRIAGE_PLAN.md §7-4；product-library 岛已于 2026-10-01 整体下架，
+# 见 docs/features/PRODUCT_LIBRARY.md §0-A；order-insight 岛已于 2026-10-05 整体下架，
+# 见 docs/notes/2026-10-01-ui-island-retirement.md §6；shipping-rate 岛已于 2026-10-15
+# 回收为内建「基础数据 › 物流运费」，其反忽略行随之删除 —— 留着会让 tests/pluginTriage.spec.ts
+# 的「dist/ 未被忽略」守卫读到一条指向已删目录的规则。脚手架仍在 scripts/ui-plugin-template。）
+!ui-plugins/excel-copy/dist/
+
 # ============ 系统文件 ============
 .DS_Store
 Thumbs.db
@@ -13,17 +26,14 @@ Thumbs.db
 .workbuddy/
 .codebuddy/
 
-# ============ AI 协作文档（不入库） ============
-# 注：docs/ 下「对外/同类可共享」的文档（PLUGIN_DEVELOPMENT / PROFIT_TRACKER / MAIL_INBOX /
-#     USER_GUIDE / Requirements / manual）正常入库；以下「本地内部文档」不入库（沿用既有策略）。
-#     路径随 docs 目录整理同步更新（2026-09-16）。
-#     如需把审查报告纳入版本管理，删掉 docs/reviews/ 这一行即可。
-AGENTS.md
-docs/baseline/
-docs/architecture/PLUGIN_ARCHITECTURE.md
-docs/architecture/PROJECT_OVERVIEW.md
-docs/reviews/
-docs/plans/
+# ============ AI 协作文档：**已改为入库**（R4-5 / D-07，2026-09-16 决策） ============
+# 原策略只让「对外可共享」的文档入库，导致两类实际问题：
+#   1. AGENTS.md 是编码助手的强制约定入口，不入库等于"换机器/协作即失效"；
+#   2. PLUGIN_DEVELOPMENT.md（入库）大量引用 PLUGIN_ARCHITECTURE.md / AGENTS.md（不入库），
+#      克隆仓库者必然看到指向不存在文件的悬空引用。
+# 现策略：**全部文档入库**，理由是可追溯性优先于仓库整洁度。
+#   仍保持不入库的仅：.workbuddy/ / .codebuddy/（AI 工具本地数据，非项目文档）。
+# 入库前已扫描密钥/内网 IP/凭据：无命中。
 
 # ============ 环境变量 ============
 # 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example
@@ -35,6 +45,10 @@ docs/plans/
 # vite.config.ts 在每次 dev/build 时重新生成
 src/registry.generated.ts
 
+# vite 加载 vite.config.* 时会落一个带时间戳的临时副本（每次都新名字、不会自己清理）。
+# 不忽略的话 `git add ui-plugins/<岛>/` 会一次带进十几个垃圾文件。
+vite.config.*.timestamp-*.mjs
+
 # ============ 临时 / 测试文件 ============
 # 临时调试脚本（验证 app.name / userData），可删除
 debug-name.js
@@ -44,5 +58,9 @@ debug-name.js
 # ============ 插件市场本地发布产物 ============
 # publish-plugin.js 输出目录：zip + catalog.json（内含独立 git 仓库，作市场部署用，不入主仓库）
 market-out/
-# 早期 UI 岛 POC 验证产物（无源码、仅 dist），已被 ui-plugins/sk-ui-starter 取代
-scripts/poc-ui-hello/
+# （原 scripts/poc-ui-hello/ 开发期种子 UI 包已于 2026-09-24 随 `sk-ui-hello` 删除移除；
+#   演示/template 角色由入库的脚手架 scripts/ui-plugin-template 承载，故不再需要忽略项）
+
+# AI 工具本机记忆（软链到 .workbuddy/memory/MEMORY.md，不入库）
+AGENTS.local.md
+.cache/

@@ -10,13 +10,20 @@
 
 | 模块 | 形态 | 说明 |
 |---|---|---|
-| `excel-copy` | 视图插件包（`extensions/`） | 导入 Excel → 按模板生成文本 → 一键复制，智能跟踪记录使用状态 |
-| `order-insight` | 视图插件包（`extensions/`） | 订单导入 → 主图下载 → 指纹查重 → AI 识别 → 归类汇总，含拿货对账 |
-| `shop-accounts` | 视图插件包（`extensions/`） | 店群「店铺套」集中管理，密码经系统安全存储（Keychain/DPAPI）加密落库 |
-| `quick-note` | 内建模块（`src/modules/`） | 轻量便签 |
-| `ae-profit` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 速卖通利润追踪展示端，经 host `db` 能力域读写 |
+| `excel-copy` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 导入 Excel → 按模板生成文本 → 一键复制，智能跟踪记录使用状态 |
+| `shop-accounts` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 店群「店铺套」集中管理，密码经系统安全存储（Keychain/DPAPI）加密落库 |
+| `ae-profit` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 速卖通订单采集接收端（Chrome 扩展推送或 curl 样例），写入宿主订单主干 |
+| `shipping-rate` | 市场 UI 岛（`ui-plugins/`，**不随宿主分发**） | 导入物流报价单，按克重 / 按订单 / 按产品试算到各国的实际运费 |
+| `today` / `shop-accounts` / `mail` / `order-cost` / `quick-note` | 内建模块（`src/modules/`） | 随宿主分发：**发货台**（导入→归类→拿货→对账，一页五页签）、**基础数据**（**侧栏二级菜单**七项资料：店铺账号 / 货品档案〔款·SKU·采集商品·认款映射〕/ 店铺登记 / 企业 / 供应商 / 成本与费率 / 物流运费；2026-10-17 起不再占页面内宽度）、**邮件**、统计（原「算钱」）、便签。⚠️ 拣货已于 2026-10-17 撤出左导航（功能仍是「发货台 › 拿货」的出口视图，见 `docs/notes/2026-10-30-picking-and-takeout.md`） |
 
-支撑能力：集中收件箱（IMAP 多账号同步 / FTS 全文检索 / 附件缓存）、店铺账号管家、订单队列、AI 识别（OpenAI 兼容接口）、自动更新（electron-updater）。
+> 形态说明（判定规则见 `AGENTS.md` §1.9）：**市场 UI 岛**独立构建、打成 zip 走插件市场分发，运行时由宿主 iframe 加载，只经 `window.__sk` 桥调用宿主能力；
+> 这些岛的 id 已从 `modules.config.json` 的构建预设里移除，源码在仓库 `ui-plugins/<id>/`，宿主侧数据层（SQLite / IPC / `db` 能力域）保留给岛调用。
+> 因此上表 4 个岛均**不随安装包分发**，需从插件市场安装。
+> 已整体下架的岛（功能收回内建，源码留档不入库）：**`product-library`**（2026-10-01，→ `src/modules/goods/**`）、
+> **`order-insight`**（2026-10-05，→ `src/modules/today/**` 发货台）—— 见 `docs/notes/2026-10-30-island-publish-and-retire.md`。
+> **这里不写版本号**（版本每次发版都变）—— 权威清单见 `docs/baseline/PROJECT_BASELINE.md` §4 / §5。
+
+支撑能力：集中收件箱（IMAP 多账号同步 / FTS 全文检索 / 附件缓存，2026-10-17 起独立成一级「邮件」模块）、基础数据（店铺账号 / 货品档案 / 店铺登记 / 企业 / 供应商 / 成本与费率 / 物流运费）、订单队列、AI 识别（OpenAI 兼容接口）、自动更新（electron-updater）。
 
 ---
 
@@ -44,7 +51,7 @@ npm run dist:select  # 交互式勾选模块 → 构建 → 出安装包
 SellerKit/
 ├── electron/                    # 主进程（CommonJS / require）
 │   ├── main.ts                  # 入口：窗口、生命周期、electron-store
-│   ├── preload.ts               # contextBridge → window.electronAPI（130 个 invoke 通道）
+│   ├── preload.ts               # contextBridge → window.electronAPI（133 个 invoke 通道，由 npm run verify 校验）
 │   ├── ipc-handlers.ts          # 通用 IPC + 网络请求转发
 │   ├── http-client.ts           # Electron net 请求客户端（协议/方法白名单）
 │   ├── *-db.ts                  # SQLite 数据访问层（mail / order / purchase / ae / shop-accounts）
@@ -68,9 +75,10 @@ SellerKit/
 │   ├── styles/index.css         # 全局样式 + 设计令牌（--wb-*，浅/深两套）
 │   ├── types.ts                 # 业务共享类型 + ElectronAPI 接口
 │   └── registry.generated.ts    # ⚠️ 自动生成，禁止手改
-├── extensions/<id>/             # 随宿主分发的视图插件包（manifest.json + src/）
+├── extensions/<id>/             # 随宿主分发的视图插件包（manifest.json + src/）；当前仅 excel-copy / order-insight **源码留档**（均已下记为市场岛）
 ├── ui-plugins/<id>/             # 市场分发的 UI 岛（kind: ui，静态产物）
 ├── scripts/                     # 构建 / 打包 / 脚手架 / 冒烟脚本
+│   ├── templates/               # 插件脚手架：l2-plugin（L2 模板）/ l2-demo（L2 演示）；UI 岛模板见 ui-plugin-template/
 │   └── lib/module-roots.cjs     # 模块根探测规则（vite.config.ts 与 select-build.js 共用，单一事实源）
 ├── docs/                        # 项目文档（入口见 docs/README.md）
 ├── modules.config.json          # 模块启用清单（单一事实源，纯 JSON 无转译）
@@ -110,7 +118,7 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 - **禁止硬编码色值**，一律用 `var(--wb-*)`；新颜色先在 `src/styles/index.css` 两套主题各定义令牌。
 - 主色背景上的文字必须用 `--wb-primary-contrast`（不可写死 `text-white`）。
 
-> 完整规则（含 22 条红线）见 [`AGENTS.md`](AGENTS.md)；当前状态快照见 [`docs/baseline/PROJECT_BASELINE.md`](docs/baseline/PROJECT_BASELINE.md)。
+> 完整规则（含 23 条红线）见 [`AGENTS.md`](AGENTS.md)；当前状态快照见 [`docs/baseline/PROJECT_BASELINE.md`](docs/baseline/PROJECT_BASELINE.md)。
 
 ---
 
@@ -119,7 +127,7 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 | 类型 | 位置 | 内容 |
 |---|---|---|
 | electron-store | `<userData>/config.json` → `modules.<namespace>` | 各模块状态（`app-shell` / `excel-copy` / `order-insight` / `shop-accounts` / `plugins`） |
-| SQLite | `<userData>` 下的分域 db 文件 | `sk_mail_*`（收件箱）、`oi_*`（订单洞察）、`purchase_*`（拿货对账）、`ae_*`（利润追踪）、`sk_shop_sets`（店铺账号） |
+| SQLite | **单库** `<userData>/sellerkit.db`（分域的是**表**，不是文件） | `sk_mail_*`（收件箱）、`oi_*`（订单洞察）、`purchase_*`（拿货对账）、`ae_*`（利润追踪）、`sk_shops`（**店铺 + 账号单表**，2026-10-22 合并，原 `sk_shop_sets` 已删）、`sk_tool_accounts`（紫鸟 / ERP 登录） |
 | localStorage | `sk_auth_token` | 会话 token（不落 electron-store） |
 | 系统安全存储 | Keychain / DPAPI | 店铺账号密码、IMAP 授权码 |
 
@@ -135,21 +143,38 @@ preload.ts                    ── 仅暴露白名单 API 为 window.electronA
 | [`docs/architecture/PLUGIN_DEVELOPMENT.md`](docs/architecture/PLUGIN_DEVELOPMENT.md) | 外置插件与 UI 岛开发、调试、发布 |
 | [`docs/reviews/CODE_REVIEW_REPORT.md`](docs/reviews/CODE_REVIEW_REPORT.md) | 代码与文档审查报告（含风险分级与整改建议） |
 | [`docs/guides/USER_GUIDE.md`](docs/guides/USER_GUIDE.md) | 用户使用指南 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 + **发布流程与发布前检查清单** |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南（环境 / 分支 / 提交规范 / 门禁 / PR 清单） |
 
 ---
 
 ## 质量现状（2026-09-16）
 
-项目**没有自动化测试、没有 ESLint/Prettier**，回归依赖 `vue-tsc --noEmit` 类型检查 + 手工冒烟脚本：
+六项门禁全部为**本地手动执行**（**项目仍无 CI**，这是当前最大的流程缺口）：
 
 ```bash
-npx vue-tsc --noEmit                          # 渲染进程类型检查
-npx tsc -p tsconfig.electron.json --noEmit    # 主进程类型检查
-npm run plugins:sandbox:smoke                 # 插件沙箱全链路冒烟
-npm run mail:smoke                            # 邮件引擎冒烟
+npm run lint                                  # ESLint（门禁标准：error 数 = 0）
+npm run verify                                # IPC 契约校验（preload 键 ↔ types 声明 ↔ 主进程通道）
+npm test                                      # vitest 单元测试（src/lib 纯函数层 / IPC 注册契约 / 色卡字典）
+npx vue-tsc --noEmit                          # 渲染进程 + tests 类型检查
+npx tsc -p tsconfig.electron.json --noEmit    # 主进程类型检查（strict:false + noImplicitAny:true）
+npm run build                                 # 生产构建
 ```
 
-已知风险（依赖侧）：`xlsx@0.18.5` 存在未修复 CVE（npm 上无补丁版本）、Electron 33 与 Vite 5 均已 EOL。详见审查报告。
+手工冒烟（需环境）：
+
+```bash
+npm run plugins:sandbox:smoke                 # 插件沙箱全链路：boot → command → call → deactivate → token 拒绝
+npm run mail:smoke                            # 邮件引擎冒烟（需真实 IMAP 凭据 MAIL_USER / MAIL_PASS）
+```
+
+**重要**：`npm test` 全绿 ≠ 整体已验证。单元测试只覆盖 `src/lib/` 纯函数层、`electron/ipc-util.ts`
+注册契约与款色色卡；**组件 / Pinia store / 主进程业务逻辑 / 插件沙箱均无自动化覆盖**，
+这些改动仍须手动回归（启动 / 导入 / 预览 / 复制 / 设置 / 主题 / 插件启停 / ⌘K / 邮件同步）。
+
+历史风险已处置：`xlsx` 已换源至 SheetJS 官方 CDN 版本（消除 CVE-2023-30533 / CVE-2024-22363）；
+Electron 33 → 44.4.1、Vite 5.4 → 8.3 均已升级（详见 [`CHANGELOG.md`](CHANGELOG.md)）。
+详见 [`docs/reviews/CODE_REVIEW_REPORT.md`](docs/reviews/CODE_REVIEW_REPORT.md)。
 
 ---
 

@@ -45,7 +45,23 @@ const API_WITHOUT_CHANNEL = new Set(['platform']);
 
 /** ② 主进程 → 渲染层的广播事件：由 webContents.send 发出，preload 用 on 订阅，
  *    不走 invoke，故不参与"通道有主"校验，单独做双向对称校验 */
-const BROADCAST_EVENTS = new Set(['mail-sync-event', 'updater-event']);
+const BROADCAST_EVENTS = new Set([
+  'mail-sync-event',
+  'updater-event',
+  'ae-items-ingested',
+  // 主进程 → 外壳的「界面意图」（electron/ui-bridge.ts，2026-11-04）：
+  //   open-module  通知点击等"人不在界面前"的入口请求切模块（webContents.send，不走 invoke）
+  //   nav-badge    侧栏徽标（未读数），同样由主进程单向推送
+  // 二者都只有 `send` 与 `on` 两端，故由下面的双向对称校验负责，不参与"通道有主"校验。
+  'open-module',
+  'nav-badge',
+  // 规则求值隔离窗口（electron/rule-eval-window.ts）的**窗口内专用**消息：
+  //   rule-eval:batch  主进程 → 求值窗口（走该窗口自己的最小 preload）
+  //   rule-eval:result 求值窗口 → 主进程（ipcRenderer.send）
+  // 二者都不经过主窗口 preload，故 preload 侧没有对应键是正确状态。
+  'rule-eval:batch',
+  'rule-eval:result',
+]);
 
 /** ③ 有意复用的通道：多个 API 键映射到同一通道（一对一校验需排除） */
 const SHARED_CHANNELS = new Map([['read-file', ['importExcelByPath', 'readFile']]]);
@@ -309,11 +325,36 @@ function collectMain() {
     }
 
     if (found.size) {
+      if (process.env.SK_IPC_TRACE) console.log(`[ipc-trace] ${file}: ${[...found].join(' | ')}`);
       channels.push(...found);
       perFile.push({ file, count: found.size });
     }
   }
   return { channels: [...new Set(channels)], broadcasts, perFile };
+}
+
+/**
+ * 取 `idx` 所在函数的**函数体**（花括号配平）。
+ *
+ * 为什么不能用固定窗口（原实现是 `slice(idx, idx + 1500)`）：窗口会溢出到紧随其后的
+ * 下一个函数，把普通函数误判成"包装式注册"。2026-11-04 实测：`rule-eval-window.ts` 里
+ * `rejectAll(...)` / `destroyWindow(...)` 因为后面 1500 字符内出现 `ipcMain.on(...)`，
+ * 被当成注册点，于是 `destroyWindow('求值超时')` 的中文参数被算进"已注册通道"。
+ * 传给本函数的 `masked` 已抹掉字符串与注释，括号计数可靠。
+ * 箭头函数表达式体（无 `{`）退回短窗口 —— 400 字符足够容纳一条 `x => ipcMain.handle(...)`。
+ */
+function functionBodyAt(masked, idx) {
+  const open = masked.indexOf('{', idx);
+  if (open === -1 || open - idx > 300) return masked.slice(idx, idx + 400);
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === '{') depth++;
+    else if (masked[i] === '}') {
+      depth--;
+      if (depth === 0) return masked.slice(open, i + 1);
+    }
+  }
+  return masked.slice(open);
 }
 
 /**
@@ -340,7 +381,7 @@ function collectWrapperNames(files) {
       /(?:function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^=]*)?=>)/g,
     )) {
       const name = m[1] || m[2];
-      const body = masked.slice(m.index, m.index + 1500);
+      const body = functionBodyAt(masked, m.index);
       if (/ipcMain\s*\.\s*(?:handle|handleOnce|on)\s*\(/.test(body)) wrappers.add(name);
     }
   }
@@ -415,12 +456,18 @@ function main() {
   }
 
   // ---- 校验 3：广播事件双向对称
+  // 豁免清单在这里**同样生效**（与校验 2/4 一致）：窗口内专用消息不经过主窗口 preload，
+  // 缺席是正确的。原实现只在提示文案里写了"请更新豁免清单"，代码却没读它 —— 提示与实现不符。
   const broadcastMain = new Set(main.broadcasts.map((b) => b.channel));
   const preloadEvents = new Set();
   for (const [, v] of preload.byKey) v.on.forEach((c) => preloadEvents.add(c));
   for (const ch of apiOnlyInPreload.length === 0 ? [] : []) void ch; // 占位：无副作用
-  const eventNoSender = diff([...preloadEvents], [...broadcastMain]);
-  const eventNoListener = diff([...broadcastMain], [...preloadEvents]);
+  const eventNoSender = diff([...preloadEvents], [...broadcastMain]).filter(
+    (c) => !BROADCAST_EVENTS.has(c),
+  );
+  const eventNoListener = diff([...broadcastMain], [...preloadEvents]).filter(
+    (c) => !BROADCAST_EVENTS.has(c),
+  );
   if (eventNoSender.length || eventNoListener.length) {
     errors.push({
       title: '校验 3 · 广播事件不对称（主进程 send ↔ preload on）',

@@ -1,10 +1,13 @@
 // scripts/rebuild-native.js
 // 重建 better-sqlite3 为 Electron ABI（npm install 会恢复 Node ABI 的 prebuilds，
-// 而 Electron 33 内置 Node 20，better-sqlite3 12.x prebuilds 与 Electron 不兼容会导致
-// new Database 时 SIGSEGV）。作为 postinstall 自动执行，也可手动 npm run rebuild。
+// 与 Electron 的 ABI 不兼容会导致 new Database 时 SIGSEGV）。作为 postinstall 自动执行，
+// 也可手动 npm run rebuild。
 //
-// 背景：better-sqlite3 13.x 要求 Node >= 22（Electron 33 是 Node 20.18），已锁定 12.x；
-//       12.x 的 prebuilds/ 下是 Node ABI 二进制，必须删除并从源码编译成 Electron ABI。
+// 背景：better-sqlite3 12.x 当初因 Electron 33 内置 Node 20 而锁定（13.x 要求 Node >= 22）。
+//       R3-2 升 Electron 44 后内置 Node 24.21，13.x 已可解禁——但属另一项升级，不在本次范围；
+//       12.x 在 ABI 149 下经 @electron/rebuild 从源码编译可用（已实测）。
+// 注意：@electron/rebuild 需要 node-abi >= 4.35 才认识 Electron 44 的 ABI 149
+//       （package.json 已用 overrides 固定）。
 
 'use strict';
 

@@ -1,9 +1,0 @@
-{
-  "name": "shop-accounts",
-  "displayName": "店铺账号管家",
-  "version": "0.2.0",
-  "description": "店群「店铺套」集中管理：以邮箱为主标识，一套包含店铺密码、邮箱密码、关联手机号、关联企业名称、关联支付宝与支付密码、紫鸟账号与密码、ERP账号与密码、关联平台（可多平台复用）及状态标签；密码经系统安全存储（Keychain/DPAPI）加密落库，支持一键复制模板、点击复制、密码临时查看与隐私模式。",
-  "author": "SellerKit",
-  "kind": "view",
-  "activationEvents": ["onStartup"]
-}

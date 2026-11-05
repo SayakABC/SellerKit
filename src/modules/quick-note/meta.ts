@@ -6,5 +6,5 @@ export const meta: ModuleMeta = {
   id: 'quick-note',
   name: '便签',
   icon: 'note',
-  order: 2,
+  order: 6,
 };

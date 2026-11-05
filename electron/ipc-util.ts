@@ -76,3 +76,32 @@ export function handle<T>(channel: string, fn: (payload: any) => T | Promise<T>)
     }
   });
 }
+
+// ---- 图片格式魔数嗅探（order / product 两个图片域共用，口径只此一份） ----
+
+/**
+ * 图片格式魔数嗅探：按文件头字节判断真实格式。
+ * 背景：商品图 CDN 常以 WebP 返回，但下载逻辑曾一律落 .jpg 扩展名，
+ *       扩展名与内容不符会让读取端按错误 MIME/解码器解析导致图片空白。
+ * 统一按内容定格式：读取端决定 MIME、下载端决定落盘扩展名，存量错名文件亦兼容。
+ */
+export function sniffImageFormat(buf: Buffer): 'jpeg' | 'png' | 'webp' | null {
+  if (!buf || buf.length < 12) return null;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  // WebP: RIFF .... WEBP（VP8/VP8L/VP8X）
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return 'webp';
+  return null;
+}
+
+/** 格式 → 落盘扩展名（写入端用；读取端不依赖扩展名判断内容） */
+export const IMG_EXT_BY_FORMAT: Record<'jpeg' | 'png' | 'webp', string> = {
+  jpeg: '.jpg',
+  png: '.png',
+  webp: '.webp',
+};

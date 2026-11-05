@@ -9,6 +9,8 @@
 //     … --install  生成后直接复制到 <userData>/plugins/<kebab-id>
 //       （UI 岛 --install 仅复制 manifest.json + dist/**，需先 npm run build 产出 dist）
 // 约束：manifest.name 必须等于目录名（kebab-case）；entry 仅 ./ 相对路径。
+// 模板位置：L2 → scripts/templates/l2-plugin/；UI 岛 → scripts/ui-plugin-template/。
+// 两者都是**脚手架**，不在 extensions/ 下（extensions/ 只放随宿主分发的视图插件包）。
 // userData 默认路径（dev 未打包）：macOS ~/Library/Application Support/<appName>；
 //   Windows %APPDATA%/<appName>；可用 SK_USER_DATA 覆盖（同 plugins-install-demo.js）。
 'use strict';
@@ -17,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const TEMPLATE_BG = path.join(ROOT, 'extensions', '_template');   // L2 后台插件模板
+const TEMPLATE_BG = path.join(ROOT, 'scripts', 'templates', 'l2-plugin'); // L2 后台插件模板
 const TEMPLATE_UI = path.join(ROOT, 'scripts', 'ui-plugin-template'); // UI 岛工程模板
 const PKG_NAME = 'seller-kit'; // 需与 package.json name 一致（Electron userData 默认名）
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/; // kebab-case（对齐 externalManifest.ts 的 ID_RE 精神）

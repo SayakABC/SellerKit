@@ -7,17 +7,23 @@ import type { NetRequestPayload, NetRequestResult } from '@/core/network/types';
 import type {
   OrderImageRecord,
   OrderRecord,
-  OrderQueueRow,
-  OrderQueueEnqueueRow,
-  OrderQueueStats,
-  OrderQueueStatus,
   GroupStat,
   ImageDataUrl,
   ExportExcelResult,
   StyleRecord,
+  VariantNamingBoard,
+  MergeStylesOutcome,
+  RenameColorOutcome,
+  StyleMergeBoard,
+  UnmergeOutcome,
+  SaveStyleBasicsOutcome,
   OrderUpdateInput,
   OrderUpdateStatusInput,
   OrderStatus,
+  ColorAliasRemembered,
+  PickingRowsResult,
+  PickingExportRow,
+  UnifiedOrderRow,
   StyleImportItem,
   StyleImportResult,
   BackupSummary,
@@ -33,12 +39,7 @@ import type {
   ShopAllocationDetailRow,
   PluginScanResult,
   UpdaterEventPayload,
-  AeOrderListItem,
   AeReceiverStatus,
-  AeSummary,
-  AeProfitOverview,
-  AeCostMapImportItem,
-  AeCostMapItem,
   AeRateItem,
   PurchaseCostSnapshotItem,
   ShopAccountItem,
@@ -49,6 +50,42 @@ import type {
   ShopAccountSummary,
   ShopAccountBatchUpdateInput,
   ShopAccountBatchUpdateResult,
+  CompanyStatus,
+  CompanyItem,
+  CompanyDetail,
+  CompanySummary,
+  CompanyUpsertInput,
+  CompanyProfileUpsertInput,
+  ProductStatus,
+  ProductListItem,
+  ProductUpsertInput,
+  MdColorItem,
+  MdSizeItem,
+  ColorBoardItem,
+  ColorMergeOutcome,
+  ProductSummary,
+  ProductImportRowInput,
+  ProductImportOutcome,
+  ShopStatus,
+  ShopListItem,
+  ShopUpsertInput,
+  ShopSummary,
+  ShopGate,
+  UnmappedShopRow,
+  NameMapKind,
+  SkuBackfillOutcome,
+  SkuMapStatus,
+  ShopSkuRow,
+  SkuMapInputPayload,
+  SkuMapSummary,
+  SkuQueueRow,
+  SkuQueueStats,
+  VariantRow,
+  VariantUpsertInput,
+  ProductBatchUpdateInput,
+  ItemImagePoolEntry,
+  ShopProductItem,
+  ShopProductRelation,
   MailAccountItem,
   MailAccountUpsertInput,
   MailMessageItem,
@@ -56,12 +93,68 @@ import type {
   MailMessageListFilter,
   MailConnectionTestResult,
   MailStats,
+  MailTodoResult,
   MailProviderPresetView,
   MailSyncEvent,
   MailAttachmentPreview,
   MailRemoteFolder,
   MailCacheStatus,
   MailFtsStatus,
+
+  // ---- 2026-10-28 重建 ipc.ts：签名取自 types.ts 的 ElectronAPI ----
+  NavBadgeEvent,
+  OpenModuleEvent,
+  AeItemsIngestedEvent,
+  MangoIngestedEvent,
+  LedgerBasis,
+  LedgerCategoryRow,
+  LedgerEligibleShops,
+  LedgerEntryDetail,
+  LedgerEntryFilter,
+  LedgerEntryInput,
+  LedgerEntryRow,
+  LedgerExportInput,
+  LedgerImportEntryInput,
+  LedgerKind,
+  LedgerNameResolveResult,
+  LedgerPartyKind,
+  LedgerPartyLedgerRow,
+  LedgerPartyRow,
+  LedgerRepatchMode,
+  LedgerRepatchPreview,
+  LedgerRepatchResult,
+  LedgerRuleRow,
+  LedgerSettlementRow,
+  LedgerShopBreakdown,
+  LedgerSummary,
+  LedgerTemplateSheetInput,
+  MangoSyncStatusRow,
+  OrderCoveragePayload,
+  ParcelCountMap,
+  ParcelDetail,
+  ParcelTotalsMap,
+  ProductMoveSupplierInput,
+  ShopItemImageFetchResult,
+  ShopItemRow,
+  ShopItemSummaryRow,
+  SkuMappingReplayStats,
+  StyleColorOptionRow,
+  TakenRow,
+  ToolAccountItem,
+  ToolAccountKind,
+  ToolAccountUpsertInput,
+  PodWorklistResult,
+  PodPatternRow,
+  PodSlotImageItem,
+  PodBatchRow,
+  PodBalanceRow,
+  PodNeedData,
+  PodImageLinkOutcome,
+  PodPatternMergeOutcome,
+  PodPatternMergeUndo,
+  PodPatternMergeRecord,
+  PodReportRowInput,
+  PodReportExportResult,
 } from '@/types';
 import type { MarketCatalog, MarketPluginInfo } from '@/core/plugin/types';
 
@@ -83,18 +176,25 @@ export interface TemplateFilePayload {
 
 export interface ElectronApi {
   selectExcel(): Promise<ApiResult<ExcelFilePayload>>;
+  /** 选择图片文件（产品库主图 / 商品ID覆盖图；只返回路径，内容由主进程按需读取） */
+  selectImage(): Promise<ApiResult<{ filePath: string }>>;
   importExcelByPath(filePath: string): Promise<ApiResult<ExcelFilePayload>>;
   selectTemplate(): Promise<ApiResult<TemplateFilePayload>>;
   saveTemplate(filePath: string, content: string): Promise<ApiResult<unknown>>;
   writeClipboard(text: string): Promise<ApiResult<unknown>>;
-  loadState(): Promise<ApiResult<unknown>>;
-  saveState(data: Record<string, unknown>): Promise<ApiResult<unknown>>;
+  /** 写图片剪贴板（PNG dataURL）：「复制给厂家」的发厂清单图，粘进微信发给供应商 */
+  writeClipboardImage(dataUrl: string): Promise<ApiResult<unknown>>;
   // 模块命名空间持久化（Phase 1 新增）
   getModuleState(moduleId: string): Promise<ApiResult<unknown>>;
   setModuleState(moduleId: string, data: unknown): Promise<ApiResult<unknown>>;
   checkFileExists(filePath: string): Promise<ApiResult<boolean>>;
   readFile(filePath: string): Promise<ApiResult<TemplateFilePayload>>;
   getDefaultTemplatePath(): Promise<ApiResult<string>>;
+  /** 规则求值隔离窗口（`jsExpression`）；主窗口不 eval，见 `src/lib/fieldProcessor.ts` 头部 */
+  ruleEvalBatch(payload: {
+    rule: { id: string; code: string };
+    fields: Record<string, string>[];
+  }): Promise<ApiResult<{ values: (string | null)[]; errors: { index: number; message: string }[]; cspViolations: number }>>;
   getAppVersion(): Promise<ApiResult<string>>;
   resetStore(): Promise<ApiResult<unknown>>;
   // 数据备份/恢复（换机迁移）：选目录 / 导出 / 导入 / 打开数据目录
@@ -109,109 +209,219 @@ export interface ElectronApi {
   netRequest(payload: NetRequestPayload): Promise<ApiResult<NetRequestResult>>;
   // 订单归类模块（SQLite 指纹库 / 订单 / 主图）
   orderDbEnsure(): Promise<ApiResult<unknown>>;
-  orderImageFind(fingerprint: string): Promise<ApiResult<OrderImageRecord | null>>;
-  orderImageSave(payload: { id: number; status: 'done' | 'error'; resultJson?: string; error?: string }): Promise<ApiResult<unknown>>;
   orderInsert(order: OrderRecord): Promise<ApiResult<{ id: number }>>;
   orderGroupStats(dimensions: string[]): Promise<ApiResult<GroupStat[]>>;
-  /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total }；列表不含 raw_fields */
+  /** 订单列表（分页 + 关键字搜索）：{ offset?, limit?, corrected?, search? } → { rows, total } */
   orderList(payload?: {
     offset?: number;
     limit?: number;
     corrected?: boolean;
     /** 关键字（单号/店铺/分类/颜色/logo/款编码/款名/款色），匹配为空串视为不筛选 */
     search?: string;
+    /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`）；缺省 = 全库 */
+    importDate?: string;
   }): Promise<ApiResult<{ rows: OrderRecord[]; total: number }>>;
   orderClear(): Promise<ApiResult<unknown>>;
+  /** 运费原始行（oi_orders 最小投影，只读；供按订单算运费的宿主 op 提取） */
+  orderAssignShop(payload: {
+    orderNos: string[];
+    shopName: string;
+  }): Promise<ApiResult<{ updated: number }>>;
+  /** 统一订单行投影（主干 `oi_orders`；`source` / `importDate` 过滤可选） */
+  orderShippingRows(payload?: {
+    limit?: number;
+    source?: 'all' | 'import' | 'collect';
+    /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
+    importDate?: string;
+    /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库。记账的营收占比用 */
+    period?: string;
+  }): Promise<ApiResult<UnifiedOrderRow[]>>;
+  /** 最近一次芒果同步的状态（`sk_sync_log` 最新一行；`null` = 从来没同步过） */
+  mangoSyncStatus(): Promise<ApiResult<MangoSyncStatusRow | null>>;
   orderDownloadImage(url: string): Promise<ApiResult<OrderImageRecord>>;
+  /** 拣货投影（只读；聚合在渲染层纯函数 `src/lib/picking.ts`） */
+  pickingRows(payload?: {
+    limit?: number;
+    shop?: string;
+    includeShipped?: boolean;
+  }): Promise<ApiResult<PickingRowsResult>>;
+  /** 拣货单导出（主进程 exceljs：带图 + 按厂家分表）；行由渲染层算好，主进程只画表 */
+  pickingExportExcel(payload: {
+    rows: PickingExportRow[];
+    defaultName?: string;
+  }): Promise<ApiResult<ExportExcelResult & { rows: number }>>;
   orderReadImage(localPath: string): Promise<ApiResult<ImageDataUrl>>;
   /** 缩略图（主进程等比缩放 + LRU，≤maxEdge px JPEG dataURL） */
-  orderImageThumb(payload: { localPath: string; maxEdge?: number }): Promise<ApiResult<{ dataUrl: string }>>;
+  orderImageThumb(payload: {
+    localPath: string;
+    maxEdge?: number;
+  }): Promise<ApiResult<{ dataUrl: string }>>;
   /** 批量缩略图（渲染层同帧多图合并一次往返）：返回顺序与 items 一致，单项无效为 null */
-  orderImageThumbBatch(items: { localPath: string; maxEdge?: number }[]): Promise<ApiResult<{ dataUrls: (string | null)[] }>>;
-  /** 识别引擎 API Key：safeStorage 加密落盘（渲染层不落明文） */
-  orderApiKeySet(apiKey: string): Promise<ApiResult<{ stored: boolean }>>;
-  orderApiKeyGet(): Promise<ApiResult<{ apiKey: string }>>;
+  orderImageThumbBatch(
+    items: { localPath: string; maxEdge?: number }[]
+  ): Promise<ApiResult<{ dataUrls: (string | null)[] }>>;
   /** 清理不被数据库引用的孤儿图片文件（返回释放数量与字节） */
   orderCleanupOrphanImages(): Promise<ApiResult<{ deleted: number; freedBytes: number }>>;
   // 产品库导入「图片」列：读取用户指定的本地图片（任意路径，仅图片扩展名，≤10MB）
   orderReadLocalImage(localPath: string): Promise<ApiResult<ImageDataUrl>>;
-  orderExportExcel(buffer: ArrayBuffer, defaultName?: string): Promise<ApiResult<ExportExcelResult>>;
-  // 待识别队列（订单归类：导入行整批落库，失败/缺图重启不丢、可增量重试）
-  orderQueueEnqueue(payload: { batchNo: string; rows: OrderQueueEnqueueRow[] }): Promise<ApiResult<{ count: number }>>;
-  orderQueueStats(payload: { batchNo: string }): Promise<ApiResult<OrderQueueStats>>;
-  /** 队列行分页：失败清单用 { status:'error' }，缺图清单用 { missingOnly:true }；列表不含 raw_fields，返回 { rows, total } */
-  orderQueueList(payload: {
-    batchNo: string;
-    offset?: number;
-    limit?: number;
-    status?: OrderQueueStatus | 'all';
-    /** 缺图待补（status 为 pending/missing 且 url 为空） */
-    missingOnly?: boolean;
-  }): Promise<ApiResult<{ rows: OrderQueueRow[]; total: number }>>;
-  /** 单行队列行（含 raw_fields）：补图等按需取，避免列表全量携带大字段 */
-  orderQueueGet(id: number): Promise<ApiResult<OrderQueueRow>>;
-  orderQueueNextPending(payload: { batchNo: string; afterId: number; limit: number }): Promise<ApiResult<OrderQueueRow[]>>;
-  orderQueueSetResult(payload: { id: number; status: 'done' | 'error' | 'missing'; error?: string }): Promise<ApiResult<unknown>>;
-  orderQueuePatch(payload: { id: number; url: string; rawFields: Record<string, string> }): Promise<ApiResult<unknown>>;
-  orderQueueRetryErrors(payload: { batchNo: string }): Promise<ApiResult<{ count: number }>>;
-  orderQueuePurgeDone(payload: { batchNo: string }): Promise<ApiResult<{ count: number }>>;
-  orderQueueLastActive(): Promise<ApiResult<{ batchNo: string; stats: OrderQueueStats } | null>>;
+  orderExportExcel(
+    buffer: ArrayBuffer,
+    defaultName?: string
+  ): Promise<ApiResult<ExportExcelResult>>;
   // 款编码/款色（产品库主数据）
-  orderStyleResolve(payload: { imageId: number; fingerprint: string; category: string; features: string[]; color: string; styleName?: string }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
+  orderStyleResolve(payload: {
+    imageId: number;
+    fingerprint: string;
+    category: string;
+    features: string[];
+    color: string;
+    styleName?: string;
+  }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
+  /** 款选项列表（「归属款」下拉的数据源）：**产品库全集** + 每项的可选颜色 */
   orderStyleList(): Promise<ApiResult<StyleRecord[]>>;
+  /** 命名板（P3）：按 listing 分组的色键，未命名在前。只读。`importDate` = 这一批的导入日 */
+  orderVariantNaming(payload?: { importDate?: string }): Promise<ApiResult<VariantNamingBoard>>;
+  /** 给一个款色起名 —— 命名板唯一的写入口（同款重名/空名/超长由主进程拒绝） */
+  /** 款的基本信息（命名板组头）：款名 + 厂家一次保存。`0` 厂家 = 清空。 */
+  orderStyleBasics(payload: {
+    styleId: number;
+    name?: string;
+    supplierId?: number;
+  }): Promise<ApiResult<SaveStyleBasicsOutcome>>;
+  orderVariantRename(payload: {
+    styleColorId: number;
+    name: string;
+  }): Promise<ApiResult<RenameColorOutcome>>;
+  /** 合并候选 + 已合并记录（拿货页「可能是同一件货」那块） */
+  orderStyleMergeBoard(): Promise<ApiResult<StyleMergeBoard>>;
+  /** 把 sourceStyleIds 并进 targetStyleId（一次 N→1，可按批次拆开） */
+  orderStyleMerge(payload: {
+    targetStyleId: number;
+    sourceStyleIds: number[];
+  }): Promise<ApiResult<MergeStylesOutcome>>;
+  /** 拆开一次合并（按批次） */
+  orderStyleUnmerge(payload: { batchId: string }): Promise<ApiResult<UnmergeOutcome>>;
   orderStyleDelete(payload: { id: number }): Promise<ApiResult<{ deleted: number }>>;
   // 手动归并款式：订单挂到指定款编码 + 记入附加指纹（后续自动识别命中同一款编码）
-  orderStyleAssign(payload: { orderId: number; styleId: number; color: string; fingerprint?: string }): Promise<ApiResult<{ styleCode: string; styleColorCode: string }>>;
+  // ⭐ 主用 `styleCode`（下拉的值就是编码）；`styleId` 保留兼容老形状
+  orderStyleAssign(payload: {
+    orderId: number;
+    styleCode: string;
+    styleId?: number;
+    color: string;
+    fingerprint?: string;
+  }): Promise<
+    ApiResult<{
+      styleCode: string;
+      styleColorCode: string;
+      skuBackfill?: SkuBackfillOutcome;
+      /** 本次顺带记住的「平台色名 → 我的色名」（`null` = 没记 / 无需记） */
+      colorAlias?: ColorAliasRemembered | null;
+      /** 归到套装款时自动展开的部位（`missingColor` = 该色号还没配配色，一件也没写） */
+      bundleMaterialize?: {
+        status: 'written' | 'already' | 'notBundle' | 'missingColor' | 'noProduct' | 'noItemId';
+        roles: string[];
+        expanded: Array<{ role: string; styleCode: string; color: string; qty: number }>;
+      };
+    }>
+  >;
   // 修改款式展示名（款编码级）
-  orderStyleRename(payload: { code: string; name: string }): Promise<ApiResult<{ code: string; name: string }>>;
+  orderStyleRename(payload: {
+    code: string;
+    name: string;
+  }): Promise<ApiResult<{ code: string; name: string }>>;
   // 产品库 Excel 批量导入（指纹由渲染层生成）
   orderStyleImport(payload: { styles: StyleImportItem[] }): Promise<ApiResult<StyleImportResult>>;
   // 数据纠正（更新订单字段，可选按新款指纹重新归类）
-  orderUpdate(payload: OrderUpdateInput): Promise<ApiResult<{ styleCode?: string; styleColorCode?: string }>>;
+  orderUpdate(
+    payload: OrderUpdateInput
+  ): Promise<ApiResult<{ styleCode?: string; styleColorCode?: string }>>;
   orderUpdateStatus(payload: OrderUpdateStatusInput): Promise<ApiResult<{ status: OrderStatus }>>;
   orderDelete(payload: { id: number }): Promise<ApiResult<{ deleted: number }>>;
   // 批量标记订单已核对（数据纠正页「确认无误」/「全部确认无误」置 corrected=1，不改识别字段）
   // ids: number[] 部分确认；{ all: true } 主进程一次 UPDATE 全量标记（避免大数组过 IPC）
   orderMarkCorrected(input: number[] | { all: true }): Promise<ApiResult<{ updated: number }>>;
+  // 退回待核对（归类核对页「已核对」范围里的行内动作）：把点名的已核对行置回 corrected=0。
+  // 入参只有裸数组 —— **没有** { all: true } 形态（退回一律点名，理由见 order-db.ts 的实现注释）。
+  orderReopenCorrected(ids: number[]): Promise<ApiResult<{ updated: number }>>;
   // 速卖通利润追踪（ae-profit / M0）：入站数据走 localhost 接收端，本区仅查询类 IPC
   aeDbEnsure(): Promise<ApiResult<unknown>>;
-  aeOrderList(payload?: { offset?: number; limit?: number; search?: string }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>>;
-  aeSummary(): Promise<ApiResult<AeSummary>>;
   aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>>;
-  // M1：利润统计 / 成本快照 / 汇率维护 / 拿货成本只读导出
-  aeProfitStats(payload?: { granularity?: 'day' | 'month'; rangeDays?: number }): Promise<ApiResult<AeProfitOverview>>;
-  aeCostMapImport(payload: { items: AeCostMapImportItem[] }): Promise<ApiResult<{ replaced: number }>>;
-  aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>>;
+  settleImport(payload: {
+    rows: unknown[];
+  }): Promise<
+    ApiResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
+  >;
+  settleOrders(payload: { orderNos: string[] }): Promise<
+    ApiResult<{
+      rows: {
+        orderNo: string;
+        settleStatus: string;
+        pendingReason: string;
+        dealCents: number;
+        netIncomeCents: number;
+        splitCents: number;
+        feeSumCents: number;
+        itemLines: number;
+        /** 商品行件数明细（`lines` = 该 (订单,商品) 的商品行数；>1 = 同商品多 SKU，qty 不可逐行复用） */
+        items: { itemId: string; lines: number; qty: number }[];
+        from: 'order' | 'items';
+      }[];
+    }>
+  >;
+  settleStats(): Promise<
+    ApiResult<{
+      lines: number;
+      orders: number;
+      itemLines: number;
+      orderLines: number;
+      pendingOrders: number;
+      settledOrders: number;
+      lastImportedAt: string;
+    }>
+  >;
   aeRateList(): Promise<ApiResult<AeRateItem[]>>;
-  aeRateUpsert(payload: { fromCurrency: string; rateToCny: number }): Promise<ApiResult<{ ok: boolean }>>;
+  aeRateUpsert(payload: {
+    fromCurrency: string;
+    rateToCny: number;
+  }): Promise<ApiResult<{ ok: boolean }>>;
   purchaseCostSnapshot(): Promise<ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>>;
   // 拿货对账模块（厂商 / 拿货单 / 付款 / 对账 / 待拿货缺口）
   purchaseDbEnsure(): Promise<ApiResult<unknown>>;
   purchaseSupplierList(): Promise<ApiResult<Supplier[]>>;
-  purchaseSupplierCreate(payload: { name: string; phone?: string; note?: string }): Promise<ApiResult<{ id: number }>>;
-  purchaseSupplierUpdate(payload: { id: number; phone?: string; note?: string }): Promise<ApiResult<unknown>>;
+  purchaseSupplierCreate(payload: {
+    name: string;
+    phone?: string;
+    note?: string;
+  }): Promise<ApiResult<{ id: number }>>;
+  purchaseSupplierUpdate(payload: {
+    id: number;
+    phone?: string;
+    note?: string;
+  }): Promise<ApiResult<unknown>>;
   purchaseSupplierDelete(payload: { id: number }): Promise<ApiResult<unknown>>;
   purchaseOrderList(): Promise<ApiResult<PurchaseOrder[]>>;
   purchaseOrderGet(payload: { id: number }): Promise<ApiResult<PurchaseOrder>>;
   purchaseOrderCreate(payload: {
     supplierId: number;
     bizDate: string;
-    mode: 'detail' | 'package';
-    note?: string;
-    totalCents?: number;
     items?: PurchaseItem[];
+    /** 来源订单快照（从数据统计跳转生成时锁定店铺归属；缺省时主进程按缺口自动推导） */
     sources?: PurchaseSourceRow[];
   }): Promise<ApiResult<{ id: number }>>;
   purchaseOrderUpdate(payload: {
     id: number;
     bizDate?: string;
-    note?: string;
     totalCents?: number;
     items?: PurchaseItem[];
   }): Promise<ApiResult<unknown>>;
   purchaseOrderSubmit(payload: { id: number }): Promise<ApiResult<unknown>>;
   purchaseOrderDelete(payload: { id: number }): Promise<ApiResult<unknown>>;
-  purchasePaymentList(payload?: { supplierId?: number; from?: string; to?: string }): Promise<ApiResult<Payment[]>>;
+  purchasePaymentList(payload?: {
+    supplierId?: number;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<Payment[]>>;
   purchasePaymentAdd(payload: {
     supplierId: number;
     payDate: string;
@@ -221,26 +431,228 @@ export interface ElectronApi {
     note?: string;
   }): Promise<ApiResult<{ id: number }>>;
   purchasePaymentDelete(payload: { id: number }): Promise<ApiResult<unknown>>;
-  purchaseReconciliation(payload?: { from?: string; to?: string }): Promise<ApiResult<ReconciliationRow[]>>;
+  purchaseReconciliation(payload?: {
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<ReconciliationRow[]>>;
   purchaseOutstanding(): Promise<ApiResult<OutstandingRow[]>>;
-  purchaseIgnoreAdd(payload: { styleCode: string; color?: string; reason?: string }): Promise<ApiResult<unknown>>;
+  purchaseIgnoreAdd(payload: {
+    styleCode: string;
+    color?: string;
+    reason?: string;
+  }): Promise<ApiResult<unknown>>;
   purchaseIgnoreRemove(payload: { styleCode: string; color?: string }): Promise<ApiResult<unknown>>;
   purchaseIgnoreList(): Promise<ApiResult<IgnoreRow[]>>;
-  purchasePriceHistory(payload: { supplierId?: number; styleCode: string; color?: string }): Promise<ApiResult<{ priceCents: number }>>;
-  purchaseShopAllocation(payload?: { from?: string; to?: string }): Promise<ApiResult<ShopAllocationRow[]>>;
-  purchaseShopAllocationDetail(payload: { shop: string; from?: string; to?: string }): Promise<ApiResult<ShopAllocationDetailRow[]>>;
+  purchasePriceHistory(payload: {
+    supplierId?: number;
+    styleCode: string;
+    color?: string;
+  }): Promise<ApiResult<{ priceCents: number }>>;
+  purchaseShopAllocation(payload?: {
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<ShopAllocationRow[]>>;
+  purchaseShopAllocationDetail(payload: {
+    shop: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<ShopAllocationDetailRow[]>>;
   /** 导出拿货单 Excel（主进程生成，款编码+款色自动嵌入款色图） */
-  purchaseExportExcel(payload: { items: PurchaseItem[]; defaultName?: string }): Promise<ApiResult<{ filePath: string }>>;
+  purchaseExportExcel(payload: {
+    items: PurchaseItem[];
+    defaultName?: string;
+  }): Promise<ApiResult<{ filePath: string }>>;
+  /** 拿货单编辑器行图：按「款编码 + 款色 + 尺码」批量取本地图路径（顺序与入参一致，未命中为 null）。
+   *  `size` 决定挑哪张：同一款下每个订单商品各有自己的图，只按款色挑会让同款所有行显示同一张。 */
+  purchaseStyleImages(payload: {
+    items: { styleCode: string; color: string; size?: string }[];
+  }): Promise<ApiResult<{ paths: (string | null)[] }>>;
   // ---- 店铺账号管家（以「店铺套 · 邮箱」为单位维护店群账号）----
   shopAccountDbEnsure(): Promise<ApiResult<unknown>>;
-  shopAccountList(payload?: { search?: string; status?: string; platform?: string }): Promise<ApiResult<ShopAccountItem[]>>;
+  shopAccountList(payload?: {
+    search?: string;
+    status?: string;
+    platform?: string;
+  }): Promise<ApiResult<ShopAccountItem[]>>;
   shopAccountGet(payload: { id: number }): Promise<ApiResult<ShopAccountDetail | null>>;
   shopAccountSummary(): Promise<ApiResult<ShopAccountSummary>>;
   shopAccountSecurity(): Promise<ApiResult<{ secureStorage: boolean }>>;
-  shopAccountUpsert(payload: ShopAccountUpsertInput): Promise<ApiResult<{ id: number; secureStorage: boolean }>>;
+  shopAccountUpsert(
+    payload: ShopAccountUpsertInput
+  ): Promise<ApiResult<{ id: number; secureStorage: boolean }>>;
   shopAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
-  shopAccountReveal(payload: { id: number; field: ShopAccountSecretKey }): Promise<ApiResult<{ value: string }>>;
-  shopAccountBatchUpdate(payload: ShopAccountBatchUpdateInput): Promise<ApiResult<ShopAccountBatchUpdateResult>>;
+  shopAccountReveal(payload: {
+    id: number;
+    field: ShopAccountSecretKey;
+  }): Promise<ApiResult<{ value: string }>>;
+  shopAccountBatchUpdate(
+    payload: ShopAccountBatchUpdateInput
+  ): Promise<ApiResult<ShopAccountBatchUpdateResult>>;
+  // ---- 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法）----
+  companyDbEnsure(): Promise<ApiResult<unknown>>;
+  companyList(payload?: { search?: string; status?: string }): Promise<ApiResult<CompanyItem[]>>;
+  companyGet(payload: { id: number }): Promise<ApiResult<CompanyDetail | null>>;
+  companySummary(): Promise<ApiResult<CompanySummary>>;
+  companyUpsert(payload: CompanyUpsertInput): Promise<ApiResult<{ id: number }>>;
+  companyDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  companyProfileUpsert(payload: CompanyProfileUpsertInput): Promise<ApiResult<{ id: number }>>;
+  companyProfileDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  // ---- 产品库（产品主数据；编码为跨域关联锚点，与 oi_styles.code 同口径）----
+  productDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+  // ---- 主数据字典（颜色 / 尺码）----
+  mdColorList(): Promise<ApiResult<{ colors: MdColorItem[] }>>;
+  /** 新增颜色（幂等：同名返回既有行；纯数字色号会被拒绝） */
+  mdColorCreate(payload: {
+    name: string;
+    hex?: string;
+  }): Promise<ApiResult<{ color: MdColorItem | null; created: boolean }>>;
+  /** 更新某个字典色的色块 hex（只改显示，不改名字） */
+  mdColorUpdateHex(payload: {
+    id: number;
+    hex: string;
+  }): Promise<ApiResult<{ color: MdColorItem | null }>>;
+  /** 颜色板（字典 ∪ 业务表里出现过的色名 + 用量） */
+  mdColorBoard(): Promise<ApiResult<{ rows: ColorBoardItem[] }>>;
+  /** 颜色合并（真改业务数据；保留名不许是数字色号） */
+  mdColorMerge(payload: {
+    source: string;
+    target: string;
+  }): Promise<ApiResult<{ result: ColorMergeOutcome }>>;
+  mdSizeList(): Promise<ApiResult<{ sizes: MdSizeItem[] }>>;
+  productList(payload?: {
+    search?: string;
+    status?: ProductStatus | '';
+    supplierId?: number;
+    withoutSupplier?: boolean;
+    onlyMissingWeight?: boolean;
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResult<{ rows: ProductListItem[]; total: number }>>;
+  productGet(payload: { id: number }): Promise<ApiResult<ProductListItem | null>>;
+  productUpsert(payload: ProductUpsertInput): Promise<ApiResult<{ id: number; created: boolean }>>;
+  productDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+  productSummary(): Promise<ApiResult<ProductSummary>>;
+  productImport(payload: {
+    items: ProductImportRowInput[];
+    mode?: 'upsert' | 'insertOnly';
+  }): Promise<ApiResult<ProductImportOutcome>>;
+  /** 导出 / 模板：渲染层给「每格写什么 + 每行的图路径」，主进程用 exceljs 生成并嵌图 */
+  productExport(payload: {
+    sheetName: string;
+    headers: string[];
+    rows: { cells: string[]; imagePath?: string }[];
+    imageColumn: number;
+    defaultName?: string;
+  }): Promise<ApiResult<{ filePath: string; embedded: number; imagesFailed: number }>>;
+  /** 抽 xlsx 里的**嵌入图**（浮动对象；SheetJS 读不到，只有主进程 exceljs 能） */
+  productExtractImages(payload: {
+    buffer: ArrayBuffer;
+    sheetName: string;
+    headerRow: number;
+  }): Promise<
+    ApiResult<{
+      byRow: Record<string, { imageId: number; localPath: string }>;
+      skips: { rowNo: number; reason: string }[];
+      total: number;
+    }>
+  >;
+  // ---- 店铺商品ID → 产品映射（P3；pl_shop_sku）----
+  productSkuList(payload?: {
+    search?: string;
+    status?: SkuMapStatus | '';
+    shopId?: number;
+    /** 反向过滤：只看某一款关联了哪些店铺商品（产品侧「已关联商品」）。0/缺省 = 不过滤 */
+    productId?: number;
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResult<{ rows: ShopSkuRow[]; total: number }>>;
+  productSkuSummary(): Promise<ApiResult<SkuMapSummary>>;
+  productSkuQueue(payload?: {
+    limit?: number;
+    maxRows?: number;
+  }): Promise<ApiResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>>;
+  productSkuMap(payload: {
+    rows: SkuMapInputPayload[];
+    /** 是否顺手采纳商品图（缺省 true；向导取消勾选时传 false） */
+    adoptImages?: boolean;
+  }): Promise<
+    ApiResult<{
+      created: number;
+      updated: number;
+      reassigned: number;
+      adopted: number; // 认款顺手采纳为款主图的张数（只补空，已有主图的款不动）
+      failed: { itemId: string; message: string }[];
+    }>
+  >;
+  productSkuInvalidate(payload: { id: number }): Promise<ApiResult<{ changed: boolean }>>;
+
+  /** 存量补图（只补空、不覆盖；打开「款与商品」时顺带跑一轮） */
+  productSkuRepairImages(payload?: {
+    limit?: number;
+  }): Promise<ApiResult<{ adopted: number; pending: number }>>;
+  // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
+  productVariantList(payload: { productIds: number[] }): Promise<ApiResult<{ rows: VariantRow[] }>>;
+  productVariantUpsert(
+    payload: VariantUpsertInput
+  ): Promise<ApiResult<{ id: number; created: boolean }>>;
+  productVariantDelete(payload: { id: number }): Promise<ApiResult<{ removed: number }>>;
+  productBatchUpdate(payload: ProductBatchUpdateInput): Promise<ApiResult<{ updated: number }>>;
+  // ---- 产品图片（pl_images / pl_item_images；落盘 userData/product-images/）----
+  productImageAttach(payload: {
+    productId: number;
+    /** 用户经对话框选择的图片文件路径 */
+    srcPath: string;
+  }): Promise<ApiResult<{ imageId: number; localPath: string; reused: boolean }>>;
+  productImageDetach(payload: { productId: number }): Promise<ApiResult<{ changed: boolean }>>;
+  productItemImageSet(payload: {
+    itemId: string;
+    srcPath: string;
+  }): Promise<ApiResult<{ imageId: number; localPath: string; reused: boolean; itemId: string }>>;
+  productItemImageClear(payload: { itemId: string }): Promise<ApiResult<{ removed: number }>>;
+  productItemImagePool(payload: {
+    itemIds: string[];
+  }): Promise<ApiResult<{ pool: Record<string, ItemImagePoolEntry> }>>;
+  // ---- 店铺商品清单（pl_shop_sku 扩展视图，支持一对多关联；商品清单页签的数据面）----
+  // 与 productSku* 的区别：这里按 item_id 聚合（一件商品 → 多个产品），单值映射走 productSkuMap。
+  shopProductImport(payload: {
+    items: { itemId: string; shopId: number; imageUrl: string }[];
+  }): Promise<ApiResult<{ imported: number; updated: number }>>;
+  shopProductList(payload?: {
+    offset?: number;
+    limit?: number;
+    search?: string;
+  }): Promise<ApiResult<{ rows: ShopProductItem[]; total: number }>>;
+  shopProductDelete(payload: { itemId: string }): Promise<ApiResult<{ removed: number }>>;
+  shopProductRelations(payload: { itemId: string }): Promise<ApiResult<ShopProductRelation[]>>;
+  shopProductRelationAdd(payload: {
+    itemId: string;
+    productId: number;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+  shopProductRelationDelete(payload: { id: number }): Promise<ApiResult<{ removed: number }>>;
+  // ---- 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）----
+  // 历史文本（订单 / 采购 / 利润三处）不改写，靠名称归一映射旁挂关联（G2）。
+  shopDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+  shopList(payload?: {
+    search?: string;
+    platform?: string;
+    status?: ShopStatus | '';
+    offset?: number;
+    limit?: number;
+  }): Promise<ApiResult<{ rows: ShopListItem[]; total: number }>>;
+  shopGet(payload: { id: number }): Promise<ApiResult<ShopListItem | null>>;
+  shopUpsert(payload: ShopUpsertInput): Promise<ApiResult<{ id: number; created: boolean }>>;
+  shopSummary(): Promise<ApiResult<ShopSummary>>;
+  shopUnmapped(): Promise<ApiResult<UnmappedShopRow[]>>;
+  /** 门 1（店铺归一）：只数**订单里**出现过的店名（与 `shopUnmapped` 的差别只有作用域） */
+  shopGate(): Promise<ApiResult<ShopGate>>;
+  shopMap(payload: {
+    raw: string;
+    refId?: number;
+    ignored?: boolean;
+    kind?: NameMapKind;
+    note?: string;
+  }): Promise<ApiResult<{ key: string; refId: number; ignored: boolean }>>;
+  shopUnmap(payload: { raw: string; kind?: NameMapKind }): Promise<ApiResult<{ removed: number }>>;
   // ---- 集中邮件收件箱（IMAP 只读同步；授权码只进不出）----
   mailDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
   mailAccountList(): Promise<ApiResult<MailAccountItem[]>>;
@@ -257,7 +669,9 @@ export interface ElectronApi {
   mailSyncNow(payload?: { accountId?: number }): Promise<ApiResult<{ queued: number[] }>>;
   mailSyncCancel(payload: { accountId: number }): Promise<ApiResult<{ cancelled: boolean }>>;
   mailSyncState(): Promise<ApiResult<{ active: number[]; queued: number[] }>>;
-  mailMessagesList(payload?: MailMessageListFilter): Promise<ApiResult<{ items: MailMessageItem[]; total: number }>>;
+  mailMessagesList(
+    payload?: MailMessageListFilter
+  ): Promise<ApiResult<{ items: MailMessageItem[]; total: number }>>;
   mailMessageGet(payload: { id: number }): Promise<ApiResult<MailMessageDetail | null>>;
   /** 本地已读标记（IMAP 只读；ids 为空 + accountId/all 时按账号批量） */
   mailMessageRead(payload: {
@@ -267,7 +681,10 @@ export interface ElectronApi {
     read?: boolean;
   }): Promise<ApiResult<{ changed: number; unread: number }>>;
   /** 按需补拉正文（M2-1：超大邮件只缓存了预览，点开时现拉原文） */
-  mailBodyFetch(payload: { accountId?: number; messageId: number }): Promise<ApiResult<MailMessageDetail | null>>;
+  mailBodyFetch(payload: {
+    accountId?: number;
+    messageId: number;
+  }): Promise<ApiResult<MailMessageDetail | null>>;
   /** 附件另存（M2-2：弹系统保存对话框后落盘；用户取消时 canceled=true） */
   mailAttachmentSave(payload: {
     messageId: number;
@@ -295,12 +712,60 @@ export interface ElectronApi {
   mailFtsStatus(): Promise<ApiResult<MailFtsStatus>>;
   /** 重建全文索引（M3-2） */
   mailFtsRebuild(): Promise<ApiResult<{ total: number; indexed: number }>>;
-  mailPurge(payload?: { accountId?: number; days?: number }): Promise<ApiResult<{ deleted: number }>>;
+  mailPurge(payload?: {
+    accountId?: number;
+    days?: number;
+  }): Promise<ApiResult<{ deleted: number }>>;
   mailStats(): Promise<ApiResult<MailStats>>;
+  /** 待办归集（罚单 / 纠纷·仲裁 / 订单关闭，按订单号合并） */
+  mailTodoList(payload?: { accountIds?: number[] }): Promise<ApiResult<MailTodoResult>>;
+  /** 手工划掉一条待办（messageId 是水位线：之后的新邮件会浮出） */
+  mailTodoDismiss(payload: { key: string; messageId?: number; kind?: string }): Promise<
+    ApiResult<{ dismissed: boolean; key: string }>
+  >;
+  /** 撤销划掉 */
+  mailTodoRestore(payload: { key: string }): Promise<ApiResult<{ restored: number }>>;
+  /** 下发自动收信间隔（0 = 关闭）；定时器在主进程，见 electron/mail-scheduler.ts */
+  mailAutoSyncConfig(payload: { minutes: number }): Promise<ApiResult<{ minutes: number }>>;
   /** 邮箱服务商预设（授权码获取指引 / 默认连接参数，不含凭据） */
   mailProviderList(): Promise<ApiResult<MailProviderPresetView[]>>;
+  /** ---- 运价表快照（宿主中立层）---- */
+  shipRateSnapshotSave(payload: {
+    table: unknown;
+    sourceFile?: string;
+    sheetName?: string;
+    effectiveFrom?: string;
+  }): Promise<ApiResult<{ id: number; created: boolean; effectiveFrom: string }>>;
+  shipRateSnapshotList(payload?: { limit?: number }): Promise<
+    ApiResult<{
+      rows: {
+        id: number;
+        effectiveFrom: string;
+        sourceFile: string;
+        sheetName: string;
+        countries: number;
+        cards: number;
+        importedAt: string;
+      }[];
+    }>
+  >;
+  shipRateSnapshotCalc(payload?: { limit?: number }): Promise<
+    ApiResult<{
+      rows: {
+        id: number;
+        effectiveFrom: string;
+        sourceFile: string;
+        sheetName: string;
+        table: unknown;
+      }[];
+    }>
+  >;
   /** 订阅邮件同步事件（主进程→渲染层单向）；返回退订函数 */
   onMailSyncEvent(cb: (event: MailSyncEvent) => void): () => void;
+  /** 订阅「打开某个模块」意图（通知点击等入口）；返回退订函数 */
+  onOpenModule(cb: (event: OpenModuleEvent) => void): () => void;
+  /** 订阅侧栏徽标（`count: null` = 撤掉徽标）；返回退订函数 */
+  onNavBadge(cb: (event: NavBadgeEvent) => void): () => void;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   pluginsScan(): Promise<ApiResult<PluginScanResult>>;
   pluginsReadEntry(payload: { id: string; entry: string }): Promise<ApiResult<{ code: string }>>;
@@ -308,12 +773,396 @@ export interface ElectronApi {
   pluginsOpenDir(): Promise<ApiResult<string>>;
   // ---- 插件市场（Market：catalog 拉取 + zip 安装）----
   pluginMarketCatalog(payload: { url: string }): Promise<ApiResult<MarketCatalog>>;
-  pluginMarketInstall(payload: { item: MarketPluginInfo; force?: boolean }): Promise<ApiResult<{ id: string; version: string }>>;
+  pluginMarketInstall(payload: {
+    item: MarketPluginInfo;
+    force?: boolean;
+  }): Promise<ApiResult<{ id: string; version: string }>>;
   // 软件更新（GitHub Releases 自动更新）
   checkForUpdates(): Promise<ApiResult<{ mode: 'dev' | 'release'; currentVersion: string }>>;
   quitAndInstallUpdate(): Promise<ApiResult<void>>;
   /** 订阅更新事件（主进程→渲染层单向）；返回退订函数 */
   onUpdaterEvent(cb: (event: UpdaterEventPayload) => void): () => void;
+
+  openExternal(url: string): Promise<ApiResult<void>>;
+
+  orderParcelDetail(payload: { orderNo: string }): Promise<ApiResult<ParcelDetail>>;
+
+  orderParcelCounts(payload: { orderNos: string[] }): Promise<ApiResult<ParcelCountMap>>;
+
+  orderParcelTotals(payload: { orderNos: string[] }): Promise<ApiResult<ParcelTotalsMap>>;
+
+  orderParcelCreate(payload: {
+    orderNo: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 分；`null`/缺省 = 还不知道（不是 0） */
+    shipCents?: number | null;
+    /** 克；`null`/缺省 = 还不知道 */
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail & { id: number }>>;
+
+  orderParcelUpdate(payload: {
+    id: number;
+    orderNo?: string;
+    label?: string;
+    trackingNo?: string;
+    carrier?: string;
+    note?: string;
+    /** 只传要改的字段：`undefined` = 不改，`null` = 清成"还不知道" */
+    shipCents?: number | null;
+    weightG?: number | null;
+  }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderParcelDelete(payload: {
+    id: number;
+    orderNo?: string;
+  }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderParcelSetLine(payload: {
+    parcelId: number;
+    orderItemId: number;
+    qty: number;
+    orderNo?: string;
+  }): Promise<ApiResult<ParcelDetail | null>>;
+
+  orderReplayMappings(payload?: { dryRun?: boolean }): Promise<ApiResult<SkuMappingReplayStats>>;
+
+  onAeItemsIngested(cb: (event: AeItemsIngestedEvent) => void): () => void;
+
+  onMangoIngested(cb: (event: MangoIngestedEvent) => void): () => void;
+
+  purchaseTaken(): Promise<ApiResult<TakenRow[]>>;
+
+  purchaseOrderCoverage(): Promise<ApiResult<OrderCoveragePayload>>;
+
+  purchaseStyleColors(payload: {
+    styleCodes: string[];
+  }): Promise<ApiResult<{ [styleCode: string]: StyleColorOptionRow[] }>>;
+
+  styleColorRename(payload: {
+    productId: number;
+    styleCode: string;
+    from: string;
+    to: string;
+  }): Promise<
+    ApiResult<{ renamed: boolean; styleColorId?: number; reason?: string; colorAlias?: unknown }>
+  >;
+
+  ledgerDbEnsure(): Promise<ApiResult<{ ok: boolean }>>;
+
+  ledgerEligibleShops(payload: { period: string }): Promise<ApiResult<LedgerEligibleShops>>;
+
+  ledgerCategoryList(payload?: {
+    kind?: LedgerKind;
+    includeArchived?: boolean;
+  }): Promise<ApiResult<LedgerCategoryRow[]>>;
+
+  ledgerCategoryUpsert(payload: {
+    id?: number;
+    kind?: LedgerKind;
+    name?: string;
+    sort?: number;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerRuleList(): Promise<ApiResult<LedgerRuleRow[]>>;
+
+  ledgerRuleUpsert(payload: {
+    id?: number;
+    name?: string;
+    basis?: LedgerBasis;
+    shopIds?: number[];
+    ratios?: number[];
+    note?: string;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerEntryList(payload?: LedgerEntryFilter): Promise<ApiResult<LedgerEntryRow[]>>;
+
+  ledgerEntryGet(payload: { id: number }): Promise<ApiResult<LedgerEntryDetail | null>>;
+
+  ledgerEntryUpsert(
+    payload: LedgerEntryInput
+  ): Promise<
+    ApiResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>
+  >;
+
+  ledgerEntryVoid(payload: {
+    id: number;
+    reason: string;
+  }): Promise<ApiResult<{ id: number; voided: boolean }>>;
+
+  ledgerEntryRestore(payload: {
+    id: number;
+  }): Promise<ApiResult<{ id: number; restored: boolean }>>;
+
+  ledgerEntriesVoid(payload: {
+    ids: number[];
+    reason: string;
+  }): Promise<ApiResult<{ voided: number; ids: number[] }>>;
+
+  ledgerSummary(payload?: {
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerSummary>>;
+
+  ledgerPartyList(payload?: {
+    includeArchived?: boolean;
+    keyword?: string;
+  }): Promise<ApiResult<LedgerPartyRow[]>>;
+
+  ledgerPartyUpsert(payload: {
+    id?: number;
+    name?: string;
+    kind?: LedgerPartyKind;
+    phone?: string;
+    note?: string;
+    archived?: boolean;
+  }): Promise<ApiResult<{ id: number; created: boolean }>>;
+
+  ledgerPartyMerge(payload: {
+    fromId: number;
+    toId: number;
+    note?: string;
+  }): Promise<
+    ApiResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>
+  >;
+
+  ledgerPartyLedger(payload?: {
+    includeArchived?: boolean;
+    partyId?: number;
+  }): Promise<ApiResult<LedgerPartyLedgerRow[]>>;
+
+  ledgerSettleCreate(payload: {
+    partyId: number;
+    settleDate: string;
+    direction: 'pay' | 'receive' | 'offset';
+    entryIds: number[];
+    method?: string;
+    note?: string;
+  }): Promise<
+    ApiResult<{ id: number; amountCents: number; entryCount: number; cashCents: number }>
+  >;
+
+  ledgerSettleList(payload?: { partyId?: number }): Promise<ApiResult<LedgerSettlementRow[]>>;
+
+  ledgerSettleVoid(payload: {
+    id: number;
+    reason: string;
+  }): Promise<ApiResult<{ id: number; voided: boolean }>>;
+
+  ledgerEntryRepatchPreview(payload: {
+    entryIds: number[];
+  }): Promise<ApiResult<LedgerRepatchPreview>>;
+
+  ledgerEntryRepatch(payload: {
+    entryIds: number[];
+    toPartyId: number;
+    mode: LedgerRepatchMode;
+    reason?: string;
+  }): Promise<ApiResult<LedgerRepatchResult>>;
+
+  ledgerShopBreakdown(payload: {
+    shopId: number;
+    period?: string;
+    from?: string;
+    to?: string;
+  }): Promise<ApiResult<LedgerShopBreakdown>>;
+
+  ledgerExportExcel(
+    payload: LedgerExportInput
+  ): Promise<ApiResult<{ filePath: string; rows: number }>>;
+
+  ledgerNameResolve(payload: {
+    party?: string[];
+    category?: string[];
+    shop?: string[];
+  }): Promise<ApiResult<LedgerNameResolveResult>>;
+
+  ledgerEntryBatchCreate(payload: { entries: LedgerImportEntryInput[] }): Promise<
+    ApiResult<{
+      created: number;
+      ids: number[];
+      allocations: number;
+      /** 本批自动新建的相关人 / 科目名字（界面要如实说出"多出了哪些名字"） */
+      createdParties: string[];
+      createdCategories: string[];
+    }>
+  >;
+
+  ledgerImportTemplate(payload: {
+    sheets: LedgerTemplateSheetInput[];
+    defaultName: string;
+  }): Promise<ApiResult<{ filePath: string; sheets: number }>>;
+
+  toolAccountList(payload?: { kind?: ToolAccountKind | '' }): Promise<ApiResult<ToolAccountItem[]>>;
+
+  toolAccountUpsert(payload: ToolAccountUpsertInput): Promise<ApiResult<{ id: number }>>;
+
+  toolAccountDelete(payload: { id: number }): Promise<ApiResult<{ deleted: boolean }>>;
+
+  toolAccountReveal(payload: { id: number }): Promise<ApiResult<{ value: string }>>;
+
+  productCostSet(payload: {
+    code: string;
+    costCents: number;
+  }): Promise<ApiResult<{ found: boolean; updated: boolean }>>;
+
+  productPricedCodes(): Promise<ApiResult<{ codes: string[] }>>;
+
+  productSizeShiftLoad(payload: {
+    codes: string[];
+  }): Promise<ApiResult<{ shifts: Record<string, number>; chains: Record<string, string[]> }>>;
+
+  productSizeShiftSet(payload: {
+    styleCode: string;
+    shift: number;
+    note?: string;
+  }): Promise<ApiResult<{ styleCode: string; shift: number }>>;
+
+  productNextCode(): Promise<ApiResult<{ code: string }>>;
+
+  productMoveSupplier(payload: ProductMoveSupplierInput): Promise<ApiResult<{ changed: boolean }>>;
+
+  shopItemsList(payload?: {
+    shopId?: number;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    onlyUnconfirmed?: boolean;
+    productId?: number;
+  }): Promise<ApiResult<{ rows: ShopItemRow[]; total: number }>>;
+
+  shopItemsSummary(): Promise<ApiResult<ShopItemSummaryRow[]>>;
+
+  shopItemsImport(payload: {
+    shopId?: number;
+    ids?: string[];
+  }): Promise<ApiResult<{ received: number; inserted: number; updated: number; skipped: number }>>;
+
+  shopItemImageFetch(payload: {
+    id: number;
+    productId?: number;
+    adoptMain?: boolean;
+    colors?: { color: string; imageUrl: string }[];
+  }): Promise<ApiResult<ShopItemImageFetchResult>>;
+
+  shopItemsDelete(payload: { id: number }): Promise<ApiResult<{ removed: boolean }>>;
+
+  // ---- 图案槽位域（POD；M3/M4）----
+  podWorklist(payload?: {
+    filter?: 'all' | 'unbound' | 'bound' | 'collapsed';
+    search?: string;
+    page?: number;
+    pageSize?: number;
+  }): Promise<ApiResult<PodWorklistResult>>;
+
+  podPatternList(payload?: {
+    search?: string;
+    status?: string;
+  }): Promise<ApiResult<PodPatternRow[]>>;
+
+  podPatternCreate(payload: {
+    code: string;
+    name?: string;
+    artworkImageId?: number;
+    previewImageId?: number;
+    note?: string;
+    images?: { fingerprint: string; imageId?: number }[];
+    source?: string;
+  }): Promise<ApiResult<{ id: number; created: boolean; linked: number }>>;
+
+  podPatternUpdate(payload: {
+    id: number;
+    name?: string;
+    artworkImageId?: number;
+    previewImageId?: number;
+    note?: string;
+    status?: string;
+  }): Promise<ApiResult<{ changed: number }>>;
+
+  podPatternImage(payload: {
+    srcPath?: string;
+    url?: string;
+  }): Promise<
+    ApiResult<{ imageId: number; localPath: string; fingerprint: string; reused: boolean }>
+  >;
+
+  podSlotImages(payload: { urls: string[] }): Promise<ApiResult<{ items: PodSlotImageItem[] }>>;
+
+  podBind(payload: {
+    patternId: number;
+    slots: { variantKey: string; imageKey?: string; skuCode?: string }[];
+    source?: 'image' | 'name' | 'manual';
+    state?: 'bound' | 'suspected_merge';
+  }): Promise<ApiResult<{ bound: number; patternId: number }>>;
+
+  podUnbind(payload: { keys: string[] }): Promise<ApiResult<{ removed: number }>>;
+
+  podImageLink(payload: {
+    patternId: number;
+    images: { fingerprint: string; imageId?: number }[];
+    styleColorIds?: number[];
+    source?: string;
+  }): Promise<ApiResult<PodImageLinkOutcome>>;
+
+  podImageUnlink(payload: {
+    fingerprints: string[];
+    styleColorIds?: number[];
+  }): Promise<ApiResult<{ removed: number; removedStyleColors: number }>>;
+
+  podPatternMerge(payload: {
+    targetId: number;
+    sourceIds: number[];
+  }): Promise<ApiResult<PodPatternMergeOutcome>>;
+
+  podPatternMergeUndo(payload: { batchId: string }): Promise<ApiResult<PodPatternMergeUndo>>;
+
+  podPatternMergeHistory(payload?: { limit?: number }): Promise<ApiResult<PodPatternMergeRecord[]>>;
+
+  podNeedData(): Promise<ApiResult<PodNeedData>>;
+
+  podReportExport(payload: {
+    rows: PodReportRowInput[];
+    date?: string;
+    piecesPerSheet: number;
+    unboundPieces?: number;
+    unboundRows?: number;
+    assumedRows?: number;
+  }): Promise<ApiResult<PodReportExportResult>>;
+
+  podBatchList(payload?: { patternId?: number; limit?: number }): Promise<ApiResult<PodBatchRow[]>>;
+
+  podBatchCreate(payload: {
+    patternId: number;
+    sheets: number;
+    piecesPerSheet: number;
+    supplier?: string;
+    costCents?: number;
+    orderedAt?: string;
+    note?: string;
+    arrive?: boolean;
+  }): Promise<ApiResult<{ batchId: number; arrivedPieces: number }>>;
+
+  podBatchArrive(payload: {
+    batchId: number;
+  }): Promise<ApiResult<{ arrived: boolean; arrivedPieces: number }>>;
+
+  podPrint(payload: {
+    patternId: number;
+    pieces: number;
+    refOrderItemId?: number;
+  }): Promise<ApiResult<{ printed: number; allocations: { batchId: number; pieces: number }[] }>>;
+
+  podAdjust(payload: {
+    batchId: number;
+    deltaPieces: number;
+    note?: string;
+  }): Promise<ApiResult<{ adjusted: number }>>;
+
+  podBalance(): Promise<ApiResult<PodBalanceRow[]>>;
 }
 
 export const ipc: ElectronApi = (window as unknown as { electronAPI: ElectronApi }).electronAPI;
@@ -322,7 +1171,9 @@ export const ipc: ElectronApi = (window as unknown as { electronAPI: ElectronApi
 export const isMac: boolean = ipc.platform === 'darwin';
 
 /** 窗口最小化 / 最大化切换 / 关闭 */
-export function controlWindow(action: 'minimize' | 'maximize' | 'close'): Promise<ApiResult<unknown>> {
+export function controlWindow(
+  action: 'minimize' | 'maximize' | 'close'
+): Promise<ApiResult<unknown>> {
   return ipc.controlWindow(action);
 }
 
@@ -356,7 +1207,7 @@ export function marketCatalogFetch(url: string): Promise<ApiResult<MarketCatalog
 /** 安装/更新市场插件（下载 zip → sha256 → 解压校验 → 落盘 plugins/<id>/） */
 export function marketPluginInstall(
   item: MarketPluginInfo,
-  force = false,
+  force = false
 ): Promise<ApiResult<{ id: string; version: string }>> {
   return ipc.pluginMarketInstall({ item, force });
 }
@@ -367,35 +1218,9 @@ export function aeDbEnsure(): Promise<ApiResult<unknown>> {
   return ipc.aeDbEnsure();
 }
 
-/** 订单明细列表（分页 + 单号/店铺关键字） */
-export function aeOrderList(payload?: { offset?: number; limit?: number; search?: string }): Promise<ApiResult<{ rows: AeOrderListItem[]; total: number }>> {
-  return ipc.aeOrderList(payload);
-}
-
-/** 汇总（分币种，收入/费用分列） */
-export function aeSummary(): Promise<ApiResult<AeSummary>> {
-  return ipc.aeSummary();
-}
-
 /** 接收端运行状态（端口 / 最近入库 / 错误） */
 export function aeReceiverStatus(): Promise<ApiResult<AeReceiverStatus>> {
   return ipc.aeReceiverStatus();
-}
-
-// ---- M1：利润引擎 / 成本衔接 / 汇率（语义化查询） ----
-/** 利润总览（CNY 基准分层利润 + 趋势 + TOP + 费用构成 + 成本覆盖率） */
-export function aeProfitStats(payload?: { granularity?: 'day' | 'month'; rangeDays?: number }): Promise<ApiResult<AeProfitOverview>> {
-  return ipc.aeProfitStats(payload);
-}
-
-/** 成本快照全量替换（items 来自 purchaseCostSnapshot 只读导出） */
-export function aeCostMapImport(items: AeCostMapImportItem[]): Promise<ApiResult<{ replaced: number }>> {
-  return ipc.aeCostMapImport({ items });
-}
-
-/** 成本表全量（成本管理面板） */
-export function aeCostMapList(): Promise<ApiResult<AeCostMapItem[]>> {
-  return ipc.aeCostMapList();
 }
 
 /** 汇率全量 */
@@ -403,14 +1228,48 @@ export function aeRateList(): Promise<ApiResult<AeRateItem[]>> {
   return ipc.aeRateList();
 }
 
+/** 结算明细落库（渲染层已解析并校验过；主进程只归一 + 存） */
+export function settleImport(payload: { rows: unknown[] }) {
+  return ipc.settleImport(payload);
+}
+
+/** 按订单号取结算汇总（利润页「精准轨」用） */
+export function settleOrders(payload: { orderNos: string[] }) {
+  return ipc.settleOrders(payload);
+}
+
+/** 结算明细概览（导入结果 / 诊断展示） */
+export function settleStats() {
+  return ipc.settleStats();
+}
+
 /** 汇率 upsert（1 fromCurrency = rateToCny CNY） */
-export function aeRateUpsert(fromCurrency: string, rateToCny: number): Promise<ApiResult<{ ok: boolean }>> {
+export function aeRateUpsert(
+  fromCurrency: string,
+  rateToCny: number
+): Promise<ApiResult<{ ok: boolean }>> {
   return ipc.aeRateUpsert({ fromCurrency, rateToCny });
 }
 
 /** 拿货对账只读成本快照导出（D3 单向通道，供本模块导入 ae_cost_map） */
-export function purchaseCostSnapshot(): Promise<ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>> {
+export function purchaseCostSnapshot(): Promise<
+  ApiResult<{ items: PurchaseCostSnapshotItem[]; count: number }>
+> {
   return ipc.purchaseCostSnapshot();
+}
+
+/**
+ * 待拿货缺口（只读）：**全部订单** − 已提交拿货单 − 已忽略，按「款|色|码」。
+ * 拣货单取它的 `taken` 字段当"已拿"（`src/lib/picking.aggregatePicking`）——
+ * 与「拿货」页同源，两处不各算一次（见 `purchase-db.outstanding`）。
+ */
+export function purchaseOutstanding(): Promise<ApiResult<OutstandingRow[]>> {
+  return ipc.purchaseOutstanding();
+}
+
+/** 忽略清单（只读）：不想再补货的「款|色」，整组生效 —— 拣货单据此把该组标「已忽略」 */
+export function purchaseIgnoreList(): Promise<ApiResult<IgnoreRow[]>> {
+  return ipc.purchaseIgnoreList();
 }
 
 // ---- 店铺账号管家（shop-accounts 视图插件）----
@@ -445,7 +1304,7 @@ export function shopAccountSecurity(): Promise<ApiResult<{ secureStorage: boolea
 
 /** 新增/更新店铺套（secrets：缺省=保持、空串=清空、非空=覆盖） */
 export function shopAccountUpsert(
-  payload: ShopAccountUpsertInput,
+  payload: ShopAccountUpsertInput
 ): Promise<ApiResult<{ id: number; secureStorage: boolean }>> {
   return ipc.shopAccountUpsert(payload);
 }
@@ -458,16 +1317,65 @@ export function shopAccountDelete(id: number): Promise<ApiResult<{ deleted: bool
 /** 按需解密单个敏感字段（复制/查看用） */
 export function shopAccountReveal(
   id: number,
-  field: ShopAccountSecretKey,
+  field: ShopAccountSecretKey
 ): Promise<ApiResult<{ value: string }>> {
   return ipc.shopAccountReveal({ id, field });
 }
 
 /** 批量修改店铺套（非敏感字段，含整批事务） */
 export function shopAccountBatchUpdate(
-  payload: ShopAccountBatchUpdateInput,
+  payload: ShopAccountBatchUpdateInput
 ): Promise<ApiResult<ShopAccountBatchUpdateResult>> {
   return ipc.shopAccountBatchUpdate(payload);
+}
+
+// ---------------------------------------------------------------------------
+// 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法）
+// ---------------------------------------------------------------------------
+
+/** 幂等建表（企业管理视图首次激活时调用） */
+export function companyDbEnsure(): Promise<ApiResult<unknown>> {
+  return ipc.companyDbEnsure();
+}
+
+/** 企业列表（关键字/状态过滤；含已维护合规类型，不含明细） */
+export function companyList(payload?: {
+  search?: string;
+  status?: CompanyStatus | '';
+}): Promise<ApiResult<CompanyItem[]>> {
+  return ipc.companyList(payload);
+}
+
+/** 企业详情（含欧代 / 土代 / 德国包装法明细） */
+export function companyGet(id: number): Promise<ApiResult<CompanyDetail | null>> {
+  return ipc.companyGet({ id });
+}
+
+/** 汇总（企业总数 / 状态分布 / 各合规类型覆盖数 / 30 天内到期条数） */
+export function companySummary(): Promise<ApiResult<CompanySummary>> {
+  return ipc.companySummary();
+}
+
+/** 新增/更新企业 */
+export function companyUpsert(payload: CompanyUpsertInput): Promise<ApiResult<{ id: number }>> {
+  return ipc.companyUpsert(payload);
+}
+
+/** 删除企业（级联删除其合规资料） */
+export function companyDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.companyDelete({ id });
+}
+
+/** 新增/更新合规资料（type 白名单：eu_rep / tr_rep / de_packaging） */
+export function companyProfileUpsert(
+  payload: CompanyProfileUpsertInput
+): Promise<ApiResult<{ id: number }>> {
+  return ipc.companyProfileUpsert(payload);
+}
+
+/** 删除合规资料 */
+export function companyProfileDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.companyProfileDelete({ id });
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +1394,7 @@ export function mailAccountList(): Promise<ApiResult<MailAccountItem[]>> {
 
 /** 接入/更新邮箱；授权码经主进程加密落库，写入后永不回读 */
 export function mailAccountUpsert(
-  payload: MailAccountUpsertInput,
+  payload: MailAccountUpsertInput
 ): Promise<ApiResult<{ id: number }>> {
   return ipc.mailAccountUpsert(payload);
 }
@@ -525,7 +1433,7 @@ export function mailSyncState(): Promise<ApiResult<{ active: number[]; queued: n
 
 /** 邮件列表（纯本地查询，不触网） */
 export function mailMessagesList(
-  payload?: MailMessageListFilter,
+  payload?: MailMessageListFilter
 ): Promise<ApiResult<{ items: MailMessageItem[]; total: number }>> {
   return ipc.mailMessagesList(payload || {});
 }
@@ -560,7 +1468,7 @@ export function mailMessageRead(payload: {
  */
 export function mailBodyFetch(
   messageId: number,
-  accountId?: number,
+  accountId?: number
 ): Promise<ApiResult<MailMessageDetail | null>> {
   return ipc.mailBodyFetch({ messageId, accountId });
 }
@@ -572,7 +1480,7 @@ export function mailBodyFetch(
  */
 export function mailAttachmentSave(
   messageId: number,
-  attachmentId: number,
+  attachmentId: number
 ): Promise<ApiResult<{ canceled: boolean; path: string; size: number }>> {
   return ipc.mailAttachmentSave({ messageId, attachmentId });
 }
@@ -583,7 +1491,7 @@ export function mailAttachmentSave(
  */
 export function mailAttachmentPreview(
   messageId: number,
-  attachmentId: number,
+  attachmentId: number
 ): Promise<ApiResult<MailAttachmentPreview>> {
   return ipc.mailAttachmentPreview({ messageId, attachmentId });
 }
@@ -591,7 +1499,7 @@ export function mailAttachmentPreview(
 /** 附件用系统默认应用打开（M3-1）：未缓存时先落盘到缓存目录再调用 shell.openPath */
 export function mailAttachmentOpen(
   messageId: number,
-  attachmentId: number,
+  attachmentId: number
 ): Promise<ApiResult<{ path: string }>> {
   return ipc.mailAttachmentOpen({ messageId, attachmentId });
 }
@@ -639,12 +1547,1174 @@ export function mailStats(): Promise<ApiResult<MailStats>> {
   return ipc.mailStats();
 }
 
+/**
+ * 待办归集：罚单 / 纠纷·仲裁 / 订单关闭 三类，按订单号合并成一单一条。
+ * 判定与「订单号从主题还是正文取」全部在主进程 `electron/mail-triage.ts`：
+ * 渲染层只做展示，不复制规则 —— 否则两处口径迟早对不上（AGENTS.md 铁律 5）。
+ */
+export function mailTodoList(payload?: { accountIds?: number[] }): Promise<ApiResult<MailTodoResult>> {
+  return ipc.mailTodoList(payload || {});
+}
+
+/**
+ * 手工划掉一条待办。
+ * `messageId` 必须传**这条待办当前最新的那封**（`MailTodoItem.messageId`）：
+ * 主进程用它当水位线，之后同单再来新邮件就会自动浮出。传 0 等于"以后同类都不再提醒"，
+ * 所以界面永远从待办行上取，不让调用方自己编。
+ */
+export function mailTodoDismiss(payload: {
+  key: string;
+  messageId?: number;
+  kind?: string;
+}): Promise<ApiResult<{ dismissed: boolean; key: string }>> {
+  return ipc.mailTodoDismiss(payload);
+}
+
+/** 撤销划掉（划错了 / 要重新跟进） */
+export function mailTodoRestore(payload: { key: string }): Promise<ApiResult<{ restored: number }>> {
+  return ipc.mailTodoRestore(payload);
+}
+
+/**
+ * 下发自动收信间隔（0 = 关闭）。
+ * 渲染层不再自己计时：`mailStore` 只把用户设置推给主进程，由 `mail-scheduler` 排程 ——
+ * 否则"不进邮件页就永远不收信"（渲染层轮询只在页面挂载时存在）。
+ */
+export function mailAutoSyncConfig(minutes: number): Promise<ApiResult<{ minutes: number }>> {
+  return ipc.mailAutoSyncConfig({ minutes });
+}
+
 /** 邮箱服务商预设（授权码获取指引 / 默认连接参数，不含凭据） */
 export function mailProviderList(): Promise<ApiResult<MailProviderPresetView[]>> {
   return ipc.mailProviderList();
 }
 
+/** 运价表快照：导入时留档（一次导入 = 一条，按内容去重） */
+export function shipRateSnapshotSave(payload: {
+  table: unknown;
+  sourceFile?: string;
+  sheetName?: string;
+  effectiveFrom?: string;
+}) {
+  return ipc.shipRateSnapshotSave(payload);
+}
+
+/** 运价表快照列表（不含整张表） */
+export function shipRateSnapshotList(payload?: { limit?: number }) {
+  return ipc.shipRateSnapshotList(payload);
+}
+
+/** 算账用：含整张表的快照集合（按生效日倒序） */
+export function shipRateSnapshotCalc(payload?: { limit?: number }) {
+  return ipc.shipRateSnapshotCalc(payload);
+}
+
 /** 订阅邮件同步事件（主进程→渲染层单向广播）；返回退订函数 */
 export function onMailSyncEvent(cb: (event: MailSyncEvent) => void): () => void {
   return ipc.onMailSyncEvent(cb);
+}
+
+/** 订阅「打开某个模块」意图（通知点击等用户不在界面前的入口）；返回退订函数 */
+export function onOpenModule(cb: (event: OpenModuleEvent) => void): () => void {
+  return ipc.onOpenModule(cb);
+}
+
+/** 订阅侧栏徽标（主进程算好的数值；`count: null` = 撤掉徽标）；返回退订函数 */
+export function onNavBadge(cb: (event: NavBadgeEvent) => void): () => void {
+  return ipc.onNavBadge(cb);
+}
+
+// ---------------------------------------------------------------------------
+// 产品库（产品主数据）
+// ---------------------------------------------------------------------------
+
+/** 幂等建表（视图首次激活时调用） */
+export function productDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.productDbEnsure();
+}
+
+/** 主数据：颜色字典（启用中，按 sort_order；hex 空串 = 无标准色值） */
+export function mdColorList(): Promise<ApiResult<{ colors: MdColorItem[] }>> {
+  return ipc.mdColorList();
+}
+
+/**
+ * 主数据：新增颜色（「常用色」末尾的「＋ 新增颜色」）。
+ * 只写字典，不给当前款加色；同名幂等（`created=false`）。
+ */
+export function mdColorCreate(payload: {
+  name: string;
+  hex?: string;
+}): Promise<ApiResult<{ color: MdColorItem | null; created: boolean }>> {
+  return ipc.mdColorCreate(payload);
+}
+
+/** 更新某个字典色的色块 hex（只改显示，不改名字；空串 = 没有标准色值） */
+export function mdColorUpdateHex(payload: {
+  id: number;
+  hex: string;
+}): Promise<ApiResult<{ color: MdColorItem | null }>> {
+  return ipc.mdColorUpdateHex(payload);
+}
+
+/** 颜色板：字典色 + 只在业务表里出现的色名（「颜色」页签的列表） */
+export function mdColorBoard(): Promise<ApiResult<{ rows: ColorBoardItem[] }>> {
+  return ipc.mdColorBoard();
+}
+
+/**
+ * 颜色合并：把源色整体并进保留色。
+ * ⚠️ 真改业务数据（款色 / SKU / 别名归到保留色），不是只记别名。
+ */
+export function mdColorMerge(payload: {
+  source: string;
+  target: string;
+}): Promise<ApiResult<{ result: ColorMergeOutcome }>> {
+  return ipc.mdColorMerge(payload);
+}
+
+/** 主数据：尺码字典（启用中，含别名） */
+export function mdSizeList(): Promise<ApiResult<{ sizes: MdSizeItem[] }>> {
+  return ipc.mdSizeList();
+}
+
+/** 产品列表（关键字 / 状态 / 厂家过滤 + 分页；按编码升序） */
+export function productList(payload?: {
+  search?: string;
+  status?: ProductStatus | '';
+  supplierId?: number;
+  /** 只看未关联厂家的款（与 `supplierId` 互斥，同时给时以本项为准） */
+  withoutSupplier?: boolean;
+  /** 只看至少有一个 SKU 缺克重的款 */
+  onlyMissingWeight?: boolean;
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResult<{ rows: ProductListItem[]; total: number }>> {
+  return ipc.productList(payload);
+}
+
+/** 单条产品详情（不存在返回 null） */
+export function productGet(id: number): Promise<ApiResult<ProductListItem | null>> {
+  return ipc.productGet({ id });
+}
+
+/** 新增/更新产品（全量提交；编码唯一，冲突时主进程抛错） */
+export function productUpsert(
+  payload: ProductUpsertInput
+): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.productUpsert(payload);
+}
+
+/** 删除产品（物理删除；已进入业务链路的应改为 status='archived'） */
+export function productDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.productDelete({ id });
+}
+
+/** 产品汇总（总数 / 按状态 / 厂家分布 / 未关联厂家数；supplierOptions 为全量厂家，供下拉） */
+export function productSummary(): Promise<ApiResult<ProductSummary>> {
+  return ipc.productSummary();
+}
+
+/** 产品 Excel 批量导入（单事务）；mode='insertOnly' 时编码已存在的行记为失败而不覆盖 */
+export function productImport(payload: {
+  items: ProductImportRowInput[];
+  mode?: 'upsert' | 'insertOnly';
+  /** 手工进价的生效日 `yyyy-mm-dd`（缺省 = 导入当日） */
+  effectiveFrom?: string;
+}): Promise<ApiResult<ProductImportOutcome>> {
+  return ipc.productImport(payload);
+}
+
+/** 保存导出的 xlsx（主进程生成并嵌图，弹保存框）；返回内嵌图张数与失败张数 */
+export function productExport(payload: {
+  sheetName: string;
+  headers: string[];
+  rows: { cells: string[]; imagePath?: string }[];
+  imageColumn: number;
+  defaultName?: string;
+}): Promise<ApiResult<{ filePath: string; embedded: number; imagesFailed: number }>> {
+  return ipc.productExport(payload);
+}
+
+/** 抽导入文件里的嵌入图（落盘 + 登记 `pl_images`，按锚点行报回） */
+export function productExtractImages(payload: {
+  buffer: ArrayBuffer;
+  sheetName: string;
+  headerRow: number;
+}): Promise<
+  ApiResult<{
+    byRow: Record<string, { imageId: number; localPath: string }>;
+    skips: { rowNo: number; reason: string }[];
+    total: number;
+  }>
+> {
+  return ipc.productExtractImages(payload);
+}
+
+/** 映射列表（店铺商品ID → 产品；关键字 / 状态 / 店铺 / 款 过滤 + 分页） */
+export function productSkuList(payload?: {
+  search?: string;
+  status?: SkuMapStatus | '';
+  shopId?: number;
+  /** 反向过滤：只看某一款关联了哪些店铺商品（产品侧「已关联商品」）。0/缺省 = 不过滤 */
+  productId?: number;
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResult<{ rows: ShopSkuRow[]; total: number }>> {
+  return ipc.productSkuList(payload);
+}
+
+/** 映射汇总（总数 / 按状态 / 按平台 / 按店铺；不扫订单） */
+export function productSkuSummary(): Promise<ApiResult<SkuMapSummary>> {
+  return ipc.productSkuSummary();
+}
+
+/** 待关联队列（实时聚合 oi_orders 的商品ID，减去已有生效映射） */
+export function productSkuQueue(payload?: {
+  limit?: number;
+  maxRows?: number;
+}): Promise<ApiResult<{ rows: SkuQueueRow[]; stats: SkuQueueStats }>> {
+  return ipc.productSkuQueue(payload);
+}
+
+/** 批量关联 / 改绑（单事务；行级失败逐行报回） */
+export function productSkuMap(payload: {
+  rows: SkuMapInputPayload[];
+  adoptImages?: boolean;
+}): Promise<
+  ApiResult<{
+    created: number;
+    updated: number;
+    reassigned: number;
+    adopted: number;
+    failed: { itemId: string; message: string }[];
+  }>
+> {
+  return ipc.productSkuMap(payload);
+}
+
+/** 标失效（商品ID 会变；不物理删除） */
+export function productSkuInvalidate(id: number): Promise<ApiResult<{ changed: boolean }>> {
+  return ipc.productSkuInvalidate({ id });
+}
+
+/** 存量补图（只补空、不覆盖；`pending` = 本轮之后仍缺主图的款数） */
+export function productSkuRepairImages(payload?: {
+  limit?: number;
+}): Promise<ApiResult<{ adopted: number; pending: number }>> {
+  return ipc.productSkuRepairImages(payload);
+}
+
+/** 按款批量拉 SKU（pl_variants） */
+export function productVariantList(
+  productIds: number[]
+): Promise<ApiResult<{ rows: VariantRow[] }>> {
+  return ipc.productVariantList({ productIds });
+}
+
+/** 新增 / 更新 SKU（全量提交；同款下名称唯一，编码非空时全局唯一） */
+export function productVariantUpsert(
+  payload: VariantUpsertInput
+): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.productVariantUpsert(payload);
+}
+
+/** 删除 SKU */
+export function productVariantDelete(id: number): Promise<ApiResult<{ removed: number }>> {
+  return ipc.productVariantDelete({ id });
+}
+
+/** 产品批量编辑（部分 patch：只传要改的字段，undefined = 不修改） */
+export function productBatchUpdate(
+  payload: ProductBatchUpdateInput
+): Promise<ApiResult<{ updated: number }>> {
+  return ipc.productBatchUpdate(payload);
+}
+
+/** 设置款主图（srcPath 须来自用户经对话框选择的文件） */
+export function productImageAttach(payload: {
+  productId: number;
+  srcPath: string;
+}): Promise<ApiResult<{ imageId: number; localPath: string; reused: boolean }>> {
+  return ipc.productImageAttach(payload);
+}
+
+/** 移除款主图 */
+export function productImageDetach(productId: number): Promise<ApiResult<{ changed: boolean }>> {
+  return ipc.productImageDetach({ productId });
+}
+
+/** 设置商品ID的手动覆盖图 */
+export function productItemImageSet(payload: {
+  itemId: string;
+  srcPath: string;
+}): Promise<ApiResult<{ imageId: number; localPath: string; reused: boolean; itemId: string }>> {
+  return ipc.productItemImageSet(payload);
+}
+
+/** 清除商品ID的覆盖图（回到自动聚合回落链） */
+export function productItemImageClear(itemId: string): Promise<ApiResult<{ removed: number }>> {
+  return ipc.productItemImageClear({ itemId });
+}
+
+/** 批量取商品ID的候选图（三层回落：覆盖图 → 订单图 → 款主图） */
+export function productItemImagePool(
+  itemIds: string[]
+): Promise<ApiResult<{ pool: Record<string, ItemImagePoolEntry> }>> {
+  return ipc.productItemImagePool({ itemIds });
+}
+
+/* ============================================================================
+   「货与成本」渲染层包装（2026-10-01）
+   ----------------------------------------------------------------------------
+   下列通道**本来就在 `ElectronApi` 接口里**（preload 与主进程都已实现，`verify` 三方一致），
+   只是从来没导出过渲染层包装函数 —— 因为唯一的调用方是「产品库」UI 岛，它走的是
+   `window.__sk` 桥（`DB_OPS`）而不是 `ipc.*`。
+
+   岛的功能迁回内建「货与成本」后，渲染层成了第一个消费者，故在此补包装。
+   ⚠️ 只是「加一层导出」，**不动 preload / types / 主进程** —— 通道名一个没改，
+      所以不涉及 IPC 契约的变更（`npm run verify` 的判据是通道名三方一致）。
+   ============================================================================ */
+
+/** 选 Excel 文件（返回**原始字节**；解析交给 `core/services/excel` 或 `@/lib/productImport`） */
+export function selectExcel(): Promise<ApiResult<ExcelFilePayload>> {
+  return ipc.selectExcel();
+}
+
+/** 选图片文件（返回路径；主进程按"用户亲手选过"的信任层级处理） */
+export function selectImage(): Promise<ApiResult<{ filePath: string }>> {
+  return ipc.selectImage();
+}
+
+/** 供应商（厂家）主数据 —— owner 是 `purchase-db.ts` 的 `suppliers` 表，拿货/付款也引用它 */
+export function purchaseSupplierList(): Promise<ApiResult<Supplier[]>> {
+  return ipc.purchaseSupplierList();
+}
+
+export function purchaseSupplierCreate(payload: {
+  name: string;
+  phone?: string;
+  note?: string;
+}): Promise<ApiResult<{ id: number }>> {
+  return ipc.purchaseSupplierCreate(payload);
+}
+
+export function purchaseSupplierUpdate(payload: {
+  id: number;
+  phone?: string;
+  note?: string;
+}): Promise<ApiResult<unknown>> {
+  return ipc.purchaseSupplierUpdate(payload);
+}
+
+/** 删除厂家：已有拿货单 / 付款记录时**宿主拒绝**（保护对账历史） */
+export function purchaseSupplierDelete(id: number): Promise<ApiResult<unknown>> {
+  return ipc.purchaseSupplierDelete({ id });
+}
+
+/* ---- 店铺商品清单（按 item_id 去重，一件商品可一对多关联产品）---- */
+
+export function shopProductImport(payload: {
+  items: { itemId: string; shopId: number; imageUrl: string }[];
+}): Promise<ApiResult<{ imported: number; updated: number }>> {
+  return ipc.shopProductImport(payload);
+}
+
+export function shopProductList(payload?: {
+  offset?: number;
+  limit?: number;
+  search?: string;
+}): Promise<ApiResult<{ rows: ShopProductItem[]; total: number }>> {
+  return ipc.shopProductList(payload);
+}
+
+export function shopProductDelete(itemId: string): Promise<ApiResult<{ removed: number }>> {
+  return ipc.shopProductDelete({ itemId });
+}
+
+export function shopProductRelations(itemId: string): Promise<ApiResult<ShopProductRelation[]>> {
+  return ipc.shopProductRelations({ itemId });
+}
+
+export function shopProductRelationAdd(payload: {
+  itemId: string;
+  productId: number;
+}): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.shopProductRelationAdd(payload);
+}
+
+export function shopProductRelationDelete(id: number): Promise<ApiResult<{ removed: number }>> {
+  return ipc.shopProductRelationDelete({ id });
+}
+
+/** 店铺实体：幂等建表（视图首次激活时调用） */
+export function shopDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.shopDbEnsure();
+}
+
+/** 店铺列表（关键字 / 平台 / 状态过滤 + 分页） */
+export function shopList(payload?: {
+  search?: string;
+  platform?: string;
+  status?: ShopStatus | '';
+  offset?: number;
+  limit?: number;
+}): Promise<ApiResult<{ rows: ShopListItem[]; total: number }>> {
+  return ipc.shopList(payload);
+}
+
+/** 店铺单条详情（不存在返回 null） */
+export function shopGet(id: number): Promise<ApiResult<ShopListItem | null>> {
+  return ipc.shopGet({ id });
+}
+
+/** 店铺新增/更新（全量提交；同平台同名冲突时主进程抛错） */
+export function shopUpsert(
+  payload: ShopUpsertInput
+): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.shopUpsert(payload);
+}
+
+/** 店铺汇总（店铺侧 + 三处历史文本的归一进度） */
+export function shopSummary(): Promise<ApiResult<ShopSummary>> {
+  return ipc.shopSummary();
+}
+
+/** 未归一的历史店铺名（实时聚合三处文本） */
+export function shopUnmapped(): Promise<ApiResult<UnmappedShopRow[]>> {
+  return ipc.shopUnmapped();
+}
+
+/**
+ * 门 1（店铺归一）的派生状态。
+ *
+ * ⚠️ 与 `shopUnmapped` 不是同一件事，别合并：那个回答"还有哪些店名没整理"（含历史拿货单里的旧店名），
+ *    这个回答"订单里有哪些店名还没归成店铺实体"（这才会让款/色的键分叉）。
+ */
+export function shopGate(): Promise<ApiResult<ShopGate>> {
+  return ipc.shopGate();
+}
+
+/** 归一指派 / 标记忽略 */
+export function shopMap(payload: {
+  raw: string;
+  refId?: number;
+  ignored?: boolean;
+  kind?: NameMapKind;
+  note?: string;
+}): Promise<ApiResult<{ key: string; refId: number; ignored: boolean }>> {
+  return ipc.shopMap(payload);
+}
+
+/** 撤销归一（回到未归一名单） */
+export function shopUnmap(payload: {
+  raw: string;
+  kind?: NameMapKind;
+}): Promise<ApiResult<{ removed: number }>> {
+  return ipc.shopUnmap(payload);
+}
+
+/** 运费原始行（oi_orders 最小投影，只读；供按订单算运费的宿主 op 提取） */
+/** 把订单归属到某店铺（AE 导出按店铺、无店铺列 → 由人在导入后指定） */
+export function orderAssignShop(payload: { orderNos: string[]; shopName: string }) {
+  return ipc.orderAssignShop(payload);
+}
+
+export function orderShippingRows(payload?: {
+  limit?: number;
+  source?: 'all' | 'import' | 'collect';
+  /** 只看这一天**导入**的行（`yyyy-mm-dd` 本地时区，按 `created_at`） */
+  importDate?: string;
+  /** 只看订单**发生月**（`yyyy-mm`，按 `order_time`）；缺省 = 全库 */
+  period?: string;
+}): Promise<ApiResult<UnifiedOrderRow[]>> {
+  return ipc.orderShippingRows(payload);
+}
+
+/**
+ * 最近一次芒果同步的状态（`null` = 从来没同步过）。
+ *
+ * 总览的采集状态条读它。**失败要让调用方能区分**：这一条本身就是"用来发现失败"的，
+ * 它自己再静默降级成 null，就变成"没同步过"与"读不到"分不开了。
+ */
+export function mangoSyncStatus(): Promise<ApiResult<MangoSyncStatusRow | null>> {
+  return ipc.mangoSyncStatus();
+}
+
+/** 插入一条订单（`imageId: null` = 无图订单，S2-b 免图导入） */
+export function orderInsert(order: OrderRecord): Promise<ApiResult<{ id: number }>> {
+  return ipc.orderInsert(order);
+}
+
+/**
+ * 下载订单主图（URL 指纹 / 内容指纹命中即复用既有 `oi_images` 行，不重复落盘）。
+ * 返回的 `id` 直接作为 `orderInsert` 的 `imageId`（带图导入的接线点）。
+ */
+export function orderDownloadImage(url: string): Promise<ApiResult<OrderImageRecord>> {
+  return ipc.orderDownloadImage(url);
+}
+
+/** 按路径读 Excel（**原始字节**；解析交给 `core/services/excel` / `core/services/importSheet`）。
+ * 此前只有 `ElectronApi` 上的声明、没有导出包装函数（新代码想用只得摸 `ipc` 实例）——与 `orderImageThumbBatch` 同款缺口，一并补上。 */
+export function importExcelByPath(filePath: string): Promise<ApiResult<ExcelFilePayload>> {
+  return ipc.importExcelByPath(filePath);
+}
+
+/**
+ * 规则求值隔离窗口（`jsExpression` 专用）。
+ * 只给 `src/lib/fieldProcessor.ts` 用：那里是**唯一**需要执行用户代码的地方，
+ * 其他任何地方都不该直接调它（要让规则跑起来请走 `applyFieldProcessor`）。
+ */
+export function ruleEvalBatch(payload: {
+  rule: { id: string; code: string };
+  fields: Record<string, string>[];
+}): Promise<ApiResult<{ values: (string | null)[]; errors: { index: number; message: string }[]; cspViolations: number }>> {
+  return ipc.ruleEvalBatch(payload);
+}
+
+/**
+ * 单次往返的图片数上限。**必须与主进程 `order-handlers.ts` 的 `THUMB_BATCH_MAX` 一致** ——
+ * 那侧是硬截断（`payload.items.slice(0, THUMB_BATCH_MAX)`），而调用方是按页/按批给路径的
+ * （产品页一页 50 行、拣货单可能上百），不在这侧拆批就会有若干行的图**静默变空占位**。
+ */
+const THUMB_BATCH_MAX = 40;
+
+/**
+ * 批量缩略图：返回顺序与 `items` 完全一致，单项无效为 null。
+ * 超过单次上限自动拆批（顺序不乱、失败批次按 null 补位）—— 调用方给多少张都要能拿到答案。
+ */
+export async function orderImageThumbBatch(
+  items: { localPath: string; maxEdge?: number }[]
+): Promise<ApiResult<{ dataUrls: (string | null)[] }>> {
+  const all = Array.isArray(items) ? items : [];
+  if (!all.length) return { success: true, data: { dataUrls: [] } };
+  const dataUrls: (string | null)[] = [];
+  for (let i = 0; i < all.length; i += THUMB_BATCH_MAX) {
+    const chunk = all.slice(i, i + THUMB_BATCH_MAX);
+    const r = await ipc.orderImageThumbBatch(chunk);
+    const part = r?.data?.dataUrls;
+    if (r?.success && Array.isArray(part) && part.length === chunk.length) {
+      dataUrls.push(...part);
+    } else {
+      // 整批失败不让其余批次的结果作废：这一段按 null 补位（界面显示空占位，不静默错位）
+      for (let k = 0; k < chunk.length; k++) dataUrls.push(null);
+    }
+  }
+  return { success: true, data: { dataUrls } };
+}
+
+/**
+ * 读**原图**（不缩放）—— 走与缩略图**同一套**目录白名单（`order-images` / `product-images`
+ * + 扩展名 + realpath 归一），只差"不缩放"。需要看清细节时用它：缩略图通道的 `maxEdge`
+ * 在主进程被夹到 256，认印花/领型/颜色时不够。
+ *
+ * 之前只有 `ElectronApi` 上的声明、没有导出包装（与 `orderImageThumbBatch` 同款缺口）。
+ *
+ * ⚠️ 返回整张原图的 base64（可至 MB 级）—— 只在用户**点开某一张**时调，别批量预取。
+ */
+export function orderReadImage(localPath: string): Promise<ApiResult<ImageDataUrl>> {
+  return ipc.orderReadImage(localPath);
+}
+
+/** 导出 xlsx（弹保存框；buffer 由渲染层用 xlsx 生成） */
+export function orderExportExcel(
+  buffer: ArrayBuffer,
+  defaultName?: string
+): Promise<ApiResult<ExportExcelResult>> {
+  return ipc.orderExportExcel(buffer, defaultName);
+}
+
+/** 拣货投影（只读）：未发货订单行 + 图 + 款色码/供应商 —— 聚合在纯层 `src/lib/picking.ts` */
+export function pickingRows(payload?: {
+  limit?: number;
+  shop?: string;
+  includeShipped?: boolean;
+}): Promise<ApiResult<PickingRowsResult>> {
+  return ipc.pickingRows(payload);
+}
+
+/** 拣货单导出（带图 + 按厂家分表）：主进程 exceljs 生成后弹保存对话框。
+ *  用户点取消时返回 `{ success:false, error:'__canceled__' }` —— 调用方按"不算失败"处理。 */
+export function pickingExportExcel(payload: {
+  rows: PickingExportRow[];
+  defaultName?: string;
+}): Promise<ApiResult<ExportExcelResult & { rows: number }>> {
+  return ipc.pickingExportExcel(payload);
+}
+
+/** 按款编码 + 款色取图路径（归类核对页的模式选择器与拿货单共用） */
+export function purchaseStyleImages(payload: {
+  items: { styleCode: string; color: string; size?: string; styleColorId?: number }[];
+}): Promise<ApiResult<{ paths: (string | null)[] }>> {
+  return ipc.purchaseStyleImages(payload);
+}
+
+// ---- 补齐的新通道封装（2026-10-28 重建；签名由 types.ts ElectronAPI 生成）----
+export function openExternal(url: string): Promise<ApiResult<void>> {
+  return ipc.openExternal(url);
+}
+
+export function orderParcelDetail(orderNo: string): Promise<ApiResult<ParcelDetail>> {
+  return ipc.orderParcelDetail({ orderNo });
+}
+
+export function orderParcelCounts(orderNos: string[]): Promise<ApiResult<ParcelCountMap>> {
+  return ipc.orderParcelCounts({ orderNos });
+}
+
+export function orderParcelTotals(orderNos: string[]): Promise<ApiResult<ParcelTotalsMap>> {
+  return ipc.orderParcelTotals({ orderNos });
+}
+
+export function orderParcelCreate(payload: {
+  orderNo: string;
+  label?: string;
+  trackingNo?: string;
+  carrier?: string;
+  note?: string;
+  /** 分；`null`/缺省 = 还不知道（不是 0） */
+  shipCents?: number | null;
+  /** 克；`null`/缺省 = 还不知道 */
+  weightG?: number | null;
+}): Promise<ApiResult<ParcelDetail & { id: number }>> {
+  return ipc.orderParcelCreate(payload);
+}
+
+export function orderParcelUpdate(payload: {
+  id: number;
+  orderNo?: string;
+  label?: string;
+  trackingNo?: string;
+  carrier?: string;
+  note?: string;
+  /** 只传要改的字段：`undefined` = 不改，`null` = 清成"还不知道" */
+  shipCents?: number | null;
+  weightG?: number | null;
+}): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelUpdate(payload);
+}
+
+export function orderParcelDelete(payload: {
+  id: number;
+  orderNo?: string;
+}): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelDelete(payload);
+}
+
+export function orderParcelSetLine(payload: {
+  parcelId: number;
+  orderItemId: number;
+  qty: number;
+  orderNo?: string;
+}): Promise<ApiResult<ParcelDetail | null>> {
+  return ipc.orderParcelSetLine(payload);
+}
+
+export function orderReplayMappings(payload?: {
+  dryRun?: boolean;
+}): Promise<ApiResult<SkuMappingReplayStats>> {
+  return ipc.orderReplayMappings(payload);
+}
+
+export function onAeItemsIngested(cb: (event: AeItemsIngestedEvent) => void): () => void {
+  return ipc.onAeItemsIngested(cb);
+}
+
+export function onMangoIngested(cb: (event: MangoIngestedEvent) => void): () => void {
+  return ipc.onMangoIngested(cb);
+}
+
+export function purchaseTaken(): Promise<ApiResult<TakenRow[]>> {
+  return ipc.purchaseTaken();
+}
+
+export function purchaseOrderCoverage(): Promise<ApiResult<OrderCoveragePayload>> {
+  return ipc.purchaseOrderCoverage();
+}
+
+export function purchaseStyleColors(payload: {
+  styleCodes: string[];
+}): Promise<ApiResult<{ [styleCode: string]: StyleColorOptionRow[] }>> {
+  return ipc.purchaseStyleColors(payload);
+}
+
+export function styleColorRename(payload: {
+  productId: number;
+  styleCode: string;
+  from: string;
+  to: string;
+}): Promise<
+  ApiResult<{ renamed: boolean; styleColorId?: number; reason?: string; colorAlias?: unknown }>
+> {
+  return ipc.styleColorRename(payload);
+}
+
+export function ledgerDbEnsure(): Promise<ApiResult<{ ok: boolean }>> {
+  return ipc.ledgerDbEnsure();
+}
+
+export function ledgerEligibleShops(period: string): Promise<ApiResult<LedgerEligibleShops>> {
+  return ipc.ledgerEligibleShops({ period });
+}
+
+export function ledgerCategoryList(payload?: {
+  kind?: LedgerKind;
+  includeArchived?: boolean;
+}): Promise<ApiResult<LedgerCategoryRow[]>> {
+  return ipc.ledgerCategoryList(payload);
+}
+
+export function ledgerCategoryUpsert(payload: {
+  id?: number;
+  kind?: LedgerKind;
+  name?: string;
+  sort?: number;
+  archived?: boolean;
+}): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerCategoryUpsert(payload);
+}
+
+export function ledgerRuleList(): Promise<ApiResult<LedgerRuleRow[]>> {
+  return ipc.ledgerRuleList();
+}
+
+export function ledgerRuleUpsert(payload: {
+  id?: number;
+  name?: string;
+  basis?: LedgerBasis;
+  shopIds?: number[];
+  ratios?: number[];
+  note?: string;
+}): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerRuleUpsert(payload);
+}
+
+export function ledgerEntryList(payload?: LedgerEntryFilter): Promise<ApiResult<LedgerEntryRow[]>> {
+  return ipc.ledgerEntryList(payload);
+}
+
+export function ledgerEntryGet(id: number): Promise<ApiResult<LedgerEntryDetail | null>> {
+  return ipc.ledgerEntryGet({ id });
+}
+
+export function ledgerEntryUpsert(
+  payload: LedgerEntryInput
+): Promise<
+  ApiResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>
+> {
+  return ipc.ledgerEntryUpsert(payload);
+}
+
+export function ledgerEntryVoid(
+  id: number,
+  reason: string
+): Promise<ApiResult<{ id: number; voided: boolean }>> {
+  return ipc.ledgerEntryVoid({ id, reason });
+}
+
+export function ledgerEntryRestore(
+  id: number
+): Promise<ApiResult<{ id: number; restored: boolean }>> {
+  return ipc.ledgerEntryRestore({ id });
+}
+
+export function ledgerEntriesVoid(
+  ids: number[],
+  reason: string
+): Promise<ApiResult<{ voided: number; ids: number[] }>> {
+  return ipc.ledgerEntriesVoid({ ids, reason });
+}
+
+export function ledgerSummary(payload?: {
+  period?: string;
+  from?: string;
+  to?: string;
+}): Promise<ApiResult<LedgerSummary>> {
+  return ipc.ledgerSummary(payload);
+}
+
+export function ledgerPartyList(payload?: {
+  includeArchived?: boolean;
+  keyword?: string;
+}): Promise<ApiResult<LedgerPartyRow[]>> {
+  return ipc.ledgerPartyList(payload);
+}
+
+export function ledgerPartyUpsert(payload: {
+  id?: number;
+  name?: string;
+  kind?: LedgerPartyKind;
+  phone?: string;
+  note?: string;
+  archived?: boolean;
+}): Promise<ApiResult<{ id: number; created: boolean }>> {
+  return ipc.ledgerPartyUpsert(payload);
+}
+
+export function ledgerPartyMerge(payload: {
+  fromId: number;
+  toId: number;
+  note?: string;
+}): Promise<
+  ApiResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>
+> {
+  return ipc.ledgerPartyMerge(payload);
+}
+
+export function ledgerPartyLedger(payload?: {
+  includeArchived?: boolean;
+  partyId?: number;
+}): Promise<ApiResult<LedgerPartyLedgerRow[]>> {
+  return ipc.ledgerPartyLedger(payload);
+}
+
+export function ledgerSettleCreate(payload: {
+  partyId: number;
+  settleDate: string;
+  direction: 'pay' | 'receive' | 'offset';
+  entryIds: number[];
+  method?: string;
+  note?: string;
+}): Promise<ApiResult<{ id: number; amountCents: number; entryCount: number; cashCents: number }>> {
+  return ipc.ledgerSettleCreate(payload);
+}
+
+export function ledgerSettleList(payload?: {
+  partyId?: number;
+}): Promise<ApiResult<LedgerSettlementRow[]>> {
+  return ipc.ledgerSettleList(payload);
+}
+
+export function ledgerSettleVoid(
+  id: number,
+  reason: string
+): Promise<ApiResult<{ id: number; voided: boolean }>> {
+  return ipc.ledgerSettleVoid({ id, reason });
+}
+
+export function ledgerEntryRepatchPreview(payload: {
+  entryIds: number[];
+}): Promise<ApiResult<LedgerRepatchPreview>> {
+  return ipc.ledgerEntryRepatchPreview(payload);
+}
+
+export function ledgerEntryRepatch(payload: {
+  entryIds: number[];
+  toPartyId: number;
+  mode: LedgerRepatchMode;
+  reason?: string;
+}): Promise<ApiResult<LedgerRepatchResult>> {
+  return ipc.ledgerEntryRepatch(payload);
+}
+
+export function ledgerShopBreakdown(payload: {
+  shopId: number;
+  period?: string;
+  from?: string;
+  to?: string;
+}): Promise<ApiResult<LedgerShopBreakdown>> {
+  return ipc.ledgerShopBreakdown(payload);
+}
+
+export function ledgerExportExcel(
+  payload: LedgerExportInput
+): Promise<ApiResult<{ filePath: string; rows: number }>> {
+  return ipc.ledgerExportExcel(payload);
+}
+
+export function ledgerNameResolve(payload: {
+  party?: string[];
+  category?: string[];
+  shop?: string[];
+}): Promise<ApiResult<LedgerNameResolveResult>> {
+  return ipc.ledgerNameResolve(payload);
+}
+
+export function ledgerEntryBatchCreate(payload: { entries: LedgerImportEntryInput[] }): Promise<
+  ApiResult<{
+    created: number;
+    ids: number[];
+    allocations: number;
+    /** 本批自动新建的相关人 / 科目名字（界面要如实说出"多出了哪些名字"） */
+    createdParties: string[];
+    createdCategories: string[];
+  }>
+> {
+  return ipc.ledgerEntryBatchCreate(payload);
+}
+
+export function ledgerImportTemplate(payload: {
+  sheets: LedgerTemplateSheetInput[];
+  defaultName: string;
+}): Promise<ApiResult<{ filePath: string; sheets: number }>> {
+  return ipc.ledgerImportTemplate(payload);
+}
+
+export function toolAccountList(payload?: {
+  kind?: ToolAccountKind | '';
+}): Promise<ApiResult<ToolAccountItem[]>> {
+  return ipc.toolAccountList(payload);
+}
+
+export function toolAccountUpsert(
+  payload: ToolAccountUpsertInput
+): Promise<ApiResult<{ id: number }>> {
+  return ipc.toolAccountUpsert(payload);
+}
+
+export function toolAccountDelete(id: number): Promise<ApiResult<{ deleted: boolean }>> {
+  return ipc.toolAccountDelete({ id });
+}
+
+export function toolAccountReveal(id: number): Promise<ApiResult<{ value: string }>> {
+  return ipc.toolAccountReveal({ id });
+}
+
+export function productCostSet(payload: {
+  code: string;
+  costCents: number;
+}): Promise<ApiResult<{ found: boolean; updated: boolean }>> {
+  return ipc.productCostSet(payload);
+}
+
+export function productPricedCodes(): Promise<ApiResult<{ codes: string[] }>> {
+  return ipc.productPricedCodes();
+}
+
+/**
+ * **亚洲款加码**：一次取回「款 → 偏移」与「款 → 码链」。
+ * 换算本身不在这里做（纯函数在 `src/lib/sizeShift.ts`）—— 主进程只存数字与码集。
+ */
+export function productSizeShiftLoad(payload: {
+  codes: string[];
+}): Promise<ApiResult<{ shifts: Record<string, number>; chains: Record<string, string[]> }>> {
+  return ipc.productSizeShiftLoad(payload);
+}
+
+/** 设/撤一款的加码偏移（0 = 撤）；只影响拿货侧 */
+export function productSizeShiftSet(payload: {
+  styleCode: string;
+  shift: number;
+  note?: string;
+}): Promise<ApiResult<{ styleCode: string; shift: number }>> {
+  return ipc.productSizeShiftSet(payload);
+}
+
+export function productNextCode(): Promise<ApiResult<{ code: string }>> {
+  return ipc.productNextCode();
+}
+
+export function productMoveSupplier(
+  payload: ProductMoveSupplierInput
+): Promise<ApiResult<{ changed: boolean }>> {
+  return ipc.productMoveSupplier(payload);
+}
+
+export function shopItemsList(payload?: {
+  shopId?: number;
+  search?: string;
+  page?: number;
+  pageSize?: number;
+  onlyUnconfirmed?: boolean;
+  productId?: number;
+}): Promise<ApiResult<{ rows: ShopItemRow[]; total: number }>> {
+  return ipc.shopItemsList(payload);
+}
+
+export function shopItemsSummary(): Promise<ApiResult<ShopItemSummaryRow[]>> {
+  return ipc.shopItemsSummary();
+}
+
+export function shopItemsImport(payload: {
+  shopId?: number;
+  ids?: string[];
+}): Promise<ApiResult<{ received: number; inserted: number; updated: number; skipped: number }>> {
+  return ipc.shopItemsImport(payload);
+}
+
+export function shopItemImageFetch(payload: {
+  id: number;
+  productId?: number;
+  adoptMain?: boolean;
+  colors?: { color: string; imageUrl: string }[];
+}): Promise<ApiResult<ShopItemImageFetchResult>> {
+  return ipc.shopItemImageFetch(payload);
+}
+
+export function shopItemsDelete(payload: { id: number }): Promise<ApiResult<{ removed: boolean }>> {
+  return ipc.shopItemsDelete(payload);
+}
+
+// ---------------------------------------------------------------------------
+// 图案槽位域（POD；M3/M4 —— 认图案 + 花纸库存 + 订花纸，2026-11-03 起同在一页「发货台 › 订花纸」）
+// 面板只调这些包装函数；净需件/张数由 `src/lib/podNeed.ts` 在渲染层算好后再传下沉。
+// ---------------------------------------------------------------------------
+
+export function podWorklist(payload?: {
+  filter?: 'all' | 'unbound' | 'bound' | 'collapsed';
+  search?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<ApiResult<PodWorklistResult>> {
+  return ipc.podWorklist(payload);
+}
+
+export function podPatternList(payload?: {
+  search?: string;
+  status?: string;
+}): Promise<ApiResult<PodPatternRow[]>> {
+  return ipc.podPatternList(payload);
+}
+
+export function podPatternCreate(payload: {
+  code: string;
+  name?: string;
+  artworkImageId?: number;
+  previewImageId?: number;
+  note?: string;
+  images?: { fingerprint: string; imageId?: number }[];
+  source?: string;
+}): Promise<ApiResult<{ id: number; created: boolean; linked: number }>> {
+  return ipc.podPatternCreate(payload);
+}
+
+export function podPatternUpdate(payload: {
+  id: number;
+  name?: string;
+  artworkImageId?: number;
+  previewImageId?: number;
+  note?: string;
+  status?: string;
+}): Promise<ApiResult<{ changed: number }>> {
+  return ipc.podPatternUpdate(payload);
+}
+
+/** 图片落库：本地选图（须是用户亲手选过的）或远程色图 → `md_images`，返回 imageId + 本地路径 */
+export function podPatternImage(payload: {
+  srcPath?: string;
+  url?: string;
+}): Promise<
+  ApiResult<{ imageId: number; localPath: string; fingerprint: string; reused: boolean }>
+> {
+  return ipc.podPatternImage(payload);
+}
+
+/** 批量颜色图：下载进图片仓 + 回 dHash/主色（「自动找同款」的输入；只出建议） */
+export function podSlotImages(payload: {
+  urls: string[];
+}): Promise<ApiResult<{ items: PodSlotImageItem[] }>> {
+  return ipc.podSlotImages(payload);
+}
+
+export function podBind(payload: {
+  patternId: number;
+  slots: { variantKey: string; imageKey?: string; skuCode?: string }[];
+  source?: 'image' | 'name' | 'manual';
+  state?: 'bound' | 'suspected_merge';
+}): Promise<ApiResult<{ bound: number; patternId: number }>> {
+  return ipc.podBind(payload);
+}
+
+export function podUnbind(payload: { keys: string[] }): Promise<ApiResult<{ removed: number }>> {
+  return ipc.podUnbind(payload);
+}
+
+/** 按订单图片认图案（主路径）：一次把选中的几张图都归到一个图案（原来属于别的图案会改指并回 `moved`） */
+export function podImageLink(payload: {
+  patternId: number;
+  images: { fingerprint: string; imageId?: number }[];
+  /** 一起认的款色（认图案的稳定身份；订单没归类时为空） */
+  styleColorIds?: number[];
+  source?: string;
+}): Promise<ApiResult<PodImageLinkOutcome>> {
+  return ipc.podImageLink(payload);
+}
+
+/** 取消挂图 / 撤销款色认领（认错了的回退路径） */
+export function podImageUnlink(payload: {
+  fingerprints: string[];
+  styleColorIds?: number[];
+}): Promise<ApiResult<{ removed: number; removedStyleColors: number }>> {
+  return ipc.podImageUnlink(payload);
+}
+
+/** 图案合并（N→1，可撤销）：搬识别图 + 颜色绑定 + 款色 + 花纸批次 */
+export function podPatternMerge(payload: {
+  targetId: number;
+  sourceIds: number[];
+}): Promise<ApiResult<PodPatternMergeOutcome>> {
+  return ipc.podPatternMerge(payload);
+}
+
+export function podPatternMergeUndo(payload: {
+  batchId: string;
+}): Promise<ApiResult<PodPatternMergeUndo>> {
+  return ipc.podPatternMergeUndo(payload);
+}
+
+export function podPatternMergeHistory(payload?: {
+  limit?: number;
+}): Promise<ApiResult<PodPatternMergeRecord[]>> {
+  return ipc.podPatternMergeHistory(payload);
+}
+
+export function podNeedData(): Promise<ApiResult<PodNeedData>> {
+  return ipc.podNeedData();
+}
+
+export function podReportExport(payload: {
+  rows: PodReportRowInput[];
+  date?: string;
+  piecesPerSheet: number;
+  unboundPieces?: number;
+  unboundRows?: number;
+  assumedRows?: number;
+}): Promise<ApiResult<PodReportExportResult>> {
+  return ipc.podReportExport(payload);
+}
+
+export function podBatchList(payload?: {
+  patternId?: number;
+  limit?: number;
+}): Promise<ApiResult<PodBatchRow[]>> {
+  return ipc.podBatchList(payload);
+}
+
+export function podBatchCreate(payload: {
+  patternId: number;
+  sheets: number;
+  piecesPerSheet: number;
+  supplier?: string;
+  costCents?: number;
+  orderedAt?: string;
+  note?: string;
+  arrive?: boolean;
+}): Promise<ApiResult<{ batchId: number; arrivedPieces: number }>> {
+  return ipc.podBatchCreate(payload);
+}
+
+export function podBatchArrive(payload: {
+  batchId: number;
+}): Promise<ApiResult<{ arrived: boolean; arrivedPieces: number }>> {
+  return ipc.podBatchArrive(payload);
+}
+
+export function podPrint(payload: {
+  patternId: number;
+  pieces: number;
+  refOrderItemId?: number;
+}): Promise<ApiResult<{ printed: number; allocations: { batchId: number; pieces: number }[] }>> {
+  return ipc.podPrint(payload);
+}
+
+export function podAdjust(payload: {
+  batchId: number;
+  deltaPieces: number;
+  note?: string;
+}): Promise<ApiResult<{ adjusted: number }>> {
+  return ipc.podAdjust(payload);
+}
+
+export function podBalance(): Promise<ApiResult<PodBalanceRow[]>> {
+  return ipc.podBalance();
 }

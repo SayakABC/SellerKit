@@ -8,30 +8,87 @@
      浅灰选中底 + 冷灰强调，轻边框，圆角卡片，充足留白
    ============================================================ */
 :root {
-  --wb-bg: #f6f7f9;            /* 应用画布（内容区底色） */
-  --wb-surface: #ffffff;       /* 导航 / 顶栏 / 卡片表面 */
-  --wb-surface-2: #fbfcfd;     /* 次级表面（输入框 / 标签底） */
-  --wb-border: #e8eaed;        /* 轻边框 */
-  --wb-text: #1f2328;          /* 主文字 */
-  --wb-text-muted: #8a909a;    /* 次要文字 */
-  --wb-primary: #2b2f36;       /* 石墨灰黑主色（WorkBuddy 灰白黑冷色调） */
+  /* 画布与表面的**反差**决定了"能不能看出卡片"。
+     原值 #f6f7f9 / #ffffff 只差约 2%，在普通屏幕上卡片与画布糊成一片 ——
+     截图实测：整页读起来是一整块浅灰，用户描述为"难看"（2026-10-01）。
+     现压到约 5% 反差（#eff1f5），白色面板才真正"浮"在画布上；
+     再配合 --wb-shadow-* 的投影，层次不靠加深边框来堆。 */
+  --wb-bg: #eff1f5; /* 应用画布（内容区底色） */
+  --wb-surface: #ffffff; /* 导航 / 顶栏 / 卡片表面 */
+  --wb-surface-2: #f7f9fb; /* 次级表面（输入框 / 表头 / 井内底色） */
+  --wb-border: #e6e9ef; /* 轻边框 */
+  --wb-border-strong: #d6dbe4; /* 需要"读得出来"的分隔（表头下沿 / 区块标题） */
+  --wb-text: #1f2328; /* 主文字 */
+  /* 次要文字：原 #8a909a 在 --wb-surface(白) 上只有 3.2:1、在 --wb-bg 上 3.1:1，
+     而这一档大量用于 11–13px 说明文字（低于 18.66px 的 AA 门槛是 4.5:1）→ 整体压深到 5.2:1 / 4.8:1。
+     层级仍与主文字(--wb-text) 可辨，不靠"更灰"来弱化，靠字号与位置。 */
+  --wb-text-muted: #666d79; /* 次要文字（AA 达标） */
+  --wb-primary: #2b2f36; /* 石墨灰黑主色（WorkBuddy 灰白黑冷色调） */
   --wb-primary-hover: #171a1f; /* 主色悬浮 */
-  --wb-primary-soft: #eff1f4;  /* 主色浅底（选中态） */
+  --wb-primary-soft: #eff1f4; /* 主色浅底（选中态） */
   --wb-primary-contrast: #ffffff; /* 主色背景上的文字色 */
-  --wb-success: #16a34a;       /* 成功 */
-  --wb-success-soft: #e9f7ee;  /* 成功浅底 */
-  --wb-warning: #b45309;       /* 警告 */
-  --wb-warning-soft: #fdf1e3;  /* 警告浅底 */
-  --wb-danger: #dc2626;        /* 危险 */
-  --wb-danger-soft: #fdecec;   /* 危险浅底 */
-  --wb-accent: #5a6472;        /* 衍生字段强调色（冷灰） */
-  --wb-accent-soft: #eef1f4;   /* 强调浅底 */
-  --wb-hover: #e8ebf0;         /* 悬浮底 */
+  /* 成功色：原 #16a34a 作底配白字仅 3.3:1、作文字色在白底上也只有 3.3:1，
+     两处都是 12–13px 正文 → 压到 5.0:1。深色主题一档（#4ade80）在深底上已有 9:1，不动。 */
+  --wb-success: #15803d; /* 成功 */
+  --wb-success-soft: #e9f7ee; /* 成功浅底 */
+  --wb-warning: #b45309; /* 警告 */
+  --wb-warning-soft: #fdf1e3; /* 警告浅底 */
+  --wb-danger: #dc2626; /* 危险 */
+  --wb-danger-soft: #fdecec; /* 危险浅底 */
+  /* 实心强调底（成功/危险/主色）上的前景色。原先各处借 --wb-primary-contrast 顶替，
+     浅色下数值相同（都是白），但语义上"主色前景"≠"任意强调色前景"，改主题时易被误改。 */
+  --wb-on-accent: #ffffff; /* 强调底上的文字色 */
+  --wb-accent: #5a6472; /* 衍生字段强调色（冷灰） */
+  --wb-accent-soft: #eef1f4; /* 强调浅底 */
+  --wb-hover: #e8ebf0; /* 悬浮底 */
   --wb-overlay: rgba(23, 26, 33, 0.4); /* 弹层遮罩 */
-  --wb-radius: 12px;
+  --wb-shadow: rgba(
+    23,
+    26,
+    33,
+    0.18
+  ); /* 投影**颜色**（供自行拼 box-shadow 的调用点用，如岛的抽屉） */
+
+  /* 阴影尺度（elevation）。⚠️ 与上面的 --wb-shadow 是两回事：那个是颜色，这组是整套 box-shadow。
+     刻意不叫 --wb-shadow-sm —— 名字太像，"传颜色还是传整套"会一直被搞混。
+     全仓此前**没有任何阴影尺度**，面板/弹层/卡片一律"白底 + 1px 边框"，
+     层次只能靠加深边框，于是越调越脏。多层阴影比单层阴影更接近真实光照（近层收紧、远层扩散）。 */
+  --wb-elev-1: 0 1px 2px rgba(16, 24, 40, 0.05); /* 贴在画布上的卡片 */
+  --wb-elev-2:
+    0 1px 2px rgba(16, 24, 40, 0.05), 0 4px 10px -2px rgba(16, 24, 40, 0.08); /* 面板 / 悬浮 */
+  --wb-elev-3:
+    0 4px 8px -2px rgba(16, 24, 40, 0.08), 0 16px 32px -8px rgba(16, 24, 40, 0.16); /* 弹层 / 抽屉 */
+
+  /* 圆角尺度：单一 --wb-radius 同时被卡片(12px)与 26px 高的小按钮/标签借用，
+     26px 高的控件配 12px 圆角已接近胶囊，同屏三种圆角(6/8/12)也互不呼应。
+     现按"角色"分档，--wb-radius 保留并指向 lg（存量调用点无需改动）。 */
+  --wb-radius-sm: 6px; /* 标签 / 徽标 / 小输入框 */
+  --wb-radius-md: 8px; /* 按钮 / 输入框 / 列表项 */
+  --wb-radius-lg: 12px; /* 卡片 / 面板 / 弹层 */
+  --wb-radius: var(--wb-radius-lg);
+
+  /* 键盘焦点环（:focus-visible 专用）。用主色而非固定蓝，深浅主题各自成立。 */
+  --wb-focus: var(--wb-primary);
+  --wb-focus-ring: rgba(43, 47, 54, 0.16);
+
+  /* 字阶（2026-11-03 界面方案 §4.1）。
+     原先五档挤在 12–17px（17/15/13/12.5/12），相邻只差 0.5–2px —— 1440 宽下**肉眼没有层级**，
+     扫屏时找不到"从哪开始读"。改成一列有名字的字阶：只把两处升上去（主数字、面板标题），
+     辅助级反而往下降（表格 13→12.5、表头 12→11.5）——
+     **总密度不变**，这是"拉开"不是"放大"，桌面高密度工具里密度是资产。
+     ⚠️ 新增令牌必须同步 src/core/plugin/uiBridgeHost.ts 的 WB_THEME_TOKENS：
+     tests/uiIslandThemeTokens.spec.ts 双向校验（清单 ⊇ 定义、清单内无孤儿），漏一处直接红；
+     而漏在注入侧时，岛内 var() 解析失败会**整条声明丢弃**（不报错、只是没生效）。 */
+  --wb-fs-hero: 26px; /* 每屏唯一的主数字（"今天要发多少"） */
+  --wb-fs-display: 20px; /* 常规指标数字 */
+  --wb-fs-title: 17px; /* 页标题 */
+  --wb-fs-subtitle: 14px; /* 面板标题 / 空态标题 */
+  --wb-fs-body: 12.5px; /* 正文 / 表格 */
+  --wb-fs-caption: 11.5px; /* 表头 / 说明（可读下限 11px，别再过界） */
+  --wb-fs-micro: 10.5px; /* 徽标 / 单位（配合 tabular-nums） */
 
   /* Tailwind 默认灰阶 / white 的主题化映射（RGB 三元组，供 tailwind.config 引用） */
-  --tw-surface: 255 255 255;   /* 对应 white */
+  --tw-surface: 255 255 255; /* 对应 white */
   --tw-gray-50: 249 250 251;
   --tw-gray-100: 243 244 246;
   --tw-gray-200: 229 231 235;
@@ -46,46 +103,67 @@
 
 /* ===== 深色主题（外观切换） ===== */
 [data-theme='dark'] {
-  --wb-bg: #15171c;
-  --wb-surface: #1d2027;
-  --wb-surface-2: #252932;
-  --wb-border: #2c313b;
+  --wb-bg: #0f1115;
+  --wb-surface: #191c22;
+  --wb-surface-2: #212630;
+  --wb-border: #2b303a;
+  --wb-border-strong: #3a414d;
   --wb-text: #e6e8ec;
   --wb-text-muted: #9aa1ad;
-  --wb-primary: #e4e7eb;       /* 冷白灰主色（深色下提亮） */
+  --wb-primary: #e4e7eb; /* 冷白灰主色（深色下提亮） */
   --wb-primary-hover: #ffffff; /* 主色悬浮（深色下更亮） */
-  --wb-primary-soft: #2a2e33;  /* 主色浅底（选中态） */
+  --wb-primary-soft: #2a2e33; /* 主色浅底（选中态） */
   --wb-primary-contrast: #15171c; /* 主色背景上的文字色 */
+  --wb-on-accent: #14161a; /* 强调底（浅色主题下这些色是亮色）上的文字色 */
   --wb-success: #4ade80;
   --wb-success-soft: rgba(74, 222, 128, 0.14);
   --wb-warning: #fbbf24;
   --wb-warning-soft: rgba(251, 191, 36, 0.14);
   --wb-danger: #f87171;
   --wb-danger-soft: rgba(248, 113, 113, 0.14);
-  --wb-accent: #a6afbb;        /* 冷灰强调（深色下提亮） */
+  --wb-accent: #a6afbb; /* 冷灰强调（深色下提亮） */
   --wb-accent-soft: rgba(166, 175, 187, 0.14);
   --wb-hover: #272c36;
   --wb-overlay: rgba(0, 0, 0, 0.6); /* 弹层遮罩（深色下更重） */
-  --wb-radius: 12px;
+  --wb-shadow: rgba(0, 0, 0, 0.58); /* 抽屉 / 浮层投影色（深色下须更重才有层次） */
+  /* 深色下投影几乎看不见，层次主要由 --wb-border / --wb-border-strong 承担；
+     这里保留同名令牌以免 var() 解析失败（整条 box-shadow 会被丢弃）。 */
+  --wb-elev-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --wb-elev-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 10px -2px rgba(0, 0, 0, 0.5);
+  --wb-elev-3: 0 4px 8px -2px rgba(0, 0, 0, 0.5), 0 16px 32px -8px rgba(0, 0, 0, 0.6);
+  --wb-radius-sm: 6px;
+  --wb-radius-md: 8px;
+  --wb-radius-lg: 12px;
+  --wb-radius: var(--wb-radius-lg);
+  --wb-focus: var(--wb-primary);
+  --wb-focus-ring: rgba(228, 231, 235, 0.22);
 
   /* 深色下的 Tailwind 灰阶 / white 映射 */
-  --tw-surface: 30 31 34;      /* white → 深色表面 */
+  --tw-surface: 30 31 34; /* white → 深色表面 */
   --tw-gray-50: 42 45 49;
   --tw-gray-100: 47 50 54;
-  --tw-gray-200: 55 58 63;     /* 边框 */
+  --tw-gray-200: 55 58 63; /* 边框 */
   --tw-gray-300: 75 79 85;
-  --tw-gray-400: 110 116 124;  /* 次要文字 */
+  --tw-gray-400: 110 116 124; /* 次要文字 */
   --tw-gray-500: 150 156 166;
   --tw-gray-600: 175 181 191;
-  --tw-gray-700: 205 209 215;  /* 主文字 */
+  --tw-gray-700: 205 209 215; /* 主文字 */
   --tw-gray-800: 222 225 230;
-  --tw-gray-900: 232 234 237;  /* 最亮文字 */
+  --tw-gray-900: 232 234 237; /* 最亮文字 */
 }
 
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* 画布色与文字色落到 body：原先只由 index.html 的 bg-gray-100 + 应用根节点各自上色，
+     两者数值不同（243,244,246 vs 246,247,249）→ 超滚动(overscroll)与首屏可见一条色差；
+     且根节点挂载前 body 无前景色。此处兜底后，index.html 不再需要硬编码 bg-*。 */
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* 通用卡片工具类：业务模块可作为白色面板承载内容 */
@@ -105,7 +183,9 @@ body {
   font-size: 0.875rem;
   border-radius: 0.5rem;
   color: var(--wb-text-muted);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
   cursor: pointer;
 }
 .wb-menu-item:hover {
@@ -146,7 +226,9 @@ body {
   justify-content: center;
   border-radius: 8px;
   color: var(--wb-text-muted);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 .wb-titlebar-btn:hover {
   background: var(--wb-hover);
@@ -163,7 +245,9 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--wb-text-muted);
-  transition: background-color 0.12s ease, color 0.12s ease;
+  transition:
+    background-color 0.12s ease,
+    color 0.12s ease;
 }
 .wb-winbtn:hover {
   background: var(--wb-hover);
@@ -175,8 +259,9 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  /* 6px 在鼠标下太细，横向滚动条几乎点不中；8px 是 macOS 覆盖式滚动条的常见下限 */
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -185,7 +270,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--wb-border);
-  border-radius: 3px;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -234,13 +319,22 @@ body {
      组件已有的 bg-transparent 等类仍可覆盖
    ============================================================ */
 @layer components {
-  input[type='text'],
-  input[type='search'],
-  input[type='date'],
-  input[type='datetime-local'],
-  input[type='month'],
-  input[type='time'],
-  input:not([type]),
+  /* 文本型输入控件统一主题化。
+     ⚠️ 原实现按 type 逐个列举，漏了 number / password / email / tel / url——
+     而 number（克重、天数窗、温度、费率）与 password（API Key）恰好是本项目**最常用**的两类：
+     它们拿不到 --wb-surface-2，只能由 UA 按 color-scheme 渲染，深色主题下与相邻的 text 输入框
+     底色明显不同色（一个 #252932，一个是系统深灰）。改为"排除法"，新增 type 自动纳入。 */
+  input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='range'],
+    [type='file'],
+    [type='color'],
+    [type='button'],
+    [type='submit'],
+    [type='reset'],
+    [type='image']
+  ),
   textarea,
   select {
     background-color: var(--wb-surface-2);
@@ -293,20 +387,770 @@ body {
     font-size: 0.875rem;
     line-height: 1.25rem;
     border: 1px solid var(--wb-border);
-    border-radius: 0.375rem;
+    border-radius: var(--wb-radius-md);
     padding: 0.375rem 0.625rem;
     transition:
       border-color 0.15s ease,
       box-shadow 0.15s ease;
   }
-  .wb-input:focus {
+  /* 紧凑尺寸：工具栏 / 表格内联编辑用（28px 高，与 .wb-btn--sm 同一行高）。
+     ⚠️ 用 :focus-visible 而非 :focus —— 鼠标点进来不该有键盘环，Tab 进来必须有。 */
+  .wb-input--sm {
+    width: auto;
+    height: 28px;
+    padding: 0 0.5rem;
+    font-size: 0.8125rem;
+    line-height: 26px;
+  }
+  .wb-input:focus-visible {
     outline: none;
+    border-color: var(--wb-focus);
+    box-shadow: 0 0 0 3px var(--wb-focus-ring);
+  }
+
+  /* ============================================================
+     统一按钮（.wb-btn）
+     背景：同一角色"次要按钮"此前在 5 个模块里各写一份局部类
+     （.td-btn/.gd-btn/.pk-btn/.oc-btn/.cr__btn/.rs-btn），高度 26/28、
+     圆角 6/8/12、字号 12/13 各不相同 —— 同屏看起来像两个人做的。
+     这里给出唯一基座；模块只需保留自己的尺寸微调，不再重复写边框/圆角/悬浮/禁用。
+     ============================================================ */
+  .wb-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    height: 28px;
+    padding: 0 0.75rem;
+    font-size: 0.8125rem;
+    line-height: 1;
+    white-space: nowrap;
+    border: 1px solid var(--wb-border);
+    border-radius: var(--wb-radius-md);
+    background: var(--wb-surface-2);
+    color: var(--wb-text);
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      opacity 0.15s ease;
+  }
+  .wb-btn:hover:not(:disabled) {
+    background: var(--wb-hover);
+  }
+  .wb-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  /* 主操作：一个视野内只应有一个 */
+  .wb-btn--primary {
     border-color: var(--wb-primary);
-    box-shadow: 0 0 0 1px var(--wb-primary);
+    background: var(--wb-primary);
+    color: var(--wb-primary-contrast);
+  }
+  .wb-btn--primary:hover:not(:disabled) {
+    background: var(--wb-primary-hover);
+    border-color: var(--wb-primary-hover);
+    color: var(--wb-primary-contrast);
+  }
+  /* 危险：仅用于不可逆操作（恢复出厂 / 删除） */
+  .wb-btn--danger {
+    border-color: var(--wb-danger);
+    background: transparent;
+    color: var(--wb-danger);
+  }
+  .wb-btn--danger:hover:not(:disabled) {
+    background: var(--wb-danger-soft);
+  }
+  /* 待处理：把"看见问题"直接变成"点得动的入口"（与 .wb-tag.is-warn 同一角色，
+     但可点 —— 提示挂在页头却不给路，用户只能自己去找动作在哪儿）。 */
+  .wb-btn--warn {
+    border-color: var(--wb-warning);
+    background: var(--wb-warning-soft);
+    color: var(--wb-warning);
+  }
+  .wb-btn--warn:hover:not(:disabled) {
+    border-color: var(--wb-warning);
+    background: var(--wb-warning-soft);
+    filter: brightness(0.97);
+  }
+  /* 无边框：用于工具栏里的低权重动作 */
+  .wb-btn--ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--wb-text-muted);
+  }
+  .wb-btn--ghost:hover:not(:disabled) {
+    background: var(--wb-hover);
+    color: var(--wb-text);
+  }
+  /* 选中/开关态（"更多"这类展开按钮共用）：与侧边栏激活态同一套色 */
+  .wb-btn.is-on,
+  .wb-btn[aria-pressed='true'] {
+    border-color: var(--wb-primary-soft);
+    background: var(--wb-primary-soft);
+    color: var(--wb-primary);
+  }
+  .wb-btn--sm {
+    height: 24px;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  /* 状态标签（.wb-tag）：原 .pk-tag/.oc-tag/.cr__alert 各写一遍，
+     且都用 12px 圆角给 18px 高的小标签 → 视觉上接近药丸。
+     小标签的正确档位是 --wb-radius-sm。 */
+  .wb-tag {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1;
+    white-space: nowrap;
+    border-radius: var(--wb-radius-sm);
+    background: var(--wb-surface-2);
+    color: var(--wb-text-muted);
+  }
+  .wb-tag.is-on {
+    background: var(--wb-primary-soft);
+    color: var(--wb-primary);
+  }
+  .wb-tag.is-warn {
+    background: var(--wb-warning-soft);
+    color: var(--wb-warning);
+  }
+
+  /* 分段控件：同一份数据的几个**互斥视图**（汇总/趋势、待归一/已映射…）。
+     原先只在货与成本里写了一份 `.gd-seg`；第二处要用时按"控件样式只有一个来源"
+     提到这里 —— 别再各写一份边框/圆角/选中态。 */
+  .wb-seg {
+    display: inline-flex;
+    flex-shrink: 0;
+    padding: 2px;
+    border: 1px solid var(--wb-border);
+    border-radius: var(--wb-radius-md);
+    background: var(--wb-surface-2);
+  }
+  .wb-seg__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border: 0;
+    border-radius: calc(var(--wb-radius-md) - 2px);
+    background: transparent;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--wb-text-muted);
+    cursor: pointer;
+  }
+  .wb-seg__item:hover {
+    color: var(--wb-text);
+  }
+  .wb-seg__item.is-on {
+    background: var(--wb-surface);
+    color: var(--wb-text);
+    font-weight: 600;
+    box-shadow: var(--wb-elev-1);
+  }
+  .wb-seg__badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    background: var(--wb-warning-soft);
+    color: var(--wb-warning);
+  }
+  .wb-seg__badge--plain {
+    background: var(--wb-hover);
+    color: var(--wb-text-muted);
+  }
+
+  /* ============================================================
+     页面骨架（2026-10-01 第二轮：从"统一控件"进到"统一结构"）
+     ------------------------------------------------------------
+     上一轮把按钮/输入/标签收敛成同一套，控件不再各写一遍；但**结构**仍然各页各样：
+     标题有的 18px 有的干脆没有、统计有的写成一句话有的写成标签行、
+     空态有的是一行灰字有的连标题都没有、表格有的有容器有的裸在画布上。
+     结果是"控件很好看，页面还是很难看"。这里给出五种骨架：
+       .wb-head    页头（标题 / 描述 / 动作）
+       .wb-metabar 指标条（标签 + 数字），取代"产品 2 SKU 3 缺克重 0"这种模糊的一行流水
+       .wb-panel   面板（画布上的白卡，带投影）
+       .wb-empty   空态（图标 + 标题 + 说明 + 动作）
+       .wb-table   表格
+     ============================================================ */
+
+  /* 页面容器：统一内边距与栅格间距（原各页 14px/16px/10px 混用） */
+  .wb-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: 100%;
+    overflow: auto;
+    padding: 18px 20px 24px;
+  }
+
+  /* 页头：左为"标题 + 一句说明"，右为动作。描述贴标题下方而非同行 —
+     同行时标题与说明挤在一行、说明又长，窄窗口下会先折行再顶飞右侧按钮。 */
+  .wb-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .wb-head__main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  .wb-head__title {
+    font-size: var(--wb-fs-title);
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    color: var(--wb-text);
+  }
+  .wb-head__desc {
+    font-size: var(--wb-fs-caption);
+    line-height: 1.45;
+    color: var(--wb-text-muted);
+  }
+  .wb-head__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  /* 指标条：一行"标签 + 数字"的紧凑统计（页首栏 / 面板顶）。
+     ⚠️ 结构不能改：`.wb-metric` 里必须是 `标签 <b>数字</b>` **同一串文本**。
+     三个 UI 冒烟脚本用 `textContent` 做子串断言（`/产品 2/`、`/件数 7/`、`/缺克重 0 行/`…），
+     而 `textContent` 会把相邻元素**无分隔地**拼起来 —— 把"标签/数字"拆成两个兄弟元素
+     会得到 `产品2`，断言立刻变红（这是本轮实测踩到的坑）。故只换样式、不换结构。 */
+  .wb-metabar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 0 14px;
+    border: 1px solid var(--wb-border);
+    border-radius: var(--wb-radius-md);
+    background: var(--wb-surface);
+    box-shadow: var(--wb-elev-1);
+  }
+  /* 2026-11-03 界面方案 §4.2：数字要在**上面**、且与标签不在同一行。
+     原先是 `inline-flex` + `baseline`，标签 12.5px / 数字 15px 只差 2.5px 且横向串读 ——
+     「订单行 1　收入合计 165.18」读起来是一句话，用户得逐字读完才知道哪个是数。
+     做法是 `column-reverse`：**视觉顺序反转、DOM 一个字不动**。
+     为什么不把标签与数字拆成两个兄弟元素（那样最直白）：见上面那段 textContent 断言契约。
+     column-reverse 让"视觉顺序"与"读屏 / textContent 顺序"彻底解耦，这是本次唯一纯 CSS 的大收益。 */
+  .wb-metric {
+    display: inline-flex;
+    flex-direction: column-reverse;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0;
+    padding: 7px 18px 8px;
+    font-size: var(--wb-fs-caption);
+    line-height: 1.2;
+    color: var(--wb-text-muted);
+    border-left: 1px solid var(--wb-border);
+  }
+  .wb-metric:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .wb-metric b {
+    font-size: var(--wb-fs-display);
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    color: var(--wb-text);
+    font-variant-numeric: tabular-nums;
+  }
+  /* 每屏最多一处：真正的"主角数字"（今天要发多少 / 本期结余）。多给几处等于都不重要。 */
+  .wb-metric.is-hero b {
+    font-size: var(--wb-fs-hero);
+    line-height: 1.15;
+  }
+  /* 异常值（缺克重 / 未关联厂家）用警示色 —— 数字本身变色，不是整块背景变红 */
+  .wb-metric.is-warn b {
+    color: var(--wb-warning);
+  }
+
+  /* 面板：画布上的白卡。此前卡片只靠 1px 边框与画布区分，而画布与表面只差 2% 亮度
+     → 卡片边界实际上看不出来（这是"整页糊成一块"的主因）。 */
+  .wb-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--wb-border);
+    border-radius: var(--wb-radius-lg);
+    background: var(--wb-surface);
+    box-shadow: var(--wb-elev-1);
+  }
+  .wb-panel__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--wb-border);
+    font-size: var(--wb-fs-subtitle);
+    font-weight: 600;
+    color: var(--wb-text);
+  }
+  .wb-panel__head .wb-muted {
+    font-weight: 400;
+  }
+  .wb-panel__body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+  .wb-panel__foot {
+    flex-shrink: 0;
+    padding: 8px 14px;
+    border-top: 1px solid var(--wb-border);
+  }
+
+  /* 空态骨架。原实现是一段居中灰字（有的连标题都没有），四周全是空白 ——
+     "空"和"坏"在视觉上分不开。给出四段：图标 / 标题 / 说明 / 动作。 */
+  .wb-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 52px 24px;
+    text-align: center;
+  }
+  .wb-empty__icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    margin-bottom: 8px;
+    border-radius: 50%;
+    background: var(--wb-surface-2);
+    color: var(--wb-text-muted);
+  }
+  .wb-empty__title {
+    font-size: var(--wb-fs-subtitle);
+    font-weight: 600;
+    color: var(--wb-text);
+  }
+  .wb-empty__desc {
+    max-width: 54ch;
+    font-size: var(--wb-fs-body);
+    line-height: 1.65;
+    color: var(--wb-text-muted);
+  }
+  .wb-empty__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  /* 紧凑空态：给"高度不够说这段空话"的地方用（表体一格 / 抽屉 / 半屏右栏）。
+     整页空态仍用 52px 默认档 —— 大空白里 32px 图标会像加载失败，两种场景需求相反，
+     所以是**一个修饰类**而不是把默认档一起调小。
+     ⚠️ 只压**留白与图标**，不动字号：`.wb-empty__desc` 的字号档位被
+     `tests/uiTypeScale.spec.ts` 钉在 body 档，为了"紧一点"再开一个字号变体
+     等于给同一段话两个档位 —— 那正是这轮要消灭的东西。
+     量的是内边距与图标尺寸（断言取 getComputedStyle），不是"有没有这个 class"。 */
+  .wb-empty--sm {
+    padding: 28px 20px;
+    gap: 2px;
+  }
+  .wb-empty--sm .wb-empty__icon {
+    width: 32px;
+    height: 32px;
+    margin-bottom: 6px;
+  }
+  .wb-empty--sm .wb-empty__actions {
+    margin-top: 10px;
+  }
+
+  /* 表格：统一表头 / 行高 / 悬浮 / 分隔。原各模块各写一份，
+     表头底色、行距、分隔线各不相同，同一屏两张表看起来像两套系统。 */
+  .wb-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: var(--wb-fs-body);
+  }
+  .wb-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 8px 10px;
+    text-align: left;
+    white-space: nowrap;
+    font-size: var(--wb-fs-caption);
+    font-weight: 600;
+    color: var(--wb-text-muted);
+    background: var(--wb-surface-2);
+    border-bottom: 1px solid var(--wb-border-strong);
+  }
+  .wb-table td {
+    padding: 9px 10px;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--wb-border);
+  }
+  .wb-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .wb-table tbody tr.is-clickable {
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+  }
+  .wb-table tbody tr.is-clickable:hover {
+    background: var(--wb-hover);
+  }
+  /* 同特异性下靠源码顺序取胜：选中态必须盖过悬浮态 */
+  .wb-table tbody tr.is-on {
+    background: var(--wb-primary-soft);
+  }
+  .wb-table tbody tr.is-on td:first-child {
+    box-shadow: inset 2px 0 0 var(--wb-primary);
+  }
+  /* 数字列右对齐（金额 / 件数 / 克重）—— 13px 数字不右对齐就没法比大小 */
+  .wb-table .wb-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 宽表容器：**列多到一屏放不下时，滚动条必须出现在表格自己身上**。
+     ⚠️ 这不是可选装饰：`.wb-panel` 是 `overflow: hidden`，宽表直接放进去会被**静默裁掉**右半截 ——
+     列既看不见、也没有任何滚动条能滚过去（实测：16 列明细表在 1280 视口下需要 1211px，
+     可用只有 1064px ⇒ 「毛利依据/状态/缺」三列凭空消失）。2026-10-03 修。
+     首列 + 表头 sticky：横滚时仍然知道"这一行是谁"。 */
+  .wb-table-wrap {
+    min-width: 0;
+    overflow: auto;
+  }
+  .wb-table-wrap .wb-table th:first-child,
+  .wb-table-wrap .wb-table td:first-child {
+    position: sticky;
+    left: 0;
+    /* 必须自己给底色：sticky 列若透明，横滚时下层内容会从它下面穿过去 */
+    background: var(--wb-surface);
+  }
+  .wb-table-wrap .wb-table th:first-child {
+    z-index: 4;
+  }
+  .wb-table-wrap .wb-table td:first-child {
+    z-index: 2;
+  }
+  /* 表头的 z 也要抬起来，否则横滚时会被首列的 td 盖住 */
+  .wb-table-wrap .wb-table thead th {
+    z-index: 3;
+  }
+
+  /* 弱化文字 / 等宽码（表格里高频出现，各模块都自己写了一份） */
+  .wb-muted {
+    color: var(--wb-text-muted);
+  }
+  .wb-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* ============================================================
+     弹层骨架（2026-10-01 · 产品库功能迁回宿主时建立）
+     ------------------------------------------------------------
+     为什么现在才需要：迁移前宿主只有设置 / 命令面板 / 岛容器三处弹层，且各自用
+     Tailwind 类现拼；模块级弹层几乎没有。产品库迁回后，光「货与成本」一页就有
+     6 个弹层（产品编辑 / 导入向导 / 批量编辑 / 删除确认 / 关联管理 / 选产品），
+     再各拼一遍必然又是"同一个角色写 6 次"的老问题（同 .wb-btn 的教训）。
+
+       .wb-mask                 遮罩（点自身关闭由调用方 @click.self 处理）
+       .wb-dialog               居中对话框，三档宽度 --sm / --md / --lg
+       .wb-drawer               右侧抽屉（产品编辑用它：列表保持可见，便于对照着改）
+       .wb-dialog__head/__body/__foot   三段结构，与 .wb-panel 同形
+
+     ⚠️ 遮罩与抽屉一律 `position: fixed`：`absolute` 的包含块是最近定位祖先，
+        哪天某个面板加了 `position: relative`，弹层会**静默缩进那个面板里**。
+     ============================================================ */
+  .wb-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--wb-overlay);
+  }
+
+  .wb-dialog {
+    display: flex;
+    flex-direction: column;
+    max-height: 88vh;
+    overflow: hidden;
+    border: 1px solid var(--wb-border);
+    border-radius: var(--wb-radius-lg);
+    background: var(--wb-surface);
+    box-shadow: var(--wb-elev-3);
+  }
+  .wb-dialog--sm {
+    width: 460px;
+    max-width: 92vw;
+  }
+  .wb-dialog--md {
+    width: 680px;
+    max-width: 94vw;
+  }
+  .wb-dialog--lg {
+    width: 900px;
+    max-width: 96vw;
+  }
+
+  .wb-dialog__head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--wb-border);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--wb-text);
+  }
+  .wb-dialog__body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 14px 16px;
+  }
+  .wb-dialog__foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-top: 1px solid var(--wb-border);
+    background: var(--wb-surface-2);
+  }
+
+  /* 右侧抽屉：内容比一屏高、且"改的时候要能看见列表"的场景用（产品编辑） */
+  .wb-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    width: 560px;
+    max-width: 96vw;
+    background: var(--wb-surface);
+    border-left: 1px solid var(--wb-border);
+    box-shadow: var(--wb-elev-3);
+  }
+
+  /* ============================================================
+     表单行（.wb-field）：标签在上、控件在下、说明第三行。
+     原先各弹层自己拼 `display:flex; flex-direction:column; gap:4px`，
+     连同 12px 次要色标签一起抄了五六遍。
+     ============================================================ */
+  .wb-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .wb-field__label {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--wb-text-muted);
+  }
+  .wb-field__req {
+    font-style: normal;
+    color: var(--wb-danger);
+  }
+  .wb-field__hint {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--wb-text-muted);
+  }
+
+  /* 行内提示条（错误 / 警告 / 成功）。
+     ⚠️ 错误提示**不放在 toast 里**：表单校验失败时用户还要照着改，
+        toast 一闪而过就没了内容。 */
+  .wb-notice {
+    padding: 8px 12px;
+    border-radius: var(--wb-radius-md);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .wb-notice--error {
+    background: var(--wb-danger-soft);
+    color: var(--wb-danger);
+  }
+  .wb-notice--warn {
+    background: var(--wb-warning-soft);
+    color: var(--wb-warning);
+  }
+  .wb-notice--ok {
+    background: var(--wb-success-soft);
+    color: var(--wb-success);
+  }
+
+  /* 表格行内的文本动作（编辑 / 删除 / 改绑…）。
+     用 24px 的 .wb-btn--sm 会撑高行；这里做成无底色的文字按钮，仍是 <button>（键盘可达）。 */
+  .wb-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 4px;
+    border: 0;
+    border-radius: var(--wb-radius-sm);
+    background: transparent;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--wb-primary);
+    cursor: pointer;
+  }
+  .wb-link:hover:not(:disabled) {
+    background: var(--wb-primary-soft);
+  }
+  .wb-link:disabled {
+    color: var(--wb-text-muted);
+    cursor: not-allowed;
+  }
+  .wb-link--danger {
+    color: var(--wb-danger);
+  }
+  .wb-link--danger:hover:not(:disabled) {
+    background: var(--wb-danger-soft);
+  }
+
+  /* 缩略图（列表主图 / 商品ID图共用）。三层回落取到的 dataUrl 直接塞 <img src>。 */
+  .wb-thumb {
+    display: block;
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: var(--wb-radius-sm);
+    border: 1px solid var(--wb-border);
+    background: var(--wb-hover);
+  }
+  .wb-thumb--empty {
+    display: inline-block;
+    border-style: dashed;
+    background: transparent;
+  }
+
+  /* 分页条：右对齐、次要色计数在左。 */
+  .wb-pager {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding: 10px 2px 0;
+    font-size: 13px;
+    color: var(--wb-text-muted);
+  }
+  .wb-pager__spacer {
+    margin-left: auto;
+  }
+
+  /* ============================================================
+     侧栏二级项（2026-11-03 界面方案 §4.4）
+     ------------------------------------------------------------
+     原先二级项带 15px 图标、与一级项**同尺寸同色**，视觉上读成一列平级项 ——
+     用户分不出"这是模块"还是"这是模块里的某一屏"。
+     改法：去掉图标（图标是"入口"的语言，二级项不是入口），换成一条 1.5px 引导线
+     从一级项图标中心垂下来，文字缩进到与一级项**文字**对齐。
+     引导线是"从属"最省的表达 —— 不需要第二层底色，也不加任何颜色。
+     ⚠️ 下面两个位置是硬数值，改侧栏宽度（w-52）/ 一级项内边距（px-3）/ 图标尺寸（20px）时必须一起挪：
+        引导线 x = 8（一级项按钮左缘 8px）+ 12（一级项 px-3）+ 10（20px 图标的一半）= 30px
+        pill 左缘 = 36px（二级项容器 pl-9）
+        文字   x = 36 + 16（按钮 pl-4）= 52px，正好等于一级项文字左缘 8+12+20+12
+     ⚠️ pill 必须从引导线**右边**开始（36 > 30）：一开始用「居中 + w-[calc(100%-1.5rem)]」，
+        选中行的圆角底色正好盖住引导线（按钮是子节点、画在伪元素之上）——
+        实测选中那一行线断掉 32px，读起来像"线画漏了"。现在线在外侧连续，底色贴着字。
+     引导线要跨过行间 gap（容器是 gap-1 = 4px），所以上下各外扩 2px ——
+     否则每 32px 一行就是一段线，读成虚线。
+     ============================================================ */
+  .wb-nav-sub-row {
+    position: relative;
+  }
+  .wb-nav-sub-row::before {
+    content: '';
+    position: absolute;
+    left: 29px; /* 1.5px 宽的线，取 29 让线心落在 30px */
+    top: -2px;
+    bottom: -2px;
+    width: 1.5px;
+    border-radius: 1px;
+    background: var(--wb-border-strong);
+    pointer-events: none;
   }
 }
 
 /* 深色主题：原生控件（select 箭头 / 滚动条 / 日期等）跟随深色 */
 [data-theme='dark'] {
   color-scheme: dark;
+}
+
+/* ============================================================
+   键盘焦点可见性（WCAG 2.4.7）
+   - 全仓此前只有 .wb-input:focus 一处焦点样式；Tab 走一遍界面，绝大多数
+     可交互元素（侧栏项 / 工具栏按钮 / 列表行 / 弹层菜单项）**没有**任何可见焦点，
+     键盘用户完全不知道光标在哪。
+   - 一律用 :focus-visible：鼠标点击不出现，Tab / 键盘操作才出现（不干扰视觉）。
+   - 这些规则**不放进 @layer**：未分层样式的优先级高于 @layer 内的工具类，
+     才能盖住散落在组件里的 outline-none。
+   ============================================================ */
+:is(
+  a,
+  button,
+  [role='button'],
+  [role='menuitem'],
+  [role='option'],
+  [role='tab'],
+  summary
+):focus-visible,
+[tabindex]:not([tabindex='-1']):focus-visible {
+  outline: 2px solid var(--wb-focus);
+  outline-offset: 2px;
+}
+
+/* 输入类控件不用外扩 outline（会被相邻控件裁切），改用主色边框 + 柔光环；
+   组件级 .wb-input:focus-visible 等仍可覆盖（优先级更高）。 */
+:is(input, textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--wb-focus);
+  box-shadow: 0 0 0 3px var(--wb-focus-ring);
+}
+
+/* ============================================================
+   尊重"减弱动态效果"（WCAG 2.3.3 / prefers-reduced-motion）
+   - 此前全仓没有任何兜底：toast 滑入、命令面板淡入、侧栏宽度过渡、
+     transition-all 一律照播；前庭功能敏感的用户无法关闭。
+   - 用 0.01ms 而非 none：保留 animation/transitionend 事件的触发，
+     避免依赖事件回落的逻辑（如过渡结束后清理）被卡住。
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

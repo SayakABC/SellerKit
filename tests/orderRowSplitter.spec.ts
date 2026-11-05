@@ -5,6 +5,7 @@ import {
   detectMultiProductColumns,
   expandOrderRow,
   expandOrderRows,
+  parseRowQty,
   type MultiProductColumns,
 } from '../src/lib/orderRowSplitter';
 
@@ -125,7 +126,12 @@ describe('expandOrderRow', () => {
 describe('expandOrderRows', () => {
   it('cols 为 null 时原样返回，统计为 0', () => {
     const rows = [{ 产品数量: '3' }];
-    expect(expandOrderRows(rows, null)).toEqual({ rows, expanded: 0, missingImageCount: 0 });
+    expect(expandOrderRows(rows, null)).toEqual({
+      rows,
+      expanded: 0,
+      missingImageCount: 0,
+      missingColorCount: 0,
+    });
   });
 
   it('累计统计被拆分的订单行数与缺图产品数', () => {
@@ -140,5 +146,173 @@ describe('expandOrderRows', () => {
     expect(r.rows).toHaveLength(2 + 1 + 2);
     expect(r.expanded).toBe(2);
     expect(r.missingImageCount).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────── 速卖通订单报表式（无「数量」列）
+//
+// 真实样本（2026-09-29，47 列 / 1722 行）：**没有数量列**，多商品行把商品ID 用**逗号**并列
+// （`1005...,1005...`），商品信息里带 `【1】…【2】…` 块，订单级金额只有一条。
+// 旧实现要求存在数量列 → 这类报表**完全不拆**，且 `A,B` 会被当成一个假商品ID 入库（全程无告警）。
+describe('速卖通式：无数量列时按【N】块 / 逗号商品ID 兜底', () => {
+  const headers = ['订单号', '商品 ID', '商品信息', '收货国家', '订单金额'];
+  const au = { ...cols, count: '', image: '', productId: '商品 ID', size: '', info: '商品信息' };
+
+  it('识别：无数量列但有【N】块（≥2）→ 认定为多产品结构，count 为空串', () => {
+    const rows = [{ 商品信息: '【1】A\n【2】B' }];
+    const got = detectMultiProductColumns(headers, rows, {});
+    expect(got).not.toBeNull();
+    expect(got?.count).toBe('');
+    expect(got?.productId).toBe('商品 ID');
+    expect(got?.info).toBe('商品信息');
+  });
+
+  it('识别：无数量列、无【】块，但商品ID 逗号并列 → 也认定为多产品结构', () => {
+    const rows = [{ '商品 ID': '111,222' }];
+    expect(detectMultiProductColumns(headers, rows, {})).not.toBeNull();
+  });
+
+  it('识别：两条信号都没有（单商品行）→ null（保持既有行为，不误判）', () => {
+    const rows = [{ 商品信息: '【1】A', '商品 ID': '111' }];
+    expect(detectMultiProductColumns(headers, rows, {})).toBeNull();
+  });
+
+  it('拆分：逗号分隔的商品ID 按序切开，【N】块与订单级字段各自就位', () => {
+    const row = {
+      订单号: 'NO1',
+      '商品 ID': '111,222',
+      商品信息: '【1】AAA\n(商品数量:1 piece)\n【2】BBB\n(商品数量:1 piece)',
+      收货国家: 'Latvia',
+      订单金额: 'CN￥ 165.18',
+    };
+    const r = expandOrderRow(row, au);
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows.map((x) => x['商品 ID'])).toEqual(['111', '222']);
+    expect(r.rows[0]['商品信息']).toBe('AAA\n(商品数量:1 piece)');
+    expect(r.rows[1]['商品信息']).toBe('BBB\n(商品数量:1 piece)');
+    // 订单级字段原样复制（金额只有一条，不摊到行上）
+    expect(r.rows.map((x) => x['订单金额'])).toEqual(['CN￥ 165.18', 'CN￥ 165.18']);
+    expect(r.rows.map((x) => x['订单号'])).toEqual(['NO1', 'NO1']);
+  });
+
+  it('拆分：只有【1】的单商品行原样返回（不产生额外行）', () => {
+    const row = { '商品 ID': '111', 商品信息: '【1】AAA', 订单号: 'NO1' };
+    const r = expandOrderRow(row, au);
+    expect(r.rows).toEqual([row]);
+  });
+
+  it('拆分：块数与商品ID 数不一致时按较大值拆，多出的行留空（留给人看见）', () => {
+    const row = { '商品 ID': '111,222', 商品信息: '【1】A\n【2】B\n【3】C' };
+    const r = expandOrderRow(row, au);
+    expect(r.rows).toHaveLength(3);
+    expect(r.rows.map((x) => x['商品 ID'])).toEqual(['111', '222', '']);
+  });
+
+  it('同时有数量列时以数量列为准（芒果店长式行为不变）', () => {
+    const both = { ...au, count: '产品数量', productId: '商品 ID', info: '商品信息' };
+    const row = { 产品数量: '2', '商品 ID': '111,222,333', 商品信息: '【1】A\n【2】B\n【3】C' };
+    expect(expandOrderRow(row, both).rows).toHaveLength(2);
+  });
+
+  it('拆分：没有图片列时不判缺图（不凭空制造待补图）', () => {
+    const row = { '商品 ID': '111,222', 商品信息: '【1】A\n【2】B' };
+    const r = expandOrderRow(row, au);
+    expect(r.rows).toHaveLength(2);
+    expect(r.missingImage).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────── 件数提取（`parseRowQty`）
+//
+// 件数决定拣货单"要拣几件"，也决定订单利润页的「缺件数」缺口。它**必须来自这一行自己的块**：
+// 用「数量」列会把 N 件拆出的每行都按 N 件算（splitter 不清空该列），用多块原文则无从判定是哪一件。
+describe('parseRowQty：件数只认这一行自己的商品信息块', () => {
+  const block = (qty: number, note = '') =>
+    `【1】 某款外套 (产品属性:Color:5、Size:XXL、Ships From:China Mainland)\n(商品数量:${qty} piece)${note}`;
+
+  it('单块 + 商品数量 → 取到（速卖通实测写法）', () => {
+    expect(parseRowQty({ 商品信息: block(1) })).toBe(1);
+    expect(parseRowQty({ 商品信息: block(2) })).toBe(2);
+    expect(parseRowQty({ 产品信息: block(3) })).toBe(3);
+  });
+
+  it('块数与商品数不一致时留下的**多块原文** → null（不猜是哪一件）', () => {
+    expect(parseRowQty({ 商品信息: `【1】A\n(商品数量:2 piece)\n【2】B\n(商品数量:3 piece)` })).toBeNull();
+  });
+
+  it('IOSS 标记不算块（`【AE IOSS/IM...】` 不是 `【数字】`）', () => {
+    expect(parseRowQty({ 商品信息: block(2, '\n【AE IOSS/IM5280002556】') })).toBe(2);
+  });
+
+  it('无该列 / 列内无数量 / 数量为 0 → null（不是 1：1 是兜底值，由调用方给）', () => {
+    expect(parseRowQty({ 商品ID: 'ITEM1' })).toBeNull();
+    expect(parseRowQty({ 商品信息: '【1】 某款外套 (产品属性:Size:XL)' })).toBeNull();
+    expect(parseRowQty({ 商品信息: '【1】 某款外套 (商品数量:0 piece)' })).toBeNull();
+    expect(parseRowQty(null)).toBeNull();
+  });
+
+  it('件数荒谬（超上限）→ null（宁可按取不到处理，别给拣货单一个荒谬数字）', () => {
+    expect(parseRowQty({ 商品信息: block(1000) })).toBeNull();
+    expect(parseRowQty({ 商品信息: block(999) })).toBe(999);
+  });
+
+  it('**不用**「数量」列：拆行后它仍是整行的值（照搬会把 3 件拆出的每行都按 3 件算）', () => {
+    expect(parseRowQty({ 数量: '3', 商品信息: block(1) })).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────── 一单多段同商品（真库脏行回归 2026-10-30）
+//
+// 真库订单 `1123192657411338`：`产品数量=5`（**总件数** 2+1+1+1），产品信息里有 4 个【N】段，
+// 尺寸列只有一个 `XL`。旧实现把 5 当段数 → 5 行；又因 `块数 !== n` 每行都留着**多块原文** →
+// `parseOrderPropsColor` 判定"一单多色"返回空、`parseOrderQty` 取不到件数 ⇒ 入库后 `color=''`、
+// 多段被 `(订单号, 图片)` 幂等吞掉。修复后的判据：**一段一行、每行只带自己那一段**。
+describe('速卖通一单多段同商品（真库脏行回归）', () => {
+  const aeCols: MultiProductColumns = {
+    count: '产品数量',
+    image: '产品图片链接',
+    productId: '产品ID',
+    size: '尺寸',
+    info: '产品信息',
+  };
+  const seg = (color: string, size: string, qty: number) =>
+    `Men's Cotton Jacket\n(产品属性:Color:${color},Size:${size},Ships From:China Mainland)\n(产品数量:${qty} piece)`;
+  const fields = {
+    订单号: '1123192657411338',
+    产品数量: '5',
+    产品图片链接: 'https://x/a.jpg',
+    产品ID: '1005013246442752',
+    尺寸: 'XL',
+    产品信息: [
+      `【1】${seg('10', 'XL', 2)}`,
+      `【2】${seg('10', 'XXL', 1)}`,
+      `【3】${seg('10', 'XXXL', 1)}`,
+      `【4】${seg('6', 'XL', 1)}`,
+    ].join('\n'),
+  };
+
+  it('段数按【N】块算（产品数量是总件数，不能当段数）', () => {
+    const r = expandOrderRow(fields, aeCols);
+    expect(r.rows).toHaveLength(4);
+    expect(r.missingColor).toBe(false);
+  });
+
+  it('每行只留自己那一段：色 / 码 / 件数各自就位', () => {
+    const r = expandOrderRow(fields, aeCols);
+    expect(r.rows.map((x) => x.尺寸)).toEqual(['XL', 'XXL', 'XXXL', 'XL']);
+    expect(r.rows.map((x) => parseRowQty(x))).toEqual([2, 1, 1, 1]);
+    // 每行的产品信息里只剩一个 Color（多块原文会让下游判成"一单多色"→ 空色）
+    expect(r.rows.map((x) => (x.产品信息.match(/Color:/g) ?? []).length)).toEqual([1, 1, 1, 1]);
+    expect(r.rows.map((x) => /Color:(\w+)/.exec(x.产品信息)?.[1])).toEqual(['10', '10', '10', '6']);
+  });
+
+  it('块数少于段数时，多出的行留空信息并计入缺色（不拿别人的块顶替）', () => {
+    const r = expandOrderRow(
+      { ...fields, 产品数量: '3', 产品信息: `【1】${seg('10', 'XL', 1)}\n【2】${seg('10', 'XXL', 1)}` },
+      aeCols,
+    );
+    expect(r.rows).toHaveLength(3);
+    expect(r.rows[2].产品信息).toBe('');
+    expect(r.missingColor).toBe(true);
   });
 });

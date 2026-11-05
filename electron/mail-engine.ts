@@ -39,10 +39,15 @@ import {
   getMailFolderCursor,
   updateMailFolderCursor,
   indexMailMessages,
+  maxMailMessageId,
+  countMailMessagesAfter,
+  listMailMessagesAfter,
   type MailAccountRow,
   type MailMessageUpsertRow,
   type MailMessageDetail,
 } from './mail-db';
+import { normalizeContentId } from './mail-html';
+import { publishMailUnreadBadge } from './mail-badge';
 import { resolveMailProvider, type MailProviderPreset } from './mail-providers';
 import { revealShopAccountSecret } from './shop-accounts-db';
 import { readMailAttachmentCache, writeMailAttachmentCache } from './mail-cache';
@@ -74,7 +79,33 @@ export interface MailSyncEvent {
   processed?: number;
   /** 本轮命中总封数 */
   total?: number;
+  /** 本轮**新落库**的邮件封数（只出现在 done；见 MailSyncSummary 的说明） */
+  newCount?: number;
   message?: string;
+}
+
+/**
+ * 单账号同步收尾后的简报。
+ *
+ * **引擎只报事实，要不要弹通知由调度层决定**（`mail-scheduler.ts`）：
+ * 手动点「同步」时用户就在界面前，再弹一条系统通知是噪音；自动轮次才需要。
+ * 判定与副作用分开，这条链路才能单测（对齐 `scheduler.ts` 的做法）。
+ */
+export interface MailSyncSummary {
+  accountId: number;
+  email: string;
+  /** 本轮新落库的封数（按 id 段口径，见 mail-db 的 maxMailMessageId 注释） */
+  newCount: number;
+  /** 新邮件样本（最多 3 条，供通知正文） */
+  samples: { subject: string; fromName: string }[];
+}
+
+/** 收尾简报的订阅者（至多一个：调度层） */
+let onSyncSummary: ((summary: MailSyncSummary) => void) | null = null;
+
+/** 注入 / 清除收尾简报订阅（`mail-scheduler` 启动时注入，停用时清除） */
+export function setMailSyncSummaryHook(fn: ((summary: MailSyncSummary) => void) | null): void {
+  onSyncSummary = fn;
 }
 
 let getWindow: (() => any) | null = null;
@@ -354,8 +385,12 @@ async function runMailSync(accountId: number): Promise<void> {
   updateMailAccountStatus(accountId, { status: 'syncing', lastError: '' });
   emitMailEvent({ type: 'status', accountId, email: account.email, status: 'syncing' });
 
+  // 本轮"新增"的基准：id 单调递增，收尾时 id > 基准的行就是本轮新落库的邮件。
+  // 必须在建连之前取（建连期间别的账号可能并发插入，那些不该算进本轮）。
+  const sinceId = maxMailMessageId();
+
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) {
     updateMailAccountStatus(accountId, {
       status: 'error',
@@ -405,13 +440,29 @@ async function runMailSync(accountId: number): Promise<void> {
       lastError: errors.length ? errors.join('；').slice(0, 500) : '',
       lastSyncedAt: new Date().toISOString(),
     });
+    // 本轮新增封数 + 样本：渲染层拿 newCount 刷新角标，调度层据此决定要不要弹系统通知。
+    // 注意"processed"是**扫到的**、这里是**新落库的**，两者含义不同别混用。
+    const newCount = countMailMessagesAfter(sinceId, accountId);
+    const samples = newCount
+      ? listMailMessagesAfter(sinceId, accountId, 3).map((m) => ({ subject: m.subject, fromName: m.fromName }))
+      : [];
     emitMailEvent({
       type: 'done',
       accountId,
       email: account.email,
       processed,
       total,
+      newCount,
     });
+    // 侧栏徽标：**每轮同步都重算一次**，不只在有新增时推 —— 服务端把这封信标成已读时
+    // newCount 是 0，而未读数是下降的，漏推会让侧栏一直挂着一个已经消掉的红点。
+    publishMailUnreadBadge();
+    try {
+      onSyncSummary?.({ accountId, email: account.email, newCount, samples });
+    } catch (err: any) {
+      // 订阅者（通知层）出错不许影响同步结果
+      console.warn('[mail-engine] 同步简报回调失败：', err?.message || err);
+    }
   } catch (err: any) {
     const message = String(err?.message || err);
     updateMailAccountStatus(accountId, { status: 'error', lastError: message });
@@ -555,16 +606,12 @@ async function syncMailFolder(
           }
           let textBody = '';
           let htmlBody = '';
-          let attachments: { filename: string; mime: string; size: number }[] = [];
+          let attachments: { filename: string; mime: string; size: number; contentId: string }[] = [];
           try {
-            const parsed = await simpleParser(msg.source, { skipHtmlToText: true } as any);
+            const parsed = await simpleParser(msg.source, { skipHtmlToText: true });
             textBody = String(parsed.text || '');
             htmlBody = String(parsed.html || '').slice(0, BODY_HTML_MAX);
-            attachments = (parsed.attachments || []).map((a: any) => ({
-              filename: String(a.filename || '').slice(0, 300),
-              mime: String(a.contentType || '').slice(0, 120),
-              size: Number(a.size || 0),
-            }));
+            attachments = toAttachmentMeta(parsed);
           } catch (parseErr: any) {
             updateMailParsed(hit.id, { preview: '(正文解析失败)' });
             continue;
@@ -637,7 +684,7 @@ async function openOnDemandClient(accountId: number, folder?: string): Promise<{
   const account = getMailAccount(accountId);
   if (!account) throw new Error('邮箱账号不存在');
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) throw new Error('未配置 IMAP 授权码（登录密码不能用于 IMAP）');
   const client = createClient(preset, account, password);
   await client.connect();
@@ -660,11 +707,15 @@ async function fetchSourceByUid(client: ImapFlow, uid: number, maxBytes: number)
 }
 
 /** MIME 解析结果 → 附件元信息（与同步路径同口径） */
-function toAttachmentMeta(parsed: any): { filename: string; mime: string; size: number }[] {
+function toAttachmentMeta(
+  parsed: any,
+): { filename: string; mime: string; size: number; contentId: string }[] {
   return (parsed?.attachments || []).map((a: any) => ({
     filename: String(a.filename || '').slice(0, 300),
     mime: String(a.contentType || '').slice(0, 120),
     size: Number(a.size || 0),
+    // contentId 是内联图片（正文 src="cid:..."）唯一的映射键，必须与同步路径同口径落库
+    contentId: normalizeContentId(a.contentId),
   }));
 }
 
@@ -691,7 +742,7 @@ export async function fetchMailBody(
     const source = await fetchSourceByUid(client, message.uid, maxBytes);
     if (!source) throw new Error('未取到邮件原文（可能已在服务端被删除）');
 
-    const parsed = await simpleParser(source, { skipHtmlToText: true } as any);
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
     const textBody = String(parsed.text || '');
     const htmlBody = String(parsed.html || '').slice(0, BODY_HTML_MAX);
     const attachments = toAttachmentMeta(parsed);
@@ -750,7 +801,7 @@ export async function fetchMailAttachmentData(
     const source = await fetchSourceByUid(client, message.uid, maxBytes);
     if (!source) throw new Error('未取到邮件原文（可能已在服务端被删除）');
 
-    const parsed = await simpleParser(source, { skipHtmlToText: true } as any);
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
     const list: any[] = parsed.attachments || [];
     let hit = list[ordinal];
     if (hit && String(hit.filename || '') !== target.filename) {
@@ -825,6 +876,45 @@ export async function resolveMailAttachment(
   return { filename: data.filename, mime: data.mime, size: data.size, path: cached, content: data.content };
 }
 
+/**
+ * 惰性回填附件 `content_id`（内联图片修复的存量迁移路径）。
+ *
+ * 为什么必须单独有这一步：增量同步只处理新 UID，而正文已缓存的邮件不会再进正文轮 ——
+ * 对老邮件来说，`content_id` 列补出来永远只能是空串，正文里的 `cid:` 引用永远映射不上。
+ * 触发点在 `mail-message-get`：发现"正文引用了 cid、但附件行一条 content_id 都没有"才走这里
+ * （判定见 mail-html.ts 的 needsInlineBackfill）。
+ *
+ * 与 fetchMailBody 的差异：只刷附件元信息，**不重写正文**（正文没变，重写只会多一次大对象写库）；
+ * 复用同一套按需限流与只读连接，因此不会与同步抢连接。
+ *
+ * @returns 是否真的重解析过（false = 邮件不存在/服务端已删/取原文失败，调用方不必重取详情）
+ */
+export async function refreshMailAttachmentContentIds(messageId: number): Promise<boolean> {
+  ensureMailSchema();
+  const message = getMailMessage(Number(messageId));
+  if (!message) return false;
+
+  await acquireOnDemandSlot();
+  const { account, client } = await openOnDemandClient(Number(message.accountId), message.folder);
+  try {
+    const maxBytes = Math.max(Number(account.maxBodyBytes) || 0, ON_DEMAND_MAX_BYTES);
+    const source = await fetchSourceByUid(client, message.uid, maxBytes);
+    if (!source) return false;
+    const parsed = await simpleParser(source, { skipHtmlToText: true });
+    const attachments = toAttachmentMeta(parsed);
+    // 空清单也走一遍 replaceMailAttachments：库里可能有陈旧行需要清掉
+    replaceMailAttachments(message.id, attachments);
+    return attachments.length > 0;
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      /* 忽略登出异常 */
+    }
+    releaseOnDemandSlot();
+  }
+}
+
 /** 服务端文件夹条目（设置页勾选同步目录） */
 export interface MailRemoteFolder {
   path: string;
@@ -841,7 +931,7 @@ export async function listMailRemoteFolders(accountId: number): Promise<MailRemo
   const account = getMailAccount(Number(accountId));
   if (!account) throw new Error('邮箱账号不存在');
   const preset = resolveMailProvider(account.email, account.providerId);
-  const password = revealShopAccountSecret(account.shopSetId, 'mailAuthPwd');
+  const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) throw new Error('未配置 IMAP 授权码（登录密码不能用于 IMAP）');
   const client = createClient(preset, account, password);
   try {

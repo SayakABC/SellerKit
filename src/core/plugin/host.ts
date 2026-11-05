@@ -5,7 +5,7 @@
 //       插件侧拿到的是接口端口（HostApi），权限门（Phase 3+）在桥层二次拦截。
 
 import { writeClipboard } from '@/core/services/clipboard';
-import { selectExcelFile, selectTemplateFile } from '@/core/services/dialog';
+import { selectExcelFile, selectImageFile, selectTemplateFile } from '@/core/services/dialog';
 import { ipc } from '@/core/services/ipc';
 import { toast } from '@/core/services/toast';
 import { useModuleStorage } from '@/core/services/storage';
@@ -37,8 +37,88 @@ async function unwrap<T>(p: Promise<{ success: boolean; data?: T; error?: string
   return r.data as T;
 }
 
+// 「TV 模版」业务域的入参消毒已抽到 ./sanitizeExcel.ts（纯函数、可单测）。
+// 留在 host.ts 会让门禁测试必须 mock 整个宿主能力面（本文件依赖 ipc / axios / toast）；
+// 抽出后本文件也回到 AGENTS §1「单文件 ≤ 300 行」门禁内（原 503 行）。
+import {
+  assertExcelBytes,
+  ecStr,
+  EC_MAX_HEADERS,
+  rejectOverLimit,
+  sanitizeRecords,
+  sanitizeRules,
+} from './sanitizeExcel';
+
 /** 业务库白名单：domain → op → 宿主 IPC 调用（禁止放行任意 SQL） */
+import { openSettings as openSettingsEvent } from '@/core/services/shell';
+
 const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>> = {
+  // 「TV 模版」业务域：Excel 解析与字段规则求值。
+  //
+  // 为什么这两件事必须在宿主做（与 shipping-rate 域的报价单解析同策略）：
+  //  ① 岛运行在 iframe 里，文档 CSP 是 `script-src 'self'`（electron/plugin-ui-protocol.ts），
+  //     **没有 'unsafe-eval'** —— 岛内既不能用 new Function 也不能用 eval，
+  //     而规则引擎的 jsExpression 类型（用户可在设置页写代码）必须求值 JS 表达式；
+  //  ② 岛是手写 ESM、无构建步骤，不该为读 Excel 打包一份 xlsx 依赖。
+  // 复用宿主既有实现（@/core/services/excel、@/lib/fieldProcessor）→ 与内建版行为零漂移。
+  'excel-copy': {
+    // 按路径读取并解析（对话框选用、以及启动时重载上次文件）
+    parseExcel: async (p) => {
+      const r = await ipc.importExcelByPath(String(p?.filePath ?? ''));
+      if (!r.success || !r.data) throw new Error(r.error || '读取 Excel 失败');
+      // ① 配置类：体积由被选文件决定，超限即拒绝——否则整个文件会被读进内存再解析。
+      assertExcelBytes(r.data.data);
+      const { parseExcelBuffer } = await import('@/core/services/excel');
+      const parsed = parseExcelBuffer(r.data.data);
+      return { headers: parsed.headers, records: parsed.records ?? [] };
+    },
+    // 按字节解析（拖拽导入用：iframe 拿不到真实磁盘路径，只能把 ArrayBuffer 传过来）
+    parseExcelBuffer: async (p) => {
+      const buf = p?.data;
+      if (!(buf instanceof ArrayBuffer))
+        throw new Error('parseExcelBuffer: data 必须是 ArrayBuffer');
+      assertExcelBytes(buf);
+      const { parseExcelBuffer } = await import('@/core/services/excel');
+      const parsed = parseExcelBuffer(buf);
+      return { headers: parsed.headers, records: parsed.records ?? [] };
+    },
+    // 执行字段规则（衍生列），返回新记录 + 新列名 + 错误 + 规则哈希（岛侧用它判断规则是否变更）
+    applyRules: async (p) => {
+      const { applyFieldProcessor, computeRulesHash } = await import('@/lib/fieldProcessor');
+      const rules = sanitizeRules(p?.rules);
+      const { records, truncation } = sanitizeRecords(p?.records);
+      const rawHeaders = Array.isArray(p?.headers) ? p.headers : [];
+      // ① 配置类：原为静默丢尾部，用户只会看到"少了几列"而无任何提示 → 改明确报错。
+      if (rawHeaders.length > EC_MAX_HEADERS) {
+        rejectOverLimit('表头列数', rawHeaders.length, EC_MAX_HEADERS);
+      }
+      const headers = rawHeaders.map((h: unknown) => ecStr(h, 200)).filter(Boolean);
+      // 2026-11-04：applyFieldProcessor 改为 async —— `jsExpression` 规则不再在宿主渲染层
+      // 用 new Function 求值，而是经 rule-eval-batch 交给隔离窗口（无 electronAPI / 不可出网）。
+      const result = await applyFieldProcessor(records as never, headers, rules as never);
+      return {
+        records: result.records,
+        newHeaders: result.newHeaders,
+        errors: result.errors,
+        rulesHash: computeRulesHash(rules as never),
+        // 数据类截断统计（新增字段，向后兼容：不读它的岛行为与改动前一致）
+        truncation,
+      };
+    },
+    // 读取模板文本文件（「导入模板文件」得到 content，无需岛侧再走一次 dialog）
+    readTextFile: async (p) => unwrap(ipc.readFile(String(p?.filePath ?? ''))),
+    // 读取宿主内置模板（把 template.txt 的当前内容同步进来）
+    readDefaultTemplate: async () => {
+      const filePath = await unwrap(ipc.getDefaultTemplatePath());
+      if (!filePath) throw new Error('未找到内置模板路径');
+      const f = await unwrap(ipc.readFile(filePath));
+      return { filePath, content: f?.content ?? '' };
+    },
+    checkFileExists: async (p) => unwrap(ipc.checkFileExists(String(p?.filePath ?? ''))),
+    saveTemplateFile: (p) =>
+      unwrap(ipc.saveTemplate(String(p?.filePath ?? ''), String(p?.content ?? ''))),
+  },
+
   'shop-accounts': {
     ensure: () => unwrap(ipc.shopAccountDbEnsure()),
     list: (p) => unwrap(ipc.shopAccountList(p && typeof p === 'object' ? p : undefined)),
@@ -49,85 +129,84 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
     delete: (p) => unwrap(ipc.shopAccountDelete({ id: Number(p?.id) || 0 })),
     reveal: (p) => unwrap(ipc.shopAccountReveal({ id: Number(p?.id) || 0, field: p?.field })),
     batchUpdate: (p) => unwrap(ipc.shopAccountBatchUpdate(p)),
+    // 工具账号（紫鸟 / ERP 登录凭据；usageCount > 0 时删除被拒绝）
+    toolList: (p) => unwrap(ipc.toolAccountList(p && typeof p === 'object' ? p : undefined)),
+    toolUpsert: (p) => unwrap(ipc.toolAccountUpsert(p)),
+    toolDelete: (p) => unwrap(ipc.toolAccountDelete({ id: Number(p?.id) || 0 })),
+    toolReveal: (p) => unwrap(ipc.toolAccountReveal({ id: Number(p?.id) || 0 })),
+    // 企业管理（企业基本信息 + 欧代 / 土代 / 德国包装法合规资料）
+    companyEnsure: () => unwrap(ipc.companyDbEnsure()),
+    companyList: (p) => unwrap(ipc.companyList(p && typeof p === 'object' ? p : undefined)),
+    companyGet: (p) => unwrap(ipc.companyGet({ id: Number(p?.id) || 0 })),
+    companySummary: () => unwrap(ipc.companySummary()),
+    companyUpsert: (p) => unwrap(ipc.companyUpsert(p)),
+    companyDelete: (p) => unwrap(ipc.companyDelete({ id: Number(p?.id) || 0 })),
+    companyProfileUpsert: (p) => unwrap(ipc.companyProfileUpsert(p)),
+    companyProfileDelete: (p) => unwrap(ipc.companyProfileDelete({ id: Number(p?.id) || 0 })),
   },
 
-  // 「订单归类」业务域：视觉指纹与订单明细持久化（语义化操作，禁止任意 SQL）
-  'order-insight': {
-    ensure: () => unwrap(ipc.orderDbEnsure()),
-    imageFind: (p) => unwrap(ipc.orderImageFind(String(p?.fingerprint ?? ''))),
-    imageSave: (p) => unwrap(ipc.orderImageSave(p)),
-    insert: (p) => unwrap(ipc.orderInsert(p)),
-    groupStats: (p) => unwrap(ipc.orderGroupStats(Array.isArray(p?.dimensions) ? p.dimensions : [])),
-    list: (p) => unwrap(ipc.orderList(p && typeof p === 'object' ? p : {})),
-    clear: () => unwrap(ipc.orderClear()),
-    downloadImage: (p) => unwrap(ipc.orderDownloadImage(String(p?.url ?? ''))),
-    readImage: (p) => unwrap(ipc.orderReadImage(String(p?.localPath ?? ''))),
-    readLocalImage: (p) => unwrap(ipc.orderReadLocalImage(String(p?.localPath ?? ''))),
-    imageThumb: (p) => unwrap(ipc.orderImageThumb({ localPath: String(p?.localPath ?? '') })),
-    imageThumbBatch: (p) => unwrap(ipc.orderImageThumbBatch(Array.isArray(p?.items) ? p.items : [])),
-    cleanupOrphanImages: () => unwrap(ipc.orderCleanupOrphanImages()),
-    apiKeySet: (p) => unwrap(ipc.orderApiKeySet(String(p?.apiKey ?? ''))),
-    // Excel 读取/写出在宿主完成（岛内不打包 xlsx 依赖，岛侧只传/收 JSON）
-    parseExcel: async (p) => {
-      const r = await ipc.importExcelByPath(String(p?.filePath ?? ''));
-      if (!r.success || !r.data) throw new Error(r.error || '读取 Excel 失败');
-      const { parseExcelBuffer } = await import('@/core/services/excel');
-      const parsed = parseExcelBuffer(r.data.data);
-      return { headers: parsed.headers, records: parsed.records ?? [] };
-    },
-    exportWorkbook: async (p) => {
-      const XLSX = await import('xlsx');
-      const wb = XLSX.utils.book_new();
-      const sheets = Array.isArray(p?.sheets) ? p.sheets : [];
-      for (const s of sheets) {
-        const rows = Array.isArray(s?.rows) ? s.rows : [];
-        if (!rows.length) continue;
-        const name = String(s?.name || 'Sheet').slice(0, 31);
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), name);
-      }
-      const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
-      return unwrap(ipc.orderExportExcel(buffer, String(p?.fileName || '导出.xlsx')));
-    },
-    // 视觉识别（Key 只入不出：岛侧传引擎配置不含密钥，宿主从加密存储补齐后发起调用）
-    analyze: async (p) => {
-      const keyResult = await ipc.orderApiKeyGet();
-      const apiKey = keyResult.success && keyResult.data ? String(keyResult.data.apiKey || '') : '';
-      if (!apiKey) throw new Error('未配置视觉模型 API Key，请先在「识别设置」中填写并保存');
-      const { createVisionEngine } = await import('@/core/ai');
-      const provider = String(p?.provider ?? 'custom');
-      const engine = createVisionEngine({
-        provider: (provider === 'qwen' || provider === 'openai' ? provider : 'custom') as 'qwen' | 'openai' | 'custom',
-        baseUrl: String(p?.baseUrl ?? ''),
-        model: String(p?.model ?? ''),
-        temperature: Number.isFinite(Number(p?.temperature)) ? Number(p.temperature) : 0.1,
-        apiKey,
-      });
-      return engine.analyze(String(p?.dataUrl ?? ''));
-    },
-    // 处理队列（oi_queue）：批次生命周期 + 断点续跑
-    queueEnqueue: (p) => unwrap(ipc.orderQueueEnqueue(p)),
-    queueStats: (p) => unwrap(ipc.orderQueueStats(p && typeof p === 'object' ? p : {})),
-    queueList: (p) => unwrap(ipc.orderQueueList(p && typeof p === 'object' ? p : {})),
-    queueGet: (p) => unwrap(ipc.orderQueueGet(Number(p?.id) || 0)),
-    queueNextPending: (p) => unwrap(ipc.orderQueueNextPending(p && typeof p === 'object' ? p : {})),
-    queueSetResult: (p) => unwrap(ipc.orderQueueSetResult(p)),
-    queuePatch: (p) => unwrap(ipc.orderQueuePatch(p)),
-    queueRetryErrors: (p) => unwrap(ipc.orderQueueRetryErrors(p && typeof p === 'object' ? p : {})),
-    queuePurgeDone: (p) => unwrap(ipc.orderQueuePurgeDone(p && typeof p === 'object' ? p : {})),
-    queueLastActive: () => unwrap(ipc.orderQueueLastActive()),
-    // 款式库（oi_styles）：指纹归并命名
-    styleResolve: (p) => unwrap(ipc.orderStyleResolve(p)),
-    styleList: () => unwrap(ipc.orderStyleList()),
-    styleDelete: (p) => unwrap(ipc.orderStyleDelete({ id: Number(p?.id) || 0 })),
-    styleAssign: (p) => unwrap(ipc.orderStyleAssign(p)),
-    styleRename: (p) => unwrap(ipc.orderStyleRename(p)),
-    styleImport: (p) => unwrap(ipc.orderStyleImport({ styles: Array.isArray(p?.styles) ? p.styles : [] })),
-    // 订单维护
-    update: (p) => unwrap(ipc.orderUpdate(p)),
-    updateStatus: (p) => unwrap(ipc.orderUpdateStatus(p)),
-    delete: (p) => unwrap(ipc.orderDelete({ id: Number(p?.id) || 0 })),
-    markCorrected: (p) => unwrap(ipc.orderMarkCorrected(p)),
+  // ~~「产品库」岛的五个能力域~~ **整组已删（2026-10-01）** —— 原为 `product`（共享只读 8 op）、
+  // `product-admin`（owner 写 10 op）、`product-image`（图片写 4 op）、`product-supplier`（厂家
+  // 主数据 4 op）、`shop-products`（商品清单 6 op），合计 **32 op**。
+  //
+  // 为什么当初要拆：`security.ts` 的 `decidePermission` 对 db 能力**只按岛自报的 `domains` 与
+  //   `actions` 放行，两者彼此独立** —— 把写 op 留在共享只读域里，"消费方只声明只读"就只能靠自觉。
+  //   故写侧必须结构上单独成域（P3/P4 的既定动作）。
+  // 为什么现在能删：拆域的唯一消费者是市场分发的 UI 岛 `ui-plugins/product-library`，该岛已整体
+  //   下架、功能收回内建「货与成本」（`src/modules/goods/**`）。内建渲染层跑在**同进程信任域**，
+  //   直接调 `ipc.*`、不经 `DB_OPS`，于是这 32 个 op 失去了**全部**消费者 → 按"死物可删"移除
+  //   （同 2026-09-30 的 `picking` 域，见下方）。
+  // 能力本身一行没丢：数据层 `electron/product-db.ts` / `product-handlers.ts` /
+  //   `shop-product-db.ts` / `purchase-db.ts` 与全部 `ipc.*` 通道保持原样。将来真有岛要读写产品，
+  //   再按 ADR-002 C4 的"只读子域 + owner 写子域"形态开回来（`src/modules/goods/api.ts` 里
+  //   `ipc.*` 与 op 名的对应关系就是现成的映射表）。
+
+  // ~~「拣货」只读域~~ **已删（2026-09-30，C2）**：它是 P5 为 order-insight 岛的「拣货」页签开的，
+  // 那个页签在发布前撤回（入口唯一：拣货只有内建「拣货」页一个入口，见 `docs/plans/RESTRUCTURE_PLAN.md` 的 M3/C2）。
+  // 域随之失去唯一消费者 → 按"死物可删"移除（能力本身没丢：内建页走 `ipc.pickingRows` + `@/lib/picking`，
+  // 将来真有岛要消费，再按"只读子域 + 复用渲染层纯函数"的形态开回来，~20 行）。
+  shop: {
+    ensure: () => unwrap(ipc.shopDbEnsure()),
+    list: (p) => unwrap(ipc.shopList(p && typeof p === 'object' ? p : undefined)),
+    get: (p) => unwrap(ipc.shopGet({ id: Number(p?.id) || 0 })),
+    upsert: (p) => unwrap(ipc.shopUpsert(p)),
+    summary: () => unwrap(ipc.shopSummary()),
+    unmapped: () => unwrap(ipc.shopUnmapped()),
+    map: (p) =>
+      unwrap(
+        ipc.shopMap({
+          raw: String(p?.raw ?? ''),
+          refId: Number(p?.refId) || 0,
+          ignored: p?.ignored === true,
+          kind: p?.kind,
+          note: p?.note,
+        }),
+      ),
+    unmap: (p) => unwrap(ipc.shopUnmap({ raw: String(p?.raw ?? ''), kind: p?.kind })),
   },
+
+  // ~~「订单归类」业务域~~ **已删（2026-10-05，岛整体下架）** —— 原 **37 op**（视觉指纹 /
+  // 订单明细读写 / 图片下载·读图·缩略图（单条与合批）/ 孤立图清理 / Excel 解析与导出 /
+  // 视觉识别 `analyze` / 处理队列 `oi_queue` 十个 / 款式库 `oi_styles` 六个 / 订单维护五个）。
+  //
+  // 为什么能删：它是市场分发的 UI 岛 `ui-plugins/order-insight` 的**独占**能力域 ——
+  //   其余四个岛（`shop-accounts` / `excel-copy` / `shipping-rate` / `ae-profit`）的
+  //   `manifest.capabilities` 都没有声明它。而该岛已整体下架：**四步发货台**
+  //   （`src/modules/today/**` 的五个页签；2026-10-17 算钱整步撤出后是四步）在宿主里做完了它的全部**每日动作**，
+  //   剩下的「识别库 / 透视 / 明细」不是每日动作、按裁量一并去掉。
+  //   消费者归零 ⇒ 按"死物可删"移除（同 2026-09-30 的 `picking` 域、2026-10-01 的 `product*` 五域）。
+  //   "宿主也在用这些表"**不构成保留理由**：内建页与宿主同进程、走自己的 `ipc.*`，
+  //   结构上够不到 `DB_OPS`（该对象只经 `window.__sk` 桥暴露给 iframe 岛）。
+  // 数据层 `electron/order-db.ts` / `order-handlers.ts` 与 `ipc.order*` 通道**原样保留**（宿主的
+  //   「今天 › 导入订单 / 归类核对」在用）；将来真有岛要消费，按 ADR-002 C4 的"只读子域"形态开回来
+  //   （现成的映射表就是 `src/modules/today/classify.ts` 里 `ipc.*` 的用法）。
+  //
+  // ⚠️ **视觉引擎已于 2026-10-28 整条删除**（`src/core/ai/**`、`order-api-key-*`、「设置 › 识别」页）：
+  //   自 2026-10-05 该岛下架起就零调用方，用户已决定不接云端模型。本注释上一段说的"能力一行没丢"
+  //   仅指**数据层通道**，不再包括识别引擎。判断见 `docs/notes/2026-10-30-order-classify-panel.md`。
+  //
+  // 存储命名空间 `order-insight`（引擎配置 + 列映射）随引擎一并停止读写；**但键名不要回收**——
+  //   那是 electron-store 里已落盘的用户数据，将来重新接入识别时是同名恢复而非凭空重来。
 
   // 「拿货对账」业务域：供应商 / 拿货单 / 付款 / 对账 / 待拿货缺口
   purchase: {
@@ -152,58 +231,45 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
     ignoreList: () => unwrap(ipc.purchaseIgnoreList()),
     priceHistory: (p) => unwrap(ipc.purchasePriceHistory(p && typeof p === 'object' ? p : {})),
     shopAllocation: (p) => unwrap(ipc.purchaseShopAllocation(p && typeof p === 'object' ? p : {})),
-    shopAllocationDetail: (p) => unwrap(ipc.purchaseShopAllocationDetail(p && typeof p === 'object' ? p : {})),
+    shopAllocationDetail: (p) =>
+      unwrap(ipc.purchaseShopAllocationDetail(p && typeof p === 'object' ? p : {})),
     exportExcel: (p) => unwrap(ipc.purchaseExportExcel(p)),
     // D3 单向通道：向「利润追踪」导出只读拿货成本快照
     costSnapshot: () => unwrap(ipc.purchaseCostSnapshot()),
   },
 
-  // 「利润追踪」业务域：AE 订单明细 / 利润引擎 / 成本衔接 / 汇率（只读为主，写入仅语义化操作）
+  // 「订单采集」业务域：接收端状态 / 汇率（只读为主，写入仅语义化操作）。
+  // ⚠️ 2026-10-15：`orderList` / `summary` / `profitStats` 随死表一并删除（岛侧早已不声明）。
+  // ⚠️ 2026-10-21（C2）：`costMapList` / `costMapImport` 随 ae_cost_map 退役删除。
   ae: {
     ensure: () => unwrap(ipc.aeDbEnsure()),
     receiverStatus: () => unwrap(ipc.aeReceiverStatus()),
-    orderList: (p) =>
-      unwrap(
-        ipc.aeOrderList({
-          offset: Number.isFinite(Number(p?.offset)) ? Math.max(0, Math.trunc(Number(p.offset))) : 0,
-          limit: Math.min(Math.max(Number(p?.limit) || 50, 1), 200),
-          search: typeof p?.search === 'string' ? p.search.slice(0, 120) : '',
-        }),
-      ),
-    summary: () => unwrap(ipc.aeSummary()),
-    profitStats: (p) =>
-      unwrap(
-        ipc.aeProfitStats({
-          granularity: p?.granularity === 'day' ? 'day' : 'month',
-          rangeDays: (() => {
-            const n = Number(p?.rangeDays);
-            if (!Number.isFinite(n)) return 90;
-            return Math.min(Math.max(Math.trunc(n), 1), 1095);
-          })(),
-        }),
-      ),
-    costMapList: () => unwrap(ipc.aeCostMapList()),
-    costMapImport: (p) =>
-      unwrap(
-        ipc.aeCostMapImport({
-          items: (Array.isArray(p?.items) ? p.items : []).slice(0, 5000).map((it: any) => ({
-            styleCode: String(it?.styleCode ?? '').slice(0, 64),
-            styleName: it?.styleName == null ? '' : String(it.styleName).slice(0, 200),
-            unitPriceCents: Number.isFinite(Number(it?.unitPriceCents)) ? Math.trunc(Number(it.unitPriceCents)) : 0,
-            sampleCount: Number.isFinite(Number(it?.sampleCount)) ? Math.trunc(Number(it.sampleCount)) : 0,
-            lastBizDate: it?.lastBizDate == null ? '' : String(it.lastBizDate).slice(0, 32),
-          })),
-        }),
-      ),
     rateList: () => unwrap(ipc.aeRateList()),
     rateUpsert: (p) =>
       unwrap(
         ipc.aeRateUpsert({
-          fromCurrency: String(p?.fromCurrency ?? '').toUpperCase().slice(0, 8),
+          fromCurrency: String(p?.fromCurrency ?? '')
+            .toUpperCase()
+            .slice(0, 8),
           rateToCny: Number.isFinite(Number(p?.rateToCny)) ? Number(p.rateToCny) : 0,
-        }),
+        })
       ),
   },
+
+  // 「无忧物流运费」业务域已于 2026-10-15 **整域删除**：该功能当日回收为内建页面
+  // （「基础数据 › 物流运费」，src/modules/shop-accounts/），页面直接 import
+  // `core/services/shipRateOps`（唯一实现）。原本这里保留的薄委托只为市场里已装旧岛的
+  // 用户续命 —— 项目尚未上线、没有这批用户，故按"未上线不留兼容层"的原则整域拿掉，
+  // 而不是让它长期长成第二入口（每个保留的域都是一份要维护、要守卫、还可能被人
+  // 当成"另有实现"的分身）。
+  //
+  // 同批处理的还有 OrderCostView 里读旧岛 storage 键 `table` 的回落分支：
+  // 岛已下架 ⇒ 那个键永远读不到值 ⇒ 是恒不生效的死代码（"看起来兼容、实际不存在"）。
+  //
+  // 保留 rateAdopt（src/core/services/shipRateOps.ts）：它不是岛通路，而是
+  // **用户数据迁移** —— 把早期留在 storage 里的运价表一次性交给宿主快照。
+  // 守卫 tests/pluginTriage.spec.ts 的反向断言盯着这个域别被加回来。
+
 };
 
 /** 邮件白名单（只读 IMAP 语义；凭据与账号维护由宿主完成） */
@@ -214,7 +280,10 @@ const MAIL_OPS: Record<string, (payload: any) => Promise<unknown>> = {
   accountUpsert: (p) => unwrap(ipc.mailAccountUpsert(p)),
   accountDelete: (p) => unwrap(ipc.mailAccountDelete({ id: Number(p?.id) || 0 })),
   accountTest: (p) => unwrap(ipc.mailAccountTest(p)),
-  syncNow: (p) => unwrap(ipc.mailSyncNow(p?.accountId == null ? undefined : { accountId: Number(p.accountId) || 0 })),
+  syncNow: (p) =>
+    unwrap(
+      ipc.mailSyncNow(p?.accountId == null ? undefined : { accountId: Number(p.accountId) || 0 })
+    ),
   syncCancel: (p) => unwrap(ipc.mailSyncCancel({ accountId: Number(p?.accountId) || 0 })),
   syncState: () => unwrap(ipc.mailSyncState()),
   messagesList: (p) => unwrap(ipc.mailMessagesList(p && typeof p === 'object' ? p : undefined)),
@@ -225,28 +294,28 @@ const MAIL_OPS: Record<string, (payload: any) => Promise<unknown>> = {
       ipc.mailBodyFetch({
         messageId: Number(p?.messageId ?? p?.id) || 0,
         accountId: p?.accountId == null ? undefined : Number(p.accountId) || 0,
-      }),
+      })
     ),
   attachmentSave: (p) =>
     unwrap(
       ipc.mailAttachmentSave({
         messageId: Number(p?.messageId ?? p?.id) || 0,
         attachmentId: Number(p?.attachmentId) || 0,
-      }),
+      })
     ),
   attachmentPreview: (p) =>
     unwrap(
       ipc.mailAttachmentPreview({
         messageId: Number(p?.messageId ?? p?.id) || 0,
         attachmentId: Number(p?.attachmentId) || 0,
-      }),
+      })
     ),
   attachmentOpen: (p) =>
     unwrap(
       ipc.mailAttachmentOpen({
         messageId: Number(p?.messageId ?? p?.id) || 0,
         attachmentId: Number(p?.attachmentId) || 0,
-      }),
+      })
     ),
   foldersList: (p) => unwrap(ipc.mailFoldersList({ accountId: Number(p?.accountId) || 0 })),
   cacheStatus: () => unwrap(ipc.mailCacheStatus()),
@@ -303,6 +372,11 @@ export function createHostApi(): HostApi {
           if (!f) return null;
           return { kind: 'excel', filePath: f.filePath, data: f.data };
         }
+        if (opts.kind === 'image') {
+          const f = await selectImageFile();
+          if (!f) return null;
+          return { kind: 'image', filePath: f.filePath };
+        }
         if (opts.kind === 'template') {
           const f = await selectTemplateFile();
           if (!f) return null;
@@ -315,8 +389,8 @@ export function createHostApi(): HostApi {
     },
     ui: {
       openSettings(category?: string, tab?: string): void {
-        // 对接 AppShell 已监听的 open-settings 事件，沿用现有"dispatch 事件定位设置"机制
-        window.dispatchEvent(new CustomEvent('open-settings', { detail: { category, tab } }));
+        // 对接 AppShell 已监听的 open-settings 事件（事件名只在 core/services/shell.ts 写一次）
+        openSettingsEvent(category, tab);
       },
       notify(o: { kind: 'success' | 'error' | 'info'; text: string }): void {
         toast(o.text, o.kind);

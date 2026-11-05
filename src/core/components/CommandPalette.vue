@@ -6,10 +6,15 @@
       @click.self="$emit('close')"
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="命令面板"
         class="w-[560px] max-w-[92vw] bg-[var(--wb-surface)] rounded-xl shadow-2xl border border-[var(--wb-border)] overflow-hidden"
       >
         <!-- 搜索框 -->
-        <div class="flex items-center gap-2 px-4 h-12 border-b border-[var(--wb-border)]">
+        <div
+          class="flex items-center gap-2 px-4 h-12 border-b border-[var(--wb-border)] transition-colors focus-within:border-[var(--wb-focus)]"
+        >
           <svg
             class="text-[var(--wb-text-muted)] flex-shrink-0"
             width="18"
@@ -18,23 +23,39 @@
             fill="none"
             stroke="currentColor"
             stroke-width="1.8"
+            aria-hidden="true"
           >
             <circle cx="11" cy="11" r="7" />
             <path d="M21 21l-4-4" />
           </svg>
+          <!-- combobox 语义：焦点始终留在输入框，用 aria-activedescendant 指认"当前高亮项"，
+               而不是把焦点搬来搬去（后者会让读屏在每次方向键时重读整行）。 -->
           <input
             ref="inputEl"
             v-model="query"
             type="text"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-list"
+            aria-autocomplete="list"
+            :aria-activedescendant="activeItem ? `palette-opt-${activeItem.key}` : undefined"
             placeholder="搜索模块或命令…"
             class="flex-1 outline-none bg-transparent text-sm text-[var(--wb-text)] placeholder:text-[var(--wb-text-muted)]"
             @keydown="onKeydown"
           />
-          <kbd class="text-[11px] text-[var(--wb-text-muted)] border border-[var(--wb-border)] rounded px-1.5 py-0.5">ESC</kbd>
+          <kbd
+            class="text-[11px] text-[var(--wb-text-muted)] border border-[var(--wb-border)] rounded px-1.5 py-0.5"
+            >ESC</kbd
+          >
         </div>
 
         <!-- 结果列表 -->
-        <div class="max-h-[50vh] overflow-y-auto py-2">
+        <div
+          id="palette-list"
+          role="listbox"
+          aria-label="可执行项"
+          class="max-h-[50vh] overflow-y-auto py-2"
+        >
           <template v-for="section in sections" :key="section.title">
             <div
               v-if="section.items.length"
@@ -45,6 +66,9 @@
             <button
               v-for="item in section.items"
               :key="item.key"
+              :id="`palette-opt-${item.key}`"
+              role="option"
+              :aria-selected="isActive(item)"
               :class="[
                 'w-full flex items-center gap-3 px-4 py-2 text-left text-sm transition-colors',
                 isActive(item)
@@ -59,7 +83,9 @@
                 v-html="iconHtml(item.icon)"
               ></span>
               <span class="flex-1 truncate">{{ item.label }}</span>
-              <span v-if="item.shortcut" class="text-[11px] text-[var(--wb-text-muted)]">{{ item.shortcut }}</span>
+              <span v-if="item.shortcut" class="text-[11px] text-[var(--wb-text-muted)]">{{
+                item.shortcut
+              }}</span>
             </button>
           </template>
           <div v-if="!hasResults" class="px-4 py-6 text-center text-sm text-[var(--wb-text-muted)]">
@@ -111,7 +137,7 @@ const moduleItems = computed<PaletteItem[]>(() =>
     icon: m.icon || 'box',
     section: '模块',
     moduleId: m.id,
-  })),
+  }))
 );
 
 const commandItems = computed<PaletteItem[]>(() =>
@@ -122,7 +148,7 @@ const commandItems = computed<PaletteItem[]>(() =>
     shortcut: c.shortcut,
     section: '当前模块命令',
     command: c,
-  })),
+  }))
 );
 
 // Phase 3：外置插件（后台贡献型）命令，独立分区展示（避免与当前模块命令混淆）
@@ -134,7 +160,7 @@ const pluginCommandItems = computed<PaletteItem[]>(() =>
     shortcut: c.shortcut,
     section: '外置插件命令',
     command: c,
-  })),
+  }))
 );
 
 // 扁平列表（导航用）：先模块，后当前模块命令，再外置插件命令
@@ -161,6 +187,9 @@ function isActive(item: PaletteItem): boolean {
   return flatItems.value[activeIndex.value]?.key === item.key;
 }
 
+/** 当前高亮项（供输入框的 aria-activedescendant 指认；越界时为 undefined） */
+const activeItem = computed<PaletteItem | undefined>(() => flatItems.value[activeIndex.value]);
+
 function setActive(item: PaletteItem) {
   const idx = flatIndexOf(item.key);
   if (idx >= 0) activeIndex.value = idx;
@@ -174,7 +203,7 @@ watch(
       activeIndex.value = 0;
       nextTick(() => inputEl.value?.focus());
     }
-  },
+  }
 );
 
 watch(flatItems, () => {
@@ -210,18 +239,15 @@ function choose(item: PaletteItem) {
 const iconMap: Record<string, string> = {
   table:
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>',
-  tool:
-    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 7a3 3 0 10-4 4l-6 6 2 2 6-6a3 3 0 004-4l-2 2-2-2 2-2z"/></svg>',
-  box:
-    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v6c0 4-3 7-8 8-5-1-8-4-8-8V7z"/></svg>',
+  tool: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 7a3 3 0 10-4 4l-6 6 2 2 6-6a3 3 0 004-4l-2 2-2-2 2-2z"/></svg>',
+  box: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v6c0 4-3 7-8 8-5-1-8-4-8-8V7z"/></svg>',
   chart:
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   sparkles:
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
   settings:
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>',
-  key:
-    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
+  key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17.5 12v3M20 12v2"/></svg>',
 };
 
 function iconHtml(icon?: string): string {

@@ -1,0 +1,558 @@
+#!/usr/bin/env node
+/**
+ * 文档引用校验（R4-7 的验收工具）
+ *
+ * 为什么需要它
+ * ------------
+ * 文档目录整理（docs/ 分层）与文件删除（如 R4-1 删 PROJECT_OVERVIEW.md）都会打断引用。
+ * 这类损伤的症状是"读者点开一个不存在的文件"，不会抛错、不会被 lint / tsc 发现，
+ * 只能靠扫描。本脚本让「全仓文档引用无悬空」这句话**可复现**，而不是一次性结论
+ * （与 `check-ipc-contract.mjs` 之于 R2-4 同理）。
+ *
+ * 三类引用与判定规则
+ * ------------------
+ * ① Markdown 链接 `](target)` —— **必须存在**。这是读者真正点击的路径，悬空即硬错误。
+ *    跳过 http/https/mailto/tel/data；以 `/` 开头按仓库根解析，否则按所在文件目录解析。
+ *
+ * ② 反引号里的「路径形态」token（含 `/` 且以已知扩展名结尾）—— 依次尝试四种基准：
+ *    a. 仓库根相对    → `src/lib/excelParser.ts`
+ *    b. 所在文件目录  → `docs/README.md` 里的 `archive/manual.md`
+ *    c. `docs/` 相对  → 审查报告里的 `architecture/PLUGIN_ARCHITECTURE.md`
+ *    d. 后缀匹配      → 仓库内存在任一文件以 `/<token>` 结尾
+ *       d 是必要的：插件/UI 岛文档大量使用包内相对路径（如 `src/main.js`），
+ *       它们在仓库根下当然不存在，但完全合法。没有这一层，扫描结果 95% 是噪音。
+ *    四者皆不命中 → 查下方 `DELIBERATELY_MISSING` 豁免表；仍未命中 → 报错。
+ *
+ *    另：首段为 `node_modules` / `dist` / `release` / `out` 的 token 直接跳过 ——
+ *    它们指向依赖与构建产物，**按设计不在仓库内**（UI 岛的 `dist/index.html` 即此类）。
+ *
+ * ③ 代码文件中的**文档引用**（仅匹配 `docs/**` 与根级 `*.md`）—— 删除一份文档会让
+ *    代码注释里的引用悬空（审查报告 §5.5 记录过 6 处这类引用）。只查这一类，
+ *    不查代码里的普通路径，避免误伤。
+ *
+ * ④ `docs/notes/` 结论层的**反向守卫** —— 方向与 ①–③ 相反：那三条查"引用指向的文件是否存在"，
+ *    这条查"存在的笔记是否被人知道"。多 AI 工具交替开工时，结论只有落进仓库才带得走
+ *    （见 `AGENTS.md` §0 跨工具协作契约）；而"写了但没人索引到"与"没写"等价，所以
+ *    `docs/notes/*.md`（除 `README.md`）必须同时满足：
+ *      a. 文件名为 `YYYY-MM-DD-<slug>.md`（按日期可排序）；
+ *      b. 在 `AGENTS.md` / `CHANGELOG.md` / `docs/README.md` / `docs/notes/README.md`
+ *         之一里被引用（出现文件名或 slug 即算）。
+ *    零条目时打印"未验证任何内容"而非静默通过 —— 扫描型守卫必须自证非空转。
+ *
+ * 豁免表的边界（重要）
+ * ------------------
+ * `DELIBERATELY_MISSING` 只承接**文档正在陈述"该路径不存在"的句子**——例如
+ * "`core/layout/ContentHeader.vue` 从未创建"、"均已删除"、"引用了从未存在的 X"。
+ * 这类 token 指的就是不存在的东西，不是悬空。
+ *
+ * 判断标准只有一条：**把该 token 改成存在的路径，句子是否就不成立了？**
+ *   · 是 → 属本表（句子在陈述缺失）
+ *   · 否 → 不属本表，去改文档
+ * 每项都必须写理由。不要把新出现的悬空项直接塞进来 —— 那是把校验器改瞎。
+ *
+ * 已知覆盖边界（有意为之，不是遗漏）
+ * ---------------------------------
+ * · **不含 `/` 的裸文件名不检查**（`meta.ts` / `store.ts` / `index.ts` …）。文档里这类
+ *   写法绝大多数是"模式指代"而非具体路径，逐一检查会产生成百条噪音，把真信号淹掉。
+ *   代价是：`唯一文件名` 类的错误（如引用了拼错的单文件名）本脚本抓不到。
+ * · **不检查 URL 的可达性**（跳过 http/https）。外链失效属于另一类问题，需联网，不放进门禁。
+ * · `docs/archive/` 整体跳过：归档文档内含失效引用属正常，不该继续维护。
+ *
+ * 用法：node scripts/check-doc-links.mjs   （或 npm run verify:docs）
+ */
+
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { join, dirname, resolve, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const DOCS = join(ROOT, 'docs');
+
+/** 扫描时跳过的目录：产物、依赖、AI 工具本地数据、历史归档（归档内含失效引用属正常） */
+const SKIP_DIRS = new Set([
+  'node_modules',
+  'dist',
+  'release',
+  'market-out',
+  '.git',
+  '.workbuddy',
+  '.codebuddy',
+  'archive',
+]);
+
+/** ② 反引号 token 的形态：至少一段目录 + 以已知扩展名结尾 */
+const PATH_TOKEN_RE =
+  /`([A-Za-z0-9_.@-]+\/[A-Za-z0-9_./@-]*\.(?:md|json|ts|tsx|vue|yml|yaml|css|mjs|cjs|js|html))`/g;
+
+/** ③ 代码文件里只认「文档引用」 */
+const DOC_TOKEN_RE = /`((?:docs\/[A-Za-z0-9_./-]+\.md)|(?:AGENTS|README|CHANGELOG|CONTRIBUTING)\.md)`/g;
+
+/** ① Markdown 链接 */
+const MD_LINK_RE = /\]\(([^)#\s]+?)(?:#[^)]*)?\)/g;
+
+/** 依赖 / 产物 / AI 工具私有数据：指向它们的 token 按设计不存在于仓库，直接跳过 */
+const NON_REPO_HEADS = new Set([
+  'node_modules',
+  'dist',
+  'release',
+  'out',
+  // 兄弟仓库：采集扩展 SellerKitExtensions（独立 git repo）的源码路径 ——
+  // 跨仓引用是真实存在的文件，只是不在本仓；与 node_modules 同理跳过
+  'SellerKitExtensions',
+  // AI 工具本机数据（见 AGENTS.md §0）：`git clone` 后本就不存在，
+  // 引用它们的文档不算悬空 —— 与 node_modules 同理。
+  '.workbuddy',
+  '.codebuddy',
+  '.qoder',
+]);
+
+/** ④ docs/notes 结论层：命名规范 + 必须被索引（反向守卫） */
+const NOTES_DIR = join(DOCS, 'notes');
+const NOTE_NAME_RE = /^\d{4}-\d{2}-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
+const NOTE_INDEX_FILES = [
+  join(ROOT, 'AGENTS.md'),
+  join(ROOT, 'CHANGELOG.md'),
+  join(DOCS, 'README.md'),
+  join(NOTES_DIR, 'README.md'),
+];
+
+/**
+ * 豁免表：文档**有意引用不存在的路径**之处（句子本身在陈述"它不存在"）。
+ * 每项必写理由；理由要能回答"为什么改成存在的路径后句子就不成立了"。
+ */
+const DELIBERATELY_MISSING = new Map([
+  [
+    'src/core/ai/openaiCompatible.ts',
+    '2026-10-28 删除云端视觉链路（用户决定不接云端模型）：CHANGELOG / 2026-10-05 归类链路笔记记录的是"当时它在那里"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/core/ai/visionPrompt.ts',
+    '2026-10-28 随 src/core/ai 整目录删除：CHANGELOG 2026-10-05 条目记录的是"当时把提示词搬到这里"，改指现存文件则句子不成立',
+  ],
+  [
+    'tests/visionPrompt.spec.ts',
+    '2026-10-28 与 visionPrompt.ts 一并删除（枚举注入的守卫随提示词消失，提示词本身已无消费者）：CHANGELOG / PROJECT_BASELINE 的测试计数记录的是当时新增了它',
+  ],
+  [
+    'src/core/settings/RecognitionSettings.vue',
+    '2026-10-28 删除「设置 › 识别」页：2026-10-01 样式审查笔记记录的是"当时它仍在"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/lib/podImageGroups.ts',
+    '2026-11-03 图案并进「发货台 › 订花纸」时删除：它和 podAutoGroup.ts 是"按图自动分组"的旧实现，写入位换成按款的 `src/lib/podStyles.ts`；CHANGELOG 那句正是在陈述"删掉了它们"',
+  ],
+  [
+    'src/lib/podAutoGroup.ts',
+    '同上（同次一起删的，连同 tests/podImageGroups.spec.ts / tests/podAutoGroup.spec.ts）',
+  ],
+  [
+    'src/modules/shop-accounts/components/PatternPanel.vue',
+    '2026-11-03 用户口径"把产品管理中的图案和发货台的订花纸精简合并，放在现有的订花纸中"：该面板已删，认图案在「发货台 › 订花纸」（`src/modules/today/tabs/PodOrderPanel.vue`）。CHANGELOG 2026-11-02 条目记录的是"当时面板在这里"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/goods/simple.ts',
+    '2026-10-25 用户口径"去掉简洁模式"：该共享 ref 与开关整个撤除（完整形态成为唯一形态）；CHANGELOG 2026-10-08 条目与 2026-10-08 收尾笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/goods/flow.ts',
+    '2026-10-08 撤掉「货与成本」的步骤条引导后，该纯函数**与其单测一并删除**；CHANGELOG / GOODS_WORKBENCH_PLAN / 那条引导笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
+  ],
+  [
+    'tests/goodsFlow.spec.ts',
+    '同上（同次一起删的；笔记与计划里"9 条断言"记的是当时实跑结果）',
+  ],
+  [
+    'electron/product-cost-sync.ts',
+    'P4（2026-10-09）把手工进价的写入口径提到 electron/manual-costs.ts 后删除；CHANGELOG 续十七 的句子正是在陈述「删了它」（移走后它只剩没实质的薄壳），改指现存文件则句子不成立',
+  ],
+  [
+    'electron/manual-costs.ts',
+    'C2（2026-10-21）随 `ae_cost_map` 删表一并删除（改价写口收敛到 `product-cost-set`）；CHANGELOG 与本轮笔记的句子正是**删除记录**，2026-10-09 维护面板笔记与 PRODUCT_LIBRARY P4 行记的是"当时它在哪"——改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/shop-accounts/components/CostPane.vue',
+    'B\'（2026-10-22）「基础数据 › 进价」整页退役（CostPane/RatesPane/CostRatesPane 三文件删除），成本维护收归产品编辑抽屉 + 产品列表「只看缺进价」筛选 + 内联 p-cost 列；PRODUCT_LIBRARY P4 行与 SHOP_ACCOUNT_REDESIGN_PLAN 记的是"它当时住在哪"，改指现存文件则句子不成立（成本现在散落在 ProductEditorDrawer.vue 的 ed-cost 与 ProductPane/ProductListView 的 p-cost 列，没有一个可对等的单文件）',
+  ],
+  [
+    'src/stores/app.ts',
+    '陈述"重构前是单体"，该文件已拆除；改指现存文件则句子不成立',
+  ],
+  [
+    'stores/app.ts',
+    '同上（REFACTOR_PLAN 记录改造前的全局 store，无 src/ 前缀的写法）',
+  ],
+  [
+    'excel-copy/store.ts',
+    'REFACTOR_PLAN 记录迁移映射"原 stores/app.ts → 目标位置"，描述的是搬移关系',
+  ],
+  [
+    'src/lib/electronAPI.ts',
+    '审查结论："文档引用了**从未存在**的 src/lib/electronAPI.ts"——是结论，不是引用',
+  ],
+  [
+    'core/layout/ContentHeader.vue',
+    '核验结论："**从未创建**（唯一未实现项）"——是结论，不是引用',
+  ],
+  [
+    'seller-kit/config.json',
+    '记录旧用户手册**错误的**数据位置说法（平铺 key），句子正是在指正它',
+  ],
+  [
+    'extensions/ae-profit/src/components/OrderListPanel.vue',
+    '该目录已随 R1-5 删除（迁至 ui-plugins/），报告记录的是旧路径',
+  ],
+  [
+    'docs/architecture/PROJECT_OVERVIEW.md',
+    'R4-1 已删除该文件；报告 §5.5 引用关系表为历史记录，行内已标注「已删除」',
+  ],
+  [
+    'scripts/lib/module-roots.js',
+    'R1-1 的**提议名**（原计划措辞），实际落地为 module-roots.cjs；同处已加复核修正说明',
+  ],
+  [
+    'docs/features/__pp_probe.md',
+    '《CHANGELOG》的**删除记录**：该 0 字节探针残留已被删（句子正在说"为何删它"）',
+  ],
+  [
+    'ui-plugins/product-library/__pp_probe.md',
+    '同上（同次清理里删掉的零字节探针残留）',
+  ],
+  [
+    'ui-plugins/product-library/README.md',
+    '该岛已整体下架（2026-10-01，见 `docs/features/PRODUCT_LIBRARY.md` §0-A）；CHANGELOG 与 §7.5 记录的是当时的发布流程，属历史记录',
+  ],
+  [
+    'src/ProductLibraryView.vue',
+    '同上：岛根 Vue 文件（无 `ui-plugins/` 前缀的写法）；§7.5 验收表记录的是当时实跑结果',
+  ],
+  [
+    'scripts/product-library-ui-smoke.mjs',
+    '该冒烟脚本随岛一起下线（断言已整组迁入 `scripts/goods-ui-smoke.mjs`）；§0-A 的下架清单正在陈述"它已下线"',
+  ],
+  [
+    'scripts/debug-order-db.js',
+    'C7 的**删除记录**：该一次性调试脚本已删（句子正在说"删了它"）；改指现存文件则句子不成立',
+  ],
+  [
+    'ui-plugins/ae-profit/src/components/CostRatesPanel.vue',
+    'UX 审查（取数时点 2026-09-30）记录的是**当时**该面板的文案问题；同日 C9 收编把「成本与汇率」并入宿主',
+  ],
+  [
+    'ui-plugins/shipping-rate/README.md',
+    '该岛已整体下架（2026-10-15，回收为内建「基础数据 › 物流运费」，见 `docs/notes/2026-10-30-shipping-desk-and-rate.md`）；CHANGELOG 与旧计划记录的是当时的换版流程与发布动作，属历史记录。⚠️ `docs/README.md` 的**活导航**不豁免、已改指该笔记',
+  ],
+  [
+    'ui-plugins/shipping-rate/manifest.json',
+    '同上（岛清单表记录的是"当时新增了哪些文件"，改指现存文件则句子不成立）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/styles.css',
+    'CHANGELOG 记的是某版本"给岛补了 `.notice` 样式"，描述的是岛源码改动；实现现由 `src/modules/shop-accounts/components/*.vue` 的 scoped 样式承担',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/quote.js',
+    '同上（CHANGELOG 指出"该文件用了未定义的类名"，指的是岛视图文件）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/rates.js',
+    'UX 审查（取数时点 2026-09-30）取证的是**当时**岛视图里的性能上限写法；功能已回收为内建页签',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/views/products.js',
+    '同上（该文件头注释记的是两条重量数据源刻意不混用的历史决定）',
+  ],
+  [
+    'ui-plugins/shipping-rate/dist/store.js',
+    '同日笔记（2026-09-30 M6 回迁）记录的是岛内 `syncTableFromHost()` 的改法；该文件随岛下架',
+  ],
+  [
+    'electron/ae-engine.ts',
+    '该利润引擎文件**已删除**（2026-10-15 数据依赖审查 C1，见 `docs/notes/2026-10-30-data-model-and-dependencies.md`）。引用它的四处都是**历史记录**：PROFIT_TRACKER 的「现状（extension 0.2.0）…已落地」、PRODUCT_LIBRARY 的 P4a 落地清单与「`ae-engine.ts:176` 取数」行号取证、ADR-002 记的回归面评估、CHANGELOG 旧条目 —— 改指现存文件（`ae-db.ts`）则句子不成立',
+  ],
+  [
+    'ui-plugins/order-insight/dist/views/picking.js',
+    'C2 的**删除记录**：岛内「拣货」页签随"入口唯一"撤回（发布前，1.5.0 未发布）；句子正在说"删了它"',
+  ],
+  [
+    'tests/orderInsightPicking.spec.ts',
+    '同上（C2）：该接线守卫随页签一起删；多处文档记录的是"曾经有、现已删"',
+  ],
+  [
+    'src/lib/productWeight.ts',
+    '**删除记录**（2026-10-01 领域裁定）：克重是 SKU 属性而非商品ID 属性，`pl_item_weights` + 该解析文件整条删除、改挂 `pl_variants.weight_g`。CHANGELOG 与运费岛计划里的引用是"当时做过、现已删"，三处均已就地标注 ⚠️；改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/today/tabs/PickingPanel.vue',
+    '**删除记录**（2026-10-10）：「生成拣货单」页签并入「拿货」后该整页组件删除（清单改为 `PickingView` 以 `embedded` 复用）；笔记与 CHANGELOG 的句子正是在陈述"它被删了"，改指现存文件则句子不成立',
+  ],
+  [
+    'scripts/order-insight-picking-ui-smoke.mjs',
+    '同上（C2）：该假桥冒烟随页签一起删；现役样板见 `scripts/shipping-rate-ui-smoke.mjs`',
+  ],
+  [
+    'scripts/picking-ui-smoke.mjs',
+    '**退役记录**（2026-10-17）：「拣货」摘出左导航后失去宿主页（同一份清单在「今天 › 拿货」里，入口唯一），该假桥冒烟随之退役；它的导出 / 天数窗两条断言已搬进 `scripts/today-ui-smoke.mjs`。CHANGELOG 与 `docs/notes/2026-10-10-*` 记录的是"当时它在验什么"，改指现存文件则句子不成立',
+  ],
+  [
+    'src/modules/picking/meta.ts',
+    '**退役记录**（2026-10-17）：该模块壳（`meta.ts` / `index.ts`）随「拣货」摘出左导航删除，只留 `PickingView.vue`。CHANGELOG 那条记的是"悬空入口名守卫曾靠它的 `name` 兜底"——当时成立、现已不存在该文件，改指现存文件则句子不成立',
+  ],
+  // —— 下面这组是 C3（删 `extensions/` 留档包，2026-09-30）的**历史记录**：
+  // 句子都出自"当时"的评审/计划（或 CHANGELOG 的删除记录），说的是"曾经有、现已删"，不是悬空引用。
+  [
+    'extensions/order-insight/src/store.ts',
+    'C3 的**删除记录**：`extensions/` 留档源码已于 2026-09-30 删除（AGENTS §1.9 / 计划 / CHANGELOG 多处引用的是当时路径）',
+  ],
+  [
+    'extensions/order-insight/src/stock-in/store.ts',
+    '同上（C3）：留档包的拿货对账 store，已随目录删除',
+  ],
+  [
+    'extensions/excel-copy/src/store.ts',
+    '同上（C3）：留档包的扁平存储 store（`AppState` 的唯一引用方），已随目录删除',
+  ],
+  [
+    'extensions/excel-copy/src/settings.ts',
+    '同上（C3）：留档包的设置贡献入口，其分类早已随下记消失、目录亦已删除',
+  ],
+  [
+    'extensions/order-insight/src/components/ProductLibraryView.vue',
+    '同上（C3）：留档包里的产品库视图（HOST_REVIEW 记录的是旧路径），已随目录删除',
+  ],
+  [
+    'stock-in/store.ts',
+    '同上（C3）的**后缀写法**：PLUGIN_TRIAGE_PLAN 描述当时留档布局时用的相对路径；该文件已随目录删除',
+  ],
+  // —— 下面这组是「订单归类」岛整体下架（2026-10-05）的历史记录：引用都出自 CHANGELOG 的
+  // **当时条目**与一份**当时的评审快照**，句子正在说"当时改的是它 / 当时它长这样"，不是悬空引用。
+  [
+    'ui-plugins/order-insight/manifest.json',
+    'CHANGELOG 的历史条目（1.4.0 升版当时改的就是这个文件）；该岛已于 2026-10-05 整体下架，见 docs/notes/2026-10-30-island-publish-and-retire.md §6',
+  ],
+  [
+    'tests/orderInsightShopAtImport.spec.ts',
+    'CHANGELOG 记录的是"1.4.0 当时新增了这个接线守卫"；该 spec 已随岛下架删除（守卫的坑已由内建页的 today:ui 冒烟承接）',
+  ],
+  [
+    'ui-plugins/order-insight/dist/splitter.js',
+    'CHANGELOG 的分割条修复记录（当时是双份拷贝同改：留档源码 + 岛产物）；该岛已整体下架',
+  ],
+  [
+    'ui-plugins/order-insight/dist/views/stockin.js',
+    'docs/reviews 的 UI 评审快照（写于 2026-09-22，记的是**当时**该岛的命中点）；岛已下架，改成现存路径则句子不成立',
+  ],
+  [
+    'scripts/order-insight-settings-ui-smoke.mjs',
+    'CHANGELOG 的删除记录 + 下架笔记 §6.2 说的正是"它**从未被 git 跟踪**、也已随岛删除"；改指现存文件则句子不成立',
+  ],
+  // —— 下面这组是「店铺账号管家」岛回收为内建模块（2026-10-14）的历史记录：引用出自 CHANGELOG
+  // 的**当时条目**（记录 2026-10-04 meta CSP 修复、2026-10-06 能力域校验盲区取证），句子正在说
+  // "当时改的是它 / 当时它长这样"，不是悬空引用。见 docs/notes/2026-10-30-shop-account-merge-and-status.md。
+  [
+    'ui-plugins/shop-accounts/index.html',
+    'CHANGELOG 的历史条目（meta CSP 修复当时改的就是岛根这个文件）；该岛已于 2026-10-14 回收为内建模块 `src/modules/shop-accounts/`，嵌正文 CSP 的宿主侧对应层现为仓库根 `index.html`',
+  ],
+  [
+    'ui-plugins/shop-accounts/src/api.js',
+    'CHANGELOG 的历史条目（能力域校验盲区取证当时点的就是岛内这份桥桩）；桥桩已随岛回收删除，现由 `src/core/services/ipc.ts` 直连',
+  ],
+  // —— 下面这条是「货与成本」并入「基础数据 › 货品档案」（2026-10-17）的历史记录：
+  // 引用出自一份**写于 2026-10-08 的审查快照**（`docs/reviews/UX_GOODS_NOVICE_2026-10-08.md`），
+  // 句子正在说"当时从侧栏这一项进来"，见 docs/notes/2026-10-30-goods-ux-refactor.md。
+  [
+    'src/modules/goods/meta.ts',
+    '2026-10-08 审查快照记录的**当时入口**（侧边栏「货与成本」，icon box / order 2）；该模块外壳已于 2026-10-17 删除并并入「基础数据」左导航第二项「货品档案」，改指现存文件（`src/modules/shop-accounts/MasterDataView.vue`）会让这句话描述一个当时不存在的入口',
+  ],
+  // —— 下面这组出自 `docs/plans/MANGO_INGEST_AND_POD_PLAN.md`（2026-11-01 施工总纲）：
+  // 它是**待开工计划**，任务表里的落点写的就是"要新建这个文件"。句子是"新增 X / 落点 X"，
+  // 改成现存路径后任务描述就不成立（会变成"改一个已存在的文件"，与实际工作量不符），
+  // 故属本表。**T*-x 完成后这些条目应逐条删除**（文件一旦存在，引用自然不再悬空）。
+  ['electron/mango-ingest.ts', '施工总纲 T1-1 的落点 = **待新建**的芒果帧映射模块；建成后本条目应删除'],
+  ['src/lib/mangoStatus.ts', '施工总纲 T2-1 的落点 = **待新建**的芒果状态映射纯函数（bucket 唯一实现）；建成后应删除'],
+  ['electron/podImageKey.ts', '施工总纲 T3-2 与图案流水线方案 §3.1 的落点 = **待新建**的图键归一化纯函数；建成后应删除'],
+  ['electron/pod-db.ts', '施工总纲 T4-4 的落点 = **待新建**的花纸批次与流水写入层；建成后应删除'],
+  ['electron/scheduler.ts', '施工总纲 T5-3 与开机自动化方案 §6 的落点 = **待新建**的每日调度器；建成后应删除'],
+  ['electron/mango-sync.ts', '`ORDER_AUTO_SYNC_PLAN.md` §6 的落点 = **已作废路线**（Electron 内嵌隐藏窗口）里"新增"的文件；该路线在确认登录态在用户 Chrome 后整体作废，文件从未创建，改指现存文件则"新增它"这句话不成立'],
+  ['scripts/mango-ingest-smoke.cjs', '施工总纲 T1-7 的落点 = **待新建**的芒果入库冒烟；建成后应删除'],
+  ['scripts/pod-rekey-collapsed.cjs', '施工总纲 T3-6 的落点 = **待新建**的塌陷链接一次性重算脚本（跑完即废，可能永不存在于主干）；建成后应删除'],
+]);
+
+// ---------------------------------------------------------------- 文件索引
+
+function walk(dir, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      // 点开头的一律跳过（.git/.workbuddy/.codebuddy 等），仅保留 .github
+      if (entry.name.startsWith('.') && entry.name !== '.github') continue;
+      if (SKIP_DIRS.has(entry.name)) continue;
+      walk(join(dir, entry.name), out);
+    } else if (!entry.name.startsWith('.')) {
+      out.push(join(dir, entry.name));
+    }
+  }
+  return out;
+}
+
+const allFiles = walk(ROOT);
+const relOf = (f) => relative(ROOT, f).split(sep).join('/');
+
+/** 后缀索引：`src/main.js` → 仓库内是否存在以该串结尾的路径 */
+const suffixSet = new Set(
+  allFiles.flatMap((f) => {
+    const parts = relOf(f).split('/');
+    return parts.map((_, i) => parts.slice(i).join('/'));
+  }),
+);
+
+const mdFiles = allFiles.filter((f) => f.endsWith('.md'));
+const codeFiles = allFiles.filter((f) => /\.(ts|tsx|vue|js|cjs|mjs)$/.test(f));
+
+// ---------------------------------------------------------------- 校验
+
+const errors = [];
+const stats = {
+  links: 0,
+  tokens: 0,
+  codeRefs: 0,
+  baseResolved: 0,
+  suffixResolved: 0,
+  exempted: 0,
+  notes: 0,
+  notesIndexed: 0,
+};
+const exemptHits = new Map();
+
+/** 依次尝试四种基准，返回命中的基准名（未命中返回 null） */
+function resolveToken(file, token) {
+  if (existsSync(resolve(ROOT, token))) return 'root';
+  if (existsSync(resolve(dirname(file), token))) return 'sibling';
+  if (existsSync(resolve(DOCS, token))) return 'docs';
+  if (suffixSet.has(token)) return 'suffix';
+  if (suffixSet.has('docs/' + token)) return 'docs-suffix';
+  return null;
+}
+
+// ① + ② Markdown
+for (const file of mdFiles) {
+  const text = readFileSync(file, 'utf8');
+
+  for (const m of text.matchAll(MD_LINK_RE)) {
+    const target = m[1];
+    if (/^(https?:|mailto:|tel:|data:)/.test(target)) continue;
+    stats.links++;
+    const abs = target.startsWith('/') ? join(ROOT, target) : resolve(dirname(file), target);
+    if (!existsSync(abs)) {
+      errors.push({ file: relOf(file), target, kind: 'Markdown 链接不存在' });
+    }
+  }
+
+  for (const m of text.matchAll(PATH_TOKEN_RE)) {
+    const token = m[1].replace(/^\.\//, '');
+    stats.tokens++;
+    if (NON_REPO_HEADS.has(token.split('/')[0])) continue;
+
+    const how = resolveToken(file, token);
+    if (how === 'root' || how === 'sibling' || how === 'docs') {
+      stats.baseResolved++;
+      continue;
+    }
+    if (how === 'suffix' || how === 'docs-suffix') {
+      stats.suffixResolved++;
+      continue;
+    }
+
+    if (DELIBERATELY_MISSING.has(token)) {
+      stats.exempted++;
+      exemptHits.set(token, (exemptHits.get(token) ?? 0) + 1);
+      continue;
+    }
+
+    errors.push({
+      file: relOf(file),
+      target: token,
+      kind: '路径不存在（根相对 / 同级 / docs 相对 / 后缀 四者均未命中）',
+    });
+  }
+}
+
+// ③ 代码文件中的文档引用
+for (const file of codeFiles) {
+  const text = readFileSync(file, 'utf8');
+  for (const m of text.matchAll(DOC_TOKEN_RE)) {
+    const token = m[1];
+    stats.codeRefs++;
+    if (!existsSync(resolve(ROOT, token))) {
+      errors.push({ file: relOf(file), target: token, kind: '代码注释引用的文档不存在' });
+    }
+  }
+}
+
+// ④ docs/notes 结论层：命名规范 + 必须被索引（反向守卫）
+if (existsSync(NOTES_DIR)) {
+  const indexText = NOTE_INDEX_FILES.filter((f) => existsSync(f))
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n');
+  const noteFiles = readdirSync(NOTES_DIR)
+    .filter((n) => n.endsWith('.md') && n !== 'README.md')
+    .sort();
+
+  for (const name of noteFiles) {
+    stats.notes++;
+    if (!NOTE_NAME_RE.test(name)) {
+      errors.push({
+        file: `docs/notes/${name}`,
+        target: name,
+        kind: '笔记命名不合规（应为 YYYY-MM-DD-<slug>.md）',
+      });
+      continue;
+    }
+    const slug = name.slice(0, -'.md'.length);
+    if (indexText.includes(name) || indexText.includes(slug)) {
+      stats.notesIndexed++;
+      continue;
+    }
+    errors.push({
+      file: `docs/notes/${name}`,
+      target: name,
+      kind: '笔记未被索引（在 AGENTS.md / CHANGELOG.md / docs/README.md / docs/notes/README.md 中均未出现）',
+    });
+  }
+}
+
+// ---------------------------------------------------------------- 输出
+
+console.log('文档引用校验（scripts/check-doc-links.mjs）');
+console.log(`  扫描：${mdFiles.length} 个 Markdown、${codeFiles.length} 个代码文件`);
+console.log(
+  `  引用：Markdown 链接 ${stats.links} 条、反引号路径 ${stats.tokens} 条、代码内文档引用 ${stats.codeRefs} 条`,
+);
+console.log(
+  `  通过：路径直解 ${stats.baseResolved} 条、后缀/包内相对 ${stats.suffixResolved} 条、` +
+    `有意缺失豁免 ${stats.exempted} 条`,
+);
+console.log(
+  stats.notes === 0
+    ? '  ④ docs/notes 结论层：0 条笔记 —— ⚠️ 本项未验证任何内容（不等于"通过"）'
+    : `  ④ docs/notes 结论层：${stats.notes} 条笔记，已登记 ${stats.notesIndexed} 条`,
+);
+if (exemptHits.size) {
+  console.log('\n  有意缺失的引用（豁免，逐项核对理由）：');
+  for (const [token, n] of [...exemptHits].sort()) {
+    console.log(`    · ${token}（${n} 次）—— ${DELIBERATELY_MISSING.get(token)}`);
+  }
+}
+
+if (errors.length === 0) {
+  console.log('\n✅ 无悬空引用');
+  process.exit(0);
+}
+
+console.log(`\n❌ 发现 ${errors.length} 条悬空引用：\n`);
+for (const e of errors) {
+  console.log(`  ${e.file}\n    → ${e.target}\n      ${e.kind}`);
+}
+console.log('\n修法：① 改文档指向正确路径（首选）；② 若句子本就在陈述"它不存在"，');
+console.log('      加入脚本头部 DELIBERATELY_MISSING 并写明理由；');
+console.log('      ③ 笔记类（docs/notes/…）：改名到 YYYY-MM-DD-<slug>.md，');
+console.log('        并在 docs/notes/README.md 的索引表登记一行。');
+process.exit(1);

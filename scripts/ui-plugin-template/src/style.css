@@ -1,5 +1,9 @@
 /* UI 岛模板样式：优先消费宿主 --wb-* 设计令牌；提供回退色便于在纯浏览器中预览。 */
 :root {
+  /* 首帧兜底（跟随系统）；宿主 boot 后会把当前主题的 color-scheme 以**内联样式**写到 <html> 覆盖此处。
+     ⚠️ 不要在元素级写死 color-scheme: light —— 元素级优先于 <html> 内联，
+     深色主题下日期面板/下拉弹层/滚动条会发白；需要时写 `inherit`。
+     也不要用 `[data-theme='dark']` 选择器自我纠正：宿主不同步该属性到 iframe。 */
   color-scheme: light dark;
 }
 

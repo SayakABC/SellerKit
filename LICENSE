@@ -1,21 +1,52 @@
-MIT License
+Copyright (c) 2026 SayakABC. All rights reserved.
 
-Copyright (c) 2026 Soren
+PROPRIETARY AND CONFIDENTIAL — NO PUBLIC LICENSE GRANTED
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software, including its source code, build artifacts, documentation and
+any accompanying materials (collectively, the "Software"), is proprietary.
+No license, right, title or interest in or to the Software — whether express
+or implied, by estoppel or otherwise — is granted to any person or entity
+except under a separate written agreement signed by the copyright holder.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Accordingly, and without limiting the foregoing, you may NOT:
+
+  1. copy, reproduce or distribute the Software, in whole or in part;
+  2. modify, adapt, translate or create derivative works based on the Software;
+  3. sell, sublicense, rent, lease, lend or otherwise commercially exploit
+     the Software;
+  4. reverse engineer, decompile or disassemble the Software, except to the
+     extent such restriction is prohibited by applicable law;
+  5. remove, alter or obscure any proprietary notices contained in the Software;
+  6. use the name, logo or trademarks of the copyright holder to endorse or
+     promote products derived from the Software without prior written consent.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------ THIRD-PARTY COMPONENTS ------------------------------
+
+The prohibition above applies only to the Software as authored by the
+copyright holder. It does NOT extend to third-party open-source components
+distributed with or linked into the Software. Those components remain the
+property of their respective owners and are governed by their own licenses
+(see each package's LICENSE file under node_modules/, and the dependency
+list in package.json). Notable examples in this repository include, but are
+not limited to, the SheetJS "xlsx" library (Apache-2.0) and the Electron,
+Vite and Vue toolchains. Nothing in this notice supersedes the rights granted
+by those licenses with respect to those components.
+
+------------------------------ ATTRIBUTION NOTE ------------------------------
+
+The upstream repository github.com/SayakABC/SellerKit carried no license file
+at the time this notice was added (verified 2026-09-22 via the GitHub API:
+license = null). A public repository without a license is, by default,
+"all rights reserved"; this file makes that default explicit rather than
+granting any new permission. If a different license is later chosen, replace
+this file in its entirety and update the "license" field in package.json.
+
+Questions about licensing or requests for a written agreement:
+open an issue at the repository above, or contact the copyright holder.

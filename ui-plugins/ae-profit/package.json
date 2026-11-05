@@ -1,9 +1,9 @@
 {
   "name": "ae-profit",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "利润追踪 UI 岛（Vue 3 + Tailwind，产物为纯静态 dist，经宿主 db 能力域访问业务数据）",
+  "description": "订单采集 UI 岛（Vue 3 + Tailwind，产物为纯静态 dist，经宿主 db 能力域写入订单主干）",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

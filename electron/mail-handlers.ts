@@ -9,7 +9,7 @@
 //   mail-sync-cancel     取消同步
 //   mail-sync-state      当前同步队列状态
 //   mail-messages-list   邮件列表（**纯本地查询**）
-//   mail-message-get     邮件详情（含正文与附件元信息）
+//   mail-message-get     邮件详情（含正文与附件元信息；缺内联图映射时顺带重解析一次回填 content_id）
 //   mail-body-fetch      按需补拉正文（M2-1：超大邮件点开时现拉原文）
 //   mail-attachment-save 附件另存（M2-2：重拉原文解析后落盘，弹系统保存对话框）
 //   mail-attachment-preview 附件预览（M3-1：本地缓存命中直接读盘，图片返回 data URL）
@@ -22,6 +22,10 @@
 //   mail-fts-rebuild    重建全文索引
 //   mail-purge           手动清理过期邮件
 //   mail-stats           收件箱汇总（含文件夹分布）
+//   mail-todo-list       待办归集（罚单 / 纠纷·仲裁 / 订单关闭，按订单号合并；读时计算）
+//   mail-todo-dismiss    手工划掉一条待办（落 sk_mail_todo_dismissed；有新邮件会自动浮出）
+//   mail-todo-restore    撤销划掉
+//   mail-auto-sync-config 自动收信间隔下发（0 = 关闭；真正的定时器在主进程 mail-scheduler）
 // 安全边界：授权码只进不出（写入后永不回传渲染层）；入参在 preload 层已做形状消毒，
 //   本层再做一次业务口径校验（双防线，见 AGENTS.md §2.3 / 红线 3）。
 
@@ -51,9 +55,14 @@ import {
   cancelMailSync,
   getMailSyncState,
   fetchMailBody,
+  refreshMailAttachmentContentIds,
   resolveMailAttachment,
   listMailRemoteFolders,
 } from './mail-engine';
+import { needsInlineBackfill } from './mail-html';
+import { dismissMailTodo, listMailTodos, restoreMailTodo } from './mail-triage';
+import { publishMailUnreadBadge } from './mail-badge';
+import { configureMailAutoSync } from './mail-scheduler';
 import { getShopAccount, setShopAccountSecret } from './shop-accounts-db';
 import { MAIL_PROVIDERS, CUSTOM_MAIL_PROVIDER } from './mail-providers';
 import {
@@ -78,6 +87,11 @@ const MAX_LEN = {
 const PREVIEW_MIME_PREFIX = 'image/';
 /** 预览附件大小上限：超出不转 data URL，避免大 base64 撑爆渲染进程 */
 const PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * 内联图片映射回填的等待上限（仅存量邮件首次打开时可能触发）。
+ * 取 6s：常见 163/126 连接 + 单封拉取在 1–2s 内完成，够用；再久就不该让用户盯着"加载正文…"。
+ */
+const INLINE_BACKFILL_WAIT_MS = 6000;
 
 /** 正整数收敛（非法值回落到 fallback） */
 function toInt(value: unknown, fallback: number): number {
@@ -110,13 +124,13 @@ handle('mail-provider-list', () =>
 
 handle('mail-account-upsert', (payload: any) => {
   ensureMailSchema();
-  const shopSetId = toInt(payload?.shopSetId, 0);
-  if (shopSetId <= 0) throw new Error('店铺套不存在或已被删除');
+  const shopId = toInt(payload?.shopId, 0);
+  if (shopId <= 0) throw new Error('店铺不存在或已被删除');
 
-  const shopSet = getShopAccount(shopSetId);
-  if (!shopSet) throw new Error('店铺套不存在或已被删除');
+  const shop = getShopAccount(shopId);
+  if (!shop) throw new Error('店铺不存在或已被删除');
 
-  const email = String(payload?.email || shopSet.email || '').trim().slice(0, MAX_LEN.email);
+  const email = String(payload?.email || shop.email || '').trim().slice(0, MAX_LEN.email);
   if (!email.includes('@')) throw new Error('邮箱格式不正确');
 
   const syncEnabled = payload?.syncEnabled === undefined ? true : Boolean(payload?.syncEnabled);
@@ -129,7 +143,7 @@ handle('mail-account-upsert', (payload: any) => {
     : undefined;
 
   const id = upsertMailAccount({
-    shopSetId,
+    shopId,
     email,
     providerId: String(payload?.providerId || '').slice(0, MAX_LEN.providerId),
     imapHost: String(payload?.imapHost || '').slice(0, MAX_LEN.host),
@@ -145,7 +159,7 @@ handle('mail-account-upsert', (payload: any) => {
   // 授权码写入既有加密列（空串 = 清空；未传 = 保持原值）
   const secret = payload?.secrets?.mailAuthPwd;
   if (typeof secret === 'string') {
-    setShopAccountSecret(shopSetId, 'mailAuthPwd', secret.slice(0, MAX_LEN.secret));
+    setShopAccountSecret(shopId, 'mailAuthPwd', secret.slice(0, MAX_LEN.secret));
   }
   return { id };
 });
@@ -156,6 +170,8 @@ handle('mail-account-delete', async (payload: any) => {
   deleteMailAccount(id);
   // 账号删除后附件缓存索引级联消失，磁盘残留文件在此回收
   await garbageCollectMailCache().catch(() => 0);
+  // 该账号的邮件行一起没了 ⇒ 侧栏未读徽标必须跟着掉（不推的话会一直挂着已消掉的数）
+  publishMailUnreadBadge();
   return { deleted: true };
 });
 
@@ -209,11 +225,23 @@ handle('mail-messages-list', (payload: any) => {
   });
 });
 
-handle('mail-message-get', (payload: any) => {
+// 详情（含正文与附件元信息）。内联图片(cid)映射缺失时**顺带做一次重解析回填**（见下）
+handle('mail-message-get', async (payload: any) => {
   ensureMailSchema();
   const id = toInt(payload?.id, 0);
   if (id <= 0) throw new Error('邮件不存在');
-  return getMailMessage(id);
+  const detail = getMailMessage(id);
+  if (!needsInlineBackfill(detail)) return detail;
+
+  // 存量迁移路径：content_id 列是后加的，已同步过的邮件附件行全是空串，
+  // 而增量同步不会再解析正文已缓存的邮件 ⇒ 不主动重解析一次，老邮件正文里的内嵌图永远显示不出来。
+  // 超时兜底：正文渲染（岛侧"加载正文…"）不该被一次慢连接拖住；超时就按现状先显示，
+  // 回填仍在后台继续，落库后下次打开即正常。
+  await Promise.race([
+    refreshMailAttachmentContentIds(id).catch(() => false),
+    new Promise((resolve) => setTimeout(resolve, INLINE_BACKFILL_WAIT_MS)),
+  ]);
+  return getMailMessage(id) || detail;
 });
 
 // 本地已读标记（IMAP 只读，不改服务端 flag；有效已读 = 服务端 seen || 本地 read_at）
@@ -223,11 +251,14 @@ handle('mail-message-read', (payload: any) => {
   const ids = Array.isArray(payload?.ids) ? payload.ids.map((n: any) => toInt(n, 0)) : [];
   if (ids.length) {
     const changed = markMailMessagesRead(ids, read);
+    // 侧栏徽标与页头未读数是同一个数（都来自 mailStats），所以这里推的那次就是"扣减"
+    publishMailUnreadBadge();
     return { changed, unread: mailStats().unread };
   }
   const accountId = toInt(payload?.accountId, 0);
   if (accountId > 0 || payload?.all === true) {
     const changed = markAllMailMessagesRead(accountId > 0 ? accountId : undefined, read);
+    publishMailUnreadBadge();
     return { changed, unread: mailStats().unread };
   }
   throw new Error('缺少待标记的邮件');
@@ -340,12 +371,48 @@ handle('mail-purge', async (payload: any) => {
   const deleted = purgeMailMessages(accountId > 0 ? accountId : undefined, before);
   // 邮件删除后附件缓存索引级联消失，磁盘残留文件在此回收
   await garbageCollectMailCache().catch(() => 0);
+  // 清理会把未读一起删掉（超窗邮件多半从没被点开）
+  publishMailUnreadBadge();
   return { deleted };
 });
 
 handle('mail-stats', () => {
   ensureMailSchema();
   return mailStats();
+});
+
+// 待办归集（2026-11-04）：三类需人看一眼的邮件按订单号收敛成一条，
+// 判定规则与订单号解析只在 mail-triage.ts 一处实现（主题关键字 + 正文兜底）。
+handle('mail-todo-list', (payload: any) => {
+  ensureMailSchema();
+  const accountIds = Array.isArray(payload?.accountIds)
+    ? payload.accountIds.map((n: unknown) => toInt(n, 0)).filter((n: number) => n > 0).slice(0, 200)
+    : [];
+  return listMailTodos(accountIds);
+});
+
+// 手工划掉 / 撤销一条待办（2026-11-05）。只记"人已经处理过"这个事实，
+// 不复制待办字段：待办本身仍是读时计算，划掉只是覆盖层（见 mail-triage.ts 头部）。
+handle('mail-todo-dismiss', (payload: any) => {
+  ensureMailSchema();
+  const key = typeof payload?.key === 'string' ? payload.key : '';
+  if (!key.trim()) throw new Error('invalid todo key');
+  return dismissMailTodo(key, toInt(payload?.messageId, 0), String(payload?.kind || ''));
+});
+
+handle('mail-todo-restore', (payload: any) => {
+  ensureMailSchema();
+  const key = typeof payload?.key === 'string' ? payload.key : '';
+  if (!key.trim()) throw new Error('invalid todo key');
+  return restoreMailTodo(key);
+});
+
+// 自动收信间隔下发（0 = 关闭）。间隔的**唯一权威是渲染层设置**（MailPrefs.pollMinutes），
+// 主进程只执行 + 缓存，见 mail-scheduler.ts 头部的三条纪律。
+handle('mail-auto-sync-config', (payload: any) => {
+  const minutes = Number(payload?.minutes);
+  if (!Number.isFinite(minutes)) throw new Error('invalid minutes');
+  return configureMailAutoSync(minutes);
 });
 
 /** 供内部调用：把账号置为暂停（例如连续失败后的退避由 UI 决定时） */

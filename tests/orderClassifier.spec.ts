@@ -6,6 +6,7 @@ import {
   normalizeColor,
   normalizeCategory,
   CATEGORY_WHITELIST,
+  COLOR_WHITELIST,
   detectImageColumn,
   detectOrderNoColumn,
   detectShopColumn,
@@ -28,11 +29,72 @@ describe('normalizeText / normalizeColor', () => {
 
   it('未收录的颜色原样保留（不强行归类）', () => {
     expect(normalizeColor('荧光橙')).toBe('荧光橙');
+    expect(normalizeColor('橙')).toBe('橙');
   });
 
   it('空值返回空串', () => {
     expect(normalizeColor('')).toBe('');
     expect(normalizeColor('   ')).toBe('');
+  });
+
+  // ---- 描述式（这是"两头打架"里被打坏的那一头）----
+  // 每个分支都用**只有那条路能到达**的输入，避免"两条路互为兜底"时断言蒙对。
+  describe('描述式颜色（底色+花色）只取底色', () => {
+    it('「底」连接：藏蓝底白色条纹 → 藏蓝（只有分段能到，整串与前缀都认不出）', () => {
+      expect(normalizeColor('藏蓝底白色条纹')).toBe('藏蓝');
+    });
+
+    it('深浅同义：黑底白条纹 → 黑色；深蓝底白点 → 藏蓝', () => {
+      expect(normalizeColor('黑底白条纹')).toBe('黑色');
+      expect(normalizeColor('深蓝底白点')).toBe('藏蓝');
+    });
+
+    it('`+` 分隔（提示词里定死的多色写法）→ 取底色', () => {
+      expect(normalizeColor('白+黑')).toBe('白色');
+      expect(normalizeColor('藏蓝+白')).toBe('藏蓝');
+    });
+
+    it('顿号 / 斜杠分隔同样按"底色在前"取第一段', () => {
+      expect(normalizeColor('红、白')).toBe('红色');
+      expect(normalizeColor('军绿/卡其')).toBe('军绿');
+    });
+
+    it('前缀回退：主色当短语开头时也认得出（白条纹 → 白色；军绿色 → 军绿）', () => {
+      expect(normalizeColor('白条纹')).toBe('白色');
+      expect(normalizeColor('军绿色')).toBe('军绿');
+      expect(normalizeColor('藏蓝白条纹')).toBe('藏蓝');
+    });
+
+    it('⚠️ 不扫"任意位置"：灰蓝色按"主色在前"判成灰色，不是蓝色', () => {
+      // 这条固化的是一条**取舍**：扫任意位置会把 灰蓝 → 蓝、粉绿 → 绿…全靠猜。
+      // 认不出宁可原样保留（款色拆开，看得见、能改），也不要错并（两色合一色，最难发现）。
+      expect(normalizeColor('灰蓝色')).toBe('灰色');
+    });
+
+    it('整段认不出仍原样保留（不做二次猜）', () => {
+      expect(normalizeColor('香槟金')).toBe('香槟金');
+      expect(normalizeColor('纯棉黑色')).toBe('纯棉黑色');
+    });
+  });
+});
+
+describe('COLOR_WHITELIST', () => {
+  it('是标准色名的集合，且覆盖常用色（防"派生逻辑被换成残缺手写列表"）', () => {
+    expect(COLOR_WHITELIST).toEqual(
+      expect.arrayContaining(['黑色', '白色', '藏蓝', '粉色', '印花']),
+    );
+    // 至少 20 项：数量级塌掉说明值域被削过（词表与提示词枚举会一起变窄，模型没得选）
+    expect(COLOR_WHITELIST.length).toBeGreaterThan(20);
+  });
+
+  it('每一项都能被自身归一命中（词表是"自洽"的 —— 否则提示词让模型选一个归不了的词）', () => {
+    for (const c of COLOR_WHITELIST) {
+      expect(normalizeColor(c)).toBe(c);
+    }
+  });
+
+  it('无重复（派生用了 Set，但别让后来者改成数组字面量时漏掉）', () => {
+    expect(new Set(COLOR_WHITELIST).size).toBe(COLOR_WHITELIST.length);
   });
 });
 

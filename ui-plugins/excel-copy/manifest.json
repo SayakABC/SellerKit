@@ -1,0 +1,49 @@
+{
+  "name": "excel-copy",
+  "displayName": "TV模版（UI 岛）",
+  "version": "1.0.0",
+  "description": "导入 Excel，按模板生成文本并一键复制，自动跟踪每条记录的使用状态。支持多模板（占位符 {{列名}} + 自动补全）、字段处理规则（日期偏移 / 模板拼接 / 数值运算 / 自定义 JS 表达式 → 衍生列）、显示列勾选、全部/未使用/已使用筛选与撤销。1.0.0 起为本功能唯一实现（内建视图包已从宿主预设下记，id 不再被占用）；配置与旧内建版共用 modules.excel-copy，模板 / 字段规则 / 显示列 / 记录使用状态自动继承。Excel 解析与规则求值在宿主完成（岛内不打包 xlsx、且 iframe CSP 禁 eval），数据只在本地流转。",
+  "author": "SellerKit",
+  "engines": {
+    "sellerkit": ">=1.0.0"
+  },
+  "entry": "./dist/index.html",
+  "kind": "ui",
+  "activationEvents": [],
+  "capabilities": [
+    {
+      "id": "storage",
+      "namespaces": [
+        "excel-copy"
+      ]
+    },
+    {
+      "id": "clipboard",
+      "actions": [
+        "write",
+        "writeText"
+      ]
+    },
+    {
+      "id": "dialog",
+      "actions": [
+        "openFile"
+      ]
+    },
+    {
+      "id": "db",
+      "domains": [
+        "excel-copy"
+      ],
+      "actions": [
+        "parseExcel",
+        "parseExcelBuffer",
+        "applyRules",
+        "readTextFile",
+        "readDefaultTemplate",
+        "checkFileExists",
+        "saveTemplateFile"
+      ]
+    }
+  ]
+}

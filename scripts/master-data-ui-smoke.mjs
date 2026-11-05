@@ -207,7 +207,15 @@ const FAKE_BRIDGE = `<script>
     'shopAccountDbEnsure': function () { return { success: true, data: { ok: true } }; },
     'shopAccountList': function (p) {
       rec('shopAccountList', p);
-      return { success: true, data: SHOPS.map(function (a) { return Object.assign({}, a); }) };
+      // 「企业」列是主进程 shopAccountList 里 **JOIN 企业表现算**的（SQL: c.name AS company_name），
+      // 不是店铺表里的副本列。桩必须按 companyId 现算 —— 写死一份的话，
+      // "改完企业名店铺列表仍是旧名"（不重拉）这类 bug 会被夹具掩盖成恒绿。
+      // ⚠️ 只现算 companyName：手机号 / 支付宝仍取夹具原值（下方的分面断言依赖那两个原值）。
+      return { success: true, data: SHOPS.map(function (a) {
+        var c = null;
+        for (var i = 0; i < COMPANIES.length; i++) if (COMPANIES[i].id === a.companyId) c = COMPANIES[i];
+        return Object.assign({}, a, { companyName: c ? c.name : '' });
+      }) };
     },
     'shopAccountSummary': function () {
       rec('shopAccountSummary', {});
@@ -1237,6 +1245,67 @@ async function main() {
         tags[2].className.indexOf('is-on') < 0,
       tags.map(function (t) { return flat(t) + (t.className.indexOf('is-on') >= 0 ? '(on)' : '(off)'); }).join(' '));
 
+    /* ── 企业「编辑」：抽屉必须真打开、真保存（2026-11-03 用户报「编辑保存企业时报错」）──
+       旧实现按 company 信封取详情，而 company-get 返回的是**摊平**详情对象
+       ⇒ 点「编辑」一律弹「企业不存在或已被删除」，抽屉永远打不开。
+       只验上面两行列表渲染时这个 bug 恒绿，所以必须点真按钮走一遍。 */
+    step('company-edit');
+    var editBtn = document.querySelector('.panel .grid tbody tr button.mini');
+    report('企业行「编辑」按钮存在（第一个 mini 按钮）',
+      !!editBtn && flat(editBtn).indexOf('编辑') >= 0,
+      editBtn ? flat(editBtn) : 'missing');
+    if (editBtn) editBtn.click();
+    await settle(function () { return !!document.querySelector('.editor-drawer'); }, 4000);
+    var editTitle = flat(document.querySelector('.editor-drawer .editor-title'));
+    var editInputs = all('.editor-drawer .editor-body input.wb-input');
+    var editName = editInputs[0] || null;
+    report('点「编辑」打开编辑抽屉（标题「编辑企业」+ 企业名称已回填）',
+      editTitle.indexOf('编辑企业') >= 0 && !!editName && editName.value === '示例企业',
+      'title=' + editTitle + ' name=' + (editName ? editName.value : 'no-input'));
+    // 支付宝账号的唯一编辑入口在企业页：输入框在不在（漏了它，店铺侧「扣运费支付宝」永远填不上）
+    report('编辑抽屉有「支付宝账号」输入框并把既有值带出',
+      !!document.querySelector('.editor-drawer input[placeholder*="扣运费的支付宝"]'),
+      'inputs=' + editInputs.length);
+    if (editName) {
+      editName.value = '示例企业（改）';
+      editName.dispatchEvent(new Event('input'));
+    }
+    await sleep(60);
+    var editSave = document.querySelector('.editor-drawer .editor-foot .btn-primary');
+    if (editSave) editSave.click();
+    await settle(function () { return !document.querySelector('.editor-drawer'); }, 6000);
+    var ups = calls('companyUpsert');
+    var lastUps = ups[ups.length - 1] || {};
+    report('保存走「更新」而不是新增（带 id=3）+ 支付宝字段同批提交',
+      ups.length >= 1 && Number(lastUps.id) === 3 &&
+        String(lastUps.name || '').indexOf('示例企业（改）') >= 0 &&
+        Object.prototype.hasOwnProperty.call(lastUps, 'alipayAccount'),
+      'n=' + ups.length + ' id=' + lastUps.id + ' name=' + lastUps.name +
+        ' hasAlipay=' + Object.prototype.hasOwnProperty.call(lastUps, 'alipayAccount'));
+
+    /* ── 改名后两处列表都要跟着变（2026-11-03 用户报「企业名称在列表中没有同步刷新」）──
+       ① 企业页自己的列表：保存后必须重拉（不是靠乐观改本地对象）；
+       ② 「店铺」页的企业列：它是主进程 JOIN 企业表现算的，店铺列表只在模块级 init / reload 时
+          重拉，页签切回来不重拉 ⇒ 企业改了名这里仍是旧快照（本步抓的就是这个）。
+       两条分开验：只验 ① 的话，把企业页内部 refresh 去掉也照样绿。 */
+    await settle(function () {
+      var first = document.querySelector('.panel .grid tbody tr');
+      return !!first && flat(first).indexOf('示例企业（改）') >= 0;
+    }, 6000);
+    report('改名后企业列表立刻显示新名称（不是旧快照）',
+      flat(document.querySelector('.panel .grid tbody tr')).indexOf('示例企业（改）') >= 0,
+      flat(document.querySelector('.panel .grid tbody tr')).slice(0, 60));
+    await gotoKind('accounts');
+    await settle(function () {
+      return flat(document.querySelector('.acct-panel')).indexOf('示例企业（改）') >= 0;
+    }, 8000);
+    var shopRow = all('.acct-panel .data-table tbody tr').filter(function (tr) {
+      return flat(tr).indexOf('HK 优品店') >= 0;
+    })[0];
+    report('改名后「店铺」页的企业列跟着变（企业名是 JOIN 现算，不重拉就是旧名）',
+      !!shopRow && flat(shopRow).indexOf('示例企业（改）') >= 0,
+      shopRow ? flat(shopRow).slice(0, 80) : 'row-missing');
+
     /* ── 工具账号：紫鸟 / ERP 共享登录（2026-10-22 物理合并新增页签）────────
        一套登录管多家店 —— 夹具两套各被一家引用，统计 / 删除保护都要真数。 */
     step('tools');
@@ -1452,6 +1521,16 @@ async function main() {
         ' lastBottom=' + (lastCard ? Math.round(lastCard.getBoundingClientRect().bottom) : 'null') +
         ' panelBottom=' + (panelEl ? Math.round(panelEl.getBoundingClientRect().bottom) : 'null'));
 
+    /* ── 图案页已撤走（2026-11-03）：用户口径「把产品管理中的图案和发货台的订花纸功能
+       精简合并，放在现有的订花纸中」⇒ 认图案 + 花纸库存都归「发货台 › 订花纸」，
+       本页不再有 kind-tab-patterns。这里留一条**反向断言**：它还出现在组内页签里
+       就说明删得不干净（那个页签点开是一片空白）。 */
+    var tabIdsNow = all('[data-act^="kind-tab-"]').map(function (el) {
+      return (el.getAttribute('data-act') || '').replace('kind-tab-', '');
+    });
+    report('「图案」页签已从基础数据撤走（认图案归「发货台 › 订花纸」）',
+      tabIdsNow.indexOf('patterns') < 0, JSON.stringify(tabIdsNow));
+
     step('errors');
     report('无未捕获错误', (window.__smokeErrors || []).length === 0,
       JSON.stringify(window.__smokeErrors || []));
@@ -1486,23 +1565,39 @@ html = html.replace('</head>', () => FAKE_BRIDGE + '</head>');
 html = html.replace('</body>', () => ASSERT_SCRIPT + '</body>');
 writeFileSync(indexPath, html);
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
+const MIME = {
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+};
 const server = http.createServer((req, res) => {
   const rel = decodeURIComponent((req.url || '/').split('?')[0]);
   const file = path.join(WORK, rel === '/' ? '/index.html' : rel);
-  if (!file.startsWith(WORK)) { res.writeHead(403); res.end('forbidden'); return; }
+  if (!file.startsWith(WORK)) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
   try {
     const buf = readFileSync(file);
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
     res.end(buf);
-  } catch { res.writeHead(404); res.end('not found'); }
+  } catch {
+    res.writeHead(404);
+    res.end('not found');
+  }
 });
 await new Promise((resolve) => server.listen(PORT, '127.0.0.1', resolve));
 
 async function runChrome(size, budget, mode) {
   const dom = await new Promise((resolve, reject) => {
     const cp = spawn(CHROME, [
-      '--headless=new', '--disable-gpu', '--no-sandbox',
+      '--headless=new',
+      '--disable-gpu',
+      '--no-sandbox',
       `--window-size=${size}`,
       `--virtual-time-budget=${budget}`,
       '--dump-dom',
@@ -1528,7 +1623,9 @@ for (const p of passes) {
   results[p.mode] = out;
   if (passes.indexOf(p) === 0) {
     if (!out) {
-      console.error('✗ 宽视口那遍没抓到 #smoke-result（页面可能没挂载）。排查：产物新鲜度（npm run build）→ 资源 404 → 内联脚本语法错 → 假桥缺键');
+      console.error(
+        '✗ 宽视口那遍没抓到 #smoke-result（页面可能没挂载）。排查：产物新鲜度（npm run build）→ 资源 404 → 内联脚本语法错 → 假桥缺键'
+      );
       process.exit(1);
     }
     console.log(out);
@@ -1539,6 +1636,8 @@ for (const p of passes) {
 }
 server.close();
 
-const ok = passes.every((p) => !!results[p.mode] && results[p.mode].split('\n').pop() === 'SMOKE: ALL PASS');
+const ok = passes.every(
+  (p) => !!results[p.mode] && results[p.mode].split('\n').pop() === 'SMOKE: ALL PASS'
+);
 console.log(ok ? '\n✓ 基础数据页冒烟通过（宽 + 窄，共两遍）' : '\n✗ 基础数据页冒烟失败');
 process.exit(ok ? 0 : 1);

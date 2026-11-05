@@ -121,9 +121,21 @@ const KINDS: KindDef[] = [
   // `黑` / `黑色` 两种写法各占一行，本页是唯一能把它们归一的地方（拖一行到另一行）。
   // **刻意不给徽标**：色名总量是低频变化的，不是待办（同 `goods` / `tools` 的判据）。
   { id: 'colors', name: '颜色', icon: 'palette' },
+  // 2026-11-03：**「图案」从这里撤走**（连本页的 PatternPanel 一起删）。
+  // 用户口径：「把产品管理中的图案和发货台的订花纸功能精简合并，放在现有的订花纸中」——
+  // 认图案不但是维护一份资料，它是"今天这批单要印什么花"的动线，归「发货台 › 订花纸」
+  // （`src/modules/today/tabs/PodOrderPanel.vue`）。留在这里等于同一件事两个入口，
+  // 且在这里认图看不到件数与库存，用户还是得跑回发货台。存量偏好里的 'patterns'
+  // 会在 `SHOP_ACCOUNTS_MAIN_TABS` 白名单里落空 ⇒ 回落到「店铺」（真实存在的地方）。
   // 2026-10-22：「店铺登记」改名「店名归一」—— 它只负责认历史文本里的名字，
   // 实体增改在「店铺」页签（合并编辑器）。
-  { id: 'registry', name: '店名归一', icon: 'table', countTitle: (n) => `${n} 个店名待认领`, todo: true },
+  {
+    id: 'registry',
+    name: '店名归一',
+    icon: 'table',
+    countTitle: (n) => `${n} 个店名待认领`,
+    todo: true,
+  },
   { id: 'companies', name: '企业', icon: 'shield', countTitle: (n) => `${n} 家企业` },
   // 2026-10-22 新增：紫鸟 / ERP 登录名 + 密码库（一套工具管多家店，避免每家店重复录入）。
   // **刻意不给徽标**：它不是"待办"，是低频维护的资料库（同 `goods` 的判据）。
@@ -166,8 +178,18 @@ interface GroupDef {
 const GROUPS: GroupDef[] = [
   // 2026-10-22：组内加 `tools`（工具账号库）。顺序 = 维护频率：店铺天天看，
   // 店名归一 / 企业 / 工具账号按需维护。
-  { id: 'accounts', name: '店铺账号', icon: 'key', kinds: ['accounts', 'registry', 'companies', 'tools'] },
-  { id: 'goods', name: '产品管理', icon: 'box', kinds: ['goods', 'colors', 'suppliers'] },
+  {
+    id: 'accounts',
+    name: '店铺账号',
+    icon: 'key',
+    kinds: ['accounts', 'registry', 'companies', 'tools'],
+  },
+  {
+    id: 'goods',
+    name: '产品管理',
+    icon: 'box',
+    kinds: ['goods', 'colors', 'suppliers'],
+  },
   { id: 'shipping', name: '物流运费', icon: 'truck', kinds: ['shipping'] },
   // 2026-10-19：第四组「待补清单」—— 只有一项，故不画组内页签条（同物流运费）。
   // 独立成组而不是塞进「产品管理」：它的六类检查里有两类在**订单侧**（没认款 / 颜色未分类），
@@ -273,9 +295,7 @@ function groupBadge(g: GroupDef): { count?: number; countTitle?: string; todo?: 
     const pending = counts.value.registry;
     if (pending) return { count: pending, countTitle: `${pending} 个店名待登记`, todo: true };
     const total = counts.value.accounts;
-    return total === undefined
-      ? {}
-      : { count: total, countTitle: `${total} 套店铺账号` };
+    return total === undefined ? {} : { count: total, countTitle: `${total} 套店铺账号` };
   }
   return {};
 }

@@ -38,6 +38,8 @@ const MAX_LEN = {
   address: 300,
   person: 60,
   phone: 40,
+  /** 扣运费的支付宝账号（可为邮箱 / 手机号；与 preload sanitize 的 200 保持一致） */
+  alipay: 200,
   email: 200,
   taxNo: 60,
   note: 2000,
@@ -89,6 +91,7 @@ handle('company-upsert', (payload: any) => {
     legalPerson: str(p.legalPerson, MAX_LEN.person),
     contactName: str(p.contactName, MAX_LEN.person),
     contactPhone: str(p.contactPhone, MAX_LEN.phone),
+    alipayAccount: str(p.alipayAccount, MAX_LEN.alipay),
     contactEmail: str(p.contactEmail, MAX_LEN.email),
     vatNo: str(p.vatNo, MAX_LEN.taxNo),
     eoriNo: str(p.eoriNo, MAX_LEN.taxNo),

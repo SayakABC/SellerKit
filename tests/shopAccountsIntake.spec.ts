@@ -74,10 +74,13 @@ function importedIpcNames(): string[] {
   for (const f of moduleFiles) {
     const src = readSrc(f);
     for (const m of src.matchAll(
-      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+'@\/core\/services\/ipc'/g,
+      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+'@\/core\/services\/ipc'/g
     )) {
       for (const raw of m[1].split(',')) {
-        const name = raw.trim().split(/\s+as\s+/)[0].trim();
+        const name = raw
+          .trim()
+          .split(/\s+as\s+/)[0]
+          .trim();
         if (name) out.push(name);
       }
     }
@@ -144,9 +147,10 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     const src = allSrc;
     expect(moduleFiles.length).toBeGreaterThan(10); // 自证非空转
     for (const bad of ['window.__sk', "'../api.js'", "'./bridge.js'", 'useIslandToasts', '__sk']) {
-      expect(src.includes(bad), `模块源码里仍有 ${bad}（那是 iframe 岛专用的桥，内建模块走 @/core/services/*）`).toBe(
-        false,
-      );
+      expect(
+        src.includes(bad),
+        `模块源码里仍有 ${bad}（那是 iframe 岛专用的桥，内建模块走 @/core/services/*）`
+      ).toBe(false);
     }
   });
 
@@ -169,7 +173,10 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
       'shop-accounts:settings'
     );
     const view = readFileSync(join(MODULE_DIR, 'MasterDataView.vue'), 'utf-8');
-    expect(view.includes("openSettings('"), '视图又开始自己打开设置了（入口是设置中心底部齿轮）').toBe(false);
+    expect(
+      view.includes("openSettings('"),
+      '视图又开始自己打开设置了（入口是设置中心底部齿轮）'
+    ).toBe(false);
   });
 
   it('八类资料的名字与 kind id 真的写在视图里（uxEntryNames 豁免的存在性锚点）', () => {
@@ -210,6 +217,8 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
       { id: 'shipping', name: '物流运费' },
       // 2026-10-30：颜色板与合并（同色异名归一；「基础数据 › 产品管理」组第三项）。
       { id: 'colors', name: '颜色' },
+      // 2026-11-03：**「图案」页撤出本模块**（并进「发货台 › 订花纸」）。
+      // 所以这里刻意不再列它 —— 若它又出现在 KINDS 里，下面"组内 kinds 一个不漏"那条会红。
       // 2026-10-19：单页组「待补清单」（组名与页签名同名 —— 它不属于任何既有组，
       // 六类检查里有两类在订单侧，塞进「产品管理」会让组名说谎）。
       { id: 'health', name: '待补清单' },
@@ -269,7 +278,9 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     // 2026-10-17：资料从页面内左导航搬到主侧栏，视图与侧栏之间只剩**一条上报**这条线。
     // 这条线断掉的形态特别安静：页面本身完全正常（内容区照常切换），只是侧栏里没有那一串菜单。
     const view = readFileSync(join(MODULE_DIR, 'MasterDataView.vue'), 'utf-8');
-    expect(view.includes("reportSubNav('shop-accounts'"), '没上报 = 侧栏永远画不出二级菜单').toBe(true);
+    expect(view.includes("reportSubNav('shop-accounts'"), '没上报 = 侧栏永远画不出二级菜单').toBe(
+      true
+    );
     // 数据源必须是 GROUPS 那一份 —— 另抄一份清单就迟早与内容分支不一致
     // （同 2026-10-08 撤指标条的理由）。2026-10-17 收拢后侧栏画的是**组**，所以是 GROUPS。
     expect(
@@ -289,10 +300,15 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     // 2026-10-17 下午：原第 8 行「设置」按用户口径**去掉**（"二级菜单中的设置去掉"）。
     // 反向断言：它回来了就是错的 —— 设置入口是宿主设置中心（侧栏底部齿轮），不是第八类资料。
     expect(view.includes('settings: {'), '「设置」入口不该再挂在二级菜单里').toBe(false);
-    expect(view.includes('openHostSettings'), 'openHostSettings 已无用（设置入口撤掉了），不该留死代码').toBe(false);
+    expect(
+      view.includes('openHostSettings'),
+      'openHostSettings 已无用（设置入口撤掉了），不该留死代码'
+    ).toBe(false);
     // meta 的布尔：模块还没打开过时，侧栏也画得出展开箭头（内容仍由上报给）
     const meta = readFileSync(join(MODULE_DIR, 'meta.ts'), 'utf-8');
-    expect(/subNav:\s*true/.test(meta), 'meta 没声明 subNav = 首次进模块前侧栏没有展开箭头').toBe(true);
+    expect(/subNav:\s*true/.test(meta), 'meta 没声明 subNav = 首次进模块前侧栏没有展开箭头').toBe(
+      true
+    );
   });
 
   it('二级菜单能靠点一级项收起（判据必须是渲染条件，不只是箭头）', () => {
@@ -330,12 +346,19 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     // 少抄一处，模块写的 true 在到达 AppShell 之前静默消失，TypeScript 一句话都不报。
     // 2026-10-17 建这个字段时就踩了一次：侧栏七项怎么都不出现，日志里没有任何报错，
     // 排查一路走到 `metasFromContributions` 才发现字段被白名单吃了。
-    const discover = readFileSync(join(ROOT, 'src', 'core', 'plugin', 'managerDiscover.ts'), 'utf-8');
-    const manager = readFileSync(join(ROOT, 'src', 'core', 'plugin', 'pluginManager.ts'), 'utf-8');
-    expect(discover.includes('subNav: meta.subNav'), 'managerDiscover 没把 meta.subNav 抄进 spec').toBe(true);
-    expect(manager.includes('subNav: c.spec.subNav'), 'metasFromContributions 没把 spec.subNav 抄回 meta').toBe(
-      true
+    const discover = readFileSync(
+      join(ROOT, 'src', 'core', 'plugin', 'managerDiscover.ts'),
+      'utf-8'
     );
+    const manager = readFileSync(join(ROOT, 'src', 'core', 'plugin', 'pluginManager.ts'), 'utf-8');
+    expect(
+      discover.includes('subNav: meta.subNav'),
+      'managerDiscover 没把 meta.subNav 抄进 spec'
+    ).toBe(true);
+    expect(
+      manager.includes('subNav: c.spec.subNav'),
+      'metasFromContributions 没把 spec.subNav 抄回 meta'
+    ).toBe(true);
   });
 
   it('跨模块跳转落地的 kind 与左导航同一份清单（switch-module action）', () => {
@@ -344,7 +367,10 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     const view = readFileSync(join(MODULE_DIR, 'MasterDataView.vue'), 'utf-8');
     expect(view.includes("detail.moduleId !== 'shop-accounts'")).toBe(true);
     // 落地时必须校验 action 是真 kind（否则任意字符串都能当选项 = 静默无变化）
-    expect(/KINDS\.some\(\(k\) => k\.id === id\)/.test(view), 'selectKind 必须校验 id 在 KINDS 里').toBe(true);
+    expect(
+      /KINDS\.some\(\(k\) => k\.id === id\)/.test(view),
+      'selectKind 必须校验 id 在 KINDS 里'
+    ).toBe(true);
   });
 
   it('组 id 与 kind id 撞车：两个入口分函数，页签不许按组解释（2026-10-17 当晚 bug 回归）', () => {
@@ -356,16 +382,29 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
     // 修法：入口按来源拆函数 —— 侧栏传组 id 走 selectGroup，页签传 kind id 走 selectKind。
     const view = readFileSync(join(MODULE_DIR, 'MasterDataView.vue'), 'utf-8');
     // ① 页签点击走 selectKind
-    expect(view.includes('@click="selectKind(k.id)"'), '页签点击没走 selectKind（入口接错了）').toBe(true);
+    expect(
+      view.includes('@click="selectKind(k.id)"'),
+      '页签点击没走 selectKind（入口接错了）'
+    ).toBe(true);
     // ② selectKind 体内不许出现 GROUPS：按 kind 解，不按组解。
     //    "已在这组就早退"是**组点击**的语义，套到页签上就是把用户点击吞掉。
     const kindFn = /function selectKind\(id: string\): void \{([\s\S]*?)\n\}/.exec(view)?.[1] ?? '';
-    expect(kindFn.length, '没解析到 selectKind 函数体（正则写歪了 = 这条恒绿）').toBeGreaterThan(20);
-    expect(kindFn.includes('GROUPS'), 'selectKind 又按组解释了：组内点第一页页签会被早退吞掉').toBe(false);
+    expect(kindFn.length, '没解析到 selectKind 函数体（正则写歪了 = 这条恒绿）').toBeGreaterThan(
+      20
+    );
+    expect(kindFn.includes('GROUPS'), 'selectKind 又按组解释了：组内点第一页页签会被早退吞掉').toBe(
+      false
+    );
     // ③ 侧栏 onSelect 走 selectGroup，且 selectGroup 校验的是组表
-    expect(view.includes('onSelect: (id) => selectGroup(id)'), '侧栏 onSelect 没走 selectGroup').toBe(true);
-    const groupFn = /function selectGroup\(id: string\): void \{([\s\S]*?)\n\}/.exec(view)?.[1] ?? '';
-    expect(groupFn.length, '没解析到 selectGroup 函数体（正则写歪了 = 这条恒绿）').toBeGreaterThan(20);
+    expect(
+      view.includes('onSelect: (id) => selectGroup(id)'),
+      '侧栏 onSelect 没走 selectGroup'
+    ).toBe(true);
+    const groupFn =
+      /function selectGroup\(id: string\): void \{([\s\S]*?)\n\}/.exec(view)?.[1] ?? '';
+    expect(groupFn.length, '没解析到 selectGroup 函数体（正则写歪了 = 这条恒绿）').toBeGreaterThan(
+      20
+    );
     expect(groupFn.includes('GROUPS.find'), 'selectGroup 没在校验组 id').toBe(true);
     // ④ 跨模块 action 两种都可能：先按 kind 解（'accounts'/'goods' 两种解释同页），
     //    落空再按组解。老路"一个函数先查组表"不许回来。
@@ -384,7 +423,10 @@ describe('基础数据：岛 → 内建 → 整合重设计的结构', () => {
   it('「货与成本」不再有登记 / 供应商 / 进价页签（整合的反面：漏一处 = 两个入口）', () => {
     const goodsView = readFileSync(join(ROOT, 'src', 'modules', 'goods', 'GoodsView.vue'), 'utf-8');
     for (const tab of ["'registry'", "'suppliers'", "'cost'"]) {
-      expect(goodsView.includes(`id: ${tab}`), `GoodsView 的页签表里还有 ${tab}（应已搬进基础数据）`).toBe(false);
+      expect(
+        goodsView.includes(`id: ${tab}`),
+        `GoodsView 的页签表里还有 ${tab}（应已搬进基础数据）`
+      ).toBe(false);
     }
     // 组件导入也要一并消失（留着 import 会让 vite 把它打进包里，白占体积）
     for (const comp of ['ShopRegistryView', 'SupplierView', 'CostPane']) {

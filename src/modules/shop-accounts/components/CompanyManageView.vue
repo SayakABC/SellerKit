@@ -83,6 +83,8 @@ function emptyCompany() {
     legalPerson: '',
     contactName: '',
     contactPhone: '',
+    /** 扣运费的支付宝账号：唯一落点是企业表，店铺侧只读带出（account 编辑器「去企业修改」指这里） */
+    alipayAccount: '',
     contactEmail: '',
     vatNo: '',
     eoriNo: '',
@@ -90,6 +92,9 @@ function emptyCompany() {
     note: '',
   };
 }
+
+/** 企业表单字段白名单（openCompanyEditor 用：只回填这些键） */
+const COMPANY_FORM_KEYS = Object.keys(emptyCompany());
 
 function emptyProfile() {
   return {
@@ -215,11 +220,50 @@ function taxText(c) {
 
 /* ------------------------------ 企业编辑 ------------------------------ */
 
+/**
+ * 企业变更后让「店铺」侧的数据跟着变。
+ *
+ * 店铺行的企业名 / 手机号 / 支付宝是主进程 `shopAccountList` 里 **JOIN 企业表现算**的
+ * （`c.name AS company_name` 等），不是店铺表里的副本列 ⇒ 企业改了名，店铺列表里那份
+ * 内存快照不会自己变：`store.items` 只在模块级 init / reload 时重拉，页签切回来不重拉。
+ * 2026-11-03 用户报的「改完企业名，列表里还是旧名」就是这么来的。
+ */
+function syncShopSide() {
+  // ① 账号编辑器的「关联企业」下拉候选（含手机号 / 支付宝带出值）
+  void shopAccountsStore.loadCompanies();
+  // ② 店铺列表本身（派生列 + 手机号/支付宝分面都依赖企业行）
+  if (shopAccountsStore.initialized) void shopAccountsStore.reload();
+}
+
+/**
+ * 用企业数据回填表单。
+ * ⚠️ 只挑 `COMPANY_FORM_KEYS` 白名单：入参是 IPC 摊平返回的企业行，还带着
+ * `profiles` / `profileTypes` / `createdAt` 等只读字段，直接 Object.assign 会让它们
+ * 混进保存 payload（无害但会让人误以为可写），也会在"新增"时残留上一家的值。
+ */
+function fillCompanyForm(company) {
+  const src = company || {};
+  for (const key of COMPANY_FORM_KEYS) {
+    const value = src[key];
+    if (key === 'id') companyForm.id = Number(value) || 0;
+    else if (key === 'status') companyForm.status = value === 'inactive' ? 'inactive' : 'active';
+    else companyForm[key] = String(value ?? '');
+  }
+  for (const key of Object.keys(companyForm)) {
+    if (!COMPANY_FORM_KEYS.includes(key)) delete companyForm[key];
+  }
+}
+
 function openCompanyEditor(company) {
-  Object.assign(companyForm, emptyCompany(), company || {});
+  fillCompanyForm(company);
   modal.value = 'company';
 }
 
+/**
+ * 列表行「编辑」：按 id 读详情后回填。
+ * ⚠️ `company-get` 返回的是**摊平**的企业详情（`{...company, profiles}`），不是 `{ company }` 信封 ——
+ * 按信封判断会永远拿不到数据，点「编辑」一律弹「企业不存在或已被删除」。
+ */
 async function openCompanyEditorById(id) {
   if (detail.value && detail.value.id === id) {
     openCompanyEditor(detail.value);
@@ -227,11 +271,11 @@ async function openCompanyEditorById(id) {
   }
   try {
     const data = await unwrap(companyGet(id), '读取企业详情失败');
-    if (!data || !data.company) {
+    if (!data || !data.id) {
       toast.error('企业不存在或已被删除');
       return;
     }
-    openCompanyEditor(data.company);
+    openCompanyEditor(data);
   } catch (e) {
     toast.error(e.message);
   }
@@ -245,14 +289,17 @@ async function saveCompany() {
   const payload = { ...companyForm, name: companyForm.name.trim() };
   if (!payload.id) delete payload.id;
   try {
-    await unwrap(companyUpsert(payload), '保存企业失败');
+    const saved = await unwrap(companyUpsert(payload), '保存企业失败');
     toast.success('已保存');
-    const keepDetailId = modal.value === 'company' && detail.value ? detail.value.id : 0;
+    // 保存前后的「当前详情」：只有详情正开着**这家**时才回详情节，否则关抽屉即可
+    const detailId = detail.value ? detail.value.id : 0;
+    const savedId = Number((saved && saved.id) || payload.id) || 0;
     modal.value = '';
     await refresh();
-    // 同步刷新店铺账号模块的「关联企业」下拉缓存（新建/重命名后立即在账号编辑器可选）
-    void shopAccountsStore.loadCompanies();
-    if (keepDetailId) await openDetail(keepDetailId);
+    // 企业名 / 手机号 / 支付宝会出现在店铺列表与账号编辑器里（主进程 JOIN 现算，不是副本列）——
+    // 不重拉的话切回「店铺」页看到的还是旧名字（2026-11-03 用户报）。
+    syncShopSide();
+    if (detailId && detailId === savedId) await openDetail(savedId);
   } catch (e) {
     toast.error(e.message);
   }
@@ -271,8 +318,8 @@ async function removeCompany(id) {
     await unwrap(companyDelete(id), '删除企业失败');
     toast.success('已删除');
     await refresh();
-    // 同步刷新店铺账号模块的「关联企业」下拉缓存（避免已删除企业残留在候选中）
-    void shopAccountsStore.loadCompanies();
+    // 同上：删掉企业后店铺行的企业列会变空/待补，列表必须重拉
+    syncShopSide();
   } catch (e) {
     toast.error(e.message);
   }
@@ -305,6 +352,7 @@ const infoRows = computed(() => {
     ['法定代表人', c.legalPerson],
     ['联系人', c.contactName],
     ['联系电话', c.contactPhone],
+    ['支付宝账号', c.alipayAccount],
     ['联系邮箱', c.contactEmail],
     ['VAT 税号', c.vatNo],
     ['EORI 号', c.eoriNo],
@@ -556,6 +604,18 @@ onMounted(() => {
             <div class="form-row">
               <label class="form-label">联系电话</label>
               <input v-model="companyForm.contactPhone" class="wb-input" type="text" />
+            </div>
+            <!-- 支付宝账号的唯一编辑入口：店铺侧（账号编辑器 / 列表 / 筛选）一律只读带出企业这份 -->
+            <div class="form-row">
+              <label class="form-label">支付宝账号</label>
+              <div class="field-wrap">
+                <input
+                  v-model="companyForm.alipayAccount"
+                  class="wb-input"
+                  type="text"
+                  placeholder="扣运费的支付宝账号（一企业一份，店铺侧只读带出）"
+                />
+              </div>
             </div>
             <div class="form-row">
               <label class="form-label">联系邮箱</label>

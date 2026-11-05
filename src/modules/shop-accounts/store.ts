@@ -263,7 +263,7 @@ function matchesSearch(item: ShopAccountItem, search: string): boolean {
       item.platformShopId,
       item.tags,
       item.note,
-    ].join(' '),
+    ].join(' ')
   );
   return haystack.includes(search);
 }
@@ -368,7 +368,11 @@ export type SelectionState = 'none' | 'partial' | 'all';
  * 组间排序：先按店铺数降序，同数量按组名升序（用中文排序规则）。
  * @param parentKey 父级路径键，用于保证跨层级 key 唯一（折叠态不串台）
  */
-function buildGroupTree(list: ShopAccountItem[], dims: GroupField[], parentKey: string): GroupNode[] {
+function buildGroupTree(
+  list: ShopAccountItem[],
+  dims: GroupField[],
+  parentKey: string
+): GroupNode[] {
   if (!dims.length || !list.length) return [];
   const [field, ...rest] = dims;
   const buckets = new Map<string, ShopAccountItem[]>();
@@ -450,6 +454,10 @@ export const SHOP_ACCOUNTS_MAIN_TABS = [
   // 2026-10-30：颜色板与合并（`ColorPanel.vue`）。同一个颜色在不同表里以 `黑` / `黑色`
   // 两种写法各占一行，本项是唯一能把它们归一的地方。
   'colors',
+  // 2026-11-03：'patterns' 撤出白名单 —— 「图案」页并进「发货台 › 订花纸」
+  // （用户口径「把产品管理中的图案和发货台的订花纸功能精简合并」）。
+  // 存量偏好里的 'patterns' 在这里落空 ⇒ 回落到默认项『店铺』：让用户落到一个真实存在的
+  // 地方，而不是一个已经删掉的空面板（同 2026-10-17 的 'mail' 处理）。
   'registry',
   'companies',
   'tools',
@@ -543,7 +551,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   const revealTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const statusCounts = computed(() =>
-    STATUS_META.map((meta) => ({ ...meta, count: summary.byStatus[meta.value] || 0 })),
+    STATUS_META.map((meta) => ({ ...meta, count: summary.byStatus[meta.value] || 0 }))
   );
   const isEmpty = computed(() => !loading.value && items.value.length === 0);
   const hasFilter = computed(
@@ -552,7 +560,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
       !!statusFilter.value ||
       companyFilter.value !== undefined ||
       ziniaoFilter.value !== undefined ||
-      erpFilter.value !== undefined,
+      erpFilter.value !== undefined
   );
 
   // ── 内存筛选与分面计数 ────────────────────────────────────────────────────
@@ -574,15 +582,15 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
     baseRows.value.filter(
       (item) =>
         (ziniaoFilter.value === undefined || item.ziniaoAccountId === ziniaoFilter.value) &&
-        (erpFilter.value === undefined || item.erpAccountId === erpFilter.value),
-    ),
+        (erpFilter.value === undefined || item.erpAccountId === erpFilter.value)
+    )
   );
 
   /** 紫鸟 / ERP 分面底座：底座 + 企业维度筛选（不含工具维度自身） */
   const toolFacetRows = computed(() =>
     baseRows.value.filter(
-      (item) => companyFilter.value === undefined || item.companyId === companyFilter.value,
-    ),
+      (item) => companyFilter.value === undefined || item.companyId === companyFilter.value
+    )
   );
 
   /** 企业下拉：distinct companyId（0 = 未关联），计数 = 企业维度不生效时的命中数 */
@@ -688,7 +696,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
    */
   function keepSelectedPhoneOption(
     list: PhoneFacetOption[],
-    valueOf: (item: ShopAccountItem) => string,
+    valueOf: (item: ShopAccountItem) => string
   ): PhoneFacetOption[] {
     const cid = companyFilter.value;
     if (cid === undefined || list.some((o) => o.companyId === cid)) return list;
@@ -739,19 +747,21 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   /** 当前筛选结果（列表实际渲染的数据） */
   const filteredItems = computed(() =>
     companyFacetRows.value.filter(
-      (item) => companyFilter.value === undefined || item.companyId === companyFilter.value,
-    ),
+      (item) => companyFilter.value === undefined || item.companyId === companyFilter.value
+    )
   );
 
   // ── 分组归类 computed ─────────────────────────────────────────────────────
 
   /** 有效分组维度（顺带过滤历史脏数据里的未知字段） */
   const activeGroupFields = computed(() =>
-    groupFields.value.filter((f) => GROUP_FIELDS.some((m) => m.field === f)),
+    groupFields.value.filter((f) => GROUP_FIELDS.some((m) => m.field === f))
   );
   const grouping = computed(() => activeGroupFields.value.length > 0);
   /** 分组树（作用于当前筛选结果，非全量） */
-  const groupTree = computed(() => buildGroupTree(filteredItems.value, activeGroupFields.value, ''));
+  const groupTree = computed(() =>
+    buildGroupTree(filteredItems.value, activeGroupFields.value, '')
+  );
   /** 分组总数（含各层级） */
   const groupNodeCount = computed(() => countGroupNodes(groupTree.value));
   /** 是否含多值维度（同一店铺可出现在多个分组，需提示避免误读合计数） */
@@ -759,7 +769,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
 
   /** 当前聚焦的分组节点（key 为空或维度调整后失效时为 null，视为「全部」） */
   const activeGroupNode = computed<GroupNode | null>(() =>
-    activeGroupKey.value ? findGroupNode(groupTree.value, activeGroupKey.value) : null,
+    activeGroupKey.value ? findGroupNode(groupTree.value, activeGroupKey.value) : null
   );
   /**
    * 详情区实际展示的店铺列表。
@@ -769,11 +779,11 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   const activeGroupItems = computed(() =>
     viewMode.value === 'group' && activeGroupNode.value
       ? activeGroupNode.value.items
-      : filteredItems.value,
+      : filteredItems.value
   );
   /** 当前分组的面包屑路径（含各层级 field 与组名；「全部」时为空数组） */
   const activeGroupTrail = computed(() =>
-    activeGroupNode.value ? groupNodeTrail(groupTree.value, activeGroupNode.value.key) : [],
+    activeGroupNode.value ? groupNodeTrail(groupTree.value, activeGroupNode.value.key) : []
   );
   /** 全量选中态（左栏「全部店铺」复选框三态） */
   const allSelectionState = computed<SelectionState>(() => {
@@ -803,18 +813,14 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
         viewMode.value = data.viewMode;
       }
       if (Array.isArray(data.groupFields)) {
-        groupFields.value = data.groupFields.filter((f) =>
-          GROUP_FIELDS.some((m) => m.field === f),
-        );
+        groupFields.value = data.groupFields.filter((f) => GROUP_FIELDS.some((m) => m.field === f));
       }
       // 历史偏好里的 'settings' 已废弃：回落到默认页签（accounts）。
       // 'shops' 是旧页签 id（店铺登记）——2026-10-14 整合后改名 'registry'，做映射而不是丢弃。
       // ⚠️ 强转成 string 再比：`data.mainTab` 的类型是**新**联合（不含 'shops'），
       //    直接 `=== 'shops'` 会被 TS 判成"永假"而砍掉这条迁移（TS2367）。
       const legacyTab =
-        (data.mainTab as string | undefined) === 'shops'
-          ? 'registry'
-          : data.mainTab;
+        (data.mainTab as string | undefined) === 'shops' ? 'registry' : data.mainTab;
       // 白名单读 `SHOP_ACCOUNTS_MAIN_TABS`（唯一清单）：手写 if 长链漏掉一项的后果是
       // "用户上次停的那一页下次进不来"，而它**不报错**（2026-10-15→10-19 `shipping` 就这么漏了两轮）。
       if (
@@ -826,7 +832,8 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
       if (data.lastUsed && typeof data.lastUsed === 'object') {
         const lu = data.lastUsed;
         lastUsed.value = {
-          companyId: typeof lu.companyId === 'number' && lu.companyId >= 0 ? lu.companyId : undefined,
+          companyId:
+            typeof lu.companyId === 'number' && lu.companyId >= 0 ? lu.companyId : undefined,
           ziniaoAccountId:
             typeof lu.ziniaoAccountId === 'number' && lu.ziniaoAccountId >= 0
               ? lu.ziniaoAccountId
@@ -908,7 +915,12 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
     try {
       const result = await companyList({});
       companies.value = result.success
-        ? (result.data || []).map((c) => ({ id: c.id, name: c.name, phone: c.contactPhone, alipay: c.alipayAccount }))
+        ? (result.data || []).map((c) => ({
+            id: c.id,
+            name: c.name,
+            phone: c.contactPhone,
+            alipay: c.alipayAccount,
+          }))
         : [];
     } catch {
       companies.value = [];
@@ -1086,7 +1098,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   async function copySecret(
     item: ShopAccountItem,
     field: ShopAccountSecretKey,
-    label: string,
+    label: string
   ): Promise<void> {
     try {
       const result = await shopAccountReveal(item.id, field);
@@ -1108,7 +1120,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   async function resolveTemplateField(
     item: ShopAccountItem,
     field: CopyTemplateField,
-    toolPwdCache: Map<number, string>,
+    toolPwdCache: Map<number, string>
   ): Promise<{ ok: boolean; value: string }> {
     if ('secret' in field) {
       // 列表行带 secretKeys 标记，未配置的密码无需发起解密
@@ -1136,7 +1148,10 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
         pwd = result.data?.value || '';
         toolPwdCache.set(toolId, pwd);
       }
-      return { ok: true, value: `${field.label}账号: ${account.account}\n${field.label}密码: ${pwd}` };
+      return {
+        ok: true,
+        value: `${field.label}账号: ${account.account}\n${field.label}密码: ${pwd}`,
+      };
     }
     if ('status' in field) return { ok: true, value: statusMeta(item.status).label };
     return { ok: true, value: String(item[field.plain] || '').trim() };
@@ -1170,7 +1185,7 @@ export const useShopAccountsStore = defineStore('shop-accounts', () => {
   async function toggleReveal(
     item: ShopAccountItem,
     field: ShopAccountSecretKey,
-    label: string,
+    label: string
   ): Promise<void> {
     if (privacyMode.value) {
       toast('隐私模式已开启，请先关闭再查看密码', 'info');

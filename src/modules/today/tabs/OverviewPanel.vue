@@ -20,9 +20,14 @@
          ⚠️ 算法在 `@/lib/dailyShip`（纯函数）—— 面板只摆放，不做四则运算。
          ⚠️ 断言钉在 `data-act` 上（`daily-summary` / `stat-orders` / `stat-pieces` / `stat-taken`
             / `stat-remaining` / `daily-scope`），**不按整段文本匹配**：文案会改，锚点不该跟着改。 -->
-    <section class="td-daily" data-act="daily-summary">
+    <section class="td-daily td-daily--quiet" data-act="daily-summary">
       <header class="td-daily__head">
-        <h2 class="td-daily__title">今天要发</h2>
+        <!-- 2026-11-05：标题从「今天要发」改成「今天进来」。
+             它原来的名字在回答"今天要发几单"，而下面那块（跨天全量）才是这个问题的答案 ——
+             两块同叫"要发"、数字还不同（2 vs 3），用户得读两行小字才敢决定信哪个。
+             改名后这一块只说"今天这批进来了多少"（服务第 1-2 步的口径核对），
+             首屏的"要发多少"只剩下面那一组数字。 -->
+        <h2 class="td-daily__title">今天进来</h2>
         <!-- 口径小字只跟**数字**走：空态那句「今天还没有导入订单」自己已经交代了范围，
              两行一起出现就是把同件事说两遍。 -->
         <span v-if="daily.orders" class="td-daily__scope" data-act="daily-scope">
@@ -69,26 +74,46 @@
         <p v-if="daily.estimated" class="td-daily__hint" data-act="daily-estimated">
           已拿里有历史拿货单（没记订单归属），按款色总量估算
         </p>
+
+        <!-- ⚠️ 2026-11-05：主按钮「按此开始发货」**搬到下面「现在要发」那一块**了。
+             为什么：这一块已经降级成"今天进来多少"的口径说明，而"开始发货"回答的是
+             "现在还有几单要发" —— 按钮跟着它服务的那组数字走，别留在已经改名的那一块里
+             （否则用户点的是"今天进来"上的按钮，落到的却是跨天全量的清单）。
+             本屏仍然只有一个实心按钮（`today:ui` 钉着），只是换了位置。 -->
       </template>
 
       <!-- 空态：这句话本身已经交代了范围（"今天"），所以不再挂口径小字。
-           ⚠️ 措辞是「今天还没有导入订单」而不是「还没有订单数据」：库里可能明明有前几天的单，
-              说"没有数据"是假话（用户会以为数据丢了）。 -->
+           ⚠️ 措辞是「今天还没有订单」而不是「还没有订单数据」：库里可能明明有前几天的单，
+              说"没有数据"是假话（用户会以为数据丢了）。
+           ⚠️ 2026-11-02：主入口改成**芒果采集**（用户："以芒果采集为主，弱化 Excel 导入"）——
+              主按钮是「去芒果采集」，Excel 退成次级 ghost 按钮。 -->
       <template v-else>
-        <p class="td-daily__empty" data-act="daily-empty">今天还没有导入订单</p>
+        <p class="td-daily__empty" data-act="daily-empty">今天还没有订单</p>
         <p class="td-daily__note">
-          来源①：浏览器采集（自带推送）· 来源②：Excel 导入（订单报表 / 结算明细 / 报价单自动识别）
+          主入口：打开芒果店长的待发货页面，扩展会自动抓一次 · 备选：Excel 导入（订单报表 / 结算明细 / 报价单自动识别）
         </p>
-        <!-- 主操作走容器的 `importExcel()`：切到导入页签**并一步直达选文件**
-             （只切页签还要用户再找一个按钮 = 白改）。 -->
-        <button
-          class="wb-btn wb-btn--primary td-daily__cta"
-          data-act="empty-import"
-          :disabled="importing"
-          @click="onEmptyImport"
-        >
-          {{ importing ? '导入中…' : '导入 Excel' }}
-        </button>
+        <!-- 主操作是采集；次操作是 Excel（弱化为 ghost）。
+             ⚠️ Excel 按钮仍走容器的 `importExcel()`：切到「待发货」页签**并一步直达选文件**
+                （只切页签还要用户再找一个按钮 = 白改）。 -->
+        <div class="td-daily__actions">
+          <button
+            class="wb-btn wb-btn--primary td-daily__cta"
+            type="button"
+            data-act="empty-collect"
+            @click="onOpenMango"
+          >
+            去芒果采集
+          </button>
+          <button
+            class="wb-btn wb-btn--sm wb-btn--ghost"
+            type="button"
+            data-act="empty-import"
+            :disabled="importing"
+            @click="onEmptyImport"
+          >
+            {{ importing ? '导入中…' : 'Excel 导入（备选）' }}
+          </button>
+        </div>
       </template>
     </section>
 
@@ -101,7 +126,10 @@
             算法在 `@/lib/shippingPulse`（纯函数，vitest 覆盖）。 -->
     <section class="td-pulse" data-act="pulse-summary">
       <header class="td-pulse__head">
-        <h2 class="td-pulse__title">现在还没发</h2>
+        <!-- 2026-11-05：从「现在还没发」改成「现在要发」——
+             它是首屏**唯一**回答"我还有几单要发"的那组数字（上面那块已降级成口径说明），
+             标题就该用用户的原话。 -->
+        <h2 class="td-pulse__title">现在要发</h2>
         <span class="td-pulse__scope" data-act="pulse-scope">全部待发货 · 跨天</span>
       </header>
 
@@ -144,11 +172,25 @@
           件数里有 {{ pulse.assumedQty }} 行不知道数量，按 1 件计
         </p>
 
-        <!-- 下钻（T2-4）：这一块只说"还有几单"，"是哪几单、先发哪个"在「待发货」页签。
-             就地切页签（`go`）而不是跳模块 —— 与四步的页签同一个姿势。 -->
-        <button class="wb-btn td-pulse__cta" data-act="pulse-goto-queue" @click="go('queue')">
-          看清单：按最晚发货时间排，最急的在最上
-        </button>
+        <!-- 主操作区（2026-11-05 从上面「今天进来」那块搬来）：
+             实心「按此开始发货」= 本屏唯一焦点，落到第 1 步；
+             描边「看是哪几单」= 同一落点的下钻（`today:ui` 钉着它必须存在且真的切页签）。
+             两个按钮落点相同是刻意的：一个说"开工"，一个说"先看看是哪几单"，
+             用户按自己的确定程度挑一个，不必先去读清单的列名。 -->
+        <div class="td-daily__actions">
+          <button
+            class="wb-btn wb-btn--primary td-daily__cta"
+            type="button"
+            data-act="daily-start"
+            title="从第 1 步「待发货」开始：按最晚发货时间排好的单都在那一屏，逐单处理"
+            @click="go('queue')"
+          >
+            按此开始发货
+          </button>
+          <button class="wb-btn td-pulse__cta" data-act="pulse-goto-queue" @click="go('queue')">
+            看是哪几单
+          </button>
+        </div>
       </template>
 
       <!-- 空态（T2-5）：这里**必须分两种处境**，因为 0 的含义不止一个 ——
@@ -176,6 +218,12 @@
         </p>
       </div>
     </section>
+
+    <!-- 收尾（2026-11-05）：四步全完成才出现，不加图标、不放按钮 ——
+         它只需要告诉用户"今天到此为止"，多说一句都会变成要维护的文案。 -->
+    <p v-if="allDone" class="td-done" data-act="daily-done">
+      今天这条流程走完了：单清完、货拿齐、账已结清
+    </p>
   </div>
 </template>
 
@@ -195,11 +243,22 @@ import { isNeverSynced, syncBanner } from '@/lib/syncBanner';
 import { openMangoPending } from '../mangoOpen';
 import { useShipping } from '../flowCtx';
 
-const { summary, go, importing, importExcel } = useShipping();
+const { summary, flow, go, importing, importExcel } = useShipping();
 
 const daily = computed(() => summary.value.daily);
 /** 「现在还没发」四数（容器里的 `@/lib/shippingPulse` 算好，这里只摆放） */
 const pulse = computed(() => summary.value.pulse);
+
+/**
+ * 今天这条线走完了（2026-11-05）。
+ *
+ * 为什么要有：四步全 `done` 之后，这一屏**一点变化都没有** —— 只有页签左侧那条 3px 标记
+ * 悄悄移到最后一步。用户干完一天的活，界面不说一句"完了"，第二天回来也不知道昨天是收尾了
+ * 还是漏了一步。判据直接用容器的 `flow`（与页签标记同一份推导），不另算一套。
+ */
+const allDone = computed(
+  () => flow.value.length > 0 && flow.value.every((s) => s.state === 'done'),
+);
 
 /**
  * 采集状态条（T2-3）。文案与配色**都在 `@/lib/syncBanner`**（纯函数，vitest 覆盖四种形态）——
@@ -230,9 +289,9 @@ const percent = computed(() => {
   return Math.max(0, Math.min(100, Math.round((taken / pieces) * 100)));
 });
 
-/** 空态的「导入 Excel」：切到导入页签**并立刻弹选文件**（一步直达，不让用户再找一次按钮） */
+/** 空态的「Excel 导入」：切到「待发货」页签**并立刻弹选文件**（一步直达，不让用户再找一次按钮） */
 function onEmptyImport(): void {
-  go('import');
+  go('queue');
   void importExcel();
 }
 
@@ -325,6 +384,36 @@ function onOpenMango(): void {
   border-radius: var(--wb-radius-lg);
   background: var(--wb-surface);
   box-shadow: var(--wb-elev-1);
+}
+
+/* 「今天进来」= **口径说明**，不是首屏主角（2026-11-05）。
+   降权手段只用三样、一个新颜色都不加：退到次级表面 / 去掉投影 / 数字小一号。
+   ⚠️ 不要把它做得"更漂亮"——这一块与下面「现在要发」是**两级信息**，
+      两块一样重的话，"今天要发几单"又变成两个答案（这正是要修的那个问题）。 */
+.td-daily--quiet {
+  padding: 14px 18px 16px;
+  background: var(--wb-surface-2);
+  box-shadow: none;
+}
+
+.td-daily--quiet .td-stat__num {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.td-daily--quiet .td-stat {
+  border-left-color: var(--wb-border);
+}
+
+/* 降权块里「还差」不再染警示色：警示色属于"现在要发"那一组，
+   这里再染一次就等于两次提醒同一件事，且会让次级块抢回视觉焦点。 */
+.td-daily--quiet .td-stat:last-child .td-stat__num,
+.td-daily--quiet .td-stat.is-done .td-stat__num {
+  color: var(--wb-text);
+}
+
+.td-daily--quiet .td-stat:last-child {
+  border-left-color: var(--wb-border);
 }
 
 .td-daily__head {
@@ -541,8 +630,25 @@ function onOpenMango(): void {
   color: var(--wb-text-muted);
 }
 
-/* 按钮跟着内容宽度，不铺满整行（铺满会变成"整页只有一个按钮"的压迫感） */
+/* 按钮跟着内容宽度，不铺满整行（铺满会变成"整页只有一个按钮"的压迫感）。
+   2026-11-02：主（采集）+ 次（Excel）并排 —— 次要按钮自己不来抢主按钮的宽度。 */
+.td-daily__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .td-daily__cta {
   align-self: flex-start;
+}
+
+/* 收尾一句：安静的绿，不抢"现在要发"那组数字；没有背景块 —— 它是一条状态，不是一张卡 */
+.td-done {
+  margin: 0;
+  padding: 2px 2px 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--wb-success);
 }
 </style>

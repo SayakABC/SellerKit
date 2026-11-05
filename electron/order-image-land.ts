@@ -50,7 +50,7 @@ export interface LandedOrderImage {
  */
 export function landOrderImageBytes(
   buf: Buffer,
-  opts: { urlFingerprint: string; sourceUrl: string; source?: string },
+  opts: { urlFingerprint: string; sourceUrl: string; source?: string }
 ): LandedOrderImage {
   const landed = landImageBytes(buf, {
     sourceUrl: opts?.sourceUrl,
@@ -95,7 +95,11 @@ export interface LandOrderImageResult {
  *
  * 失败不外抛：调用方决定是整单失败还是收进单色的 `reason`（色图场景要"一张坏图不拖累其它色"）。
  */
-export async function landOrderImageByUrl(url: string): Promise<LandOrderImageResult> {
+export async function landOrderImageByUrl(
+  url: string,
+  /** 来源标记（只用于排查：order-image / pod-slot / pod-pattern …） */
+  source = 'order-image'
+): Promise<LandOrderImageResult> {
   const urlFp = fingerprintUrl(url);
   const byUrl = findImageByUrlFingerprint(urlFp);
   if (byUrl && byUrl.id > 0) {
@@ -119,7 +123,10 @@ export async function landOrderImageByUrl(url: string): Promise<LandOrderImageRe
     const buf = fs.readFileSync(tmpPath);
     // 下载内容不是受支持的图片（或下载到了错误页/防盗链占位）：不落盘避免垃圾入库
     if (!sniffImageFormat(buf)) return { ok: false, error: 'unsupported image format' };
-    return { ok: true, image: landOrderImageBytes(buf, { urlFingerprint: urlFp, sourceUrl: url }) };
+    return {
+      ok: true,
+      image: landOrderImageBytes(buf, { urlFingerprint: urlFp, sourceUrl: url, source }),
+    };
   } finally {
     if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
   }

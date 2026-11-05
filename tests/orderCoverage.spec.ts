@@ -13,12 +13,15 @@
 //   · `已拿 + 还差 === 件数` 恒成立（与总览那四个数同一个恒等式）。
 import { describe, expect, it } from 'vitest';
 import {
+  coverageImportSplit,
   coverageInputs,
   coverageSummary,
   groupByOrder,
   missingLabel,
   planCoverage,
+  scopeCoverageByDays,
   type CoverageInputRow,
+  type OrderCoverageOrder,
 } from '../src/lib/orderCoverage';
 import { takenKey } from '../src/lib/picking';
 
@@ -106,9 +109,12 @@ describe('planCoverage：逐行「拿了没有」', () => {
   });
 
   it('未识别款不摊池子：空款编码键会把"同色同码的不同商品"并成一格', () => {
-    const p = planCoverage([row({ id: 1, styleCode: '', styleColorId: 0, color: '白', size: 'M', qty: 2 })], {
-      pool: pool([['', '白', 'M', 2]]),
-    });
+    const p = planCoverage(
+      [row({ id: 1, styleCode: '', styleColorId: 0, color: '白', size: 'M', qty: 2 })],
+      {
+        pool: pool([['', '白', 'M', 2]]),
+      }
+    );
     expect(p.rows[0].covered).toBe(0);
     expect(p.rows[0].unclassified).toBe(true);
   });
@@ -137,7 +143,7 @@ describe('groupByOrder：每张单齐了没有', () => {
       row({ id: 2, orderNo: 'O1', qty: 1, size: 'XL' }),
       row({ id: 3, orderNo: 'O2', qty: 1, size: 'M', orderTime: '2026-10-22 10:00:00' }),
     ],
-    { covered: { '1': 2, '2': 1 } },
+    { covered: { '1': 2, '2': 1 } }
   );
 
   it('按订单号聚合：O1 齐了、O2 还差 1 件', () => {
@@ -149,14 +155,21 @@ describe('groupByOrder：每张单齐了没有', () => {
 
   it('汇总：齐了 N 单 / 还差 N 单，件数与行级判定同源（不另算一遍）', () => {
     const s = coverageSummary(groupByOrder(p.rows));
-    expect(s).toMatchObject({ orders: 2, done: 1, partial: 1, pieces: 4, covered: 3, remaining: 1 });
+    expect(s).toMatchObject({
+      orders: 2,
+      done: 1,
+      partial: 1,
+      pieces: 4,
+      covered: 3,
+      remaining: 1,
+    });
     expect(s.covered + s.remaining).toBe(s.pieces);
   });
 
   it('还差的行排在齐了的行前面（用户先看见要动手的）', () => {
     const plan = planCoverage(
       [row({ id: 1, orderNo: 'O1', size: 'L' }), row({ id: 2, orderNo: 'O1', size: 'XL' })],
-      { covered: { '2': 1 } },
+      { covered: { '2': 1 } }
     );
     const one = groupByOrder(plan.rows)[0];
     expect(one.rows.map((r) => r.size)).toEqual(['L', 'XL']);
@@ -205,8 +218,25 @@ describe('coverageInputs：宿主返回 → 纯函数入参（列名与键只在
   it('返回的三样能直接喂给 `planCoverage`（`planCoverage(ins.rows, ins)` 的约定）', () => {
     const ins = coverageInputs({
       rows: [
-        { orderItemId: 1, orderNo: 'O1', qty: 2, styleCode: 'S1', styleColor: '黑', size: 'L', styleColorId: 11, covered: 2 },
-        { orderItemId: 2, orderNo: 'O1', qty: 1, styleCode: 'S1', styleColor: '黑', size: 'XL', styleColorId: 11 },
+        {
+          orderItemId: 1,
+          orderNo: 'O1',
+          qty: 2,
+          styleCode: 'S1',
+          styleColor: '黑',
+          size: 'L',
+          styleColorId: 11,
+          covered: 2,
+        },
+        {
+          orderItemId: 2,
+          orderNo: 'O1',
+          qty: 1,
+          styleCode: 'S1',
+          styleColor: '黑',
+          size: 'XL',
+          styleColorId: 11,
+        },
       ],
     });
     const plan = planCoverage(ins.rows, ins);
@@ -224,5 +254,66 @@ describe('missingLabel：一句话说清还差什么', () => {
   it('缺款编码 / 缺颜色时不拼出空段（"未识别款 ·  ·  × 1"读不懂）', () => {
     const p = planCoverage([row({ id: 1, styleCode: '', styleColor: '', color: '' })]);
     expect(missingLabel(p.rows[0])).toBe('未识别款 · 未分类 · L × 1');
+  });
+});
+
+// 2026-11-02：用户拿「今天同步 4 单」对上「拿货页 73 单未发」，以为同步出了 73 单。
+// 两个数都真：总览按导入日筛，按单核对是**全部未发货**（跨天结转 + 历史导入）。
+// 下面钉住"范围怎么算"与"历史从哪来"，界面文案只是它们的投影。
+describe('scopeCoverageByDays：按单核对的时间窗（下单日）', () => {
+  function ordersOf(list: Partial<CoverageInputRow>[]): OrderCoverageOrder[] {
+    return groupByOrder(planCoverage(list.map((o, i) => row({ id: i + 1, ...o }))).rows);
+  }
+
+  it('days<=0 → 全部可见、没有隐藏（"不限"不是"只看今天"）', () => {
+    const g = ordersOf([
+      { orderNo: 'O-OLD', orderTime: '2026-08-23 10:00:00', qty: 2 },
+      { orderNo: 'O-NEW', orderTime: '2026-11-01 10:00:00', qty: 1 },
+    ]);
+    const w = scopeCoverageByDays(g, { days: 0, today: '2026-11-02' });
+    expect(w.visible).toHaveLength(2);
+    expect(w.hidden).toEqual([]);
+    expect(w.cutoff).toBe('');
+    expect(w.hiddenPieces).toBe(0);
+  });
+
+  it('近 30 天：更早的单进 hidden 并报件数；没有下单日的单**照收**（不能当"太老"）', () => {
+    const g = ordersOf([
+      { orderNo: 'OLD', orderTime: '2026-10-02 10:00:00', qty: 3 },
+      { orderNo: 'EDGE', orderTime: '2026-10-03 10:00:00', qty: 1 }, // 下界当天算在窗口内
+      { orderNo: 'NEW', orderTime: '2026-11-01 10:00:00', qty: 2 },
+      { orderNo: 'NODATE', orderTime: '', qty: 1 },
+    ]);
+    const w = scopeCoverageByDays(g, { days: 30, today: '2026-11-02' });
+    expect(w.cutoff).toBe('2026-10-03');
+    expect(w.visible.map((o) => o.orderNo)).toEqual(['NODATE', 'EDGE', 'NEW']);
+    expect(w.hidden.map((o) => o.orderNo)).toEqual(['OLD']);
+    expect(w.hiddenPieces).toBe(3);
+  });
+
+  it('认多种下单日期写法（2026/10/02 也要挡在外面，不能在比较里静默放行）', () => {
+    const g = ordersOf([{ orderNo: 'SLASH', orderTime: '2026/10/02 10:00', qty: 1 }]);
+    const w = scopeCoverageByDays(g, { days: 30, today: '2026-11-02' });
+    expect(w.hidden.map((o) => o.orderNo)).toEqual(['SLASH']);
+  });
+});
+
+describe('coverageImportSplit：这 73 单从哪来（入库日，不是下单日）', () => {
+  function ordersOf(list: Partial<CoverageInputRow>[]): OrderCoverageOrder[] {
+    return groupByOrder(planCoverage(list.map((o, i) => row({ id: i + 1, ...o }))).rows);
+  }
+
+  it('今天导入 / 历史导入 / 导入日未知 三档分开，未知不并进历史', () => {
+    const g = ordersOf([
+      { orderNo: 'TODAY', importedAt: '2026-11-02 00:21:00' },
+      { orderNo: 'HIST', importedAt: '2026-10-28 18:00:00' },
+      { orderNo: 'UNKNOWN', importedAt: '' },
+    ]);
+    expect(coverageImportSplit(g, '2026-11-02')).toEqual({ today: 1, history: 1, undated: 1 });
+  });
+
+  it('ISO 入库时间按本地日归一（东八区 11-02 → today；不能取 UTC 日期）', () => {
+    const g = ordersOf([{ orderNo: 'ISO', importedAt: '2026-11-02T00:21:00+08:00' }]);
+    expect(coverageImportSplit(g, '2026-11-02')).toEqual({ today: 1, history: 0, undated: 0 });
   });
 });

@@ -1856,9 +1856,11 @@ function ensureStyleColor(styleId: number, styleCode: string, color: string): { 
     .prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`)
     .get(styleId, color) as { id: number; code: string } | undefined;
   if (sc) return sc;
+  // 探测语句提到循环外：编码冲突时循环每转一圈就重编译一次同样的 SQL（导入场景下按行触发）
+  const existsByCode = d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`);
   let scCode = `${styleCode}-${colorCode(color)}`;
   let seq = 2;
-  while (d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`).get(scCode)) {
+  while (existsByCode.get(scCode)) {
     scCode = `${styleCode}-${colorCode(color)}-${seq}`;
     seq += 1;
   }
@@ -2036,9 +2038,11 @@ export function assignOrderStyle(input: {
       | { id: number; code: string }
       | undefined;
     if (!sc) {
+      // 探测语句提到循环外（同 ensureStyleColor）：冲突回退时每圈都重编译一次没必要
+      const existsByCode = d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`);
       let scCode = `${style.code}-${colorCode(color)}`;
       let seq = 2;
-      while (d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`).get(scCode)) {
+      while (existsByCode.get(scCode)) {
         scCode = `${style.code}-${colorCode(color)}-${seq}`;
         seq += 1;
       }
@@ -2386,9 +2390,11 @@ export function importStyles(items: StyleImportItem[]): StyleImportResult {
         .prepare(`SELECT id, code FROM oi_style_colors WHERE style_id = ? AND color = ?`)
         .get(styleId, color) as { id: number; code: string } | undefined;
       if (!sc) {
+        // 探测语句提到循环外（同 ensureStyleColor）：导入时这段按行执行，每行都编译一次纯浪费
+        const existsByCode = d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`);
         let scCode = `${styleCode}-${colorCode(color)}`;
         let seq = 2;
-        while (d.prepare(`SELECT id FROM oi_style_colors WHERE code = ?`).get(scCode)) {
+        while (existsByCode.get(scCode)) {
           scCode = `${styleCode}-${colorCode(color)}-${seq}`;
           seq += 1;
         }
@@ -4392,6 +4398,10 @@ export function shippingRows(
   timeoutAt: string;
   /** 行图（`oi_order_items.image_id`；**0 = 没落地**）—— 图案槽位与「缺图 K」读它 */
   imageId: number;
+  /** 行图的本地路径（`md_images.local_path`；空串 = 没图或文件没落地）。
+   *  2026-11-05：「待发货」清单要出缩略图 —— 那一屏只拿得到 id 就得多一次往返，
+   *  而「这单要印什么」正是 POD 卖家判断"能不能发"的第一判据。 */
+  localPath: string;
   rawFields: Record<string, string>;
 }[] {
   const n = Math.min(Math.max(Number(limit) || 500, 1), 2000);
@@ -4441,11 +4451,13 @@ export function shippingRows(
             o.amount_cents, o.vat_cents, o.ddp_cents, o.tax_platform, o.biz_status, o.source, oi.qty,
             oi.weight_g, oi.cost_cents, oi.actual_cost_cents,
             oi.image_id, o.pay_time, o.deal_deadline, o.timeout_at,
+            COALESCE(img.local_path, '') AS local_path,
             COALESCE(s.code, '') AS style_code, COALESCE(sc.color, '') AS style_color,
             COALESCE(sc.id, 0) AS style_color_id,
             ${supplierSel}
      FROM oi_order_items oi
      JOIN oi_orders o ON o.id = oi.order_id
+     LEFT JOIN md_images img ON img.id = oi.image_id
      LEFT JOIN oi_style_colors sc ON sc.id = ${ITEM_STYLE_COLOR_ID}
      LEFT JOIN oi_styles s ON sc.style_id = s.id
      ${supplierJoin}
@@ -4485,6 +4497,7 @@ export function shippingRows(
     // 这里折成 0 是安全的：SQLite 自增从 1 起，0 不可能是一个真实图片 id，
     // 且下游（缺图统计 / 图案槽位）只需要布尔"有没有图"。
     imageId: Number(r.image_id ?? 0) || 0,
+    localPath: String(r.local_path ?? ''),
     rawFields: safeJson(String(r.raw_fields ?? '')),
   }));
 }
@@ -4492,7 +4505,15 @@ export function shippingRows(
 /** 订单列表（分页 + corrected 过滤 + 关键字搜索）：
  *  - 列表不携带 o.raw_fields（整行 Excel 原始字段体积大且界面不消费），显著降低 IPC 传输；
  *  - 返回 { rows, total } 供渲染层同步总数/分页；
- *  - search 匹配 单号/店铺/分类/颜色/logo/款编码/款名/款色，供纠正页/明细页服务端搜索。 */
+ *  - search 匹配 单号/店铺/分类/颜色/logo/款编码/款名/款色，供纠正页/明细页服务端搜索。
+ *
+ *  ⚠️ **改造触发阈值（不是"以后有空再说"，到了就必须做）**：
+ *    - `oi_order_items` 任一表 > 5 万行 → 把下面的 8 列 `LIKE '%kw%'` 换成 FTS5 虚拟表
+ *      （范式抄 `electron/mail-db.ts` 的 `FTS_TABLE` + 回填游标，那份已经在生产用着）；
+ *      `LIKE '%x%'` 用不上任何索引，是全表扫 + 每页再跑一次 `COUNT(*)`。
+ *    - 单页实测返回 > 500 行 → 渲染层加虚拟滚动，再谈把 `limit` 上限从 2000 抬上去。
+ *  2026-11-04 取证：真库 `oi_order_items` 5 行 / `oi_orders` 5 行 / `pl_products` 21 行，
+ *  此时做索引与 FTS 没有可测收益，属提前优化（见 docs/plans/SECURITY_PERF_HARDENING_PLAN_2026-11-04.md §S3）。 */
 export function listOrdersPage(
   opts: { offset?: number; limit?: number; corrected?: boolean; search?: string; importDate?: string } = {},
 ): {

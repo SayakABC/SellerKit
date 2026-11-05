@@ -11,8 +11,30 @@
         @keyup.enter="doSearch"
       />
       <button type="button" class="wb-btn wb-btn--sm" data-act="cl-query" @click="doSearch">查询</button>
-      <button type="button" class="wb-btn wb-btn--sm" data-act="cl-reload" :disabled="loading" @click="reload">
-        刷新
+      <!-- 「刷新」→「重新读取本页」（2026-11-05）：页头右上还有一个「刷新」（那是**全局**的：
+           重取汇总 + 作废所有页签缓存）。两个同名按钮并排时，用户得先猜哪个是哪个 ——
+           这一颗改成说清范围的动词，行为不变（`today:ui` 仍按 `cl-reload` 找它）。 -->
+      <button
+        type="button"
+        class="wb-btn wb-btn--sm"
+        data-act="cl-reload"
+        :disabled="loading"
+        title="只重取这一页的列表与计数；要连总数/页签徽标一起刷，用右上角那个「刷新」"
+        @click="reload"
+      >
+        重新读取本页
+      </button>
+      <!-- 紧凑/舒适（2026-11-05）：一行 96px、一屏只放得下 3 行，30 行要滚 10 屏。
+           紧凑模式把图降到 48px，一屏约 6 行；认款仍可点开原图（图小而点得开，不比看不清更坏）。 -->
+      <button
+        type="button"
+        class="wb-btn wb-btn--sm cl-density"
+        data-act="cl-density"
+        :aria-pressed="compact ? 'true' : 'false'"
+        :title="compact ? '现在是一屏能看到更多行的紧凑排版' : '现在是大图排版（认款更清楚）'"
+        @click="toggleDensity"
+      >
+        {{ compact ? '用大图' : '用紧凑' }}
       </button>
     </div>
 
@@ -60,12 +82,15 @@
       </ul>
     </section>
 
-    <!-- 命名板（P3，2026-10-28）：订单进来就按变体键归好之后，这一页的**人工动作**从
-         "逐行选款选色"变成了"给颜色起个名"。它放在核对表**上面**，因为它是现在唯一还能做
-         的事；核对表在改造后通常一进来就是空的（"这批核对完了"）。
-         ⚠️ 它是**可选**动作：不起名照样统计/拿货，卡片自己会收成一行 —— 不要给它加"必须做完"
-            的措辞，也不要把它做成进入本页的前置（那会把 58 次输入变成门槛）。 -->
-    <VariantNamingCard :import-date="localDayKey()" />
+    <!-- 命名板（P3）**已从本页撤下**（2026-11-02 用户口径：
+         「归类核对中的『颜色叫什么』可以去掉，当前在该页面没法保存，
+           并且在待核对页面中可以进行颜色的选择」）。
+         颜色这一层仍留在核对表里：行内颜色格（点开 = 该款色卡弹层）与顶部色卡托盘，
+         都走 `saveOne` / `applyTrayColor` 同一条落库路径 —— 这里不再多一块"起名"。
+         组件与三支 IPC（orderVariantNaming / orderVariantRename / orderStyleBasics）都留着，
+         恢复成本 = 一行 `<VariantNamingCard :import-date="localDayKey()" />`。
+         ⚠️ **不要**在没解决"保存"问题的前提下把它挂回来：本页现在不承担"给色起名"，
+             起名/改名走「基础数据 › 产品管理」（款色卡与颜色页签）。 -->
 
     <!-- 款合并（P4）**已撤下**（2026-10-30 用户口径「同一件货模块现在的推荐完全不准」）。
          它的"推荐"其实只是「同一厂家下 ≥2 个款」—— 真库 5 号厂家里挂了 8 个款，
@@ -199,7 +224,7 @@
       </div>
 
       <div v-if="rows.length" class="wb-panel__body wb-table-wrap">
-        <table class="wb-table cl-table" data-act="cl-table">
+        <table class="wb-table cl-table" :class="{ 'is-compact': compact }" data-act="cl-table">
           <thead>
             <tr>
               <!-- 勾选列（2026-10-28 批量）：只在待核对范围出现 —— 已核对是只读列表，
@@ -359,7 +384,7 @@
               <td>{{ o.size || '—' }}</td>
               <td class="cl-style-col">
                 <template v-if="scope === 'pending'">
-                  <!-- ── 归属款（2026-10-28 换掉原生下拉）────────────────────────────
+                  <!-- 归属款（2026-10-28 换掉原生下拉）────────────────────────────
                        用户原话：「只是通过下拉列表看文字，不够直观，也容易对应错」。
                        原生 `<select>` 有两条死路：① 选项里放不了图；② 展开时没法把这一行的
                        订单图摆在旁边。而这件事的全部判据就是**图**（"这款是不是这一单"）。
@@ -368,9 +393,12 @@
                          · 点开弹层，左边固定这一行的订单图，右边带图列表 + 搜索 —— 拿图挑款。
                        ⚠️ `data-style` 是给冒烟/脚本读**当前值**的锚点（换掉 value 之后，
                           原来靠 `<select>.value` 的断言会全部失效 —— 值必须有个等价出口）。
-                       ⚠️ 「自动匹配」这一支仍在（弹层底部「不点名款」）：改错了要能退回去。 -->
+                       ⚠️ 「自动匹配」这一支仍在（弹层底部「不点名款」）：改错了要能退回去。
+                       ⚠️ 2026-11-02：**不再按 `styleOptions.length` 分叉**。原实现产品库为空时
+                          这一格退化成一句灰字「先到「产品管理」建档」，而那句是**说明不是入口**
+                          —— 用户当场就卡死在这行。现在格子永远可点：弹层里有「＋ 新建款」，
+                          产品库空也能就地建（用户口径：不存在款时要能继续）。 -->
                   <button
-                    v-if="styleOptions.length"
                     type="button"
                     class="cl-style-btn"
                     :class="{ 'is-auto': !draftOf(o).styleCode }"
@@ -410,7 +438,6 @@
                     </span>
                     <span class="cl-style-btn__go" aria-hidden="true">选</span>
                   </button>
-                  <span v-else class="wb-muted">产品库为空 —— 先到「产品管理」建档</span>
                   <!-- 「填了颜色却没有款可挂」：颜色的**载体是款色**（`oi_style_colors(款, 色)`），
                        没点名款、又没有可用于自动匹配的特征时，这个颜色落不到任何地方 ——
                        原先它照样能保存（宿主只写订单自己的 color 列，提示还是"已保存"），
@@ -426,6 +453,9 @@
                 <span v-else class="wb-muted" :data-act="`cl-ro-style-${o.id}`">未归类</span>
               </td>
               <td class="cl-ops">
+                <!-- 内层 span 才是 flex 容器：td 必须是 table-cell（在 td 上写 flex/inline-flex
+                     会让它不再是单元格，整张表的列宽算法作废）。 -->
+                <span class="cl-ops__row">
                 <template v-if="scope === 'pending'">
                   <button
                     type="button"
@@ -474,6 +504,7 @@
                 >
                   拆包<template v-if="parcelCounts[o.orderNo]"> ×{{ parcelCounts[o.orderNo] }}</template>
                 </button>
+                </span>
               </td>
             </tr>
           </tbody>
@@ -485,7 +516,7 @@
         <p class="wb-empty__desc">{{ emptyDesc }}</p>
         <!-- 空态的出口（⚠️「提示不是入口」：空态说明里的下一步必须**点得到**，不能只是句说明）：
              三种空态各自的下一步不同 ——
-               · 今天还没导   → 去导入（本页无对象可核对）
+               · 今天还没导   → 去待发货（本页无对象可核对）
                · 搜不到       → 不给按钮（清空搜索框就在旁边，塞个按钮反而多一步）
                · 这批核对完了 → **去「统计」看利润 / 去「拿货」页签**（独立模块 + 第 3 步）——
                  原先这里什么都没有，用户核对完就"断"在这一页上。
@@ -500,10 +531,10 @@
             v-if="!hasOrders"
             type="button"
             class="wb-btn wb-btn--primary"
-            data-act="cl-goto-import"
-            @click="go('import')"
+            data-act="cl-goto-queue"
+            @click="go('queue')"
           >
-            去导入订单
+            去待发货
           </button>
           <template v-else-if="applied">
             <!-- 搜索无结果时不给按钮（清空搜索框就在旁边）—— 两个范围一致 -->
@@ -582,8 +613,11 @@
            27 个色名排成一条文字列表，选错/选漏全靠读字。
            ⚠️ 它**必须放在 `v-if="rows.length"` / `v-else` 那一段之后**（与 `cl-viewer` 同区）：
               插在两者中间会把 `v-else` 改绑，表格与空态同时渲染（见上面 `cl-viewer` 的长注释）。
-           ⚠️ 这里**不新增颜色**（`allowAdd` 关闭）：新增色写的是全局字典，但"这个款有哪些色"
-              是另一条写路径（款色卡），不在本页职责内。 -->
+           ⚠️ 2026-11-02 起 `allowAdd` **打开**（用户口径：款里没有这个色时也要能继续）：
+              新增走的是 `ColorPalette` 已有的"只加字典"那一步，选完仍要按「保存」才落款色 ——
+              弹层里不直接写库，与 `StylePicker` 的「＋ 新色」同一条语义。
+              改前这里刻意关闭，理由是"新增色写的是全局字典，而'这个款有哪些色'是另一条写路径"；
+              但关掉的真实后果是"色卡里没有这个色 ⇒ 这一行永远保存不了"，代价比字典多一行大得多。 -->
       <Teleport to="body">
         <div
           v-if="colorPicker"
@@ -619,7 +653,9 @@
             :colors="colorPicker.colors"
             :current="draftOf(colorPicker.row).color"
             compact
+            allow-add
             @pick="pickDraftColor"
+            @added="onPickerColorAdded"
           />
           <div class="cl-color-pop__foot">
             <button
@@ -723,6 +759,7 @@
          于是表格与空态同时渲染。 -->
     <StylePicker
       v-if="pickerRow"
+      ref="pickerEl"
       :styles="styleOptions"
       :order-image="thumbs[pickerRow.localPath || ''] || ''"
       :order-no="pickerRow.orderNo"
@@ -733,10 +770,12 @@
       :current-color="draftOf(pickerRow).color"
       :has-next="pickerRowIdx >= 0 && pickerRowIdx < rows.length - 1"
       :busy="busy"
+      :suggested-code="suggestedCode"
       @close="closePicker"
       @zoom-order="zoomPickedOrder"
       @pick="onStylePicked"
       @clear="onStyleCleared"
+      @create="createStyleFromPicker"
     />
 
     <!-- 批量定款弹层（2026-10-28）：勾选 N 行 → 按商品分组，每组选一次款 → 一次落库。
@@ -852,9 +891,8 @@ import { localDayKey } from '@/lib/localDay';
 import type { OrderRecord, SkuBackfillOutcome, StyleRecord, ColorAliasRemembered, ShopGate } from '@/types';
 import { useShipping } from '../flowCtx';
 import { styleImages } from '../purchase';
-// 命名板（P3）：本页多出来的一块**可选**动作，见该组件头注释
-import VariantNamingCard from './VariantNamingCard.vue';
-// StyleMergeCard 已从本页撤下（见模板里的注释）；组件文件保留，但这里不再 import。
+// VariantNamingCard 已从本页撤下（见模板里的注释）；组件文件保留，但这里不再 import。
+// StyleMergeCard 同样已从本页撤下；组件文件保留，但这里不再 import。
 import {
   PAGE_SIZE,
   listCorrected,
@@ -867,7 +905,7 @@ import {
   saveCorrection,
 } from '../classify';
 
-const { token, go, bump, openModule } = useShipping();
+const { token, go, bump, openModule, classifyFocus } = useShipping();
 
 /** 本页的两个**互斥范围**（同一张表的两种筛法，不是两个页面） */
 type Scope = 'pending' | 'corrected';
@@ -896,6 +934,29 @@ const busy = ref(false);
 const error = ref('');
 /** 本次进页按已有映射**自动补上**的行数（0 = 没有漏网的，不显示） */
 const healed = ref(0);
+/**
+ * 紧凑排版（2026-11-05）：图 96 → 48。
+ *
+ * 为什么需要：一行 96px 时 1440×900 只放得下 **3 行**，而这一页的日常是几十行核对。
+ * 偏好只存在本机（`localStorage`）——它是**展示密度**，不是业务状态，不该进库；
+ * 读失败（隐私模式 / 存储被禁）一律回落舒适档，不阻断页面。
+ */
+function readDensity(): boolean {
+  try {
+    return localStorage.getItem('today.classify.compact') === '1';
+  } catch {
+    return false;
+  }
+}
+const compact = ref(readDensity());
+function toggleDensity(): void {
+  compact.value = !compact.value;
+  try {
+    localStorage.setItem('today.classify.compact', compact.value ? '1' : '0');
+  } catch {
+    // 存不下就只在本次生效 —— 不因为一个偏好没记住而报错
+  }
+}
 const search = ref('');
 /** 已提交给主进程的关键字（与输入框里正在敲的 `search` 分开 —— 否则每次输入都会触发分页重置） */
 const applied = ref('');
@@ -987,7 +1048,9 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)
  */
 const hasOrders = computed(() => counts.pending > 0 || counts.corrected > 0 || total.value > 0);
 const emptyTitle = computed(() => {
-  if (!hasOrders.value) return '今天还没有导入订单';
+  // ⚠️ 2026-11-02：标题从「今天还没有导入订单」改成「今天还没有订单」—— 订单进来的主入口已是
+  //    芒果采集（Excel 只是备选），说"还没有导入"会让只做采集的用户以为"我抓回来的那些不算数"。
+  if (!hasOrders.value) return '今天还没有订单';
   if (applied.value) return '没有匹配的订单';
   if (scope.value === 'corrected') return '今天这批还没有核对过的行';
   return '今天这批都核对完了';
@@ -1000,7 +1063,7 @@ const emptyDesc = computed(() => {
     // ⚠️ 说「今天导入的订单行」而不是「导入进来的订单行」：本页口径是**今天这批**
     //（与容器汇总、算钱页同一个筛），不写清楚的话，库里明明有前几天的单却说"还没订单"
     // 会让人以为数据丢了。
-    return '核对的对象是今天导入的订单行。先在第 1 步「导入订单」把平台导出的订单报表导进来。';
+    return '核对的对象是今天导入的订单行。先在第 1 步「待发货」把订单采集或导入进来。';
   }
   if (applied.value) {
     // 搜的是哪个范围就说哪个范围 —— 两个范围共用同一个搜索框，写错一边会让人以为搜索失灵
@@ -1099,6 +1162,23 @@ function clearDraftColor(): void {
   draftOf(p.row).color = '';
 }
 
+/**
+ * 颜色弹层里「＋ 新增颜色」的回执（2026-11-02）。
+ *
+ * `ColorPalette` 那一步**只写字典**（"以后在哪都能选到它"），不回写款色 ——
+ * 款色仍然随行内「保存」由 `saveCorrection` 落库（`ensureStyleColor` 会建）。这里只做两件事：
+ *   ① 把新色补进这个弹层的候选里（否则它加进字典了，这一屏却看不见，用户会以为没成功）；
+ *   ② 顺手选中它 —— 用户点"新增"的意图就是"我要用这个色"。
+ */
+function onPickerColorAdded(name: string): void {
+  const p = colorPicker.value;
+  if (!p) return;
+  const n = String(name ?? '').trim();
+  if (!n) return;
+  if (!p.colors.includes(n)) p.colors.push(n);
+  draftOf(p.row).color = n;
+}
+
 
 /**
  * 这一行载入时的颜色。优先级（**每一支都要在色卡里才作数**）：
@@ -1152,6 +1232,10 @@ function colorTitle(o: OrderRecord): string {
 
 /** 正在挑款的那一行；`null` = 弹层关着 */
 const pickerRow = ref<OrderRecord | null>(null);
+/** 弹层句柄：建款结果是**异步回执**（父层落库后才算数），要靠它把结论送回弹层的表单 */
+const pickerEl = ref<InstanceType<typeof StylePicker> | null>(null);
+/** 新建款时预填的编码（`productNextCode`；空串 = 没取到，让用户自己填） */
+const suggestedCode = ref('');
 /**
  * 款首图（款编码 → dataUrl）。行内格子上常显 —— 用户要治的是"只能看文字、容易对应错"，
  * 所以**不选的时候也要看得见图**，不能只在弹层里有。
@@ -1183,7 +1267,59 @@ function styleBtnTitle(o: OrderRecord): string {
 
 function openPicker(o: OrderRecord): void {
   pickerRow.value = o;
+  suggestedCode.value = '';
   void loadStyleThumbs();
+  // 预填"下一个款编码"：新建款时不必自己编，也不会撞上已有的（`nextStyleCode` 是唯一权威）
+  void ipc
+    .productNextCode()
+    .then((r) => {
+      if (r.success && r.data?.code) suggestedCode.value = String(r.data.code);
+    })
+    .catch(() => {
+      /* 取不到就让用户自己填 —— 它只是预填，不是能不能建的前提 */
+    });
+}
+
+/**
+ * 弹层里「＋ 新建款」的落库（2026-11-02，用户口径「不存在款时就没办法进入下一步」）。
+ *
+ * 三条刻意的选择：
+ *   ① **建的是产品库的款**（`productUpsert` → `pl_products`），不是"只在这页可见的临时款"。
+ *      临时款会把同一件货拆成两个真相（分类页一个、产品管理一个），而下游（取图/算钱/拿货）
+ *      全按款色匹配，对不上时既不报错也查不出来。
+ *   ② 建完**重新取一次款全集**，而不是把 `{code,name}` 拼进 `styleOptions`：新款的 `status` /
+ *      `colors` 由宿主算，本地拼一份就多了一个会漂的副本（`colors` 一空，颜色格的分支也会跟着错）。
+ *   ③ 建成功但列表里读不到 ⇒ **明说**。不能"假装选中"：那会让后面 `colorMissing` 指向一个
+ *      这个界面并不认识的款，报错会指向错的地方。
+ */
+async function createStyleFromPicker(input: { code: string; name: string }): Promise<void> {
+  const code = String(input?.code ?? '').trim();
+  const name = String(input?.name ?? '').trim();
+  if (!code) {
+    pickerEl.value?.failCreate('编码不能为空');
+    return;
+  }
+  const r = await ipc.productUpsert({ code, name, status: 'active' });
+  if (!r.success) {
+    // 原话透传（"产品编码已存在：STYLE-003" 比"新建失败"有用得多）
+    pickerEl.value?.failCreate(r.error || '新建款失败');
+    return;
+  }
+  try {
+    styleOptions.value = await listStyleOptions();
+  } catch (e) {
+    pickerEl.value?.failCreate(
+      e instanceof Error ? `款已建好，但刷新款列表失败：${e.message}` : '款已建好，但刷新款列表失败',
+    );
+    return;
+  }
+  const rec = styleOptions.value.find((s) => s.code === code);
+  if (!rec) {
+    pickerEl.value?.failCreate(`已建款 ${code}，但列表里还没读到它 —— 关掉重开这一格再试`);
+    return;
+  }
+  pickerEl.value?.acceptCreated(rec);
+  toast(`已新建款 ${code}${name ? ` · ${name}` : ''} —— 选个颜色就能保存`);
 }
 
 /** 正在挑款的行在**当前页**里的下标（-1 = 不在列表里）；主按钮文案与"下一条"都看它 */
@@ -2278,6 +2414,36 @@ async function bootstrap(): Promise<void> {
   await load();
 }
 
+/**
+ * 「带着一个单号进来」（2026-11-05，来自「待发货」清单的详情弹层）。
+ *
+ * 做的事只有一件：把单号填进搜索框并提交 —— 与用户手打单号走**同一条**查询路径
+ * （`applied` → `load()`），不新增匹配规则。同时清掉容器里那个标记，否则下次点进本页
+ * 会被一个过期单号弹到空列表。
+ *
+ * ⚠️ 范围强制回「待核对」：从待发货点进来是为了**改**这一单，落在「已核对」范围会看到只读行。
+ */
+function applyClassifyFocus(): void {
+  const no = classifyFocus.value;
+  if (!no) return;
+  classifyFocus.value = '';
+  search.value = no;
+  applied.value = no;
+  scope.value = 'pending';
+  page.value = 0;
+}
+
+// 已挂载（KeepAlive 保活）时从别的页签点进来：watch 接住；
+// 首次挂载走 `onMounted`（那时 watch 还没跑过这个值）。
+watch(
+  () => classifyFocus.value,
+  (no) => {
+    if (!no) return;
+    applyClassifyFocus();
+    void load();
+  },
+);
+
 /** Esc 收起颜色弹层（它挂在 body，焦点不一定在弹层内 —— 必须挂 window）；拖动中也一并取消 */
 function onColorPickKey(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
@@ -2289,6 +2455,8 @@ function onColorPickKey(e: KeyboardEvent): void {
 onMounted(() => {
   void loadColorDict();
   window.addEventListener('keydown', onColorPickKey);
+  // 先落搜索词，再取数 —— 顺序反了会先拉一屏全量、再重拉一次（闪两下，且第一屏是错的）
+  applyClassifyFocus();
   void bootstrap();
 });
 onBeforeUnmount(() => {
@@ -2312,7 +2480,7 @@ watch(
 }
 /* ── 核对表的地板（2026-10-28 修「页面展示不全」）────────────────────────────
    `.cl-view` 是 height:100% 的**定高弹性列**（`overflow:auto`），直接子项默认 `flex-shrink:1`。
-   命名板（P3）与款合并卡（P4）插进来之后，核对表成了唯一"可缩"的那一项 —— 实测被压到
+   命名板（P3）与款合并卡（P4）插进来之后（现均已撤下），核对表成了唯一"可缩"的那一项 —— 实测被压到
    55px、表格容器 0px，而页面 `scrollHeight == clientHeight`（**没有滚动条**）
    ⇒ 表格整块消失、想滚也滚不到（真机症状就是"归类核对页面展示不全"）。
    ⇒ 给它一道地板：空间够就填满剩余（表格自己滚），空间不够就停在地板上，
@@ -2572,8 +2740,19 @@ watch(
   display: flex;
   justify-content: flex-end;
 }
+/* ---- 缩略图尺寸 = 一个变量（2026-11-05 加紧凑档）-------------------------------
+   96px 是"认款看清印花"的尺寸，48px 是"一屏多看几行"的尺寸，两档都由 `--cl-thumb` 决定：
+   列宽、按钮、img 三处必须同时跟着变，否则列宽与图不一致会留一条大空白（或把图裁掉）。 */
+.cl-table {
+  --cl-thumb: 96px;
+}
+
+.cl-table.is-compact {
+  --cl-thumb: 48px;
+}
+
 .cl-thumb-col {
-  width: 112px;
+  width: calc(var(--cl-thumb) + 16px);
   /* ⭐ 2026-10-12 补的**地板**：这一列不许被压扁。
      为什么需要它：`.wb-table` 是 `table-layout: auto`，列宽由"各列首选宽之和 vs 表格可用宽"
      决定；差多少就从**每列抠**。已核对范围各列都是窄文本（只读格），首选宽之和很容易超过
@@ -2584,7 +2763,7 @@ watch(
         min-content 只有几十 px，列该塌还是塌。地板必须由 CSS 给，不能靠图片有多大。
      代价：窄窗口下整表会比容器宽一点 ⇒ 横向滚动（`.wb-table-wrap` 本来就为这个准备着，
         且首列 sticky —— 与待核对范围在同一窄窗口下的行为一致，不是新引入的）。 */
-  min-width: 112px;
+  min-width: calc(var(--cl-thumb) + 16px);
 }
 /* 核对用的是**整张图**，不是裁出来的中心块：
    基座 `.wb-thumb` 是 40px + `object-fit: cover`（商品照多是竖版，上下两端正是"款长什么样"
@@ -2595,8 +2774,8 @@ watch(
       再往上提就得不偿失：图列每 +32px，颜色/归属款两列就要让出空间（表格总宽固定），
       而"要看细节"有 `cl-zoom-*` 那条路（读原图），不必把表格撑胖。 */
 .cl-table .wb-thumb {
-  width: 96px;
-  height: 96px;
+  width: var(--cl-thumb);
+  height: var(--cl-thumb);
   object-fit: contain;
 }
 /* 「点开看大图」：整格是一个按钮（不是只在图右上角一个小角标）——
@@ -2608,8 +2787,8 @@ watch(
   /* 尺寸写死在按钮上（而不是只写在 img 上）：按钮是格子里那个**块**，它的宽度就是本列
      min-content 的来源。只给 img 设宽时，`img { max-width: 100% }` 会让 Chrome 按图片
      **固有尺寸**算这一列的下限（缩略图固有尺寸很小 ⇒ 列照样塌）—— 2026-10-12 实测踩到。 */
-  width: 96px;
-  height: 96px;
+  width: var(--cl-thumb);
+  height: var(--cl-thumb);
   padding: 0;
   border: 0;
   background: none;
@@ -2739,9 +2918,18 @@ watch(
    每行被撑高约 20px，5 行就是 100px，而**行高是被一个排版细节决定的**，与内容无关。
    用户 2026-10-12 报"行高被撑高"就是它。改成 nowrap：这一列的内容是两个 13px 文字链接
    （合计 ≈120px），170px 放得下；放不下的情况由 `.wb-table-wrap` 的横向滚动兜底
-   （该列会跟着表格一起滚，不会被裁掉——裁切是静默的，滚动才是可发现的）。 */
+   （该列会跟着表格一起滚，不会被裁掉——裁切是静默的，滚动才是可发现的）。
+   ⚠️ 2026-11-05：flex 容器从 td 挪到内层 `.cl-ops__row`。原来 `td.cl-ops { display:flex }`
+   会让内容盒**贴着单元格顶部**（td 的 `vertical-align: middle` 对块级 flex 容器不起作用），
+   192px 高的行里三个动作挤在右上角，扫视时容易点到隔壁行；也不能直接把 td 设成
+   `inline-flex`（那样 td 不再是 table-cell，整张表的列宽算法作废）。 */
 .cl-ops {
-  display: flex;
+  vertical-align: middle;
+}
+
+.cl-ops__row {
+  display: inline-flex;
+  align-items: center;
   flex-wrap: nowrap;
   gap: 10px;
   white-space: nowrap;

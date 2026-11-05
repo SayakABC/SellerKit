@@ -66,8 +66,11 @@ const receiver = stripComments(read('electron/ae-receiver.ts'));
 const main = stripComments(read('electron/main.ts'));
 const preload = stripComments(read('electron/preload.ts'));
 const useSkuPool = stripComments(read('src/modules/goods/useSkuPool.ts'));
+const todayView = stripComments(read('src/modules/today/TodayView.vue'));
 
 const EVENT = 'ae-items-ingested';
+/** 芒果同步广播的事件名（与 `ae-items-ingested` 同一套接线，见文末 describe） */
+const MANGO_EVENT = 'mango-ingested';
 
 describe('采集入库广播：接收端（① ②）', () => {
   it(`emit 里 send('${EVENT}')`, () => {
@@ -153,5 +156,60 @@ describe('采集入库广播：消费端订阅（⑤）', () => {
       '非 items 段收到广播应只刷 loadItemSummaryOnly()（点亮分段徽标，不动列表）——\n' +
         '全量重拉会清空勾选、打断当前操作（停在队列段时用户只是在扫队列）。'
     ).toContain('loadItemSummaryOnly()');
+  });
+});
+
+// ─────────────────────────────────────────────────────────── 芒果同步广播
+//
+// 2026-11-02 用户报障「点「去芒果采集」、扩展抓完后软件里没实时刷新」。
+// 根因与上面那条一模一样：扩展是外部进程，`/mango/ingest` 写完库宿主页面无从感知 ——
+// 待发货清单、总览四数、采集状态条全都停在旧快照上，只能再点一次「刷新」。
+// 五环结构相同（emit / 事件名 / 窗口注入 / preload / 消费端订阅），
+// 窗口注入由上面 ③ 的 `setAeEventWindow` 共用，这里只钉其余四环。
+describe('芒果同步广播：接线（发送 → 订阅 → 刷新）', () => {
+  it(`emit 里 send('${MANGO_EVENT}')`, () => {
+    expect(
+      receiver,
+      `ae-receiver.ts 里没有 webContents.send('${MANGO_EVENT}', ...)。\n` +
+        '没有它，芒果采集处理完后界面永远停在旧清单（= 用户报障的原始症状）。'
+    ).toContain(`send('${MANGO_EVENT}'`);
+  });
+
+  it('handleMangoIngest 必须在 ingestMangoOrders() **之后**调 emitMangoIngested（处理完才通知）', () => {
+    const at = receiver.indexOf('function handleMangoIngest');
+    expect(at, 'handleMangoIngest 不见了（函数被改名/删除？守卫需同步更新）').toBeGreaterThan(-1);
+    const rest = receiver.slice(at);
+    const nextFn = rest.indexOf('\nfunction ', 10);
+    const body = nextFn > 0 ? rest.slice(0, nextFn) : rest;
+    const ingestAt = body.indexOf('ingestMangoOrders(');
+    const emitAt = body.indexOf('emitMangoIngested(');
+    expect(ingestAt, 'handleMangoIngest 里不见 ingestMangoOrders()（处理调用被挪走？）').toBeGreaterThan(-1);
+    expect(emitAt, 'handleMangoIngest 里没有调用 emitMangoIngested()').toBeGreaterThan(-1);
+    expect(
+      emitAt,
+      'emitMangoIngested() 必须在 ingestMangoOrders() **之后**：写库/图落地/同步日志都已完成才通知，\n' +
+        '否则界面会在数据只写了一半时重拉（读到的是中间态）。'
+    ).toBeGreaterThan(ingestAt);
+  });
+
+  it('preload 订阅 + 返回退订函数（removeListener 成对）', () => {
+    expect(preload, `preload.ts 没有 ipcRenderer.on('${MANGO_EVENT}', ...)`).toContain(`on('${MANGO_EVENT}'`);
+    expect(
+      preload,
+      `preload.ts 没有 removeListener('${MANGO_EVENT}', ...) —— 订阅泄漏（重复挂载会叠出多个监听）`
+    ).toContain(`removeListener('${MANGO_EVENT}'`);
+  });
+
+  it('TodayView 订阅 onMangoIngested 并走 bump()（重取汇总 + 作废各面板缓存）', () => {
+    // ⚠️ 只断言"文件里有 bump()"会恒绿（它到处都是定义与调用）；必须钉在订阅回调体内。
+    expect(
+      todayView.match(/onMangoIngested\(\(\)\s*=>\s*bump\(\)\)/),
+      'TodayView.vue 的 onMangoIngested 回调必须直接 bump()。\n' +
+        '只 reload() 不 bump 的话，页签徽标会变、点进面板还是旧数据（项目里已踩过的缝）。'
+    ).not.toBeNull();
+    expect(
+      todayView,
+      'TodayView.vue 里订阅句柄没有被退订（offMango?.() 不见了）—— 组件反复挂载会叠监听。'
+    ).toContain('offMango?.()');
   });
 });

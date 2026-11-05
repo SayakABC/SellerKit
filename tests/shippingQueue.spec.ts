@@ -182,4 +182,23 @@ describe('remainText · 「还剩多久」分四档', () => {
     expect(remainText(Number.NaN)).toBe('不知道');
     expect(remainText(Number.POSITIVE_INFINITY)).toBe('不知道');
   });
+
+  // ⚠️ 这一组是 2026-11-05 补的**进位边界**：旧实现分段各自 Math.round 余数，
+  //    在档位边界会输出「0 小时 60 分」「23 小时 60 分」「29 天 24 小时」——
+  //    而原有 4 条用例全是整点（3 小时 / 3 小时 20 分 / 2 天 5 小时 / 9 天），
+  //    恰好避开边界 ⇒ 全绿但漏。改回旧实现，这 4 条立刻红。
+  it('进位不能溢出：不能出现「60 分」或「24 小时」', () => {
+    expect(remainText(59.6 * 60_000)).toBe('还剩 1 小时');
+    expect(remainText((23 * 60 + 59.6) * 60_000)).toBe('还剩 1 天');
+    expect(remainText(29 * 24 * 3_600_000 + 23.7 * 3_600_000)).toBe('还剩 30 天');
+    expect(remainText((47 * 60 + 54) * 60_000)).toBe('还剩 2 天');
+  });
+
+  it('档位边界本身要落在正确的一档（59 分 / 1 小时 / 24 小时）', () => {
+    expect(remainText(59 * 60_000)).toBe('还剩 59 分钟');
+    expect(remainText(60 * 60_000)).toBe('还剩 1 小时');
+    expect(remainText(23.9 * 3_600_000)).toBe('还剩 23 小时 54 分');
+    expect(remainText(24 * 3_600_000)).toBe('还剩 1 天');
+    expect(remainText(48 * 3_600_000)).toBe('还剩 2 天');
+  });
 });

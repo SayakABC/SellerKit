@@ -3,13 +3,18 @@
     <!-- 页头：标题 + 一句说明 + 刷新。
          说明从"待办清单"改成"这条流程长什么样" —— 四步现在**都在本页的页签里**，
          用户第一眼要知道的是"不用跳页了"，而不是"今天有几件事"。
+         ⚠️ 2026-11-02：第 1 步的「导入订单」页签并进「待发货」—— 主入口是芒果采集，
+            Excel 导入退成页内的备选区。说明句按这个顺序写，免得用户又去别处找"导入"。
          ⚠️ 算钱（利润）已**不在本页**（2026-10-17 用户裁定：归拢到独立「统计」页），
             说明里点名它，免得用户在本页找第三个数钱的页签。 -->
     <header class="wb-head">
       <div class="wb-head__main">
         <h1 class="wb-head__title">发货台</h1>
+        <!-- 说明句缩成一行（2026-11-05）：原来两行、括号里还塞了两条"别处"的指引，
+             老用户每天上班看一遍全是噪音。现在只说这条线长什么样，
+             两个旁路（订花纸按需 / 利润在统计）各自在页签与模块名上就能看到。 -->
         <p class="wb-head__desc">
-          每日发货全流程：导入 → 归类 → 拿货 → 对账，四步都在下面的页签里，点页签就地切换（算钱与利润在「统计」页）
+          采集 → 归类 → 拿货 → 对账；订花纸按需，利润在「统计」
         </p>
       </div>
       <div class="wb-head__actions">
@@ -23,7 +28,7 @@
          ⚠️ 断言钉在 `data-act` 上（`tab-<id>`），不按整段文本匹配。
          ⚠️ 页签上的数字**来自容器统一取的那一份汇总**（`ctx.summary`），不各自取数 ——
             否则会出现"页签说 3 个 SKU、点进去说 0 个"（保活让这份错更隐蔽）。 -->
-    <div class="td-tabs" role="tablist" data-act="tabs">
+    <div class="td-tabs" role="tablist" data-act="tabs" @keydown="onTabKey">
       <button
         v-for="t in TABS"
         :key="t.id"
@@ -35,11 +40,12 @@
         }"
         role="tab"
         :aria-selected="tab === t.id"
+        :tabindex="tab === t.id ? 0 : -1"
         :data-act="`tab-${t.id}`"
         :title="t.hint"
         @click="go(t.id)"
       >
-        <span v-if="t.no" class="td-tab__no">{{ t.no }}</span>
+        <span v-if="t.no" class="td-tab__no" :data-act="`tab-no-${t.id}`">{{ t.no }}</span>
         <span class="td-tab__name">{{ t.name }}</span>
         <span v-if="badge(t)" class="td-tab__badge" :data-act="`tab-badge-${t.id}`">{{
           badge(t)
@@ -81,7 +87,16 @@
 // **本页只做两件事**：① 汇总指标的取数与分发（`ctx.summary`，各页签徽标与总览共用同一份）；
 // ② 页签切换。**业务算法一律不在这页** —— 仍在 `src/lib/dailyShip.ts` / `picking.ts` /
 // `orderCost.ts` 那几处，各面板只调用（用户 2026-09-30 定的原则：数字的算法只有一处）。
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, ref, type Component } from 'vue';
+import {
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  provide,
+  ref,
+  type Component,
+} from 'vue';
 import * as ipc from '@/core/services/ipc';
 import { toast } from '@/core/services/toast';
 import { switchModule } from '@/core/services/shell';
@@ -121,8 +136,12 @@ interface TabDef {
  * 于是 `KeepAlive` 永远认不出"这是同一个组件"，保活失效（切换即重建，等于没做）。
  *
  * 2026-11-01（T2-4）：新增 `queue`「待发货」，位置紧跟「总览」。
- *   · 它**不带步骤号**：四步是"今天导进来的这批怎么走完"，而它是"现在手上还有多少没发"（跨天）；
  *   · 它是总览那块「现在还没发」的**下钻落点**（那块的按钮 `go('queue')` 就切到这里）。
+ * 2026-11-02：`import`「导入订单」页签**并进 `queue`「待发货」**（用户口径："两个页面合并，
+ *   统一合并为待发货，弱化 Excel 导入按钮，以芒果采集为主"）。于是：
+ *   · 「待发货」带上第 1 步编号 —— 它现在就是"把单弄进来"的入口；
+ *   · Excel 投放区成为该页内**默认收起**的备选区（主入口 = 芒果采集）；
+ *   · 页签栏从六个回到五个。
  */
 const TABS: TabDef[] = [
   {
@@ -134,18 +153,11 @@ const TABS: TabDef[] = [
   {
     id: 'queue',
     name: TN.queue,
-    hint: '还没发的单，按最晚发货时间排，最急的在最上面',
+    no: '1',
+    hint: '把订单采集进来（芒果为主 / Excel 备选），并按最晚发货时间排好要发的单',
     comp: defineAsyncComponent(() => import('./tabs/QueuePanel.vue')),
     // 徽标 = 待发货**单数**（与总览那一格同一个数、同一份来源 `summary.pulse`）
     badge: (s) => (s.pulse.pending ? `${s.pulse.pending} 单` : ''),
-  },
-  {
-    id: 'import',
-    name: TN.import,
-    no: '1',
-    hint: '把平台导出的订单报表导入进来（自动识别文件类型）',
-    comp: defineAsyncComponent(() => import('./tabs/ImportPanel.vue')),
-    badge: (s) => (s.orders.total ? `${s.orders.total} 行` : ''),
   },
   {
     id: 'classify',
@@ -154,6 +166,12 @@ const TABS: TabDef[] = [
     hint: '把订单行归到款式/颜色上（批量识别 + 逐行修正）',
     comp: defineAsyncComponent(() => import('./tabs/ClassifyPanel.vue')),
     badge: (s) => (s.gaps.style ? `${s.gaps.style} 未归类` : ''),
+  },
+  {
+    id: 'pod',
+    name: TN.pod,
+    hint: '要发货的件数 − 手上还剩的花纸 = 这次补多少件（再折算成要订几张）；可以直接复制成图片发给花纸厂',
+    comp: defineAsyncComponent(() => import('./tabs/PodOrderPanel.vue')),
   },
   {
     id: 'purchase',
@@ -186,6 +204,8 @@ const receipt = ref<AutoImportResult | null>(null);
  * 各取一次 IPC 的话，"总览说 3 单、清单列 2 行"这种缝迟早出现，且没人能一眼看出哪边对。
  */
 const pulseRows = ref<PulseRow[]>([]);
+/** 「芒果订单已同步」事件的退订函数（挂载时订阅，卸载时释放） */
+let offMango: (() => void) | null = null;
 
 const summary = ref<ShippingSummary>({
   orders: { total: 0, collect: 0, import: 0, lastTime: '' },
@@ -212,6 +232,33 @@ function badge(t: TabDef): string {
 /** 切到本页某个页签 —— **不跳页**（这是本次改造的核心诉求） */
 function go(tabId: string): void {
   tab.value = tabId;
+}
+
+/**
+ * 页签的键盘动线（2026-11-05）：`role="tablist"` 在浏览器里**不自带**行为，
+ * 只标 role 而不实现 ←/→ 等于对外承诺了却做不到（读屏用户按方向键没反应）。
+ *
+ * 改的是 `tabindex`（roving tabindex）：只有当前页签在 Tab 序列里，
+ * 否则 Tab 要穿过 5 个页签才能到面板 —— 那才是键盘用户真正的负担。
+ */
+function onTabKey(e: KeyboardEvent): void {
+  const i = TABS.findIndex((t) => t.id === tab.value);
+  if (i < 0) return;
+  let next = -1;
+  if (e.key === 'ArrowRight') next = (i + 1) % TABS.length;
+  else if (e.key === 'ArrowLeft') next = (i - 1 + TABS.length) % TABS.length;
+  else if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = TABS.length - 1;
+  if (next < 0) return;
+  e.preventDefault();
+  const target = TABS[next];
+  if (!target) return;
+  go(target.id);
+  // 切完把焦点送过去：`KeepAlive` 换面板不会动焦点，不送的话焦点还留在原来那个按钮上
+  void nextTick(() => {
+    const el = document.querySelector<HTMLElement>(`[data-act="tab-${target.id}"]`);
+    el?.focus();
+  });
 }
 
 /** 打开**别的模块**（「货与成本」这类主数据维护页不属于本流程的某一步，仍是真跳转） */
@@ -268,13 +315,13 @@ function onSwitchModule(e: Event): void {
 }
 
 /**
- * ⚠️ 前置口径（2026-10-11，用户拍板）：**第 1–2 步看"今天导入的那批"，第 3–4 步看"未结清"**。
+ * ⚠️ 前置口径（2026-10-11，用户拍板）：**第 1–2 步看"今天进来的那批"，第 3–4 步看"未结清"**。
  *    所以这里的 `orders` / `gaps` / `daily` 是**今天**的数（`reload()` 按导入日筛，见那里的注释），
- *    而 `purchase` 是跨天的（未结清）。这正是"每天上班导一次、货和钱跨天结转"的真实工作流；
- *    两条口径都在界面上写出来了（「导入订单」页的计数、总览的口径小字），不要把它们合并成一个数。
+ *    而 `purchase` 是跨天的（未结清）。这正是"每天上班采集一次、货和钱跨天结转"的真实工作流；
+ *    两条口径都在界面上写出来了（「待发货」页的计数、总览的口径小字），不要把它们合并成一个数。
  *
  * 四步主线。**只由 `summary` 推导**，不新增取数（页签的 `is-now` 标记读它）：
- *   · 第 1 步看 `orders.total`（**今天**导进来多少）
+ *   · 第 1 步看 `orders.total`（**今天**采集/导进来多少）
  *   · 第 2 步看 `gaps.style`（今天这批里还有多少行没识别出款）
  *   · 第 3 步看 `purchase.gap`（还有多少款色没拿 —— 由订单需求 − 已提交拿货单推出，宿主算好）
  *   · 第 4 步看 `purchase.balance`（还欠厂家多少钱；`0` 才算结清）
@@ -307,12 +354,14 @@ const flow = computed<FlowStep[]>(() => {
   return [
     {
       no: 1,
-      key: 'import',
-      name: '导入订单',
-      tab: 'import',
-      act: '去导入',
-      where: '本页「导入订单」',
-      note: hasOrders ? `今天导入 ${o.total} 行` : '今天还没导入',
+      key: 'queue',
+      name: '待发货',
+      tab: 'queue',
+      act: '去采集',
+      where: '本页「待发货」',
+      // 第 1 步 = 把单弄进来（芒果采集为主，Excel 导入备选）。有单就算走完 ——
+      // 具体"还有几单没发"是清单自己的事，不参与这条主线的状态推导。
+      note: hasOrders ? `今天 ${o.total} 行订单` : '今天还没有订单',
       state: hasOrders ? 'done' : 'now',
     },
     {
@@ -357,6 +406,12 @@ const flowNow = computed((): FlowStep => {
 /** 导入进行中（按钮的 disabled 与文案读它）—— 必须在 `ctx` 之前声明（对象字面量求值时就要取值） */
 const importing = ref(false);
 
+/**
+ * 「待发货」清单 → 「归类核对」的**带单号跳转**（2026-11-05）。
+ * 只在两屏之间传一个单号，不搬运行数据（归类页自己按单号搜，口径与手打一致）。
+ */
+const classifyFocus = ref('');
+
 const ctx: ShippingCtx = {
   summary,
   pulseRows,
@@ -373,6 +428,7 @@ const ctx: ShippingCtx = {
   importing,
   importExcel,
   importFile,
+  classifyFocus,
 };
 provide(SHIPPING_CTX, ctx);
 
@@ -560,11 +616,17 @@ onMounted(() => {
     (window as unknown as { __switchModuleAction?: { moduleId?: string; action?: string } })
       .__switchModuleAction
   );
+  // 芒果采集是**外部进程**（Chrome 扩展）写库，本页无从感知 —— 接收端处理完一批就广播，
+  // 这里据此走 `bump()`（= 重取汇总 + 作废各面板缓存），用户点完「去芒果采集」不必再手动刷新。
+  // ⚠️ **`ok:false` 也要刷**：抓 0 条 / 登录过期时采集状态条必须立刻变红，藏到下次手动刷新等于没说。
+  offMango = ipc.onMangoIngested(() => bump());
   void reload();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('switch-module', onSwitchModule as EventListener);
+  offMango?.();
+  offMango = null;
 });
 </script>
 
@@ -637,19 +699,27 @@ onBeforeUnmount(() => {
   border-bottom-color: var(--wb-border-strong);
 }
 
+/* 步骤号 = **位置标记**（空心环），数量 = **数值**（实心胶囊）。
+   ⚠️ 这两者原来**同形**：都是一圈浅边 + 浅底的小块，字号也接近，
+      于是「1 归类核对 1 未归类」里两个 "1" 一个是序号、一个是待办数，
+      用户要读三遍才分得清（2026-11-03 界面审查，方案 §5 表）。
+      分离手段**只靠填充**，一个新颜色都不加：
+        · 序号 → 透明底 + 一圈细边 + 字重 500（像列表标号，不抢视线）
+        · 数量 → 实心底 + 无边框 + 字重 600（像数值，一眼看出"这是个量"）
+      深色主题下两套填充同样成立（底都是令牌，不写死颜色）。 */
 .td-tab__no {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: var(--wb-surface);
-  border: 1px solid var(--wb-border);
+  background: transparent;
+  border: 1px solid var(--wb-border-strong);
   color: var(--wb-text-muted);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: var(--wb-fs-micro);
+  font-weight: 500;
   line-height: 1;
 }
 
@@ -662,15 +732,17 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-/* 页签上的"还有多少活"：数字小而实心，区别于名称 */
+/* 页签上的"还有多少活"：实心胶囊 —— 与左侧空心序号形成"数值 vs 标号"的形状对立。
+   ⚠️ 去掉边框：边框是**控件**语言（可点的框），填充是**数据**语言（一个量）。
+      页签本身已经是可以点的按钮了，徽标再画一圈边，就成了"按钮里套按钮"。 */
 .td-tab__badge {
   flex-shrink: 0;
-  padding: 1px 6px;
+  padding: 1px 6px 2px;
   border-radius: 999px;
-  background: var(--wb-surface);
-  border: 1px solid var(--wb-border);
-  color: var(--wb-text-muted);
-  font-size: 11px;
+  background: var(--wb-hover);
+  color: var(--wb-text);
+  font-size: var(--wb-fs-micro);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 

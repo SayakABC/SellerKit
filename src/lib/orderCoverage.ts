@@ -17,8 +17,8 @@
 //    宿主 `orderCoverage()` 的 `unattributed` 已经减掉了有归属的那部分。
 // ⚠️ 未识别款（款编码为空）**不摊池子**：空键会把"同色同码的不同商品"并成一格，
 //    凭空宣布已拿是"漏货式"的静默错（货没到、界面说到了）。与 `outstanding()` 的 `have = 0` 同口径。
-import { bucketOfStatus, resolveQty } from './orderCost';
-import { takenKey, takenKeyOf } from './picking';
+import { bucketOfStatus, dateKey, resolveQty } from './orderCost';
+import { cutoffDate, takenKey, takenKeyOf } from './picking';
 
 /** 一行输入：宿主 `orderCoverage().rows` 的投影（本层只取要用的列） */
 export interface CoverageInputRow {
@@ -27,6 +27,14 @@ export interface CoverageInputRow {
   orderNo?: unknown;
   shop?: unknown;
   orderTime?: unknown;
+  /**
+   * 这一单**进入本地库的时间**（`oi_orders.created_at`，导入/采集落库时刻）。
+   *
+   * 与 `orderTime`（平台下单时刻）是**两件事**：芒果采集进来的单常常是前几天下、
+   * 今天才抓到的（本机实测 4 单的下单日 10-24 ~ 11-01，采集日却是 11-02）。
+   * 「这些数据是不是历史」问的是**入库日**，所以区间说明必须用这一列。
+   */
+  importedAt?: unknown;
   qty?: unknown;
   rawFields?: Record<string, string> | null;
   styleCode?: unknown;
@@ -48,6 +56,8 @@ export interface RowCoverage {
   orderNo: string;
   shop: string;
   orderTime: string;
+  /** 入库时刻原文（见 `CoverageInputRow.importedAt`；与下单时刻不是同一件事） */
+  importedAt: string;
   styleCode: string;
   /** 有效颜色（款色 → 订单原文色）—— 与拣货投影、拣货单同一顺序 */
   color: string;
@@ -93,7 +103,7 @@ export function planCoverage(
     pool?: Record<string, number> | null;
     /** 旧名（2026-10-22 之前叫 `taken`：拿整条台账当池子）—— 与 `pool` 同义 */
     taken?: Record<string, number> | null;
-  } = {},
+  } = {}
 ): CoveragePlan {
   const list = Array.isArray(rows) ? rows : [];
   const coveredMap = opts?.covered && typeof opts.covered === 'object' ? opts.covered : {};
@@ -122,13 +132,13 @@ export function planCoverage(
     const size = String(r?.size ?? '');
     // id=0 的行没有订单行身份（正常数据里不该出现）⇒ 不给它匹配任何精确覆盖，
     // 否则一个手滑的 `covered["0"]` 会同时命中所有这类行（"已拿"凭空翻几倍）。
-    const exact =
-      id > 0 ? Math.max(0, Math.min(qty, Number(coveredMap[String(id)] ?? 0) || 0)) : 0;
+    const exact = id > 0 ? Math.max(0, Math.min(qty, Number(coveredMap[String(id)] ?? 0) || 0)) : 0;
     const row: RowCoverage = {
       orderItemId: id,
       orderNo: String(r?.orderNo ?? '').trim(),
       shop: String(r?.shop ?? ''),
       orderTime: String(r?.orderTime ?? ''),
+      importedAt: String(r?.importedAt ?? ''),
       styleCode,
       color,
       size,
@@ -178,6 +188,11 @@ export interface OrderCoverageOrder {
   orderNo: string;
   shop: string;
   orderTime: string;
+  /**
+   * 这一单**入库的时刻**（同单所有明细行一致；'' = 宿主没给）。
+   * 折叠头的「今天导入 / 历史导入」用它 —— 拿 `orderTime` 会答成"今天下单 0 单"。
+   */
+  importedAt: string;
   /** 明细行（还差的在前，齐了的在后 —— 用户先看见要动手的） */
   rows: RowCoverage[];
   pieces: number;
@@ -203,6 +218,7 @@ export function groupByOrder(rows: RowCoverage[] | null | undefined): OrderCover
         orderNo: r.orderNo,
         shop: r.shop,
         orderTime: r.orderTime,
+        importedAt: r.importedAt,
         rows: [],
         pieces: 0,
         covered: 0,
@@ -224,12 +240,12 @@ export function groupByOrder(rows: RowCoverage[] | null | undefined): OrderCover
     g.remaining = g.pieces - g.covered;
     g.done = g.remaining <= 0;
     // 还差的行在前（用户先看见要动手的），同组内按行 id 升序
-    g.rows.sort((a, b) => Number(a.covered >= a.qty) - Number(b.covered >= b.qty) || a.orderItemId - b.orderItemId);
+    g.rows.sort(
+      (a, b) =>
+        Number(a.covered >= a.qty) - Number(b.covered >= b.qty) || a.orderItemId - b.orderItemId
+    );
   }
-  out.sort(
-    (a, b) =>
-      a.orderTime.localeCompare(b.orderTime) || a.orderNo.localeCompare(b.orderNo),
-  );
+  out.sort((a, b) => a.orderTime.localeCompare(b.orderTime) || a.orderNo.localeCompare(b.orderNo));
   return out;
 }
 
@@ -273,6 +289,77 @@ export function coverageSummary(orders: OrderCoverageOrder[] | null | undefined)
   return out;
 }
 
+/**
+ * 「按单核对」的时间窗结果（2026-11-02）。
+ *
+ * 为什么需要：折叠头原先只有「还差 73 单」一个数 —— 那是**全部未发货**（跨天结转，
+ * 历史导入单也算在内），而总览的「今天同步 4 单」按导入日筛。两个数都真，但页面不说范围，
+ * 用户只能理解成"今天同步出了 73 单"。这里把范围做成显式窗口，并把**被挡住的那批**
+ * 报出去（`hidden` / `hiddenPieces`），不静默丢单。
+ *
+ * 口径与拣货宫格一致：按**下单日**（`dateKey(orderTime)`）；没有下单日的单**照收**
+ * （"没日期"≠"太老"，丢掉会让货没人拣）。
+ */
+export interface CoverageWindow {
+  /** 窗口内的单（界面上的「可以发货 / 还差」只用这一批） */
+  visible: OrderCoverageOrder[];
+  /** 窗口外的单（必须在界面上说"另有 N 单更早"，不许悄悄藏掉） */
+  hidden: OrderCoverageOrder[];
+  /** 窗口下界（yyyy-mm-dd）；'' = 不限 */
+  cutoff: string;
+  /** 窗口外那批的件数合计 */
+  hiddenPieces: number;
+}
+
+export function scopeCoverageByDays(
+  orders: OrderCoverageOrder[] | null | undefined,
+  opts: { days?: unknown; today?: unknown } = {}
+): CoverageWindow {
+  const list = Array.isArray(orders) ? orders : [];
+  const days = Number(opts?.days);
+  const today = String(opts?.today ?? '');
+  if (!(Number.isFinite(days) && days > 0) || !today) {
+    return { visible: list, hidden: [], cutoff: '', hiddenPieces: 0 };
+  }
+  const cutoff = cutoffDate(today, days);
+  if (!cutoff) return { visible: list, hidden: [], cutoff: '', hiddenPieces: 0 };
+  const visible: OrderCoverageOrder[] = [];
+  const hidden: OrderCoverageOrder[] = [];
+  for (const o of list) {
+    const day = dateKey(o.orderTime);
+    if (!day || day >= cutoff) visible.push(o);
+    else hidden.push(o);
+  }
+  const hiddenPieces = hidden.reduce((sum, o) => sum + o.pieces, 0);
+  return { visible, hidden, cutoff, hiddenPieces };
+}
+
+/** 「今天导入 / 历史导入」的拆分（按 `importedAt`，不是下单日） */
+export interface CoverageImportSplit {
+  /** 入库日是今天（`today`）的订单数 */
+  today: number;
+  /** 入库日有、但不是今天的订单数（= 历史导入/采集） */
+  history: number;
+  /** 入库日认不出的订单数（照收、另说，不并进历史） */
+  undated: number;
+}
+
+export function coverageImportSplit(
+  orders: OrderCoverageOrder[] | null | undefined,
+  today: unknown
+): CoverageImportSplit {
+  const list = Array.isArray(orders) ? orders : [];
+  const key = String(today ?? '');
+  const out: CoverageImportSplit = { today: 0, history: 0, undated: 0 };
+  for (const o of list) {
+    const day = dateKey(o.importedAt);
+    if (!day) out.undated += 1;
+    else if (day === key) out.today += 1;
+    else out.history += 1;
+  }
+  return out;
+}
+
 /** 「还差什么」的单行文案（款 · 色 · 码 × 件数）—— 三处（按单清单 / 缺口 / 总览小字）共用一处拼法 */
 export function missingLabel(row: RowCoverage): string {
   const name = row.styleCode || '未识别款';
@@ -301,6 +388,7 @@ export function coverageInputs(
               orderNo?: unknown;
               shop?: unknown;
               orderTime?: unknown;
+              importedAt?: unknown;
               qty?: unknown;
               rawFields?: Record<string, string> | null;
               styleCode?: unknown;
@@ -312,11 +400,17 @@ export function coverageInputs(
             }[]
           | null;
         unattributed?:
-          | { styleColorId?: unknown; styleCode?: unknown; color?: unknown; size?: unknown; taken?: unknown }[]
+          | {
+              styleColorId?: unknown;
+              styleCode?: unknown;
+              color?: unknown;
+              size?: unknown;
+              taken?: unknown;
+            }[]
           | null;
       }
     | null
-    | undefined,
+    | undefined
 ): { rows: CoverageInputRow[]; covered: Record<string, number>; pool: Record<string, number> } {
   const covered: Record<string, number> = {};
   const pool: Record<string, number> = {};
@@ -330,6 +424,7 @@ export function coverageInputs(
       orderNo: r?.orderNo,
       shop: r?.shop,
       orderTime: r?.orderTime,
+      importedAt: r?.importedAt,
       qty: r?.qty ?? null,
       rawFields: r?.rawFields ?? {},
       styleCode: r?.styleCode,

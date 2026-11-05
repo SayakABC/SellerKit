@@ -34,6 +34,8 @@ export interface PulseRow {
   dealDeadline: string;
   /** 行图 id；0 = 没落地 */
   imageId: number;
+  /** 行图的本地路径（空串 = 没有/没落地）。「待发货」清单出 32px 缩略图读它 */
+  localPath?: string;
   /** 件数真值；null = 不知道（导入侧由渲染层解析，这里按 1 兜底并计数） */
   qty?: number | null;
   /** 店铺（订单级原文；清单第 2 列读它，空串 = 采集侧没记/未登记） */
@@ -93,6 +95,8 @@ export interface QueueLine {
   pieces: number;
   assumedQty: boolean;
   imageId: number;
+  /** 行图本地路径（空串 = 没图）。清单的缩略图列读它；不要在这里读盘 —— 读图在面板里合批做 */
+  localPath: string;
   pattern: PatternState;
   /** 最晚发货时点（毫秒）；**0 = 不知道**（不是"很久以后"） */
   deadlineMs: number;
@@ -154,17 +158,25 @@ export function parseLocalTime(raw: unknown): number {
 export function remainText(remainMs: number): string {
   if (!Number.isFinite(remainMs)) return '不知道';
   const late = remainMs <= 0;
-  const ms = Math.abs(remainMs);
-  const mins = Math.round(ms / 60000);
+  // ⚠️ **先归一成"总分钟"，再由它一次性拆 d/h/m**（2026-11-05 修）。
+  //    旧实现每个档各自 `Math.round` 余数：59.6 分 ⇒ `0 小时 60 分`、29 天 23.7 小时 ⇒
+  //    `29 天 24 小时` —— 单位溢出的文案会让人怀疑"这列到底对不对"，而这一列决定先发哪单。
+  //    边界用例见 `tests/shippingQueue.spec.ts` 的「进位不能溢出」。
+  const totalMin = Math.max(1, Math.round(Math.abs(remainMs) / 60000));
   let span: string;
-  if (mins < 60) span = `${Math.max(1, mins)} 分钟`;
-  else if (ms < 48 * 3600_000) {
-    const h = Math.floor(ms / 3600_000);
-    const m = Math.round((ms - h * 3600_000) / 60000);
+  if (totalMin < 60) span = `${totalMin} 分钟`;
+  else if (totalMin < 24 * 60) {
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
     span = m >= 5 ? `${h} 小时 ${m} 分` : `${h} 小时`;
   } else {
-    const d = Math.floor(ms / (24 * 3600_000));
-    const h = Math.round((ms - d * 24 * 3600_000) / 3600_000);
+    let d = Math.floor(totalMin / 1440);
+    let h = Math.round((totalMin - d * 1440) / 60);
+    // 进位：`totalMin` 落在 23.5h 之后时 `h` 会算成 24 ⇒ 并进 1 天，绝不输出「N 天 24 小时」
+    if (h >= 24) {
+      d += 1;
+      h = 0;
+    }
     span = h ? `${d} 天 ${h} 小时` : `${d} 天`;
   }
   return late ? `已超时 ${span}` : `还剩 ${span}`;
@@ -217,6 +229,7 @@ export function shippingQueue(
       pieces: n || 1,
       assumedQty: !n,
       imageId,
+      localPath: String(r?.localPath ?? ''),
       pattern: patternStateOf({ imageId, styleColorId: r?.styleColorId }),
       deadlineMs,
       deadlineRaw: raw,

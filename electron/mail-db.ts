@@ -279,6 +279,19 @@ const MAIL_SCHEMA: string[] = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
   )`,
+  // `sk_mail_todo_dismissed`：**用户手工划掉待办**的记号（一行 = 一单），只存"人已经处理过了"这个事实。
+  // 待办本身是读时计算的派生结果（不落库），本表不复制待办字段，只当覆盖层 —— 避免
+  // "原始邮件被 30 天窗口 purge 了、派生表还留着"的漂移（见 mail-triage.ts 头部）。
+  // `last_message_id` 是划掉那一刻最新事件的邮件 id：之后同单再来新邮件（id 更大）会自动浮出，
+  // 所以划掉**不会永久吞掉**后续进展（罚单升级、纠纷判决这类必须重新看见）。
+  // 写 = `dismissMailTodo` / `restoreMailTodo`；读 = `listMailTodos` 判是否压掉。
+  `CREATE TABLE IF NOT EXISTS sk_mail_todo_dismissed (
+    -- 用途：用户手工划掉的待办（一行一单）；只存覆盖层，不复制派生字段。
+    todo_key TEXT PRIMARY KEY,
+    last_message_id INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT '',
+    dismissed_at TEXT NOT NULL DEFAULT ''
+  )`,
 ];
 
 let cachedDb: unknown = null;
@@ -569,6 +582,23 @@ function setMailMeta(key: string, value: string): void {
   stmt(
     `INSERT INTO sk_mail_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run(key, String(value || ''));
+}
+
+/**
+ * 读 `sk_mail_meta` 的 KV 值（**跨层**入口：供 `mail-scheduler` 读自动同步间隔）。
+ *
+ * 为什么不由那一层自己建表/自己读：`sk_mail_meta` 是本域的**基础设施表**，
+ * 表 owner 只能有一个（与 `shop-db.ts` 对 `sk_shops` 的约定一致）。
+ */
+export function getMailMetaValue(key: string): string {
+  ensureMailSchema();
+  return getMailMeta(String(key || ''));
+}
+
+/** 写 `sk_mail_meta` 的 KV 值（同上；表 owner 仍是本文件） */
+export function setMailMetaValue(key: string, value: string): void {
+  ensureMailSchema();
+  setMailMeta(String(key || ''), String(value ?? ''));
 }
 
 function toAccountRow(r: Record<string, any>): MailAccountRow {
@@ -1215,8 +1245,61 @@ export function mailStats(): {
   };
 }
 
-/** 账号实际参与同步的文件夹列表（folders 为空时回退单文件夹 folder） */
-export function resolveMailFolders(account: { folder: string; folders?: string[] }): string[] {
+/**
+ * 当前最大邮件 id。
+ *
+ * 用法：同步**开始前**取一次基准，结束后用 `countMailMessagesAfter(基准)` 得到
+ * "本轮新落库了几封"。为什么不用 `date('now')` 或未读数差值：
+ *   · 未读数差值会把"用户刚点开一封未读"算成负数，把"服务端标记已读"算成 0；
+ *   · `id` 是 AUTOINCREMENT 单调递增，新插入的行一定大于基准 —— 这是唯一
+ *     不受已读状态、清理任务、同秒插入干扰的口径。
+ */
+export function maxMailMessageId(): number {
+  ensureMailSchema();
+  const row = stmt(`SELECT COALESCE(MAX(id), 0) AS m FROM sk_mail_messages`).get() as { m: number };
+  return Number(row?.m) || 0;
+}
+
+/**
+ * 某账号在基准 id 之后**新落库**的邮件封数。
+ *
+ * 为什么必须带 `accountId`：多个账号是并发同步的（`MAX_GLOBAL_CONNECTIONS`）。
+ * 若只按 `id > 基准` 全局过滤，A 还在同步时 B 插进来的行会被 A 也算一遍 ——
+ * 两个账号各弹一条"新邮件"，数字还都是合并后的（2026-11-04 自测踩到）。
+ */
+export function countMailMessagesAfter(id: number, accountId: number): number {
+  ensureMailSchema();
+  const row = stmt(`SELECT COUNT(*) AS c FROM sk_mail_messages WHERE id > ? AND account_id = ?`).get(
+    Number(id) || 0,
+    Number(accountId) || 0,
+  ) as { c: number };
+  return Number(row?.c) || 0;
+}
+
+/** 某账号在基准 id 之后的新邮件样本（系统通知正文用：谁发的、什么主题） */
+export function listMailMessagesAfter(
+  id: number,
+  accountId: number,
+  limit = 3,
+): { id: number; subject: string; fromName: string; folder: string }[] {
+  ensureMailSchema();
+  const rows = stmt(
+    `SELECT id, subject, from_name, folder FROM sk_mail_messages
+       WHERE id > ? AND account_id = ? ORDER BY id ASC LIMIT ?`,
+  ).all(
+    Number(id) || 0,
+    Number(accountId) || 0,
+    Math.max(1, Math.min(20, Number(limit) || 3)),
+  ) as Record<string, any>[];
+  return rows.map((r) => ({
+    id: Number(r.id) || 0,
+    subject: String(r.subject || ''),
+    fromName: String(r.from_name || ''),
+    folder: String(r.folder || ''),
+  }));
+}
+
+/** 账号实际参与同步的文件夹列表（folders 为空时回退单文件夹 folder） */export function resolveMailFolders(account: { folder: string; folders?: string[] }): string[] {
   const list = (account.folders || []).map((p) => String(p || '').trim()).filter(Boolean);
   return list.length ? list : [String(account.folder || 'INBOX') || 'INBOX'];
 }

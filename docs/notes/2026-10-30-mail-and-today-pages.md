@@ -560,6 +560,277 @@ sk_shop_sets(3/4/5).secret_keys 均含 mailAuthPwd
 
 ---
 
+## 33. 「不会自动收信」的根因是计时器放错了进程（2026-11-04）
+
+**结论（现象 → 根因 → 修法）**：
+
+- **渲染层轮询 ≠ 后台收信**。`mailStore.startPolling()` 只在 `MailView` 挂载
+  （`ensureReady`）时启动 ⇒ 冷启动后不进「邮件」页就**一次都不拉**。本应用关窗口
+  不退出（有托盘，见 `main.ts` 的 `window-all-closed`），后台挂着时更没有渲染层计时。
+  这解释了"有时能收到、有时收不到"：只要进过一次邮件页，那次会话里就一直在跑。
+- `electron/` 目录此前**没有任何 `setInterval`**：订单自动同步的设计是"启动时一次 +
+  托盘手动"，明确不做常驻轮询。所以"邮件自动收信"这件事**从来没有真正存在过**，
+  不是坏了。
+- **计时搬主进程**（`electron/mail-scheduler.ts`），但**间隔的权威仍在渲染层**
+  （`MailPrefs.pollMinutes`）—— 主进程只执行 + 缓存到 `sk_mail_meta.autoSyncMinutes`，
+  缓存唯一的用途是"窗口还没加载完的那十几秒"也有值可读。双份计时会让同步频率翻倍，
+  所以 `startPolling/stopPolling` 已整段删除。
+- **新邮件判定用 id 段，不用未读数差值**：同步前取 `MAX(id)`，收尾取
+  `COUNT(id > 基准)`。未读数差值会把"用户点开一封未读"算成负数、把"服务端标已读"
+  算成 0；`id` 是 AUTOINCREMENT 单调递增，不受已读状态 / 清理任务 / 同秒插入干扰。
+  `processed`（扫到的）与 `newCount`（新落库的）是两个量，别混用。
+- **id 段必须再按账号过滤**（自测踩到）：多账号是并发同步的（`MAX_GLOBAL_CONNECTIONS`），
+  只按 `id > 基准` 全局过滤时，A 还在同步期间 B 插进来的行会被 A 也算一遍 ——
+  两个账号各弹一条通知、数字还是合并后的。故 `countMailMessagesAfter(id, accountId)` /
+  `listMailMessagesAfter(id, accountId, limit)` 的 `accountId` 是**必填**，不做可选参数
+  （可选就等于允许调用方漏掉它，而漏掉的表现是"数字变多"这种看起来合理的错）。
+- **通知只在自动轮次发**：`autoRound` 集合记录本轮入队的账号，手动同步不进集合 ⇒
+  不弹通知（用户就在界面前，弹了是噪音）。点通知 `showMainWindow()`，与订单自动同步
+  同一套动作。
+- **已知代价（接受）**：升级后首次冷启动缓存为空 → 按默认 10 分钟跑一轮；用户打开
+  邮件页时会把本地真实设置（可能是 0 = 关闭）下发纠正。
+- **仍未做**：点通知不会切到「邮件」模块（只把窗口拿出来）；侧栏没有未读角标。
+  → 两项已在本日下一节 §34 补上。
+
+**取证**：
+
+- `electron/mail-scheduler.ts`（新增；`startMailScheduler` / `configureMailAutoSync` / `runAutoRound`）
+- `electron/main.ts` 的 `app.whenReady` 段 —— 注入窗口钩子 + 启动调度（首轮延迟 15s）
+- `electron/mail-engine.ts` 的 `runMailSync`：开头 `const sinceId = maxMailMessageId()`，
+  `done` 事件带 `newCount`，并调 `onSyncSummary` 简报钩子
+- `electron/mail-handlers.ts` 的 `mail-auto-sync-config`（渲染层 → 主进程单向下发）
+- `src/modules/mail/mailStore.ts`：原 `startPolling/stopPolling` 已删，
+  `ensureReady` 改为 `pushAutoSyncConfig()`，`setPrefs` 改间隔即重下发
+- 门禁：`tsc -p tsconfig.electron.json` / `vue-tsc --noEmit` / `verify` / `verify:docs` /
+  `build` / `vitest run`（74 文件 1441 用例）全绿
+- **真机（无界面）验收 12 项**：临时 Electron 脚本（`initDb` 指临时目录）跑
+  「基准前后新增计数 / 同 UID 更新不计新增 / 并发账号不串号 / 间隔 0·5·越界·负数收敛 /
+  落库可读 / 停止清排程」。这条链路**没跑**的一环是"真收到邮件后系统通知真的弹出"，
+  需重启宿主、用真实邮箱收一封验证（macOS 还要给应用通知权限）。
+
+---
+
+## 34. 「点通知切到邮件」与侧栏未读角标：主进程 → 界面意图的单向下发（2026-11-04）
+
+上一轮把计时搬进主进程之后，还留着两件"用户看不见结果"的事：点通知只把窗口拿出来（人可能
+正停在别的模块上），侧栏也没有未读角标（邮件模块没被打开时它根本不存在，没人上报）。
+
+### 为什么需要一条新的下发通道
+
+两件事的**数据都在主进程**（未读数是 `mailStats().unread`，通知点击发生在主进程），
+而**后果都在渲染层**。收件箱模块不在场时无法上报自己的状态 —— 让它上报的话，冷启动不进
+邮件页就永远没有角标，而那恰恰是最需要它的时刻。
+
+故新增 `electron/ui-bridge.ts`：`openModule(moduleId, action?)` + `pushNavBadge(moduleId, badge)`。
+渲染层 `src/core/services/navBadge.ts` 只做登记表，`AppShell` 的 `navRows` 把它拼到模块行上。
+
+### 四条踩点
+
+- **`did-finish-load` 时 `webContents.isLoading()` 仍是 true**（要到 `did-stop-loading` 才翻转）。
+  重放函数若照常判"加载中就不发"，整批重放会被**静默挡掉** —— 15 项端到端验收里 5 项红，
+  改完才绿。修法：`send(channel, payload, force)`，只在 `flushUiBridge` 里传 `true`
+  （事件名本身就证明页面已就绪：preload 在 document start 注册）。
+- **不许丢消息**：窗口可能还没建 / 正在加载 / 已销毁。`ui-bridge` 保留最后一份状态
+  （徽标按 moduleId 去重、打开意图只留一条），`did-finish-load` 重放。
+  验收里专门跑了"无窗口时推 → 建窗口 → 自动重放"和"销毁后推 → 重开窗口 → 自动重放"。
+- **渲染层订阅必须早于 `onMounted` 的第一个 `await`**：晚一步那批重放就收不到，
+  表现为"侧栏没角标 / 点通知没反应"且**日志一条错都没有**。`tests/navBadgeWiring.spec.ts`
+  用静态断言钉住这条顺序（`onOpenModule` 同理）。
+- **`count: null` = 撤掉徽标，不是画 0**：未读清零时画一个"0"会让"没事了"和"还有 0 件"
+  看起来一样。同一约定见 `SubNavItem.count`。收起态（48px 仅图标）退化为一个圆点 ——
+  数字塞不下，但完全看不见更糟。
+
+### 打开意图的语义
+
+不走 `activateFromSwitch`（那是业务流跳转，会给 TitleBar 留一个「返回」到用户上次那页）：
+点通知的语义是"带我去看新邮件"，不是"从这里出发再回来"。带 `action` 时复用
+`switch-module` 通道（`await nextTick()` 后再派发 —— 目标模块的监听在它自己的 `onMounted` 里注册，
+早派发会被静默丢掉）。
+
+### 未读数的每个变化点都要推
+
+`electron/mail-badge.ts` 的 `publishMailUnreadBadge()` 只读 `mailStats().unread`（与邮件页页头、
+列表角标同一实现）。四处调用：同步收尾（`mail-engine` 的 done）、按 ids 已读 / 按账号或全部已读
+（`mail-handlers` 两个分支）、清理超窗邮件、解绑账号。
+**不做未读数 ±1 的增量推算**：读状态也可能是服务端改的（IMAP 只读，同步时才把服务端 `seen` 落库），
+增量在这种场景下必然漂移。`tests/navBadgeWiring.spec.ts` 断言这四个推送点在位。
+
+**取证**：
+
+- `electron/ui-bridge.ts`（新）/ `electron/mail-badge.ts`（新）
+- `electron/main.ts`：`setUiBridgeWindow` + `did-finish-load → flushUiBridge` + `openMailInbox`
+- `electron/mail-scheduler.ts`：通知点击从 `showWindow` 改为 `openInbox`
+- `electron/mail-engine.ts` / `mail-handlers.ts`：四处 `publishMailUnreadBadge()`
+- `electron/preload.ts` / `src/types.ts` / `src/core/services/ipc.ts`：`onOpenModule` / `onNavBadge`
+  （契约脚本的 `BROADCAST_EVENTS` 同步登记 `open-module` / `nav-badge`）
+- `src/core/services/navBadge.ts`（新）/ `src/core/AppShell.vue`（模块行徽标 + 收起态圆点 +
+  启动期暂存打开意图 + 订阅时序）
+- 门禁：`tsc -p tsconfig.electron.json` / `vue-tsc --noEmit` / `verify` / `verify:docs` /
+  `build` / `vitest run` 全绿
+- **真机端到端 15 项**（临时 Electron 脚本 + 真 preload + 临时库）：无窗口缓存 / 重放送达 /
+  徽标数值与 `todo` / 未读归零推 `null` / 新增未读 → 1 / 带 action 原样送达 / 销毁后不抛且进缓存 /
+  重开窗口自动重放
+- **新增无头 UI 冒烟 `npm run nav:ui`**（15 条断言，假桥 + 无头 Chrome）：徽标真的画出来、
+  待办色、`count:null` 撤掉、未登记模块不渲染、`open-module` 真的切到邮件、未知 id 不跳走、
+  action 被转发成 `switch-module`、无未捕获错误。**做过变异测试**（抽掉 `...moduleBadge(...)`
+  + 让 `applyOpenModule` 直接 return）：8 条断言变红，还原后全绿 —— 守卫不是恒绿的。
+
+---
+
+## 35. 「待办」视图：1423 封里只有 16 单值得看（2026-11-04）
+
+**先有数据，才有这个功能**。本机 31 天 1423 封速卖通邮件按类型归并后：
+
+| 类型 | 封数 | 要不要动手 |
+|---|---|---|
+| 新订单 / 风控通过 / 未付款关单 / 买家确认收货 | 591 / 317 / 256 / 197 | 流水通知 |
+| 订单关闭（协议取消 22 + 卖家未发货 1） | 23 | 1 单要动手 |
+| 纠纷·客诉·仲裁 | 18 | 15 单要核对 |
+| 罚单（待申诉 → 申诉失败） | 2 | 1 单，直接扣钱 |
+
+⇒ 需动手 16 单 / 参与判定 43 封 / 全库 1423 封。
+
+**三条判定规则（只认主题）**：罚单（`申诉失败|举证不成立` 优先于 `罚单`）→ 卖家未发货关单 →
+**未付款关单显式排除** → 纠纷处理结果 / 仲裁 / `Resolution for Order` → 通用「关闭」（协议取消，sev1）。
+规则表**顺序敏感**：少了"未付款"那条排除项，256 封自动关单会落到通用「关闭」上把待办淹掉
+（单测 `tests/mailTriage.spec.ts` 专门钉这一条）。
+
+**订单号从哪来**：`风控通过 / 纠纷 / Resolution` 的主题里**没有单号**，只在正文
+（`订单：1123620564922700`）。而正文里还有 `#CaseNo:1143809062350955#`、`Service No.` ——
+同样是 15–16 位纯数字。取"第一个长数字"会稳定抓错，**且看起来完全正常**（长度对、不报错）。
+所以正文兜底**只认带"订单/order"前缀的数字**，用前缀做结构性约束，而不是维护"哪些编号要剔除"
+的黑名单（平台多一个字段就多一种噪声）。实测 43 封参与判定的邮件 **0 封无法归属**。
+
+**按订单号合并，不按邮件列**：同一单会连着来「卖家未发货关单 → 罚单待申诉 → 罚单申诉失败」
+三封（主题原文措辞是**"申诉失败"**，2026-11-05 用真库复查确认；规则表也只认这一族词），列成三条会把一条因果链拆成三件事。合并后每行显示最新状态 + `共 N 封`，点开是**最新那封**。
+`severity` 取最新事件：3 有申诉期 / 2 已成事实待核对 / 1 仅知会（协议取消，默认折叠）。
+
+**读时计算，不建派生表**：命中 ~43 行、实测 <20ms。落表会引入"原始邮件被 purge 后待办还在"
+的漂移（同步窗口 30 天滚动，见 §33 的 purge 逻辑），而待办本来就该跟着原始邮件一起消失。
+
+**踩点：纯函数不能和 db 同模块**。渲染层 `tsconfig.json` 把 `tests/**` 也纳入编译，
+单元测试直接引用判定函数时，只要那个模块顶层 `import './db'`，就会把 `electron/db.ts` 拖进
+渲染层工程 —— 那边是 ESM，`import Database = require(...)` 直接 `TS1202`；vitest 跑在 node 下
+加载 Electron ABI 的 better-sqlite3 会 `ERR_DLOPEN`。故拆成
+`mail-triage-rules.ts`（零 import，纯函数）+ `mail-triage.ts`（SQL，import db）。
+**这是编译期就炸的错，比运行时静默错好排查得多** —— 但只有真去跑 `vue-tsc` 才看得见。
+
+**UI**：待办区在筛选栏下方，`severity>=2` 常驻、`severity=1` 点「另有 N 单已了结」才展开；
+有要动手的待办时**邮件列表默认收起**（否则待办被流水通知淹没），点「展开其余 N 封」放出来；
+输入关键词时整个待办区让位（搜索是"我要找某封邮件"）。点待办行 = 打开该单最新那封，详情占满整行。
+
+**取证**：
+
+- `electron/mail-triage-rules.ts`（新，纯判定）/ `electron/mail-triage.ts`（新，SQL 归并）
+- `electron/mail-handlers.ts` 的 `mail-todo-list`；`preload.ts` / `types.ts` / `ipc.ts` 三处声明
+- `src/modules/mail/mailStore.ts`（`todos` / `todoActions` / `todoInfo` / `loadTodos`，
+  只随 `accountFilter` 刷新，**不叠加**关键词/未读/文件夹）
+- `src/modules/mail/MailInboxView.vue`（待办区 + `listCollapsed`）
+- `tests/mailTriage.spec.ts`（18 条：规则顺序、未付款排除、CaseNo 陷阱、17 位串不截断、
+  标签切分数字仍能取到）
+- `scripts/mail-todo-ui-smoke.mjs` + `npm run mail:ui`（17 条断言）
+- 真库验收 19 项（临时 Electron 脚本 + `/tmp` 克隆库）：单号格式、未付款不进、CaseNo 不误取、
+  排序、同单唯一、事件正序、账号过滤
+- **变异测试**：去掉"未付款"排除项 → 1 条红；正文允许裸号 → 2 条红；
+  `todoActions` 去掉 severity 过滤 + 列表不收起 → UI 冒烟 5 条红。均还原后全绿
+- 门禁：`tsc` / `vue-tsc` / `verify` / `verify:docs` / `build` / `vitest`（76 文件 1470 用例）
+
+## 36. 待办「手工划掉」：判据是水位线，不是"永久屏蔽"（2026-11-05）
+
+**为什么必须加**：待办的状态只由后续邮件推进。若平台对某些事项不再发终结邮件（或用户已在线下
+处理完），那一行会永远留着，人只能靠"12 天前"自己判断 —— 待办区会慢慢退化成噪音。
+
+**但"划掉"最危险的实现是永久屏蔽该订单**：罚单升级、纠纷判决这类后续进展会被静默吞掉，
+用户以为已经没事，实际在扣钱。所以判据是**水位线**：
+
+- 划掉时记下"那一刻最新那封邮件的 id"（`last_message_id`）；
+- 只有 `latest.messageId <= 水位线` 才压住；一旦同单来了新邮件（id 更大）**自动浮出**，
+  并标「有新进展」——这样"我刚划掉它怎么又回来了"有解释：不是划掉失效，是事情有新进展。
+
+两个方向写反都是**静默**的：写成 `<` 会让"划掉的那封自己"漏出来（用户以为没生效，反复点）；
+写成"永久"会吞掉后续进展。故单独提成纯函数 `isTodoSuppressed()` 并配单测。
+
+**只落一张覆盖层表**：`sk_mail_todo_dismissed(todo_key, last_message_id, kind, dismissed_at)`，
+**不复制待办字段**。待办本身是读时计算的派生结果，落派生表 ⇒ 30 天窗口 purge 掉原始邮件后
+表里还留着，两套数据必然漂移（这是 §35「读时计算」的直接推论）。
+
+**撤销入口必须有**（「已划掉 N 单」→ 展开 → 恢复）：划错一次就再也看不见，等于给待办加了个
+永久静默的坑。界面细节：`@click.stop` 防止点「已处理」顺带打开正文；划掉后**重新拉一次**
+而不是本地 -1，分组/计数/排序全在主进程。
+
+**一处措辞纠偏**：§35 与验收夹具里曾写「罚单申诉未通过」，但规则表是
+`/申诉失败|举证不成立|处罚已执行/`，真库复查主题原文为 `…罚单申诉失败`。自造措辞若被后来者
+当成规则依据，会把"已处罚"降级成"待申诉（有申诉期）"（severity 3 vs 2）—— 已改正。
+
+**取证与守卫**
+
+- 老库平滑加表：在用户真库副本上 `ensureMailSchema()` 前后各数一次 → 0 → 1；加表前后待办
+  都是 **38 单 / 43 封 / 0 封无法归属**（新字段不改变任何判定），划掉一单 → 37 单 + 1 已划掉，
+  撤销 → 回到 38 单
+- `tests/mailTriage.spec.ts` +5 条（`isTodoSuppressed`：相等压住 / 更早压住 / 更大浮出 /
+  水位线 0 / 非数字入参）
+- `npm run mail:ui` 17 → **27 条**（按钮存在、调 `mailTodoDismiss` 且带订单号与 `messageId`、
+  `click.stop` 不打开正文、数字按主进程重算、已划掉入口/展开/恢复）
+- 真机验收 **22 项**（临时 Electron + 临时库）：幂等重复划掉、单账号隔离、**同单新邮件浮出**、
+  再次划掉 `resurfaced` 归零、撤销后空 key 报错、**邮件被 purge 后记号仍在且重建邮件仍能浮出**
+- **变异**：`todoActions` 去掉 `!t.dismissed` + 去掉 `@click.stop` → UI 冒烟 2 条红；
+  `isTodoSuppressed` 的 `<=` 改 `<` → 单测 1 条红。均还原后全绿
+- 门禁：`tsc` / `vue-tsc` / `verify`（264 通道一致）/ `verify:docs` / `build` /
+  `vitest`（76 文件 **1475** 用例）；`db:inventory` **66**（表 65 + FTS 1，业务表 62）
+
+## 37. 「点待办看不全正文」是三条叠加：面板占高 / 双层滚动 / 同单邮件没有入口（2026-11-05）
+
+**现象**：点一条待办，右侧正文只露出一小块，得在 iframe 里滚、外面还有一条滚动条。
+
+**三条原因是叠加的，只修一条都还有残余**（读 `MailInboxView.vue` 得出）：
+
+| # | 原因 | 取证 |
+| --- | --- | --- |
+| ① | 待办面板在详情**上方**且 `max-height: 42vh`，待办越多正文越矮 | 900px 窗口 10 单时正文 ≈216px，3 单时 ≈400px |
+| ② | `.detail-body{overflow:auto}` + iframe `min-height:320px` ⇒ **内外双层滚动** | 320 的 iframe 塞进 230 的容器，外层出现滚动条 |
+| ③ | `openTodo()` 只开 `t.messageId`（最新一封），`t.events` 里同单历史邮件**没有入口** | 罚单"通知 → 已受理 → 补材料"三封只能看一封 |
+
+③ 最容易被漏掉：它看起来像布局问题，实际是**数据有、界面没入口**——`events` 早就在
+`MailTodoItem` 里（§35 合并同单时就有了），只差一个时间线。
+
+**改法：竖向堆叠 → 左右主从。** 左栏 300–360px 是队列（`待办` / `全部邮件` 两个模式，
+取代旧版"待办面板 + 可折叠邮件列表"），右栏是**一张单据**：单据头（类型 + 可复制单号 + 时效 +
+标记已处理）→ 同单邮件时间线 → 正文（唯一滚动区）→ 附件条。待办不再横在上面，
+所以既不占正文高度，也不需要靠 `listCollapsed` 把邮件列表藏起来让位。
+
+**身份仍只有一处**：右栏的"当前单据"由 `selectedId` **派生**
+（`todos.find(t => t.events.some(e => e.messageId === id))`），不新开 `selectedOrderNo`。
+两个细节都是坑：
+- 只比 `t.messageId` ⇒ 点时间线第二封时单据头**整块消失**（它只等于最新那封）；
+- 新开一份 `selectedOrderNo` ⇒ 与"选中邮件"迟早对不上（本仓已有三次同类实证）。
+
+**动线对齐习惯**：划掉后**自动接下一条**（待办是队列，处理完接着下一个），并给 6 秒撤销；
+「已处理」常显不藏 hover（沿用 §36 结论）；↑↓ / Enter / `D` 复用 `useRowNav`，
+但这页没有能稳拿焦点的"表格"，所以挂在 `window` 上（`isKeyTarget` 已保证输入框内不抢键）。
+
+**视觉三条**（深色主题下最容易白做）：
+1. 选中不能只靠底色 —— `#22262e` 与 `#191c22` 只差 4%，实测看不出来；必须叠 inset 描边环 + 单号加粗；
+2. 左边缘 3px **只表达紧急度**，选中不抢这条边（两个含义压在同一条线上会互相抵消）；
+3. 邮件正文是浅色排版，深色界面里把它当"一张纸"（白底 + 圆角 + 描边 + 轻微投影），不反色。
+
+**取证与守卫**
+
+- `npm run mail:ui` 27 → **37 条**：新增「两个视图切换」「同一单 3 封出时间线且按时间升序」
+  「点时间线第 1 封 = 载入那一封、单据头不变」「划掉后自动打开下一条（12 而不是 11）」
+  「提示条上的撤销真的调 `mailTodoRestore`」；夹具给罚单那一单补成 3 封（13/14/11）
+- **响应乱序**：桩里给 id=13 加 400ms 延迟，先点 13 再点 11，最终必须显示 11。
+  这条守的是 `openMessage` 里新加的 `if (selectedId !== id) return` —— 没有它，
+  后到的旧响应会盖掉新选中那封，界面表现为「点 A 显示 B」，不报错、也最难复现
+- **变异**（三条新守卫逐条改坏）：去掉自动接下一条 ⇒ 「划掉后自动切到下一条」红；
+  `activeTodo` 改成只比 `t.messageId` ⇒ 「换邮件不换单」红；去掉过期响应丢弃 ⇒
+  「响应乱序时以最后一次点击为准」红（显示成 13 的主题）。均还原后全绿
+- `master-data:ui` 仍全绿 —— 它没有待办夹具，靠"没有要动手的待办 ⇒ 默认落到全部邮件"
+  这一条继续满足它对 `.mail-list .mail-item` 的断言
+- 门禁：`vue-tsc` / `tsc -p tsconfig.electron.json` / `verify` / `verify:docs` / `build` /
+  `vitest`（76 文件 1477 用例）
+
+---
+
 ## 合并清单
 
 | 原笔记 | 日期 | 归并到 |

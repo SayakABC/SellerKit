@@ -1,5 +1,7 @@
 // src/modules/mail/mailStore.ts
-// 「集中邮件收件箱」状态：账号接入 + 邮件列表/详情 + 同步触发 + 定时轮询 + 本地偏好。
+// 「集中邮件收件箱」状态：账号接入 + 邮件列表/详情 + 同步触发 + 本地偏好。
+// 自动收信的**定时器在主进程**（electron/mail-scheduler.ts）：本 store 只负责把
+// 「间隔」这一项用户设置下发过去，并消费同步事件刷新列表 —— 不再自己 setInterval。
 // 依赖：core/services/ipc（mail-* 语义化封装）——所有持久化/网络能力均在主进程，
 // 本 store 不持有任何凭据（IMAP 授权码只进不出，见 AGENTS.md §1.8 / 红线 16）。
 //
@@ -38,6 +40,10 @@ import {
   mailFtsRebuild,
   mailPurge,
   mailStats,
+  mailTodoList,
+  mailTodoDismiss,
+  mailTodoRestore,
+  mailAutoSyncConfig,
   mailProviderList,
   onMailSyncEvent,
 } from '@/core/services/ipc';
@@ -56,11 +62,15 @@ import type {
   MailRemoteFolder,
   MailStats,
   MailSyncEvent,
+  MailTodoItem,
 } from '@/types';
 
 /** 收件箱本地偏好（持久化于 modules.shop-accounts-mail） */
 export interface MailPrefs {
-  /** 自动轮询间隔（分钟；0 = 关闭自动轮询） */
+  /**
+   * 自动收信间隔（分钟；0 = 关闭）。
+   * 本值是**唯一权威**：变更即下发给主进程（mail-auto-sync-config），由主进程排程。
+   */
   pollMinutes: number;
   /** 新建接入时的默认同步/保留窗口（天） */
   defaultSyncDays: number;
@@ -77,7 +87,13 @@ const DEFAULT_PREFS: MailPrefs = {
   defaultMaxBodyKb: 200,
   pageSize: 100,
 };
-const EMPTY_STATS: MailStats = { accounts: 0, messages: 0, unread: 0, lastSyncedAt: '', folders: [] };
+const EMPTY_STATS: MailStats = {
+  accounts: 0,
+  messages: 0,
+  unread: 0,
+  lastSyncedAt: '',
+  folders: [],
+};
 
 function normalizeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -102,6 +118,18 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
 
   const messages = ref<MailMessageItem[]>([]);
   const total = ref(0);
+  /**
+   * 待办（三类：罚单 / 纠纷·仲裁 / 订单关闭，按订单号合并）。
+   * **判定规则不在渲染层**：主进程 `mail-triage.ts` 一处实现，这里只是展示用的快照。
+   * 因此它随「同步收尾 / 打开邮件页」刷新，不随关键词、未读、文件夹筛选变化 ——
+   * 那三项是"看哪些邮件"，待办是"哪些单要处理"，两个问题。
+   */
+  const todos = ref<MailTodoItem[]>([]);
+  /** 参与判定的邮件封数与无法归属封数（诚实展示缺口，不静默吞） */
+  const todoMeta = ref({ mails: 0, unattributed: 0 });
+  const todoLoading = ref(false);
+  /** 正在划掉/恢复的那条待办 key（防连点：同一时刻只发一个请求） */
+  const todoBusyKey = ref('');
   const keyword = ref('');
   const unreadOnly = ref(false);
   /** 文件夹筛选（M3-3）：空串 = 全部文件夹；值来自 stats.folders */
@@ -128,20 +156,25 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
   const prefs = ref<MailPrefs>({ ...DEFAULT_PREFS });
 
   let unsubscribe: (() => void) | null = null;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
   /** 关键词搜索防抖 */
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   /** 账号态（prefs / providers / accounts）的加载单飞：失败后置空以便重试 */
   let accountStatePromise: Promise<boolean> | null = null;
 
   const unread = computed(() => stats.value.unread);
+  /** 要动手的待办（severity ≥ 2，且没被手工划掉）：常驻列表顶部 */
+  const todoActions = computed(() => todos.value.filter((t) => t.severity >= 2 && !t.dismissed));
+  /** 只需知会的（协议取消这类已了结的）：折在"更多"里，不占注意力 */
+  const todoInfo = computed(() => todos.value.filter((t) => t.severity < 2 && !t.dismissed));
+  /** 被手工划掉的：默认不显示，但**必须能撤销** —— 划错了否则就永远找不回来了 */
+  const todoDismissed = computed(() => todos.value.filter((t) => t.dismissed));
   const hasAccount = computed(() => accounts.value.length > 0);
   const isSyncing = computed(() => syncingIds.value.length > 0);
   const accountOptions = computed(() =>
-    accounts.value.map((a) => ({ id: a.id, email: a.email, status: a.status })),
+    accounts.value.map((a) => ({ id: a.id, email: a.email, status: a.status }))
   );
   const selectedMessage = computed(
-    () => messages.value.find((m) => m.id === selectedId.value) || null,
+    () => messages.value.find((m) => m.id === selectedId.value) || null
   );
   /** 账号 id → 账号（列表行展示邮箱用） */
   const accountById = computed(() => {
@@ -172,7 +205,13 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
   /** 按邮箱地址推断服务商（用于接入抽屉默认值） */
   function detectProviderId(email: string): string {
     const at = String(email || '').lastIndexOf('@');
-    const domain = at >= 0 ? email.slice(at + 1).trim().toLowerCase() : '';
+    const domain =
+      at >= 0
+        ? email
+            .slice(at + 1)
+            .trim()
+            .toLowerCase()
+        : '';
     const hit = providers.value.find((p) => p.domains.includes(domain));
     return hit ? hit.id : 'custom';
   }
@@ -265,6 +304,86 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     }
   }
 
+  /**
+   * 拉待办快照。只按「邮箱」收敛，**不叠加关键词 / 只看未读 / 文件夹** ——
+   * 那三项回答的是"我要看哪些邮件"，待办回答的是"哪些单要处理"。
+   * @param opts.silent 后台刷新（同步收尾）不弹错：用户没主动点，报错只是噪音
+   */
+  async function loadTodos(opts: { silent?: boolean } = {}): Promise<void> {
+    todoLoading.value = true;
+    try {
+      const result = await mailTodoList({
+        accountIds: accountFilter.value ? [accountFilter.value] : undefined,
+      });
+      if (!result.success) {
+        if (!opts.silent) toast(result.error || '读取待办失败', 'error');
+        return;
+      }
+      todos.value = result.data?.items || [];
+      todoMeta.value = {
+        mails: result.data?.mails || 0,
+        unattributed: result.data?.unattributed || 0,
+      };
+    } catch (e: unknown) {
+      if (!opts.silent) toast(`读取待办失败: ${normalizeError(e)}`, 'error');
+    } finally {
+      todoLoading.value = false;
+    }
+  }
+
+  /**
+   * 手工划掉一条待办（"这单我处理过了"）。
+   *
+   * 传的 `messageId` 是**这条待办当前最新的那封**：主进程拿它当水位线，之后同单再来新邮件
+   * 会自动浮出。所以划掉 ≠ 屏蔽该订单 —— 罚单升级、纠纷判决这类后续进展不会被吞掉。
+   * 落库后**重新拉一次待办**而不是本地 ±1：分组/计数/排序全在主进程，本地改状态迟早对不上。
+   *
+   * @returns 真的划掉了为 true（调用方据此决定"要不要自动跳到下一条"——
+   *          失败还跳，用户会以为划成功、其实那条还在）
+   */
+  async function dismissTodo(t: MailTodoItem): Promise<boolean> {
+    if (todoBusyKey.value) return false;
+    todoBusyKey.value = t.orderNo;
+    try {
+      const result = await mailTodoDismiss({
+        key: t.orderNo,
+        messageId: t.messageId,
+        kind: t.kind,
+      });
+      if (!result.success) {
+        toast(result.error || '划掉失败', 'error');
+        return false;
+      }
+      await loadTodos({ silent: true });
+      return true;
+    } catch (e: unknown) {
+      toast(`划掉失败: ${normalizeError(e)}`, 'error');
+      return false;
+    } finally {
+      todoBusyKey.value = '';
+    }
+  }
+
+  /** 撤销划掉（划错了 / 要重新跟进） */
+  async function restoreTodo(t: MailTodoItem): Promise<boolean> {
+    if (todoBusyKey.value) return false;
+    todoBusyKey.value = t.orderNo;
+    try {
+      const result = await mailTodoRestore({ key: t.orderNo });
+      if (!result.success) {
+        toast(result.error || '恢复失败', 'error');
+        return false;
+      }
+      await loadTodos({ silent: true });
+      return true;
+    } catch (e: unknown) {
+      toast(`恢复失败: ${normalizeError(e)}`, 'error');
+      return false;
+    } finally {
+      todoBusyKey.value = '';
+    }
+  }
+
   async function openMessage(id: number): Promise<void> {
     selectedId.value = id;
     detail.value = null;
@@ -276,13 +395,17 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
         toast(result.error || '读取邮件正文失败', 'error');
         return;
       }
+      // 期间用户已经换了一封（连按 ↑↓ / 连点时间线）：**丢弃这次结果**。
+      // 不判的话后到的旧响应会盖掉新选中那封 —— 界面上表现为"点 A 显示 B"，
+      // 而且没有任何报错，是最难复现的一类错位。
+      if (selectedId.value !== id) return;
       detail.value = result.data || null;
       // 打开即标记本地已读（IMAP 只读，服务端 flag 改不了，只能本地兜底）
       if (detail.value && !detail.value.read) void markRead([id], true, { silent: true });
     } catch (e: unknown) {
       toast(`读取邮件正文失败: ${normalizeError(e)}`, 'error');
     } finally {
-      loadingDetail.value = false;
+      if (selectedId.value === id) loadingDetail.value = false;
     }
   }
 
@@ -297,7 +420,7 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
   async function markRead(
     ids: number[],
     read: boolean,
-    opts: { silent?: boolean; accountId?: number; all?: boolean } = {},
+    opts: { silent?: boolean; accountId?: number; all?: boolean } = {}
   ): Promise<boolean> {
     const payload = ids.length
       ? { ids, read }
@@ -348,7 +471,10 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
    * 同步时为超大邮件只缓存了预览，用户点开时按 UID 现拉原文解析入库。
    * @returns 成功返回最新详情；失败返回 null（已 toast）
    */
-  async function fetchBodyOnDemand(messageId: number, accountId?: number): Promise<MailMessageDetail | null> {
+  async function fetchBodyOnDemand(
+    messageId: number,
+    accountId?: number
+  ): Promise<MailMessageDetail | null> {
     loadingDetail.value = true;
     try {
       const result = await mailBodyFetch(messageId, accountId);
@@ -402,7 +528,7 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
    */
   async function previewAttachment(
     messageId: number,
-    attachmentId: number,
+    attachmentId: number
   ): Promise<MailAttachmentPreview | null> {
     previewingAttachmentId.value = attachmentId;
     try {
@@ -508,14 +634,16 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     if (ready.value) return;
     ready.value = true;
     if (!(await ensureAccountState())) return;
-    await Promise.all([loadAccounts(), loadStats()]);
+    await Promise.all([loadAccounts(), loadStats(), loadTodos({ silent: true })]);
     unsubscribe = onMailSyncEvent(handleSyncEvent);
-    startPolling();
+    // 自动收信的定时器在**主进程**（见 electron/mail-scheduler.ts）：这里只把用户设置推给它。
+    // 2026-11-04 前这里是 `startPolling()`（渲染层 setInterval），只在邮件页挂载时存在 ——
+    // 冷启动后不进本页就永远不收信，正是"不会自动接收邮件"的原因。
+    void pushAutoSyncConfig();
   }
 
-  /** 释放定时器与事件订阅（模块停用时调用） */
+  /** 释放事件订阅（模块停用时调用） */
   function dispose(): void {
-    stopPolling();
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
@@ -539,6 +667,7 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     void loadAccounts();
     void loadStats();
     void loadMessages();
+    void loadTodos({ silent: true });
   }
 
   /** 触发同步（省略 accountId = 全部启用账号） */
@@ -631,28 +760,27 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     await Promise.all([loadStats(), loadMessages()]);
   }
 
-  function startPolling(): void {
-    stopPolling();
-    const minutes = prefs.value.pollMinutes;
-    if (!minutes) return;
-    pollTimer = setInterval(() => {
-      if (!hasAccount.value) return;
-      if (syncingIds.value.length) return;
-      void syncNow();
-    }, minutes * 60_000);
-  }
-
-  function stopPolling(): void {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+  /**
+   * 把「自动收信间隔」下发给主进程。
+   *
+   * 用户设置（`prefs.pollMinutes`）是**唯一权威**；主进程只执行 + 缓存，
+   * 冷启动时会先按缓存排程（见 electron/mail-scheduler.ts）。
+   * 下发失败不回滚设置（本地仍记着用户的选择，下次打开页面会再推一次）。
+   */
+  async function pushAutoSyncConfig(): Promise<void> {
+    try {
+      const result = await mailAutoSyncConfig(prefs.value.pollMinutes);
+      if (!result.success) console.warn('[mail] 下发自动收信间隔失败：', result.error);
+    } catch (e: unknown) {
+      console.warn('[mail] 下发自动收信间隔失败：', normalizeError(e));
     }
   }
 
   async function setPrefs(patch: Partial<MailPrefs>): Promise<void> {
     prefs.value = { ...prefs.value, ...patch };
     await storage.save({ prefs: prefs.value });
-    if (patch.pollMinutes !== undefined) startPolling();
+    // 间隔变了就立刻让主进程重排定时器（否则用户要等到下次重启才生效）
+    if (patch.pollMinutes !== undefined) void pushAutoSyncConfig();
   }
 
   function openAccess(shopId: number): void {
@@ -665,6 +793,11 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
 
   watch([accountFilter, unreadOnly, folderFilter], () => {
     void loadMessages();
+  });
+
+  // 待办只随「邮箱」变：未读/文件夹/关键词是"看哪些邮件"，不影响"哪些单要处理"
+  watch(accountFilter, () => {
+    void loadTodos({ silent: true });
   });
 
   watch(keyword, () => {
@@ -684,6 +817,16 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     stats,
     messages,
     total,
+    todos,
+    todoMeta,
+    todoLoading,
+    todoBusyKey,
+    todoActions,
+    todoInfo,
+    todoDismissed,
+    loadTodos,
+    dismissTodo,
+    restoreTodo,
     keyword,
     unreadOnly,
     folderFilter,
@@ -734,8 +877,6 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     testConnection,
     purge,
     setPrefs,
-    startPolling,
-    stopPolling,
     openAccess,
     closeAccess,
     detectProviderId,

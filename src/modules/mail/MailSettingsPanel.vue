@@ -174,9 +174,9 @@ async function saveFolders(): Promise<void> {
 
     <div class="field-grid">
       <label class="field">
-        <span>自动轮询间隔（分钟）</span>
+        <span>自动收信间隔（分钟）</span>
         <input v-model.number="pollMinutes" class="wb-input" type="number" min="0" max="1440" />
-        <small>0 = 关闭自动轮询，只在打开收件箱时手动同步</small>
+        <small>后台定时同步（关窗口到托盘也生效）；0 = 关闭，改成只在打开收件箱时手动同步</small>
       </label>
       <label class="field">
         <span>新邮箱默认同步窗口（天）</span>

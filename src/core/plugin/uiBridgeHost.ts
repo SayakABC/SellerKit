@@ -70,6 +70,16 @@ export const WB_THEME_TOKENS = [
   '--wb-radius-lg',
   '--wb-focus',
   '--wb-focus-ring',
+  // 字阶（2026-11-03 界面方案 §4.1）：岛内要跟宿主"同一套级差"就得拿到这几档。
+  // ⚠️ 漏在这里不会报错 —— 岛内 var() 解析失败 ⇒ 整条 font-size 声明被丢弃 ⇒ 岛内退回默认 16px，
+  //    表现为"插件字体比宿主大一截"。本清单由 tests/uiIslandThemeTokens.spec.ts 双向校验。
+  '--wb-fs-hero',
+  '--wb-fs-display',
+  '--wb-fs-title',
+  '--wb-fs-subtitle',
+  '--wb-fs-body',
+  '--wb-fs-caption',
+  '--wb-fs-micro',
 ] as const;
 
 /** 采集当前生效的宿主设计令牌（--wb-* 前缀），用于注入 iframe（宿主 data-theme 切换后重采） */

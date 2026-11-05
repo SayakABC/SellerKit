@@ -41,15 +41,36 @@
           v-html="t.type === 'success' ? ICON.success : t.type === 'error' ? ICON.error : ICON.info"
         ></span>
         <span class="wb-toast__text">{{ t.message }}</span>
+        <!--
+          动作按钮（撤销 / 重开 …）。**只有它自己**恢复 `pointer-events`，
+          容器仍是穿透的 —— 见文件头那条"常驻容器不得吃点击"的约束，别把 auto 提到容器上。
+          提示本身有超时（带动作的停留 6s），过期即视为接受默认结果，不做二次确认。
+        -->
+        <button
+          v-if="t.action"
+          class="wb-toast__action"
+          type="button"
+          data-act="toast-action"
+          @click="runAction(t)"
+        >
+          {{ t.action.label }}
+        </button>
       </div>
     </transition-group>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useToasts } from '@/core/services/toast';
+import { dismissToast, useToasts, type ToastItem } from '@/core/services/toast';
 
 const toasts = useToasts();
+
+/** 动作先执行、再收提示：动作自己可能又会弹一条新提示（如撤销后再报一次结果）。 */
+function runAction(t: ToastItem): void {
+  const action = t.action;
+  dismissToast(t.id);
+  action?.run();
+}
 
 /** 类型图标（内联 SVG）。颜色由所在类型的规则决定，跟随 currentColor。 */
 const ICON = {
@@ -93,6 +114,36 @@ const ICON = {
 .wb-toast__text {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+/*
+  动作按钮：整条提示里**唯一**可点的东西。
+  `pointer-events` 从容器继承下来是 none ⇒ 这里显式收回，否则点它等于点空气。
+  视觉上只用文字 + 主色，不加边框/底色 —— 它是提示的补充动作，不是第二个主按钮。
+*/
+.wb-toast__action {
+  pointer-events: auto;
+  flex-shrink: 0;
+  align-self: center;
+  margin: -2px -2px -2px 2px;
+  padding: 3px 7px;
+  border: none;
+  border-radius: var(--wb-radius-sm);
+  background: transparent;
+  color: var(--wb-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.14s ease,
+    color 0.14s ease;
+}
+.wb-toast__action:hover {
+  background: var(--wb-hover);
+}
+.wb-toast__action:focus-visible {
+  outline: 2px solid var(--wb-focus);
+  outline-offset: 1px;
 }
 .wb-toast--success {
   border-left-color: var(--wb-success);

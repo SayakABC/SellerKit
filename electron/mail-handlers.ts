@@ -22,6 +22,10 @@
 //   mail-fts-rebuild    重建全文索引
 //   mail-purge           手动清理过期邮件
 //   mail-stats           收件箱汇总（含文件夹分布）
+//   mail-todo-list       待办归集（罚单 / 纠纷·仲裁 / 订单关闭，按订单号合并；读时计算）
+//   mail-todo-dismiss    手工划掉一条待办（落 sk_mail_todo_dismissed；有新邮件会自动浮出）
+//   mail-todo-restore    撤销划掉
+//   mail-auto-sync-config 自动收信间隔下发（0 = 关闭；真正的定时器在主进程 mail-scheduler）
 // 安全边界：授权码只进不出（写入后永不回传渲染层）；入参在 preload 层已做形状消毒，
 //   本层再做一次业务口径校验（双防线，见 AGENTS.md §2.3 / 红线 3）。
 
@@ -56,6 +60,9 @@ import {
   listMailRemoteFolders,
 } from './mail-engine';
 import { needsInlineBackfill } from './mail-html';
+import { dismissMailTodo, listMailTodos, restoreMailTodo } from './mail-triage';
+import { publishMailUnreadBadge } from './mail-badge';
+import { configureMailAutoSync } from './mail-scheduler';
 import { getShopAccount, setShopAccountSecret } from './shop-accounts-db';
 import { MAIL_PROVIDERS, CUSTOM_MAIL_PROVIDER } from './mail-providers';
 import {
@@ -163,6 +170,8 @@ handle('mail-account-delete', async (payload: any) => {
   deleteMailAccount(id);
   // 账号删除后附件缓存索引级联消失，磁盘残留文件在此回收
   await garbageCollectMailCache().catch(() => 0);
+  // 该账号的邮件行一起没了 ⇒ 侧栏未读徽标必须跟着掉（不推的话会一直挂着已消掉的数）
+  publishMailUnreadBadge();
   return { deleted: true };
 });
 
@@ -242,11 +251,14 @@ handle('mail-message-read', (payload: any) => {
   const ids = Array.isArray(payload?.ids) ? payload.ids.map((n: any) => toInt(n, 0)) : [];
   if (ids.length) {
     const changed = markMailMessagesRead(ids, read);
+    // 侧栏徽标与页头未读数是同一个数（都来自 mailStats），所以这里推的那次就是"扣减"
+    publishMailUnreadBadge();
     return { changed, unread: mailStats().unread };
   }
   const accountId = toInt(payload?.accountId, 0);
   if (accountId > 0 || payload?.all === true) {
     const changed = markAllMailMessagesRead(accountId > 0 ? accountId : undefined, read);
+    publishMailUnreadBadge();
     return { changed, unread: mailStats().unread };
   }
   throw new Error('缺少待标记的邮件');
@@ -359,12 +371,48 @@ handle('mail-purge', async (payload: any) => {
   const deleted = purgeMailMessages(accountId > 0 ? accountId : undefined, before);
   // 邮件删除后附件缓存索引级联消失，磁盘残留文件在此回收
   await garbageCollectMailCache().catch(() => 0);
+  // 清理会把未读一起删掉（超窗邮件多半从没被点开）
+  publishMailUnreadBadge();
   return { deleted };
 });
 
 handle('mail-stats', () => {
   ensureMailSchema();
   return mailStats();
+});
+
+// 待办归集（2026-11-04）：三类需人看一眼的邮件按订单号收敛成一条，
+// 判定规则与订单号解析只在 mail-triage.ts 一处实现（主题关键字 + 正文兜底）。
+handle('mail-todo-list', (payload: any) => {
+  ensureMailSchema();
+  const accountIds = Array.isArray(payload?.accountIds)
+    ? payload.accountIds.map((n: unknown) => toInt(n, 0)).filter((n: number) => n > 0).slice(0, 200)
+    : [];
+  return listMailTodos(accountIds);
+});
+
+// 手工划掉 / 撤销一条待办（2026-11-05）。只记"人已经处理过"这个事实，
+// 不复制待办字段：待办本身仍是读时计算，划掉只是覆盖层（见 mail-triage.ts 头部）。
+handle('mail-todo-dismiss', (payload: any) => {
+  ensureMailSchema();
+  const key = typeof payload?.key === 'string' ? payload.key : '';
+  if (!key.trim()) throw new Error('invalid todo key');
+  return dismissMailTodo(key, toInt(payload?.messageId, 0), String(payload?.kind || ''));
+});
+
+handle('mail-todo-restore', (payload: any) => {
+  ensureMailSchema();
+  const key = typeof payload?.key === 'string' ? payload.key : '';
+  if (!key.trim()) throw new Error('invalid todo key');
+  return restoreMailTodo(key);
+});
+
+// 自动收信间隔下发（0 = 关闭）。间隔的**唯一权威是渲染层设置**（MailPrefs.pollMinutes），
+// 主进程只执行 + 缓存，见 mail-scheduler.ts 头部的三条纪律。
+handle('mail-auto-sync-config', (payload: any) => {
+  const minutes = Number(payload?.minutes);
+  if (!Number.isFinite(minutes)) throw new Error('invalid minutes');
+  return configureMailAutoSync(minutes);
 });
 
 /** 供内部调用：把账号置为暂停（例如连续失败后的退避由 UI 决定时） */

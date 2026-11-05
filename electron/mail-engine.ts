@@ -39,11 +39,15 @@ import {
   getMailFolderCursor,
   updateMailFolderCursor,
   indexMailMessages,
+  maxMailMessageId,
+  countMailMessagesAfter,
+  listMailMessagesAfter,
   type MailAccountRow,
   type MailMessageUpsertRow,
   type MailMessageDetail,
 } from './mail-db';
 import { normalizeContentId } from './mail-html';
+import { publishMailUnreadBadge } from './mail-badge';
 import { resolveMailProvider, type MailProviderPreset } from './mail-providers';
 import { revealShopAccountSecret } from './shop-accounts-db';
 import { readMailAttachmentCache, writeMailAttachmentCache } from './mail-cache';
@@ -75,7 +79,33 @@ export interface MailSyncEvent {
   processed?: number;
   /** 本轮命中总封数 */
   total?: number;
+  /** 本轮**新落库**的邮件封数（只出现在 done；见 MailSyncSummary 的说明） */
+  newCount?: number;
   message?: string;
+}
+
+/**
+ * 单账号同步收尾后的简报。
+ *
+ * **引擎只报事实，要不要弹通知由调度层决定**（`mail-scheduler.ts`）：
+ * 手动点「同步」时用户就在界面前，再弹一条系统通知是噪音；自动轮次才需要。
+ * 判定与副作用分开，这条链路才能单测（对齐 `scheduler.ts` 的做法）。
+ */
+export interface MailSyncSummary {
+  accountId: number;
+  email: string;
+  /** 本轮新落库的封数（按 id 段口径，见 mail-db 的 maxMailMessageId 注释） */
+  newCount: number;
+  /** 新邮件样本（最多 3 条，供通知正文） */
+  samples: { subject: string; fromName: string }[];
+}
+
+/** 收尾简报的订阅者（至多一个：调度层） */
+let onSyncSummary: ((summary: MailSyncSummary) => void) | null = null;
+
+/** 注入 / 清除收尾简报订阅（`mail-scheduler` 启动时注入，停用时清除） */
+export function setMailSyncSummaryHook(fn: ((summary: MailSyncSummary) => void) | null): void {
+  onSyncSummary = fn;
 }
 
 let getWindow: (() => any) | null = null;
@@ -355,6 +385,10 @@ async function runMailSync(accountId: number): Promise<void> {
   updateMailAccountStatus(accountId, { status: 'syncing', lastError: '' });
   emitMailEvent({ type: 'status', accountId, email: account.email, status: 'syncing' });
 
+  // 本轮"新增"的基准：id 单调递增，收尾时 id > 基准的行就是本轮新落库的邮件。
+  // 必须在建连之前取（建连期间别的账号可能并发插入，那些不该算进本轮）。
+  const sinceId = maxMailMessageId();
+
   const preset = resolveMailProvider(account.email, account.providerId);
   const password = revealShopAccountSecret(account.shopId, 'mailAuthPwd');
   if (!password) {
@@ -406,13 +440,29 @@ async function runMailSync(accountId: number): Promise<void> {
       lastError: errors.length ? errors.join('；').slice(0, 500) : '',
       lastSyncedAt: new Date().toISOString(),
     });
+    // 本轮新增封数 + 样本：渲染层拿 newCount 刷新角标，调度层据此决定要不要弹系统通知。
+    // 注意"processed"是**扫到的**、这里是**新落库的**，两者含义不同别混用。
+    const newCount = countMailMessagesAfter(sinceId, accountId);
+    const samples = newCount
+      ? listMailMessagesAfter(sinceId, accountId, 3).map((m) => ({ subject: m.subject, fromName: m.fromName }))
+      : [];
     emitMailEvent({
       type: 'done',
       accountId,
       email: account.email,
       processed,
       total,
+      newCount,
     });
+    // 侧栏徽标：**每轮同步都重算一次**，不只在有新增时推 —— 服务端把这封信标成已读时
+    // newCount 是 0，而未读数是下降的，漏推会让侧栏一直挂着一个已经消掉的红点。
+    publishMailUnreadBadge();
+    try {
+      onSyncSummary?.({ accountId, email: account.email, newCount, samples });
+    } catch (err: any) {
+      // 订阅者（通知层）出错不许影响同步结果
+      console.warn('[mail-engine] 同步简报回调失败：', err?.message || err);
+    }
   } catch (err: any) {
     const message = String(err?.message || err);
     updateMailAccountStatus(accountId, { status: 'error', lastError: message });

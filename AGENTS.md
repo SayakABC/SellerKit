@@ -77,6 +77,7 @@ src/
 │   ├── plugin/                 # 运行时插件内核：pluginManager / sandbox / gatedHost / security / sdk / contributions / lifecycle / externalManifest / externalLoader / marketClient / uiBridgeHost / di / host / types / index
 │   ├── ai/                     # OpenAI 兼容 AI 客户端（types / openaiCompatible / index）
 │   ├── layout/                 # SplitPane.vue（分栏布局）
+│   ├── composables/            # 跨模块组合式函数（useRowNav：表格键盘动线 ↑↓ / Space / Enter）
 │   └── types.ts                # ModuleMeta / ModuleDefinition / ModuleCommand 等
 ├── modules/<module-id>/        # 内建业务模块（快速迭代用；当前 today / shop-accounts（显示名「基础数据」，2026-10-14 由 UI 岛回收并整合全部维护入口；2026-10-17 起「货品档案」= 原「货与成本」整页，其模块外壳已删；同日七项资料从页面内左导航搬到**主侧栏的二级菜单**（`meta.subNav` + `services/subNav.ts` 运行时上报），页面里不再有那条 200px 左导航；**同日晚间再收拢成三组**（店铺账号 = 账号库/店铺登记/企业、货品档案 = 款与商品/成本与费率/供应商、物流运费），组内资料页由页面顶部的页签条切换 —— 侧栏 `data-act="kind-<groupId>"`，组内页签 `data-act="kind-tab-<kindId>"`，`store.mainTab` 的七个值未变）/ mail（「邮件」，2026-10-17 由基础数据页签独立成一级模块；存储键仍沿用 shop-accounts-mail）/ order-cost（显示名「统计」，2026-10-17 由「算钱」改名）/ ledger（显示名「记账」，2026-10-25 新增：P0 数据层 + P1 明细页 / 记一笔〔专属 + 公共分摊〕/ 相关人与科目管理 + P2 营收占比基准与分摊方案 + P3 往来页签〔台账 / 结算 / 撤销〕+ P4 批量变更相关人三路 / 单店与汇总页签 / xlsx 导出；存的是**钱怎么进出**，与「统计」算订单利润是两件事）/ quick-note。⚠️ `picking/` 目录仍在，但**不是模块**（无 meta/index，2026-10-17 摘出左导航）：`PickingView.vue` 只作「今天 › 拿货 › 要拿什么」的 embedded 视图）
 │   ├── meta.ts                 # 模块元信息（必须）
@@ -473,13 +474,22 @@ npm run ae:settle:smoke # 结算明细冒烟（改了 ae_settle_lines 的落库 
 npm run ledger:smoke  # 记账数据层冒烟（改了 electron/ledger-db.ts 的 bk_* 表形状 / 迁移 / 守恒断言 /
                       #   分摊落库 / 结算唯一性 / 批量变更相关人三路 / 单店取数 / 四项体检后必跑；含 `ledger.main` v2/v3 老库场景）
 npm run picking:smoke # 拣货投影冒烟（改了 electron/picking-db.ts 的筛选 / JOIN / 取图回落必跑）
+npm run pod:smoke     # 图案域冒烟（改了 electron/pod-db.ts / podLedger.ts / podImageKey.ts / variantKey.ts 必跑：
+                      #   槽位键与 variantKey 逐字节同构 / 塌陷必须带图键 / 绑定幂等与上限 / 款色→图案（pod_style_color_patterns）认领与撤销 / 建批不加余量 /
+                      #   到货幂等 / 印花 FIFO 不足整批拒绝 / 盘点流水；改了 DDL 另跑 schema:smoke）
+npm run pod:report:smoke # 花纸报单 zip 冒烟（改了 electron/pod-report.ts / zip-writer.ts 必跑：图稿张数 == 清单行数 /
+                      #   打进 zip 的字节必须是 artwork_image_id 那张（红线 7）/ 缺图稿标「（缺）」/ 空单抛错）
+npm run pod:worklist  # 图案待绑定清单（**只读副本**）：`-- --expect 560,50` 当门禁断言，采集铺开后重跑取新分母
+npm run pod:rekey     # 塌陷链接定向重算（默认 dry-run 且写在副本上；`-- --apply` 才写 —— 只动 pod_n_images>1 的链接）
+npm run scheduler:smoke # 开机自动同步日志冒烟（改了 electron/scheduler.ts / schedulerPlan.ts 必跑：
+                      #   只数 startup+open 位 / manual 不挤占额度 / 本地日 key / reason 截断；含 sk_auto_sync_log 形状）
 npm run shop:smoke    # 店铺实体数据层冒烟（改了 sk_shops / sk_tool_accounts / sk_name_map 或 `shop.main` 迁移必跑；
                       #   含「一行两态 / 部分唯一索引 / 局部更新不清账号列」）
 npm run db:inventory  # 稳态表清单与对象总数（真建一个临时库逐域 ensure 后数 sqlite_master；改了任何域的
                       #   CREATE TABLE / 迁移收尾必跑 —— 基线 §6 的「共 N 个对象」只能用这条数，grep 推算已退役）
 npm run master-data:ui # 「基础数据」页假桥无头冒烟（宽 + 窄两遍：店铺列表与两种空态 / 五个下拉联动筛选 /
                       #   合并编辑器 / 工具账号页 / 企业与支付宝 / 店名归一；改了 shop-accounts 模块接线必跑；需本机 Chrome）
-npm run today:ui      # 「今天」首页假桥无头冒烟（改了首页卡片 / 跳转必跑；含「拿货」里的拣货清单：自动生成 / 厂家筛选 / 复制给厂家 / 导出带图 xlsx / 天数窗重算 —— 拣货的独立页冒烟已于 2026-10-17 随菜单退役并入这一条；需本机 Chrome）
+npm run today:ui      # 「今天」首页假桥无头冒烟（改了首页卡片 / 跳转必跑；含「订花纸」按款认图案 —— 认领载荷必须带款色 id、键盘流（空格/↑↓/←→/Enter/1-9/Z 放大/N/M/S）、图片放大与说明「?」弹层、新建/合并/批次三条写路径的载荷与回执；含「拿货」里的拣货清单：自动生成 / 厂家筛选 / 复制给厂家 / 导出带图 xlsx / 天数窗重算 —— 拣货的独立页冒烟已于 2026-10-17 随菜单退役并入这一条；需本机 Chrome）
 npm run goods:ui      # 「货与成本」页假桥无头冒烟（改了该页接线必跑；需本机 Chrome）
 npm run shipping-rate:ui # 运费岛假桥无头冒烟（两个来回：冷启动空态 / 运价表迁移；改了岛的计价接线必跑；手写岛无构建，这是唯一可自动化的真点）
 npm run ledger:ui     # 「记账」页假桥无头冒烟（宽 + 窄两遍：明细页指标条只认月份 / 筛选 / 记一笔两种形态 /

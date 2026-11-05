@@ -573,3 +573,19 @@ P2 色值单一来源。（归类页「批量定色」已落地，见文末。�
 `verify` / `verify:docs` 全绿；`master-data:ui` ALL PASS（colors step 重写为两区 + 点选合并 + 拖卡合并）/
 `ipc:shape:smoke` **95 项**（新增 ⑬d `md-color-update-hex`：成功 / 只改 hex 不改名 / 非法 hex 拒 / 幽灵 id 拒）/
 `order:smoke` / `today:ui` 全绿。
+
+#### 实施记录（2026-11-02，归类核对撤下「颜色叫什么」）
+
+> 用户口径：「归类核对中的『颜色叫什么』可以去掉，当前在该页面没法保存，并且在待核对页面中可以进行颜色的选择」。
+
+| 项 | 状态 | 实际形态 |
+| --- | --- | --- |
+| **撤下范围** | ✅ 落地 | `ClassifyPanel` 不再挂 `<VariantNamingCard />`，模板注释写明撤下理由与恢复成本（= 一行）；`VariantNamingCard.vue` 与三支 IPC 全留，不删后端 |
+| **颜色选择仍然可用** | ✅ 已存在 | 行内颜色格（点开 = 该款色卡弹层）与顶部色卡托盘，落库仍走 `saveOne` / `applyTrayColor` |
+| **起名/改名去哪** | ✅ 说明 | 「基础数据 › 产品管理」的款色卡与颜色页签；本页不再承担"给平台原文起名" |
+| **守卫** | ✅ 落地 | `today:ui` 的命名板 11 条断言换成 1 条**反向**断言：`vn-panel` / `vn-palette` 不在，`orderVariantNaming` / `orderVariantRename` / `orderStyleBasics` 一次都不读 |
+
+**门禁实测（2026-11-02）**：`node --check scripts/today-ui-smoke.mjs` ✅ / `vue-tsc --noEmit` 0 error /
+`build` ✅ / `test` **1328 passed（67 files）** / `today:ui` **359 PASS · ALL PASS**
+（新反向断言 `「颜色叫什么」已从归类核对页撤下…` PASS：`vn-panel=false naming=0 rename=0 basics=0`；
+待核对颜色选择那批断言（行内色卡弹层 / 顶部色卡托盘 / 拖图定色）全绿）/ `verify` / `verify:docs` 全绿。

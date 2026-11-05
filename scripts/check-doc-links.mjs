@@ -138,6 +138,18 @@ const DELIBERATELY_MISSING = new Map([
     '2026-10-28 删除「设置 › 识别」页：2026-10-01 样式审查笔记记录的是"当时它仍在"，改指现存文件则句子不成立',
   ],
   [
+    'src/lib/podImageGroups.ts',
+    '2026-11-03 图案并进「发货台 › 订花纸」时删除：它和 podAutoGroup.ts 是"按图自动分组"的旧实现，写入位换成按款的 `src/lib/podStyles.ts`；CHANGELOG 那句正是在陈述"删掉了它们"',
+  ],
+  [
+    'src/lib/podAutoGroup.ts',
+    '同上（同次一起删的，连同 tests/podImageGroups.spec.ts / tests/podAutoGroup.spec.ts）',
+  ],
+  [
+    'src/modules/shop-accounts/components/PatternPanel.vue',
+    '2026-11-03 用户口径"把产品管理中的图案和发货台的订花纸精简合并，放在现有的订花纸中"：该面板已删，认图案在「发货台 › 订花纸」（`src/modules/today/tabs/PodOrderPanel.vue`）。CHANGELOG 2026-11-02 条目记录的是"当时面板在这里"，改指现存文件则句子不成立',
+  ],
+  [
     'src/modules/goods/simple.ts',
     '2026-10-25 用户口径"去掉简洁模式"：该共享 ref 与开关整个撤除（完整形态成为唯一形态）；CHANGELOG 2026-10-08 条目与 2026-10-08 收尾笔记记录的是"当时新增了它"，改指现存文件则句子不成立',
   ],

@@ -111,12 +111,18 @@ describe('邮件正文 iframe 的两层 CSP', () => {
     expect(bad.map((w) => w.id), `缺 frame-src sk-mail: 的岛 ——\n${detail}`).toEqual([]);
   });
 
-  it('宿主 index.html 没有 CSP meta —— 内建模块因此不需要第二层（有人加了就必须回来补 frame-src）', () => {
-    // 这条不是形式检查：宿主页一旦有了 CSP meta 且其 frame-src 未放行 sk-mail:，
-    // 内建模块的邮件正文区会**整块空白且无提示**（与 2026-10-04 的岛事故同型）。
-    expect(
-      hostIndex.hasMeta,
-      '宿主 index.html 出现了 CSP meta：请确认其 frame-src 放行 sk-mail:，并同步更新本守卫',
-    ).toBe(false);
+  it('宿主 index.html 的 CSP（2026-11-04 起已有 meta）必须放行 frame-src 的 sk-plugin: 与 sk-mail:', () => {
+    // 这条不是形式检查：宿主页的 CSP meta 若未放行这两个 scheme，
+    // · sk-mail: 缺 ⇒ 内建「邮件」模块的正文区**整块空白且无提示**（与 2026-10-04 的岛事故同型）；
+    // · sk-plugin: 缺 ⇒ 所有 UI 岛（外置富 UI）点进去也是空白。
+    //
+    // 历史形态：2026-11-04 之前宿主**没有** CSP meta，这里断言 `hasMeta === false`，
+    // 用途是"有人加 CSP 时必须回来补 frame-src"。CSP 已在 S1 加上（见 index.html），
+    // 守卫随之升级为**正面断言**：不跳过、不豁免 —— 真删掉放行项就变红。
+    expect(hostIndex.hasMeta, '宿主 index.html 丢了 CSP meta（S1 加的，别删）').toBe(true);
+    expect(hostIndex.metaCsp, '宿主 CSP 缺 frame-src sk-mail:').toMatch(/frame-src[^;]*sk-mail:/);
+    expect(hostIndex.metaCsp, '宿主 CSP 缺 frame-src sk-plugin:（UI 岛会整块空白）').toMatch(
+      /frame-src[^;]*sk-plugin:/,
+    );
   });
 });

@@ -29,11 +29,64 @@ export interface ProcessResult {
  * @param rules - 已启用的规则（按 order 升序执行）
  * @returns 处理结果
  */
-export function applyFieldProcessor(
+/** 单批送隔离窗口的记录数：太大则单次 IPC 载荷过大，太小则往返次数多 */
+const EVAL_BATCH_SIZE = 500;
+
+/** `jsExpression` 的求值器形状（隔离窗口返回「每行结果 + 每行错误」） */
+export interface JsExpressionEvaluator {
+  (
+    rule: { id: string; code: string },
+    fields: Record<string, string>[],
+  ): Promise<{
+    values: (string | null)[];
+    errors: { index: number; message: string }[];
+    /** 窗口累计的 CSP 违规次数（可选：注入实现不必提供） */
+    cspViolations?: number;
+  }>;
+}
+
+/**
+ * 求值器注入点。
+ * - 生产：不注入，懒取 `ipc.ruleEvalBatch`（主进程转交隔离窗口执行）；
+ * - 测试/离线：注入本地实现，避免 vitest 依赖 Electron。
+ *
+ * 为什么不在本地用 `new Function` 兜底：那等于把 2026-11-04 审查里
+ * 「插件经 jsExpression 拿到主窗口全量能力」的洞原样装回来。窗口起不来就明确报错。
+ */
+let injectedEvaluator: JsExpressionEvaluator | null = null;
+
+export function setJsExpressionEvaluator(fn: JsExpressionEvaluator | null): void {
+  injectedEvaluator = fn;
+}
+
+async function resolveEvaluator(): Promise<JsExpressionEvaluator> {
+  if (injectedEvaluator) return injectedEvaluator;
+  const { ruleEvalBatch } = await import('@/core/services/ipc');
+  const viaIpc: JsExpressionEvaluator = async (rule, fields) => {
+    const r = await ruleEvalBatch({ rule, fields });
+    if (!r.success) throw new Error(r.error || '规则求值失败');
+    return r.data ?? { values: [], errors: [], cspViolations: 0 }; // data 缺失时按"无结果"处理（不写字段）
+  };
+  injectedEvaluator = viaIpc;
+  return viaIpc;
+}
+
+/**
+ * 对所有记录执行已启用的规则，返回新记录和新增的列名。
+ *
+ * **按规则外提、记录内循环**（原实现是记录外层）：两者等价的前提是「行与行之间无依赖」——
+ * 规则只经 `record.fields[targetField]` 传递，行内自洽。这样 `jsExpression` 能整批
+ * 送隔离窗口（一次 IPC 跑 500 行），而不是每行往返一次。
+ *
+ * @param records - 原始记录数组（会被原地修改）
+ * @param headers - 当前列名
+ * @param rules - 规则全集（未启用的被过滤，按 order 升序执行）
+ */
+export async function applyFieldProcessor(
   records: RecordItem[],
   headers: string[],
   rules: ProcessingRule[],
-): ProcessResult {
+): Promise<ProcessResult> {
   const errors: { ruleId: string; message: string }[] = [];
   const newHeaders: string[] = [];
 
@@ -48,8 +101,12 @@ export function applyFieldProcessor(
     }
   }
 
-  for (const record of records) {
-    for (const rule of enabledRules) {
+  for (const rule of enabledRules) {
+    if (rule.type === 'jsExpression') {
+      await runJsExpressionRule(records, rule, errors);
+      continue;
+    }
+    for (const record of records) {
       try {
         let result: string | null = null;
 
@@ -62,9 +119,6 @@ export function applyFieldProcessor(
             break;
           case 'math':
             result = processMath(record.fields, rule);
-            break;
-          case 'jsExpression':
-            result = processJsExpression(record.fields, rule);
             break;
         }
 
@@ -79,6 +133,47 @@ export function applyFieldProcessor(
 
   return { records, newHeaders, errors };
 }
+
+/**
+ * 一条 `jsExpression` 规则：分批送求值器，写回目标字段。
+ *
+ * 失败语义（有意为之）：某批编译失败 / 窗口故障 ⇒ 记一条错误并**结束这条规则**，
+ * 但继续执行后续规则 —— 与改造前「单条规则抛错不影响其他规则」一致；也避免
+ * 一条坏规则让整份导入全废。
+ */
+async function runJsExpressionRule(
+  records: RecordItem[],
+  rule: ProcessingRule,
+  errors: { ruleId: string; message: string }[],
+): Promise<void> {
+  const code = rule.config?.code;
+  if (!code) return; // 原实现：无 code 时不写字段（不是写空串）
+  const evaluator = await resolveEvaluator();
+
+  for (let start = 0; start < records.length; start += EVAL_BATCH_SIZE) {
+    const slice = records.slice(start, start + EVAL_BATCH_SIZE);
+    // 显式浅拷贝再送出（旧实现是 `Object.freeze({ ...fields })`，同款语义）：
+    // 求值侧会冻结入参，若直接传原对象引用，回写时就会 "object is not extensible"。
+    // 真实 IPC 路径下结构化克隆本来就会产生副本，但**不能依赖它** —— 本地注入实现没有克隆，
+    // 依赖隐式语义会让同一份代码在两种环境下表现不同（首版就是这样红的）。
+    const fields = slice.map((r) => ({ ...(r.fields ?? {}) }));
+    let res: { values: (string | null)[]; errors: { index: number; message: string }[] };
+    try {
+      res = await evaluator({ id: rule.id, code }, fields as Record<string, string>[]);
+    } catch (e: any) {
+      errors.push({ ruleId: rule.id, message: e?.message || String(e) });
+      return;
+    }
+    for (let i = 0; i < slice.length; i++) {
+      const v = res.values?.[i];
+      if (v !== null && v !== undefined) slice[i].fields[rule.targetField] = v;
+    }
+    for (const e of res.errors ?? []) {
+      errors.push({ ruleId: rule.id, message: `第 ${start + e.index + 1} 行：${e.message}` });
+    }
+  }
+}
+
 
 /**
  * 计算两条规则配置的哈希值，用于检测规则变更
@@ -329,17 +424,14 @@ function tokenize(expr: string): string[] {
 // ============================================================
 // jsExpression — 自定义 JS 表达式
 // ============================================================
+//
+// 实现已移出本文件（2026-11-04）：本地那份 `new Function` 跑在**主窗口**，
+// 而主窗口是唯一持有完整 `window.electronAPI` 的上下文 —— 市场分发的 UI 岛可经
+// `excel-copy.applyRules` 把任意 code 送到这里执行，等于把「声明 db 能力」放大成
+// 「读写白名单文件 + 读全部业务数据 + 无限制外带」。
+//
+// 现在由 `runJsExpressionRule` 送 `electron/rule-eval-window.ts` 的隔离窗口求值：
+// 该窗口无 electronAPI、CSP `connect-src 'none'`、单次 2s 超时。
+// **不要**为了省事在这里加回 `new Function` / `eval` —— 主窗口随后收紧到
+// `script-src 'self'`（index.html），加回来会直接 EvalError。
 
-function processJsExpression(
-  fields: Record<string, string>,
-  rule: ProcessingRule,
-): string | null {
-  const code = rule.config.code;
-  if (!code) return null;
-
-  // 安全沙箱：冻结 fields 副本 + strict mode 阻止污染全局
-  const sandbox = Object.freeze({ ...fields });
-  const fn = new Function('fields', `"use strict"; return (${code})`);
-  const result = fn(sandbox);
-  return result !== null && result !== undefined ? String(result) : null;
-}

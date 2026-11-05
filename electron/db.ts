@@ -11,11 +11,17 @@ export {};
 import Database = require('better-sqlite3');
 
 type Db = Database.Database;
+type Statement = Database.Statement;
 
 const DEFAULT_FILE_NAME = 'sellerkit.db';
 
 let db: Db | null = null;
 let dbFilePath = '';
+
+/** 预处理语句缓存上限：SQL 全部来自代码字面量（少数按列名/字段组合拼装），实际远达不到这个数 */
+const STMT_CACHE_MAX = 512;
+const stmtCache = new Map<string, Statement>();
+let stmtCacheDb: Db | null = null;
 
 export interface DbRunResult {
   lastInsertRowid: number;
@@ -38,6 +44,13 @@ export function initDb(file?: string): Db {
   db = new Database(dbFilePath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // WAL 下 synchronous=NORMAL 只保证「进程崩溃不丢已提交事务」，断电等 OS 级崩溃仍可能回滚最近几笔；
+  // 但换掉默认的 FULL 后每次提交少一次 fsync —— 批量导入是逐行写，这个差价直接体现在卡不卡。
+  db.pragma('synchronous = NORMAL');
+  // 负值 = 按 KiB 计量：-20000 ⇒ 约 20MB 页缓存（默认 2MB，多表 JOIN 时反复刷页）
+  db.pragma('cache_size = -20000');
+  // 5s 忙等：主进程写、备份/另开连接读时不再立刻抛 SQLITE_BUSY
+  db.pragma('busy_timeout = 5000');
   return db;
 }
 
@@ -66,6 +79,30 @@ export function closeDb(): void {
     db = null;
     dbFilePath = '';
   }
+  // 语句对象绑定在具体连接上：连接关了还留着，下次重开库会拿到「The database connection is not open」。
+  // 这里清空是主要防线；`stmt()` 里比对连接身份是第二道（防止有别的路径把 db 换掉）。
+  stmtCache.clear();
+  stmtCacheDb = null;
+}
+
+/**
+ * 取（并缓存）预处理语句。
+ * 为什么缓存：`prepare` 每次都要走一遍 SQL 解析/编译，逐行调用的封装（`dbRun` 的批量写）里
+ * 这笔开销比执行本身还大；缓存后同一批导入只编译一次。
+ */
+function stmt(sql: string): Statement {
+  const d = getDb();
+  if (stmtCacheDb !== d) {
+    stmtCache.clear();
+    stmtCacheDb = d;
+  }
+  let s = stmtCache.get(sql);
+  if (!s) {
+    if (stmtCache.size >= STMT_CACHE_MAX) stmtCache.clear();
+    s = d.prepare(sql);
+    stmtCache.set(sql, s);
+  }
+  return s;
 }
 
 /** 批量执行 DDL（幂等建表/索引），整体走事务，任一条失败则全部回滚 */
@@ -165,7 +202,7 @@ export function tableSql(name: string): string {
 
 /** 查询多条记录 */
 export function dbQuery<T = Record<string, unknown>>(sql: string, params: DbBindParams = []): T[] {
-  return getDb().prepare(sql).all(...normalizeParams(params)) as T[];
+  return stmt(sql).all(...normalizeParams(params)) as T[];
 }
 
 /** 查询单条记录，无结果返回 undefined */
@@ -173,7 +210,7 @@ export function dbGet<T = Record<string, unknown>>(
   sql: string,
   params: DbBindParams = [],
 ): T | undefined {
-  return getDb().prepare(sql).get(...normalizeParams(params)) as T | undefined;
+  return stmt(sql).get(...normalizeParams(params)) as T | undefined;
 }
 
 /**
@@ -181,7 +218,7 @@ export function dbGet<T = Record<string, unknown>>(
  * @returns lastInsertRowid（自增主键）/ changes（受影响行数）
  */
 export function dbRun(sql: string, params: DbBindParams = []): DbRunResult {
-  const info = getDb().prepare(sql).run(...normalizeParams(params));
+  const info = stmt(sql).run(...normalizeParams(params));
   return { lastInsertRowid: Number(info.lastInsertRowid), changes: info.changes };
 }
 

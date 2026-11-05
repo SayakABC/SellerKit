@@ -67,10 +67,23 @@ export async function loadColorDict(force = false): Promise<void> {
  *
  * 字典为空（首次加载失败 / 没跑 Electron）时回落到 `COMMON_COLORS` —— 不能让色条整排消失：
  * 用户要靠它加色/归类，"空的不如内置的"。
+ *
+ * ⚠️ 回落表与字典种子**不是同一套写法**（回落是 `黑`/`白`/`灰`，字典种子是 `黑色`/`白色`/`灰色`）。
+ *    所以"能不能在这里点一个色**落成款色/SKU**"必须再看 `colorDictLoaded`：
+ *    在回落态下点一个「黑」，写进库的就是一个字典里没有的款色 —— 颜色库从此多一份重复。
  */
 export const colorDictNames = computed<string[]>(() =>
   items.value.length ? items.value.map((c) => c.name) : [...COMMON_COLORS]
 );
+
+/**
+ * 字典**真的读到了**（不是回落表）。
+ *
+ * 给"点了会落库"的界面用：回落表只是"让人看得见颜色长什么样"，拿它当色名写进业务表就是造假数据。
+ * 读不到时（接口失败 / 非 Electron）保持 false，界面据此**不给写入口**并说明原因，
+ * 而不是拿内置词表顶着 —— 静默造重复比少一个按钮更难查。
+ */
+export const colorDictLoaded = computed<boolean>(() => items.value.length > 0);
 
 /**
  * 色名 → 字典 id（**0 = 不在字典**：还没归类的异写色，或字典尚未载入）。

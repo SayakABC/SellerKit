@@ -102,6 +102,106 @@ describe('toInternal · 正常单', () => {
   });
 });
 
+describe('toInternal · 扩展真正推的规整帧（2026-11-02 事故的回归）', () => {
+  /**
+   * 形状**照抄** `SellerKitExtensions/extensions/mango-order/src/mango-parse.js` 的 `toOrder` 输出：
+   * `orderNo` / `shopName` / `shopAuthId` / `platformStatusCn` / 已格式化的本地时间串 /
+   * `amountCents`（已经是分）/ `lines[]`（`itemId` + 行上 `color`/`size` + `imgUrl`）。
+   *
+   * 事故现场：宿主当时只认原始响应键名（`orderId` / `alias` / `orderItemList`），
+   * 于是线上 4 单全部 `缺少 orderId` 被跳过，而 HTTP 仍是 `ok:true` ⇒ popup 显示"推送 成功（新 0 / 更新 0）"。
+   */
+  function extensionOrder(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      orderNo: '3077508596852457',
+      shopName: '十店',
+      shopAuthId: '32958002',
+      site: 'ae',
+      orderTime: '2026-11-01 12:00:00',
+      payTime: '2026-11-01 12:00:00',
+      deadline: '2026-11-11 23:59:59',
+      status: 'normal',
+      platformStatus: 'WAIT_SELLER_SEND_GOODS',
+      platformStatusCn: '等待卖家发货',
+      currency: 'CNY',
+      amountCents: 12748,
+      labels: ['72h时效考核订单', '地址异常'],
+      timeoutType: 72,
+      timeoutAt: '2026-11-06 12:00:00',
+      countryCode: 'UK',
+      countryCn: '英国（UK）',
+      weightGram: 700,
+      lines: [
+        {
+          itemId: '1005012742360018',
+          skuCode: '12000059187655796',
+          skuKey: '',
+          qty: 2,
+          color: '6',
+          size: 'M',
+          shipsFrom: 'China Mainland',
+          imgUrl: 'https://ae-pic-a1.aliexpress-media.com/kf/Secda2766378947e8a88be790e6e5453cE.jpg',
+          title: '定制拖鞋',
+          unitPriceCents: 6374,
+          attrs: { Size: 'M', Color: '6' },
+        },
+      ],
+      ...over,
+    };
+  }
+
+  it('认规整帧的键名：单号 / 店 / 状态 / 金额 / 两个时效 / 明细全部落位', () => {
+    const { order: d, reason, warnings } = toInternal(extensionOrder());
+    expect(reason).toBe('');
+    expect(warnings).toEqual([]);
+    expect(d!.orderNo).toBe('3077508596852457');
+    expect(d!.shop).toBe('十店');
+    expect(d!.shopAuthId).toBe('32958002');
+    expect(d!.bizStatus).toBe('等待卖家发货'); // platformStatusCn 优先，不是英文码
+    // 扩展已经算好"分"，**不许再乘一次 100**（127.48 元 = 12748 分）
+    expect(d!.amountCents).toBe(12748);
+    // 扩展交的是格式化好的本地时间串，不能因为 mangoTime(字符串)=NaN 就整列变空
+    for (const t of [d!.orderTime, d!.payTime, d!.dealDeadline, d!.timeoutAt]) {
+      expect(t).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    }
+    expect(d!.payTime < d!.dealDeadline).toBe(true);
+    expect(d!.lines).toHaveLength(1);
+    const l = d!.lines[0];
+    expect(l.itemId).toBe('1005012742360018');
+    expect(l.skuCode).toBe('12000059187655796');
+    expect(l.qty).toBe(2); // 规整帧是 qty，不是 productCount
+    expect(l.color).toBe('6');
+    expect(l.size).toBe('M');
+    expect(l.imageUrl).toContain('/kf/Secda2766378947e8a88be790e6e5453cE.jpg'); // imgUrl
+    // 人要看的三项：countryCn / labels[] / weightGram(克→千克)
+    expect(d!.rawFields['目的地国家']).toBe('UK');
+    expect(d!.rawFields['订单标签']).toBe('72h时效考核订单、地址异常');
+    expect(d!.rawFields['重量kg']).toBe('0.700');
+  });
+
+  it('规整帧缺单号 ⇒ 拒绝，且原因同时点出两个键名（免得下次只改一半）', () => {
+    for (const bad of [{}, { orderNo: '' }, { orderNo: '  ', orderId: '' }]) {
+      const r = toInternal(bad);
+      expect(r.order).toBeNull();
+      expect(r.reason).toContain('orderId');
+      expect(r.reason).toContain('orderNo');
+    }
+  });
+
+  it('规整帧的币种非 CNY ⇒ 金额 null（即使扩展给了 amountCents 也不猜汇率）', () => {
+    const r = toInternal(extensionOrder({ currency: 'USD', amountCents: 1850 }));
+    expect(r.order!.amountCents).toBeNull();
+    expect(r.warnings.join()).toContain('USD');
+  });
+
+  it('规整帧空明细 ⇒ 不拒绝（与原始帧同口径）', () => {
+    const r = toInternal(extensionOrder({ lines: [] }));
+    expect(r.order).not.toBeNull();
+    expect(r.order!.lines).toHaveLength(0);
+    expect(r.warnings.join()).toContain('明细为空');
+  });
+});
+
 describe('toInternal · 拒绝与降级', () => {
   it('缺订单号 ⇒ 整帧拒绝（空单号会撞主表 UNIQUE，且无从合并）', () => {
     for (const bad of [{}, { orderId: '' }, { orderId: '   ' }, { orderId: null }]) {

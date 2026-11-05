@@ -529,16 +529,89 @@ initDb(path.join(tmpDir, 'mango-smoke.db'));
   });
 
   // ===================================================================================
+  // 七、扩展**真正推的形状**（2026-11-02 线上事故的回归）
+  // ===================================================================================
+  //  上线当天的事实：扩展推的是 `mango-parse.js` 的 `toOrder` 规整帧（orderNo / shopName /
+  //  platformStatusCn / lines / amountCents / 已格式化的本地时间串），而宿主只认原始响应键名
+  //  ⇒ 4 单全部"缺少 orderId"被跳过，HTTP 却是 ok:true，popup 只显示"推送 成功（新 0 / 更新 0）"。
+  //
+  //  所以这里的帧**不许手抄**：直接用扩展自己的解析器造帧。字段名在任一侧改了，这一段就会红。
+  section('[8] 扩展规整帧（真机推送形状）走完整链路');
+
+  /** 用扩展自己的解析器（`mango-parse.js` 的 `toOrder`）把抓包原文变成扩展真正推送的形状 */
+  function extensionFrameOf(index) {
+    const fs = require('fs');
+    const vm = require('vm');
+    const parserPath = path.join(
+      ROOT, '..', 'SellerKitExtensions', 'extensions', 'mango-order', 'src', 'mango-parse.js',
+    );
+    assert.ok(fs.existsSync(parserPath), `扩展解析器不在：${parserPath}（跨仓契约测试需要它）`);
+    const sandbox = { window: {}, Date, Number, String, Object, Array, Math, JSON, console };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(parserPath, 'utf8'), sandbox);
+    const toOrder = sandbox.window.__skMangoParse && sandbox.window.__skMangoParse.toOrder;
+    assert.ok(typeof toOrder === 'function', '扩展的 toOrder 没挂到 window.__skMangoParse');
+    return toOrder(JSON.parse(JSON.stringify(FIXTURE.data.list[index])));
+  }
+
+  const extOrders = [extensionFrameOf(0), extensionFrameOf(1)];
+  extOrders[0].orderNo = 'EXT-1';
+  extOrders[1].orderNo = 'EXT-2';
+
+  await check('扩展规整帧 → 两单入库（不许再全部"缺少订单号"）', async () => {
+    const before = orderCount();
+    const r = await mangoSync.ingestMangoOrders(payload(extOrders));
+    assert.strictEqual(
+      r.skipped, 0,
+      `规整帧不该被跳过，实际 skips：${JSON.stringify(r.skips)}（"缺少订单号"= 键名没对上）`,
+    );
+    assert.strictEqual(r.inserted, 2, `两单都该是新插入，实际回执：${JSON.stringify(r)}`);
+    assert.strictEqual(orderCount(), before + 2);
+  });
+
+  await check('规整帧的订单级字段落位（中文状态 / 付款时间 / 两个时效 / 店铺 authId）', async () => {
+    const row = orderRow('EXT-1');
+    assert.ok(row, 'EXT-1 没落库');
+    assert.ok(String(row.biz_status).length > 0, '状态不能空（发货台靠它算待发）');
+    assert.ok(DTFMT.test(String(row.order_time)), `order_time 形状不对：${row.order_time}`);
+    assert.ok(DTFMT.test(String(row.pay_time)), `pay_time 不对：${row.pay_time}`);
+    assert.ok(DTFMT.test(String(row.deal_deadline)), `deal_deadline 不对：${row.deal_deadline}`);
+    assert.ok(String(row.shop_auth_id).length > 0, 'shop_auth_id 要写上（认店与后续绑定都要它）');
+  });
+
+  await check('规整帧的行级字段落位（商品ID / SKU / 色 / 码 / 变体键）', async () => {
+    const rows = itemRows('EXT-1');
+    assert.ok(rows.length >= 1, '明细没落库');
+    const l = rows[0];
+    assert.ok(String(l.item_id).length > 0, 'item_id 空 ⇒ 图案绑定无从谈起');
+    assert.ok(String(l.sku_code).length > 0, `sku_code 空：${l.sku_code}`);
+    assert.ok(String(l.color).length > 0 && String(l.size).length > 0, `色/码空：${l.color}/${l.size}`);
+    const parts = String(l.variant_key).split('\u0000');
+    assert.ok(parts.length >= 3, `variant_key 至少要 3 段，实际：${JSON.stringify(l.variant_key)}`);
+  });
+
+  await check('规整帧走 HTTP 端点 → 200 且 inserted=1（"成功但新 0"就是事故症状）', async () => {
+    const o = extensionFrameOf(0);
+    o.orderNo = 'EXT-HTTP';
+    const r = await request('POST', '/mango/ingest', payload([o]), HTTP_TOKEN);
+    assert.strictEqual(r.status, 200, `实际 ${r.status}：${r.raw}`);
+    assert.strictEqual(r.json.ok, true, `回执：${r.raw}`);
+    assert.strictEqual(r.json.inserted, 1, `回执：${r.raw}（新 0 说明帧被静默跳过）`);
+    assert.ok(orderRow('EXT-HTTP'), '规整帧从 HTTP 进来没落库');
+  });
+
+  // ===================================================================================
   // 收尾
   // ===================================================================================
   console.log('');
   if (failed > 0) {
     console.log(`\u2717 芒果入库冒烟失败：${failed} 项`);
-    closeDb();
-    process.exit(1);
+  } else {
+    console.log(`\u2713 芒果入库冒烟全部通过（${passed} 项）`);
   }
-  console.log(`\u2713 芒果入库冒烟全部通过（${passed} 项）`);
   closeDb();
   // 显式退出：不写的话进程靠 Electron 在无 GUI 环境里崩退（退出码是 SIGTRAP），看起来像冒烟失败。
-  process.exit(0);
+  // ⚠️ 退出码必须跟着 failed 走：原先是"失败分支 process.exit(1) + 之后还有一行
+  // process.exit(0)"，实测失败时两行都会跑到 ⇒ 4 项红、退出码仍是 0，门禁等于没拦。
+  process.exit(failed > 0 ? 1 : 0);
 })();

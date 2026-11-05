@@ -22,7 +22,10 @@ import {
   sanitizeShopItem,
   listScrapedItemIds,
 } from './shop-item-db';
-import { ingestMangoOrders } from './mango-sync';
+import { ingestMangoOrders, type MangoIngestResult } from './mango-sync';
+// 开机自动同步的结果回调（M5·T5-5）：只有"应用自己去开过浏览器"的那一轮才弹通知，
+// 用户手点扩展采集时结果已经在界面的采集状态条上，再弹一条是噪音。见 `scheduler.ts` 顶部注释。
+import { onIngestDone } from './scheduler';
 
 const { app } = require('electron');
 
@@ -113,6 +116,34 @@ function emitItemsIngested(payload: { received: number; inserted: number; update
   if (!win || win.isDestroyed?.()) return;
   try {
     win.webContents.send('ae-items-ingested', { ...payload, at: new Date().toISOString() });
+  } catch {
+    /* 窗口关闭中，忽略 */
+  }
+}
+
+/**
+ * 广播「芒果同步已处理完」（窗口已销毁时静默忽略）。
+ *
+ * 与 `ae-items-ingested` 同一理由：扩展是外部进程，写库完成后宿主界面本来一无所知 ——
+ * 用户点了「去芒果采集」、扩展已经抓完入库，界面却还停在旧清单上，只能自己再点一次刷新。
+ *
+ * **`ok:false` 也要广播**：抓 0 条 / 未登录这类失败恰恰最需要界面立刻把采集状态条染红，
+ * 只在成功时广播会把"没抓到"藏到下一次手动刷新。
+ * 广播时机在 `ingestMangoOrders` **返回之后**（写库 + 同步日志都已完成），不提前通知。
+ */
+function emitMangoIngested(result: MangoIngestResult): void {
+  const win = getWindow?.();
+  if (!win || win.isDestroyed?.()) return;
+  try {
+    win.webContents.send('mango-ingested', {
+      ok: result.ok,
+      fetched: result.fetched,
+      totalItems: result.totalItems,
+      inserted: result.inserted,
+      updated: result.updated,
+      skipped: result.skipped,
+      at: new Date().toISOString(),
+    });
   } catch {
     /* 窗口关闭中，忽略 */
   }
@@ -371,6 +402,10 @@ function handleMangoIngest(req: http.IncomingMessage, res: http.ServerResponse):
       const result = await ingestMangoOrders(p);
       lastIngestAt = new Date().toISOString();
       if (!result.ok) lastError = result.warnings[0] || '芒果同步未取到数据';
+      // 处理已完成（订单 / 图 / 同步日志都落库）⇒ 通知界面重拉，用户不必再手动点刷新
+      emitMangoIngested(result);
+      // 开机自动同步那一轮的结果要变成一条系统通知（T5-5）；非自动轮次这里静默返回。
+      onIngestDone(result);
       writeJson(res, 200, result);
     })
     .catch((e) => {

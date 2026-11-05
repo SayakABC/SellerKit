@@ -226,7 +226,7 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 
 | 判据 | 实测结果 |
 |---|---|
-| `npm run mango:smoke` | ✅ 20 项全绿（真实帧入库四列齐 / 变体键含图键 / 图落地 / 幂等 / 红线 1 / 残帧拒写 / 店铺认亲 / 色名塌陷 / 真发 HTTP 四态） |
+| `npm run mango:smoke` | ✅ 25 项全绿（初版 20 项：真实帧入库四列齐 / 变体键含图键 / 图落地 / 幂等 / 红线 1 / 残帧拒写 / 店铺认亲 / 色名塌陷 / 真发 HTTP 四态；+1 项跨仓契约「用扩展 `mango-parse.js` 造帧走全链路」×4，见「M1 补记 ②」） |
 | T1-3 的 HTTP 端到端 | ✅ 错 token → 401；`schema` 错 → 400（提示支持哪个）；正确帧 → 200 `{ok:true,inserted:1}` 且订单落库；空帧但 `totalItems=7` → **200 而体内 `ok:false`**（帧合法、业务失败，扩展能看见"没抓到"） |
 | 真库副本跑 `shop.columns` v3（不动线上库） | ✅ `version 2 → 3`；16 家店**行数不变**；`erp_shop_id` 全部空串（未学到，不是 NULL）；二次运行无 `duplicate column name` |
 | `npm test` | ✅ 1166 例 / 56 文件（新增 `mangoIngest` 18 例、`podImageKey` 6 例） |
@@ -274,6 +274,107 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 >
 > **判据更新**：真同步后 `shopUnmatched` 只应剩下 ②「芒果有、库里没有的店」；已退店的那 19 单必须正常归到原店，
 > 同时 `onClosedShop > 0` 且提示文案出现。仍需扩展在芒果里真推一次才能验。
+
+#### M1 补记（2026-11-02）：装好即 401 —— 扩展默认 Token 为空 + 提示指向不存在的页面
+
+**现象**（用户首次真推，扩展 popup）：`连接 正常` / `抓到订单 3 / 3 单` / `完整度 完整` / **`推送 HTTP 401 失败`**，
+提示写着「Token 不对或为空，去 SellerKit「采集端」页复制 Token 填进设置」。
+
+**定位（一条 curl 就分开"宿主拒了默认值"与"扩展发的不是默认值"）**：
+
+```bash
+curl -s -o /tmp/x -w '%{http_code}\n' -X POST http://127.0.0.1:46211/mango/ingest \
+  -H 'Content-Type: application/json' -H 'X-Ae-Token: sk-ae-dev-token' -d '{"schema":"bogus"}'
+# → 400  {"ok":false,"error":"不支持的 schema：bogus（支持 mango-order/v1）"}
+```
+
+400（schema 错）说明 **Token 这一关是过的** —— 所以问题不在宿主，而在扩展发出的 `X-Ae-Token` 不是这个值。
+
+**三条根因（缺一条都修不干净）**：
+
+1. 扩展 `DEFAULTS.token = ''`，而宿主 `/mango/ingest` 要求 `X-Ae-Token`（默认 `sk-ae-dev-token`）⇒ **装上即 401**。
+2. 401 的提示指向「SellerKit『采集端』页」—— **那个页面从来没建过**（宿主渲染层没有该入口），
+   用户照做会发现无处可复制 ⇒ 一条**无法自救**的错误（本仓明令禁止的"提示不是入口"）。
+3. 旧版默认值是 `''` 时用户点过一次「保存」就会把 `token: ''` 落进 `chrome.storage`
+   ⇒ `{...DEFAULTS, ...stored}` 被这条空串覆盖。**只改默认值会被旧配置吃掉**。
+
+**处置（`SellerKitExtensions` 1.1.1，本仓无代码改动）**：
+
+- `DEFAULTS.token = 'sk-ae-dev-token'`，并在 `background.js` / `popup.js` 两处都写明"= 宿主
+  `electron/ae-receiver.ts` 的默认 Token，**两处必须逐字一致**"；
+- `normalizeCfg()`（popup 的 `loadCfg` 同口径）：**空 Token 一律回落默认值** —— 这个字段里的空串
+  从来不是"我要清空"，是"没填过"；
+- 401 提示改写成可执行的两句话：默认 `sk-ae-dev-token`，宿主用 `AE_RECEIVER_TOKEN` 改过就填改过的那个值。
+
+**判据**：`SellerKitExtensions/tests/mango-push-token.test.mjs` 5 组（默认值真的发出去 / storage 空串回落 / 自定义值原样且去空白 /
+401 hint 含默认值与 `AE_RECEIVER_TOKEN` 且**不含**「采集端页」/ 两处常量逐字一致）；变异
+`DEFAULTS.token → ''` 立刻红（`默认 Token 必须等于宿主默认值 sk-ae-dev-token，实际 ""`）；
+`npm run test:mango` 全绿（解析 9 组 / 抓取 7 组 / 补跑 12 组 / Token 5 组）。
+
+**遗留（已知缺口，写清而不是含糊）**：宿主界面**不显示** Token（`getAeReceiverStatus()` 不含该字段，
+`PoolPane` 的「复制接入信息」curl 里也硬编码了默认值）。默认值已让"装上即能用"成立；
+只有用 `AE_RECEIVER_TOKEN` 改过的人需要知道那个值 —— 那时由改的人自己填进扩展设置。
+若将来要在宿主里显示/复制，数据源就是 `getAeReceiverStatus()` 加一个 `token` 字段。
+
+#### M1 补记 ②（2026-11-02）：推送「成功」但新 0 —— 扩展推的是规整帧，宿主只认原始键名
+
+**现象**（用户第二次真推，Token 已修好）：`连接 正常` / `抓到订单 4 / 4 单` / `完整度 完整` /
+**`推送 成功（新 0 / 更新 0）`** —— HTTP 是 200、扩展没报错，但订单表一行没多。
+
+**取证（先解决"库到底写了什么"，否则只能靠猜）**：真库有 3.5MB 的 `-wal`，
+
+```bash
+cp ~/Library/Application\ Support/seller-kit/sellerkit.db /tmp/x.db   # ❌ 只拷主文件，漏 WAL
+sqlite3 "file:$DB?mode=ro" ".backup /tmp/x.db"                        # ✅ 让 sqlite 自己合 WAL
+```
+
+`cp` 那次读到 `oi_orders` 只有 70 行、`sk_sync_log` **空**，于是差点误判成"同步根本没跑"。用 `.backup`
+后读到最新一行：
+
+```
+fetched=4 total=4 inserted=0 updated=0 skipped=4  reason='4 单未入库（见 skips）'
+detail_json: {"skips":[{"orderNo":"#1","reason":"缺少 orderId"}, … ×4]}
+```
+
+`skips` 里四条 `缺少 orderId` 就是全部答案：帧**到了**、业务层**跑了**、四单**各自被拒**。
+
+**根因（一套键名对另一套键名）**：`toInternal` 当时只认芒果**原始响应**的键名
+（`orderId` / `alias` / `authId` / `cnOrderStatus` / `orderItemList[].productId` / `payAmount` / `sendGoodExpiredDate`…），
+而扩展推过来的是它自己 `mango-parse.js` → `toOrder` 的**规整帧**
+（`orderNo` / `shopName` / `shopAuthId` / `platformStatusCn` / `lines[{itemId,qty,imgUrl}]` / `amountCents`（已是分）/
+`orderTime|payTime|deadline|timeoutAt`（**已格式化成本地时间串**））。两套一个字段都对不上 ⇒
+每帧都落进"没有单号"，而 HTTP 层只回 `ok:true`（帧合法、业务层逐单拒绝不算请求失败）——
+于是**扩展侧看起来完全成功，宿主侧一单没进**，这是最坏的一种"绿灯"。
+
+**处置（`electron/mango-ingest.ts` 认两套键名，不二选一）**：
+
+- 单号 `orderId || orderNo`，店 `alias || shopName`，`authId || shopAuthId`，
+  状态 `cnOrderStatus || platformStatusCn || orderStatus || platformStatus || status`；
+- 金额：扩展的 `amountCents` **直接用**（不再 `mangoCents` 乘 100），币种非 CNY 仍记 `null`；
+- 时间新增 `stampOrText(ms, text)`：先按毫秒/秒解析，再回落扩展**已格式化**的
+  `YYYY-MM-DD HH:mm:ss`（`mangoTime('2026-11-01 12:00:00')` 是 `''`，只走前者会把四个时间列全变空）；
+- 明细认 `orderItemList` 或 `lines`，行内 `productId||itemId`、`productImgUrl||imgUrl`、
+  `productCount||qty`、`attrMap||attrs`（`lines` 已把 attrMap 摊成 `color/size`，故再回落 `it.color`/`it.size`）；
+- `raw_fields`：`countryCode||countryCn`、`labelMap` 摊平为空时回落 `labels[]`、`weight(kg)` 缺时用 `weightGram/1000`。
+
+**判据（两条，缺一条都可能再犯）**：
+
+1. `tests/mangoIngest.spec.ts` 新增「扩展真正推的规整帧」4 例：夹具逐字照抄 `toOrder()` 的输出，
+   钉住 `amountCents` 必须是 12748（**不是 1274800**）、四个时间串匹配 `^\d{4}-\d{2}-\d{2} …$`、
+   行上的 `qty/color/size/imgUrl`、`目的地国家`/`订单标签`/`重量kg=0.700`；缺单号时 `reason` 要**同时**
+   提 `orderId` 与 `orderNo`（提醒下一个改的人别又只改一半）。`npx vitest run tests/mangoIngest.spec.ts` → 23 例。
+2. `scripts/mango-ingest-smoke.cjs` 新增 `[8]` 段 4 项：用 `vm` 加载**扩展自己的** `mango-parse.js`，
+   取 `window.__skMangoParse.toOrder` 造帧（跨仓契约：任一侧改字段名就红），走完整链路到库，
+   并真发一次 HTTP 断言 `inserted=1`。`npm run mango:smoke` → **25 项**全绿。
+
+**顺手修的门禁缺陷（影响所有冒烟的"红"是否可信）**：该脚本收尾原是"失败分支 `process.exit(1)` +
+末尾一行 `process.exit(0)`"，实测**两行都会跑到** ⇒ 变异后 4 项全红、退出码仍是 **0**。
+改为单出口 `process.exit(failed > 0 ? 1 : 0)`；变异
+`str(o.orderId)||str(o.orderNo)` → `str(o.orderId)` 后 `[8]` 四项红且 **EXIT=1**，还原后 EXIT=0。
+
+**遗留**：本轮修复在运行中的 dev 进程里不会自动生效（`dist/electron` 已重编译，进程仍持旧模块）——
+**需重启应用**才能验"新 4"。判据仍是 `sk_sync_log` 最新一行的 `skips`：若下次还是"新 0"，看 `reason`
+里写的键名，那正是本次事故的指纹。
 
 ---
 
@@ -389,7 +490,7 @@ SELECT (SELECT COUNT(*) FROM oi_orders WHERE source='collect')        AS 采集�
 | **T3-4** | `podLinkStats(skuJson)` 纯函数（返回 `{nColors, nImages}`），在 `upsertShopItems` 的 **INSERT 与 UPDATE 两处都调**（✅ 施工时摘成独立纯模块 `electron/podLinkStats.ts`，并在迁移 v3 内回填存量，见施工记录偏离 3/4） | 新 `podLinkStats.ts` + `shop-item-db.ts` | 同一款采集重跑两次，两列值不变（不是停在第一次的值） | T3-1 |
 | **T3-5** | 视图 `pod_binding_worklist` 真库实跑，导出清单人工看一遍 | 附录 A | `SELECT COUNT(*)` = **560**，`SUM(image_key<>'')` = **50** | T3-1 |
 | **T3-6** | 塌陷链接**定向重算**：只对 `pod_n_images > 1` 的链接重算 `variant_key`（加第 4 段），其余链接**一个字节都别动** | 一次性脚本 `scripts/pod-rekey-collapsed.cjs` | 重算前后：非塌陷链接的 `variant_key` 集合**完全相同**；塌陷链接行数 = 重算前 | T3-3、T3-5 |
-| **T3-7** | 绑定台 UI（内建页，**不做 UI 岛** —— 内建页不受 `DB_OPS` 10 op 上限限制）：一屏 24 张 SKU 色图，键盘 `Space` 多选 / `1-9` 快选 / `Enter` 确认跳下一张 / `N` 新建 / `S` 跳过 | `src/modules/pod/`（新模块） | 键盘流能连续绑 24 个槽位不出鼠标 | T3-5 |
+| **T3-7** | 绑定台 UI（内建页，**不做 UI 岛** —— 内建页不受 `DB_OPS` 10 op 上限限制）：一屏 24 张 SKU 色图，键盘 `Space` 多选 / `1-9` 快选 / `Enter` 确认跳下一张 / `N` 新建 / `S` 跳过 | `src/modules/today/tabs/PodOrderPanel.vue`（2026-11-03 起：图案并进「发货台 › 订花纸」；原 `PatternPanel.vue` 已删） | 键盘流能连续绑 24 个槽位不出鼠标 | T3-5 |
 | **T3-8** | 采集铺开：`ae-profit` 把剩余 14 家店扫一遍（**这是覆盖率分母的前提**）；扫完重跑 T3-4 统计 | 扩展侧操作 + 现有采集功能 | `SELECT COUNT(DISTINCT shop_id) FROM pl_shop_items` ≥ 14 | 用户配合 |
 
 #### M3 施工记录（2026-11-01）
@@ -428,7 +529,7 @@ T3-2 `imageKeyOf` / T3-3 `variantKey` 第 4 段此前随 M0 的 T0-6 已落地�
 
 **门禁**：`schema:smoke` 全绿（[I] 5 条 / [J] 5 条）· `npm test` **1252 例 / 61 文件** ·
 `verify`（跨域边已登记）· `verify:docs` · `lint`（0 error）· `shop-item:smoke` **58 项** ·
-`order:smoke` · `mango:smoke` 21 项全绿。
+`order:smoke` · `mango:smoke` 25 项全绿。
 
 **变异测试（确认断言真的会咬人）**：
 
@@ -462,6 +563,59 @@ SELECT COUNT(*) FROM pod_variant_patterns vp
  WHERE w.image_key <> '';                                             -- 也应为 50
 ```
 
+#### M3 施工记录（续）：T3-5 ~ T3-8（2026-11-01）
+
+| 任务 | 落点 | 验证 / 实测 |
+|---|---|---|
+| T3-5 真库实跑 | 新 `scripts/pod-worklist.cjs`（`npm run pod:worklist`），**只读副本** | `--expect 560,50` → **总槽位 560 / 已绑 0 / 待绑 560 / 塌陷 50 / 覆盖店铺 2 家（七店、九店）**，CSV 560 行 |
+| T3-6 定向重算 | 新 `electron/podRekey.ts`（纯函数 `linkPrefixOf` / `collapsedLinkPrefixes` / `planCollapsedRekey`）+ `scripts/pod-rekey-collapsed.cjs` | 副本 dry-run 与 `--apply`：塌陷前缀 **10 条** / 订单行 **75 行**（其中塌陷 **0 行**）/ 待改 **0** / 已是 4 段 0 / 非塌陷 75 / 认不出图键 0 / 脏键 0 |
+| T3-7 绑定台 | 原新独立模块目录（`meta` / 视图 / 三个面板 / `ctx`，2026-11-02 已归档到 `.workbuddy/archive/pod-module-2026-11-02`）；**撤并成一页**，2026-11-03 又并进「发货台 › 订花纸」`src/modules/today/tabs/PodOrderPanel.vue`（见下方「结构变更」），**内建页不做 UI 岛**（D-5） | 键盘流 `Space` 多选 / `1-9` 快选 / `Enter` 确认跳下一张 / `N` 新建 / `S` 跳过 / `←→` 换款（并页后 `↑↓` 换色）；覆盖率条把「≥ 60%」与「塌陷 100%」两个判据并成**一个结论**。⚠️ **2026-11-03 并页重写时这一层整层丢了**（新文件零 `keydown`/`tabindex`），同日已补回并加断言 —— 见下方「并页收口」 |
+| T3-8 采集铺开 | **未完成（卡在用户侧）** | 真库 `pl_shop_items` 71 行 / **2 家店**；判据 `COUNT(DISTINCT shop_id) >= 14` **未达** |
+
+三条实测结论（都是"不做就会静默错"的）：
+
+1. **T3-5 的判据成立，可以直接当门禁断言**：`npm run pod:worklist -- --expect 560,50` 不一致即退出码 1。
+   脚本先把库（连同 `-wal` / `-shm`）复制到临时目录、在副本上建视图 → **真库一个字节都不写**，
+   所以这个数字可以反复复算。CSV 里键的 `\u0000` 写成字面量 `\0`（人看得懂），另给 `variant_key_hex`
+   供机器消费。
+2. **覆盖率此刻是 0%，计划 §7「M3 覆盖率 < 60% 不进 M4」这条前置在真库上不成立**。
+   处置不是等 T3-8（那要用户配合把剩下 14 家店扫一遍），而是把「没绑完」变成**看得见**：
+   报单页把未绑件数摆进汇总（`unboundPieces` / `unboundRows`），覆盖率条把「覆盖率 ≥ 60% 且塌陷 100%」
+   并成一个结论（`src/lib/podBinding.ts` 的 `podCoverageOf`）。**口径显式化之后 M4 才有资格落地** ——
+   否则"3 个图案要报单"这种画面看起来完全正常，实际漏掉九成订单（真库 75 个待发行只有 **4 行**能匹配到槽位）。
+3. **T3-6 在真库上是幂等零副作用**：塌陷链接前缀确实有 10 条（`pod_n_images > 1`），
+   但**订单行 0 行**挂在它们上面 —— 75 个订单行全部来自另外的 3 段键。所以 `--apply` 前后
+   「非塌陷键集合完全相同（59 个键）」「塌陷行数不变（0）」「`oi_variant_keys` 59 行未动」。
+   脚本保留，作为"采集铺开、订单真的落进塌陷链接"时的唯一入口；它**刻意不动 `oi_variant_keys`**
+   （那张表是"键 → 款色"的命名台账，重算只解决"订单行能否匹配到 4 段槽位"，命名会在下次核对时按新键重建）。
+
+**已知缺口（写在这里，别让下一个人以为有守卫）**：绑定台是本仓唯一**没有 UI 冒烟**的页面 ——
+`tests/uxEntryNames.spec.ts` 里「绑定台 / 报单 / 余量看板」的豁免理由写的就是"锚点 = `PodView.vue` 的 TABS"；
+键盘流本身只由 `tests/podBinding.spec.ts`（10 例）覆盖**统计口径**，没有任何一条断言钉住"按 `1-9` 真的绑上了"。
+补 `pod:ui` 是 T3-7 的收尾项（同日未做）。
+
+#### 并页收口（2026-11-03）：T3-7 的键盘流补回，T3-8 / T5-6 明确卡在用户侧
+
+并进「发货台 › 订花纸」这一页时，**键盘流整层被丢掉了**：旧绑定台（`.workbuddy/archive/pod-module-2026-11-02/tabs/BindingPanel.vue:1214`）
+有 `window.addEventListener('keydown', onKeydown)`，新写的 `PodOrderPanel.vue`（2136 行）全文没有
+`keydown` / `tabindex` —— 而本表 T3-7 那一行还写着"键盘流 …"，**文档在说谎**。
+
+- **补回的键位**：`Space` 选/取消当前色 · `↑↓` 款内换色（到头跨到相邻款）· `←→` 换款 ·
+  `Enter` 认上 · `1-9` 快选建议图案并直接认上 · `N` 新建 · `M` 合并 · `S` 跳过本款 · `Esc` 关层/清选择。
+  快捷键写在页面上（`data-act="kbd-hint"`）。
+- **`KeepAlive` 是这一层的真陷阱**：本页在 `TodayView` 的 `<KeepAlive>` 里，切走不卸载 ⇒ 监听必须挂
+  `onActivated` / 摘 `onDeactivated`，否则在「归类核对」按空格会把这里的颜色选上、按 `1` 直接写库认领。
+- **断言**：`today:ui` 410 → **423**（+5 键盘 +8 写路径）。三次变异复核全部按要求变红
+  （禁用 ↑↓ / 数字键恒取第一个 / 删掉合并弹层占位项）。**这就是 T3-7 现在唯一的守卫**，
+  `pod:ui` 不再单建 —— 绑定台已经并进这一页，单建等于同一批断言写两遍。
+- **T3-8（采集铺开）仍卡在用户侧**：真库 `pl_shop_items` 71 行 / **2 家店**，判据 `COUNT(DISTINCT shop_id) >= 14`
+  未达；不扫店，M3 的覆盖率判据（≥60%）永远是 0%。
+- **T5-6（四种演练）仍未实跑**：断网 / 登录过期 / 扩展未装 / Chrome 没开，需要真机操作，代码侧判据已由
+  `tests/schedulerPlan.spec.ts` 24 例覆盖。
+
+**门禁**：`pod:smoke` **24 项** · `tests/podRekey.spec.ts` 10 例 · `pod:worklist --expect 560,50` ✅ ·
+`pod:rekey` dry-run / `--apply` ✅ · `verify` / `verify:docs` / `lint`（0 error）/ `vue-tsc` / `npm run build` ✅。
+
 ---
 
 ### M4 · 报单闭环（2 天）
@@ -469,15 +623,83 @@ SELECT COUNT(*) FROM pod_variant_patterns vp
 | 编号 | 任务 | 落点 | 判据 | 依赖 |
 |---|---|---|---|---|
 | **T4-1** | 净需件 SQL（按图案聚合，**跨店铺**）+ 视图 `pod_order_need` | 附录 A | 3 单样例下，手算净需件与 SQL 一致 | M3 |
-| **T4-2** | 报单页：按净需件倒序，一行 = 图案编码 / 待印件 / 余量 / 净需件 / 报单张数 `ceil(净需件/每张件数)` | `src/modules/pod/` | 余量够的行净需件显示 0 且不进报单 | T4-1 |
+| **T4-2** | 报单页：按净需件倒序，一行 = 图案编码 / 待印件 / 余量 / 净需件 / 报单张数 `ceil(净需件/每张件数)` | `src/modules/today/tabs/PodOrderPanel.vue`（发货台 › 订花纸，2026-11-02 起） | 余量够的行净需件显示 0 且不进报单 | T4-1 |
 | **T4-3** | zip 导出：`报单_YYYYMMDD.zip` = `清单.xlsx` + 非零图案的**图稿**（`artwork_image_id`，**不是**预览图） | 主进程 xlsx + zip | 解压后图片张数 == 清单行数；抽样比对图稿与预览图不同 | T4-2 |
 | **T4-4** | 花纸批次入库 + 印花扣减：`pod_sheet_batches` 一行一批（`pieces_per_sheet` **记在批次行**）；印花完成才扣 `pod_sheet_ledger`（`reason='print'`，带 `ref_order_item_id`） | `electron/pod-db.ts` | 连续 3 天：`SUM(remaining_pieces)` 与手工盘点差 ≤ 2 件 | T4-1 |
-| **T4-5** | 余量看板：`pod_pattern_balance` 直读，低于阈值（如 20 件）标黄 | `src/modules/pod/` | 看板数字 == `SELECT SUM(remaining_pieces)` | T4-4 |
+| **T4-5** | 余量看板：`pod_pattern_balance` 直读，低于阈值（如 20 件）标黄 | `src/modules/today/tabs/PodOrderPanel.vue`（花纸库存收在同一页底部，2026-11-03 起） | 看板数字 == `SELECT SUM(remaining_pieces)` | T4-4 |
 
 **三条不能错的**：
 1. **余量按「件」算，不按「张」** —— 单位搞错，余量复用全废。
 2. **`pieces_per_sheet` 记批次行，不记图案主表** —— 换排版就变，记主表会让历史批次被新值改写。
 3. **报单时不扣余量，印花完成才扣** —— 报单只是意向，花纸没到就扣等于账上凭空少货。
+
+#### M4 施工记录（2026-11-01）
+
+| 任务 | 落点 | 验证 |
+|---|---|---|
+| T4-1 净需件 | **偏离**：新 `electron/pod-need.ts`（投影）+ `src/lib/podNeed.ts`（聚合）；**没有** `pod_order_need` 视图 | `tests/podNeed.spec.ts` **13 例**，含"3 单样例手算 == 聚合结果" |
+| T4-2 报单页 | `src/modules/today/tabs/PodOrderPanel.vue`（原独立模块的 NeedPanel，已随模块归档）：净需件倒序（同量按编码，刷新不跳行），净需件 0 的行**不进表** | "每张花纸多少件"只影响张数，不影响净需件（界面直接写着这句） |
+| T4-3 zip 导出 | 新 `electron/pod-report.ts` + `electron/zip-writer.ts`（零依赖 zip，5 例单测）+ 通道 `pod-report-export` | 新 `npm run pod:report:smoke` **14 项**（见下） |
+| T4-4 批次 + 印花扣减 | `pod-db.ts`：`podBatchCreate`（**建批不加余量**）/ `podBatchArrive`（幂等）/ `podPrint`（FIFO，**不足整批拒绝**）/ `podAdjust`（±，带符号流水）；纯函数 `electron/podLedger.ts`（`allocatePrint`） | `pod:smoke` 24 项里 **9 项**在这条链上；`tests/podLedger.spec.ts` 10 例 |
+| T4-5 余量看板 | `src/modules/today/tabs/PodOrderPanel.vue`（原独立模块的 BalancePanel，已随模块归档）直读 `pod-balance`（`pod_pattern_balance` + 已绑槽位数） | 阈值 20 件（`src/lib/podBinding.ts` 的 `POD_LOW_STOCK_PIECES`），等于 0（含负数）标红；`tests/podBinding.spec.ts` 10 例 |
+
+**唯一偏离 · T4-1 没有落地 `pod_order_need` 视图**：
+
+> 那个视图要求「待发货集合与 T2-1 同一份实现」，而那份实现是 `src/lib/mangoStatus.ts` 的**正则规则**。
+> 在 SQL 里手写 `biz_status IN ('待发货', …)` 就是第二套口径 —— "发货台说 3 单待发、报单说 5 件要印"
+> 正是这类分裂的经典症状（附录 A 底下那句警告说的就是这个）。改成两段、只留一份口径：
+> ① 主进程 `electron/pod-need.ts` 只**投影**（订单行 + 绑定索引 + 图案余量原样搬，带 `truncated` 截断标记）；
+> ② `src/lib/podNeed.ts` 做**聚合**，`isWaitingShip` 全仓只在这里被调用一次。
+> 判据「3 单样例下手算净需件与 SQL 一致」等价落在单测里（手算结果写死，用例里没有 SQL）。
+
+三条口径（与上面"三条不能错的"逐条对齐，另多一条）：
+
+- **件数按行算，不按单算**；`qty` 为空按 1 件计并计入 `assumedRows`（静默当 0 会让净需件偏小，
+  而偏小的报单意味着"料不够，等发现了再补"）。
+- **余量按件扣、扣到 0 为止**（负余量归零，不进净需件）—— 否则明明够料的图案也会被再买一次花纸。
+- **未绑定的待发件必须单独计数**（`unboundPieces` / `unboundRows`）。真库实测：75 个订单行只有
+  **4 行**能匹配到槽位；只汇总"已绑定"会得到一张看似正常、实则漏掉九成订单的报单。
+  导出时这句警告会**写进 xlsx 第 2 行**（不写，花纸商和老板都会当成"齐了"）。
+
+**T4-3 的判据（计划写的是"解压后图片张数 == 清单行数；抽样比对图稿与预览图不同"）现在由冒烟钉住**：
+
+`npm run pod:report:smoke`（新脚本）在临时库 + 仓库自带的**两张字节不同**的图上跑全链路：
+
+| 断言 | 为什么值得单独一条 |
+|---|---|
+| `图稿/` 文件数 == 净需件 > 0 且有图稿的行数；`missingArtwork` 回给界面 | 数字对不上 = 花纸商缺图制版 |
+| **打进 zip 的字节 == `artwork_image_id` 那张，且 ≠ `preview_image_id`** | 红线 7：传错一次整批报废，而导出**照样成功** |
+| 缺图稿的行留在清单里、图稿列写「（缺）」、备注写"预览图不能制版" | 不拿预览图兜底（兜底就是错印） |
+| 净需件 0 的行不进报单 | 否则"够料"的图案会被再买一次花纸 |
+| 编码里的 `/` → `_`（`safeName`） | 否则 zip 解出来是多一层目录 / 解不出来 |
+| 第 1/2/3 行 = 标题 / 警告 / 表头；合计行 = 各行和 | 打开第一眼就知道"哪天的、多少件一张、这份单偏少" |
+| 净需件全 0 时**抛错** | 导出一份空单比不导出更糟：看起来做完了 |
+
+**变异**（确认断言真的会咬人）：把图稿路径解析改成 `preview_image_id` ⇒ 冒烟当场红
+（`ENOENT … open ''`，因为夹具里预览图有、图稿 0 的那一行拿不到文件）—— 与"错印"同一条链路。
+
+**没验的（留待真实使用回填）**：T4-4 的运行期判据「连续 3 天 `SUM(remaining_pieces)` 与手工盘点差 ≤ 2 件」，
+以及"印花完成后到货单与实物一致" —— 这需要真实花纸到货数据。代码侧能钉的都钉了
+（建批不加余量 / 到货幂等 / FIFO 分批次 / 不足整批拒绝 / 盘点流水带符号 / 看板 == 视图求和）。
+
+**门禁**：`pod:report:smoke` **14 项** · `pod:smoke` **24 项** · `npm test` **1324 例 / 67 文件** ·
+`verify` · `verify:docs` · `lint`（0 error）· `vue-tsc` · `npm run build` 全绿。
+
+#### 结构变更（2026-11-02）：图案并入基础数据，订花纸搬去发货台
+
+用户口径：「把图案菜单放在基础数据-产品管理-颜色后面，界面参照颜色的界面设计，花纸库存直接显示在卡片下方，
+订花纸放在发货台的归类核对后面，样式参照拿货界面的样式，可以直接复制出今天所需的花纸图片和数量」。
+
+| 原（`src/modules/pod/` 的 `PodView.vue` 三页签） | 新家 | 说明 |
+|---|---|---|
+| 「认图案」页签 | `发货台 › 订花纸`（2026-11-03 起；`基础数据 › 产品管理 › 图案` 已撤）—— `src/modules/today/tabs/PodOrderPanel.vue` | 页签紧跟「归类核对」；按**款**分组、款内按颜色认图案（界面不复用 `ColorPanel.vue` 的三段式） |
+| 「花纸库存」页签 | 同上（合并成**图案卡片下方**那一行） | < 20 件标黄、0 件标红；登记到货 / 记录用掉 / 到货记录都在这一页 —— 认图与补货是同一件事的两半 |
+| 「订花纸」页签 | `发货台 › 订花纸` —— `src/modules/today/tabs/PodOrderPanel.vue` | 紧跟「归类核对」，**刻意不带步号**（队列 1 / 归类核对 2 / 拿货 3 / 结算对账 4）；样式照「拿货」；可一键把「今天要订的图案图 + 张数」复制成长图进剪贴板（`src/lib/podSheet.ts` 自绘 PNG + `writeClipboardImage`），另配纯文字清单与 zip 导出 |
+
+- 独立模块 `src/modules/pod/` 已撤并：`modules.config.json` 三处摘掉 `"pod"`（registry 随之重生成），
+  源码归档在 `.workbuddy/archive/pod-module-2026-11-02`（可恢复，未删除）。
+- 新守卫：`npm run master-data:ui` 断言「图案」页签紧跟「颜色」、两张卡片渲染、库存语气分档；
+  `npm run today:ui` 断言六页签齐全且 `classify → pod → purchase` 相邻。
 
 ---
 
@@ -491,6 +713,56 @@ SELECT COUNT(*) FROM pod_variant_patterns vp
 | **T5-4** | 唤起 Chrome 打开待发货 URL：**复用现成的** `openUrlInPreferredBrowser()`（`browser-open.ts:108`），不新写 | `scheduler.ts` 调用 | Chrome 打开到 `…/status/正常/normal` | T5-3 |
 | **T5-5** | 系统通知三种：成功（`同步 3 单`）/ 失败（带原因）/ **抓 0 条但总数 > 0**（这第三种最容易被漏，也最重要） | `scheduler.ts` | 断网演练出「失败」通知；把接口改坏演练出「0 条告警」 | T5-3 |
 | **T5-6** | 演练清单实跑：①断网重启 ②登录过期（Chrome 退出芒果）③扩展未装 ④Chrome 没开 | 手工 | 四种都能看到**明确原因**，没有一种是"静默没数据" | T5-1~5 |
+
+#### M5 施工记录（2026-11-01）
+
+代码分两层：**判定层** `electron/schedulerPlan.ts`（纯函数，零 Electron 依赖）+ **编排层**
+`electron/scheduler.ts`（弹浏览器 / 弹通知 / 写日志 / 挂计时器）。判据全部落在判定层，
+这样 T5-3 / T5-5 的每一条都能被 vitest 钉住 —— 副作用在 CI 里跑不了，判据不能跟着一起跑不了。
+
+| 任务 | 落点 | 验证 / 判据 |
+|---|---|---|
+| T5-1 托盘 | `electron/main.ts`：`createTray()`（18px，mac 模板图）、菜单「显示主窗口 / 立即同步 / 退出」、点托盘恢复窗口；`window-all-closed` **有托盘就不 quit**，`before-quit` 置 `isQuitting` | 托盘只能手工验（关窗 → 进程还在 → 托盘菜单点「显示主窗口」）；`scheduler:smoke` 覆盖它要写的日志表 |
+| T5-2 自启 + 隐藏启动 | `configureLoginItem()`（仅打包版）：mac `{openAtLogin:true, openAsHidden:true}`、Win/Linux `args:['--hidden']`；`shouldStartHidden(process.argv)`；`createWindow(show = !START_HIDDEN)` | `tests/schedulerPlan.spec.ts` 6 例（只认精确 `--hidden`，近似串不认）；`SELLERKIT_DISABLE_AUTOSTART=1` 可关 |
+| T5-3 调度器 | 新 `electron/scheduler.ts`（`startAutoSync` / `runAutoSync` / `onIngestDone`）+ 新表 `sk_auto_sync_log`（一次尝试一行：`day_key` / `at` / `source` / `action` / `reason` / `url`） | `scheduler:smoke` **12 项**；`tests/schedulerPlan.spec.ts` **24 例** |
+| T5-4 唤起浏览器 | 复用 `openUrlInPreferredBrowser()`（`browser-open.ts`，**不新写**）；URL = `…/order/list/search/status/正常/normal`，与扩展 `ORDER_LIST_URL` 同源 | 单测钉常量（换一个筛选页也能"打开成功"，但抓回来的是另一个列表且不报错）；打开失败写 `open_failed` + 通知 |
+| T5-5 三种通知 | `autoSyncNotice()`：成功（`同步 N 单（新增 x / 更新 y）` + 瑕疵注记）/ 失败（**原样**带 reason）/ 抓 0 条告警 | `tests/schedulerPlan.spec.ts` 三态 + 一条"zero 必须先于 failure"的顺序断言 |
+| T5-6 演练 | **手工四场景**（见下表） | 四种都要看到**明确原因**，没有一种是"静默没数据" —— 该场景**未实跑**（需要真机断网 / 退登录） |
+
+三条实现细节（都会出错、都不会报错）：
+
+1. **`decideAutoSync` 先判"一天上限"、再判"今天已同步"**。顺序反过来，超过 3 次之后原因会变成
+   "今天已同步"，而真相是"补跑用完了" —— 两个原因要不要做的事完全不同。`reason` 永不为空（通知原样显示）。
+2. **只有 `source='startup' AND action='open'` 计入"今天补跑了几次"**。`already_done` / `give_up` /
+   `no_push` / `offline` 都写日志（要能查），但**不占额度**；用户手点的「立即同步」（`source='manual'`）
+   也不挤占自动额度。这四条都有冒烟断言。
+3. **`day_key` 用本地时区**（与 `src/lib/localDay.ts` 刻意第二份实现 —— 两份都很小、互相 import 不值得）：
+   `toISOString().slice(0, 10)` 在东八区会让"今天 08:00 同步过"算成昨天，"一天一次"变成一天两次。
+   单测有一条直接用 `new Date('2026-11-01T16:30:00Z') → '2026-11-02'` 钉这个回归。
+
+**通知只在"我们自己去开过浏览器"时发**：`runAutoSync` 打开浏览器后挂 5 分钟 `pending` 计时器（`unref()`，
+不阻塞退出）；`ae-receiver` 收到回推时调 `onIngestDone(result)` → 清计时器 + 按 `autoSyncNotice` 发通知 +
+写 `done` 日志。用户手点采集（没有 `pending`）**不弹通知**（自己点的还弹一次等于打扰）；5 分钟没回推
+写 `no_push` 并通知"扩展可能没装 / 没登录" —— 这是"静默没数据"的唯一兜底。
+
+**顺带的两处工程登记**（漏了就静默消失）：`sk_auto_sync_log` 进 `scripts/db-inventory.cjs` 的域文件清单
+（漏登记 → 整张表在清单里不出现）；用途文案进 `scripts/refresh-table-comments.cjs`。
+托盘图标进 `electron-builder.yml` 的 `extraResources`（漏了 → 打包版**没有托盘**，开发版看不出问题）。
+
+**T5-6 手工演练清单**：
+
+| 场景 | 怎么做 | 期望看到 | 看到就说明哪里坏了 |
+|---|---|---|---|
+| ① 断网重启 | 关 Wi-Fi → 托盘退出 → `SELLERKIT_AUTO_SYNC=1 npm run dev` | 60s 内**不**弹浏览器；`sk_auto_sync_log` 一行 `offline`；通知「网络没就绪」 | 通知写「同步失败」= 判定顺序反了（会吓人） |
+| ② 登录过期 | Chrome 退出芒果 → 手动「立即同步」→ 在芒果页点扩展采集 | 通知「同步失败」+ 原样 reason；日志 `done`；界面状态条红 | 通知说「今天没有待发货」= 红线 1 被吃掉 |
+| ③ 扩展未装 | 停用扩展 → 手动同步 → 等 5 分钟 | 通知「浏览器开了但没回推」；日志 `no_push` | 什么都没有 = 又变成静默无数据 |
+| ④ Chrome 没开 | 默认浏览器未能启动 → 重启 | 日志 `open_failed` + 通知带原因 | 「没反应」= 失败没有出口 |
+
+> 演练前先看 `sk_auto_sync_log` 最新几行（`action` / `reason`）—— 通知只存在几秒，
+> 日志才是事后能查的那一份（红线 10：没有日志的自动化等于没有自动化）。
+
+**门禁**：`scheduler:smoke` **12 项** · `tests/schedulerPlan.spec.ts` **24 例** ·
+`npm test` **1324 例 / 67 文件** · `verify` · `verify:docs` · `lint`（0 error）· `vue-tsc` · `npm run build` 全绿。
 
 ---
 
@@ -519,6 +791,10 @@ npm run schema:smoke    # 迁移幂等（老库 → 新库）
 npm run mango:smoke     # M1 起
 npm run today:ui        # M2 起
 npm run order:smoke     # M0 起
+npm run pod:smoke       # M3 起（图案域四表两视图 + 绑定/批次/流水）
+npm run pod:report:smoke # M4 起（报单 zip 的图稿/清单对账，红线 7）
+npm run scheduler:smoke # M5 起（sk_auto_sync_log 的补跑计数与日志形状）
+npm run pod:worklist -- --expect 560,50   # M3 起（真库副本读一遍覆盖率分母）
 ```
 
 ### 6.2 红线（破了就停，不要"先上线再说"）
@@ -548,25 +824,31 @@ npm run order:smoke     # M0 起
 | **M0** | 断点修复（T0-1~6） | 1.5 d | — | 采集路径字段齐 ✅ |
 | **M1** | 入库通道（T1-1~8） | 2 d | M0 | 扩展能推，日志能查 ✅ |
 | **M2** | 今日待办（T2-1~5） | 1.5 d | M1 | 早上打开知道做什么 ✅ |
-| **M3** | 图案槽位（T3-1~8） | 3 d | M1 | 560 槽位可绑，覆盖率 ≥ 60% |
-| **M4** | 报单闭环（T4-1~5） | 2 d | M3 | 一键出花纸报单 |
-| **M5** | 开机自动化（T5-1~6） | 1.5 d | M1、M2 | 重启电脑无人干预 |
+| **M3** | 图案槽位（T3-1~8） | 3 d | M1 | 560 槽位可绑（覆盖率 ≥ 60% **待 T3-8**）· T3-1~7 ✅ |
+| **M4** | 报单闭环（T4-1~5） | 2 d | M3 | 一键出花纸报单 ✅（T4-4 三天盘点实测待真实数据） |
+| **M5** | 开机自动化（T5-1~6） | 1.5 d | M1、M2 | 重启电脑无人干预 ✅（T5-6 四场景待人工演练） |
 
-> 施工进度（2026-11-01）：**M0 / M1 / M2 已完成**；M3 已完成 T3-1（图案槽位域建表）与 T3-4（判别力统计），
-> T3-2 / T3-3 早已随 M0 的 T0-6 落地。下一步 T3-5（待绑定清单真库实跑，验收 560 行 / 50 个带图键）。
-> M2 的门禁数字：`npm test` 1236 例 / 60 文件、`today:ui` 377 项 PASS；M3 至 T3-4 后为 1252 例 / 61 文件。
+> 施工进度（2026-11-01）：**M0 / M1 / M2 / M3（T3-1~T3-7）/ M4 / M5 已完成**。
+> T3-2 / T3-3 随 M0 的 T0-6 落地；T3-5 真库实跑 **560 槽位 / 50 带图键 / 71 链接 / 2 家店**；
+> T3-6 真库实测「塌陷前缀 10 条、订单行 0 行引用 ⇒ 重算幂等零副作用」；T3-8（扫剩余 14 家店）卡在用户侧。
+> **门禁数字**：`npm test` **1328 例 / 67 文件** · `today:ui` 377 项 · `pod:smoke` 24 项 ·
+> `pod:report:smoke` 14 项 · `scheduler:smoke` 12 项 · `mango:smoke` 25 项 · `shop-item:smoke` 58 项 ·
+> `schema:smoke` 全绿（含图案域 [I] 5 条 / [J] 5 条）· `verify` / `verify:docs` / `lint`（0 error）/ `vue-tsc` / `build` 全绿。
 
 **顺序不能换的三条**：
 
 1. **M0 不过不进 M1** —— 同步进来的是死数据。
 2. **M3 覆盖率 < 60% 不进 M4** —— 报单建立在绑定之上，绑定不全就去报单，等于按残缺数据买花纸。
+   ⚠️ **2026-11-01 实际处置**：真库覆盖率此刻是 **0%**（只采了 2/16 家店），这条前置**按字面不成立**；
+   M4 仍然落地，是因为把"没绑完"做成了**页面上看得见的数**（未绑件数进汇总、写进导出清单第 2 行、
+   覆盖率条把「≥60% 且塌陷 100%」并成一个结论）。**没有这层显式化就不许进 M4**。
 3. **M5 放最后** —— 自动化跑的是 M1/M2 的链路，链路没稳就自动化，等于每天自动失败一次。
 
 **可以并行的**：M3 与 M2 无依赖关系，两人做可并行；M5 也可以提前做 T5-1/T5-2（托盘与自启与业务无关）。
 
 ---
 
-## 附录 A · 图案域 DDL（照抄，已在真库副本跑通）
+## 附录 A · 图案域 DDL（照抄 `electron/pod-db.ts` 的 `POD_SCHEMA`，真库副本已跑通）
 
 ```sql
 PRAGMA foreign_keys = ON;
@@ -637,51 +919,59 @@ LEFT JOIN pod_sheet_ledger  l ON l.batch_id  = b.id
 GROUP BY p.id;
 
 -- 待绑定清单（实测 560 行 / 其中塌陷 50 行 / 覆盖 71 链接）
-CREATE VIEW IF NOT EXISTS pod_binding_worklist AS
+-- ⚠️ 代码里这条视图是 **DROP + CREATE**（`ensureViewShape`），不是 `IF NOT EXISTS`：
+--    形状变了就重建。`IF NOT EXISTS` 会在"已经建过旧形状"的库里静默保留旧列，
+--    表现和"没跑迁移"一模一样（2026-11-01 一天内给它加过 image_url、换过店铺段）。
+-- ⚠️ 建它之前 `pl_shop_items` 与 `sk_shops` 必须都在 —— SQLite 会解析 schema 里所有视图，
+--    引用了不存在的表时报错会打在**别处**的 SQL 上（`error in view … no such table: main.pl_shop_items`）。
+DROP VIEW IF EXISTS pod_binding_worklist;
+CREATE VIEW pod_binding_worklist AS
 WITH sku AS (
-  SELECT i.item_id, s.name AS shop, j.value->>'color' AS color, j.value->>'imageUrl' AS img
+  SELECT i.item_id AS item_id, s.name AS shop,
+         -- 键里的店铺段必须与订单行**逐字节相同**：订单侧是 toNameKey(oi_orders.shop)，
+         -- 而 sk_shops.name_key 就是同一份归一（唯一索引也建在它上面）。
+         -- 用展示名 s.name 的风险：店名多一个空格 / 零宽字符，560 个槽位与订单行一个都匹配不上。
+         COALESCE(NULLIF(trim(s.name_key), ''), s.name) AS shop_key,
+         j.value->>'color' AS color, j.value->>'imageUrl' AS img
   FROM pl_shop_items i JOIN sk_shops s ON s.id = i.shop_id, json_each(i.sku_json) j
   WHERE i.sku_json <> ''
 ), slot AS (
-  SELECT item_id, shop, color, img FROM sku GROUP BY item_id, shop, color, img
+  SELECT item_id, shop, shop_key, color, img FROM sku GROUP BY item_id, shop, shop_key, color, img
 ), namecnt AS (
-  SELECT item_id, color, COUNT(*) AS imgs FROM slot GROUP BY item_id, color
+  -- 商品ID 只在店内唯一，跨店同 ID 不是同一个链接
+  SELECT shop_key, item_id, color, COUNT(*) AS imgs FROM slot GROUP BY shop_key, item_id, color
 )
 SELECT
-  s.shop || char(0) || s.item_id || char(0) || s.color
+  s.shop_key || char(0) || s.item_id || char(0) || s.color
     || CASE WHEN n.imgs > 1
             THEN char(0) || substr(s.img, instr(s.img,'/kf/')+4,
                                    instr(substr(s.img,instr(s.img,'/kf/')+4),'.')-1)
             ELSE '' END AS variant_key,
-  s.shop, s.item_id, s.color,
+  s.shop AS shop, s.item_id AS item_id, s.color AS color,
   CASE WHEN n.imgs > 1
        THEN substr(s.img, instr(s.img,'/kf/')+4, instr(substr(s.img,instr(s.img,'/kf/')+4),'.')-1)
        ELSE '' END AS image_key,
-  n.imgs AS imgs_in_name
+  n.imgs AS imgs_in_name,
+  -- 该槽位自己的色图：塌陷链接里"同名色"的几张图长得不一样，绑定台必须看得到差异 ——
+  -- 只给图键（一串 S3f2a…）等于让用户凭记忆挑图案，而那正是错印的来源。
+  s.img AS image_url
 FROM slot s JOIN namecnt n ON n.item_id = s.item_id AND n.color = s.color;
-
--- 报单净需件（T4-1）
-CREATE VIEW IF NOT EXISTS pod_order_need AS
-WITH need AS (
-  SELECT vp.pattern_id, SUM(COALESCE(oi.qty,1)) AS pieces
-  FROM oi_order_items oi
-  JOIN oi_orders o     ON o.id = oi.order_id
-  JOIN pod_variant_patterns vp ON vp.variant_key = oi.variant_key
-  WHERE o.biz_status IN (/* 待发货集合，与 T2-1 同一份实现 */)
-  GROUP BY vp.pattern_id
-)
-SELECT p.code, n.pieces AS 待印件,
-       COALESCE(b.remaining_pieces, 0) AS 余量,
-       CASE WHEN n.pieces > COALESCE(b.remaining_pieces, 0)
-            THEN n.pieces - COALESCE(b.remaining_pieces, 0) ELSE 0 END AS 净需件
-FROM need n
-JOIN pod_patterns p ON p.id = n.pattern_id
-LEFT JOIN pod_pattern_balance b ON b.pattern_id = n.pattern_id
-WHERE n.pieces > COALESCE(b.remaining_pieces, 0);
 ```
 
-> ⚠️ **`pod_order_need` 里那个 `IN (…)` 不能手写状态字符串**：必须与 T2-1 的 `mangoStatus.ts` 同源，
-> 否则"发货台说 3 单待发"和"报单说 5 件要印"会对不上（两套状态口径是这类系统最经典的分裂）。
+> **本节相对最早那版的三处修正（2026-11-01 施工时改的，均已同步到 `electron/pod-db.ts` 与
+> `scripts/pod-pattern-schema.sql`，三处必须一致）**：
+>
+> 1. **`pod_binding_worklist` 的店铺段改用 `sk_shops.name_key`**（订单侧是 `toNameKey(oi_orders.shop)`）。
+>    真库此刻 16 家店 `name ≡ name_key`，所以这是"防未来的静默错键"，不是修已知错。
+> 2. **工作清单补 `image_url`**（塌陷槽位必须能看见自己的那张色图）。
+> 3. **`pod_order_need` 视图没有落地**（唯一一处删减）：它要筛"待发货集合"，而那份口径的唯一实现是
+>    `src/lib/mangoStatus.ts` 的正则规则；SQL 里手写 `biz_status IN ('待发货', …)` 就是第二套口径。
+>    改成主进程投影（`electron/pod-need.ts`）+ 渲染层聚合（`src/lib/podNeed.ts`），
+>    `isWaitingShip` 全仓只在那里被调用一次。详见 M4 施工记录的「唯一偏离」。
+>
+> 另：判别力两列（`pod_n_colors` / `pod_n_images`）正式路径是 `shop-item-db.ts` 的**迁移 v3**
+> （补列 + 回填存量，回填口径 = `electron/podLinkStats.ts`），本附录里那两行 `ALTER` 只是"形状说明"，
+> 不许直接对库执行（SQLite 没有 `ADD COLUMN IF NOT EXISTS`，重复执行会让用户升级那一刻失败）。
 
 ---
 

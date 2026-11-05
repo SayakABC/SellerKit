@@ -10,8 +10,14 @@
 // 所以这里定义的是**结构同构**的草稿类型，而不是 import 那个模块的类型 —— 一旦 import，
 // 本文件就被 better-sqlite3 拖下水，vitest 再也测不了。
 //
-// 接口形状的唯一来源是真实响应：`SellerKitExtensions/tests/fixtures/mango-search.sample.json`
-// （脱敏后的抓包，字段与生产逐字一致）。改这里之前先看它，别照文档猜字段名。
+// **接口形状有两个来源，都必须认**：
+//   ① 芒果原始响应（`SellerKitExtensions/tests/fixtures/mango-search.sample.json`，字段与生产逐字一致）；
+//   ② 扩展真正推过来的**规整帧** —— `SellerKitExtensions/extensions/mango-order/src/mango-parse.js`
+//      的 `toOrder` 输出（`orderNo` / `shopName` / `lines` / `amountCents` / 已格式化的本地时间串…）。
+//
+// 为什么必须同时认两套（2026-11-02 线上事故）：扩展推的是 ②，而本层当时只认 ① ⇒ 每一帧都落进
+// "缺少 orderId"，4 单全被跳过，响应却是 `ok:true`，扩展只显示"推送 成功（新 0 / 更新 0）"。
+// 只改文档猜字段名是不够的：契约测试要拿**扩展自己的解析器**造帧（见 `scripts/mango-ingest-smoke.cjs`）。
 
 // 注意本文件唯一的 import：`shopName` 是纯函数模块（零 better-sqlite3 依赖），
 // 店名归一口径只有它一份 —— 谁自己 trim，谁就会把"十店"和"十店 "拆成两家。
@@ -59,6 +65,7 @@ export interface MangoToInternalResult {
 
 /** 芒果帧里可能会读到的字段（宽松：真实响应里字段远不止这些，未知字段一律原样保留进快照） */
 interface MangoOrderLike {
+  // ── 芒果原始响应（路径 ①）
   orderId?: unknown;
   alias?: unknown;
   authId?: unknown;
@@ -74,6 +81,28 @@ interface MangoOrderLike {
   labelMap?: unknown;
   orderItemList?: unknown;
   aeInternetInfoDTO?: unknown;
+  // ── 扩展规整帧（路径 ②，`mango-parse.js` 的 `toOrder`；这是线上真实推送的形状）
+  orderNo?: unknown;
+  shopName?: unknown;
+  shopAuthId?: unknown;
+  platformStatusCn?: unknown;
+  platformStatus?: unknown;
+  status?: unknown;
+  /** 扩展已格式化成 `YYYY-MM-DD HH:mm:ss`（本地时区），不是毫秒 */
+  orderTime?: unknown;
+  payTime?: unknown;
+  deadline?: unknown;
+  timeoutAt?: unknown;
+  currency?: unknown;
+  /** 扩展已算成"分"（`toCents`），拿它就别再过一遍 `mangoCents` */
+  amountCents?: unknown;
+  /** 标签名数组（扩展已把 `labelMap` 摊平） */
+  labels?: unknown;
+  countryCn?: unknown;
+  /** 克（扩展把 `weight` 的千克换成了整数克） */
+  weightGram?: unknown;
+  /** 扩展的明细数组：`{ itemId, skuCode, qty, color, size, imgUrl, attrs }` */
+  lines?: unknown;
   [key: string]: unknown;
 }
 
@@ -141,12 +170,30 @@ export function mangoLabels(v: unknown): string[] {
   return [...out].sort();
 }
 
+/** 本地时间串（扩展 `toLocalStamp` 的产物）。只认这个形状 —— 别的字符串别往时间列里写 */
+const LOCAL_STAMP = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/**
+ * 时间取值：先按毫秒/秒解析（原始响应），再回落扩展**已经格式化好的**本地时间串。
+ *
+ * 为什么要有第二条：扩展 `toOrder` 交的是 `'YYYY-MM-DD HH:mm:ss'`（它已经把毫秒转成本地时间），
+ * 而 `mangoTime('2026-11-01 12:00:00')` 得到的是 `''`（`Number()` 是 NaN）——
+ * 只走 `mangoTime` 会让规整帧的 `order_time` / `pay_time` 整列变空。
+ */
+function stampOrText(ms: unknown, text: unknown): string {
+  const t = mangoTime(ms);
+  if (t) return t;
+  const s = str(text);
+  return LOCAL_STAMP.test(s) ? s : '';
+}
+
 /**
  * 一帧芒果订单 → 内部草稿。
  *
  * 三条判定：
- *   1. **没有 orderId 就整帧拒绝**（`order=null` + 原因）—— 空单号会在主表撞
+ *   1. **没有单号就整帧拒绝**（`order=null` + 原因）—— 空单号会在主表撞
  *      `NOT NULL UNIQUE`，且"不知道是哪一单"本来也无从合并；
+ *      单号两个键名（原始响应 `orderId` / 扩展规整帧 `orderNo`）都认；
  *   2. **没有店名不拒绝**：`shop=''` 落"未登记桶"（与 `matchShopByStore` 同口径 —— 店名
  *      认不出是数据问题，不该让订单进不来；`shop_auth_id` 还在，后续能补）；
  *   3. **空明细也不拒绝**：插一行占位（件数 1），因为"订单数"不能被帧的空误吞掉。
@@ -158,23 +205,30 @@ export function toInternal(frame: unknown): MangoToInternalResult {
     return { order: null, reason: '订单不是对象', warnings };
   }
   const o = frame as MangoOrderLike;
-  const orderNo = clip(str(o.orderId), MAX_ORDER_NO);
-  if (!orderNo) return { order: null, reason: '缺少 orderId', warnings };
+  // 两套键名：原始响应 `orderId` / 扩展规整帧 `orderNo`。哪个有值用哪个（不许只认一套）。
+  const orderNo = clip(str(o.orderId) || str(o.orderNo), MAX_ORDER_NO);
+  if (!orderNo) return { order: null, reason: '缺少订单号（orderId / orderNo）', warnings };
 
-  const shopAuthId = clip(str(o.authId), MAX_ORDER_NO);
-  const shop = clip(str(o.alias), MAX_SHOP);
+  const shopAuthId = clip(str(o.authId) || str(o.shopAuthId), MAX_ORDER_NO);
+  const shop = clip(str(o.alias) || str(o.shopName), MAX_SHOP);
   if (!shop) warnings.push(`店铺别名为空（authId=${shopAuthId || '无'}），落未登记桶`);
 
   // 状态取中文原文（芒果界面显示的那个）。`cnOrderStatus` 缺失时回落 `orderStatus`（平台英文码）
   // —— 两者都存原文，**不在这里做 bucket 映射**（那是 `src/lib/mangoStatus.ts` 的唯一职责，
   // 一处实现；这里换一套就是把「发货台说 3 单待发」和「报单说 5 件要印」变成两个口径）。
-  const bizStatus = clip(str(o.cnOrderStatus) || str(o.orderStatus), MAX_STATUS);
+  const bizStatus = clip(
+    str(o.cnOrderStatus) || str(o.platformStatusCn) || str(o.orderStatus) || str(o.platformStatus) || str(o.status),
+    MAX_STATUS,
+  );
   if (!bizStatus) warnings.push('订单状态为空（发货台无法判断待发/已发）');
 
   // 金额：`payAmount` 是订单实付。币种不是 CNY 时**不折算、给 null** ——
   // 汇率属 ae 域（`ae_rates`），本层零依赖读不到，猜一个 1:1 就是把外币单记成人民币。
-  const currency = (str(o.currencyCode) || 'CNY').toUpperCase();
-  const amountCents = currency === 'CNY' ? mangoCents(o.payAmount) : null;
+  // 扩展已在那边算好"分"（`amountCents`），此时**不要再乘 100**。
+  const currency = (str(o.currencyCode) || str(o.currency) || 'CNY').toUpperCase();
+  const prefilledCents =
+    typeof o.amountCents === 'number' && Number.isFinite(o.amountCents) ? Math.round(o.amountCents) : null;
+  const amountCents = currency === 'CNY' ? (prefilledCents ?? mangoCents(o.payAmount)) : null;
   if (currency !== 'CNY') {
     warnings.push(`币种 ${currency} 未折算（缺汇率链），金额记 null 而不是猜一个数`);
   } else if (amountCents === null) {
@@ -186,24 +240,31 @@ export function toInternal(frame: unknown): MangoToInternalResult {
   // 「有截止风险」只认这一列。`qualifiedTime` 仍存进 `timeout_at` 但**不参与任何判定** ——
   // 两者差的是稳定的 6 天，"取更近的那个"会把固定偏差纠成一堆假告警，假告警三天就没人看了。
   const internet = (o.aeInternetInfoDTO ?? null) as Record<string, unknown> | null;
-  const dealDeadline = mangoTime(o.sendGoodExpiredDate);
-  const timeoutAt = mangoTime(internet?.qualifiedTime);
+  const dealDeadline = stampOrText(o.sendGoodExpiredDate, o.deadline);
+  const timeoutAt = stampOrText(internet?.qualifiedTime, o.timeoutAt);
   if (!dealDeadline) warnings.push('缺少最晚发货日（无法算截止风险）');
 
-  const items = Array.isArray(o.orderItemList) ? o.orderItemList : [];
+  const items = Array.isArray(o.orderItemList)
+    ? o.orderItemList
+    : Array.isArray(o.lines)
+      ? o.lines
+      : [];
   const lines: MangoOrderDraft['lines'] = [];
   const seen = new Set<string>();
   for (const raw of items) {
     const it = (raw ?? {}) as Record<string, unknown>;
-    const itemId = clip(str(it.productId), MAX_ITEM_ID);
-    const attrs = (it.attrMap ?? {}) as Record<string, unknown>;
+    // 商品ID：原始响应 `productId` / 扩展规整帧 `itemId`
+    const itemId = clip(str(it.productId) || str(it.itemId), MAX_ITEM_ID);
     // `attrMap` 是**结构化**的（真机抓包确认），不需要解析规格文本 —— 当初"规格不可靠"
     // 的担心在接口这条路上不存在。键名按实测：`Color` / `Size`（大小写敏感）。
-    const color = clip(str(attrs['Color']) || str(attrs['color']), MAX_COLOR);
-    const size = clip(str(attrs['Size']) || str(attrs['size']), MAX_SIZE);
+    // 扩展规整帧把色/码提到了行上（`color` / `size`），两者都认。
+    const attrs = (it.attrMap ?? it.attrs ?? {}) as Record<string, unknown>;
+    const color = clip(str(attrs['Color']) || str(attrs['color']) || str(it.color), MAX_COLOR);
+    const size = clip(str(attrs['Size']) || str(attrs['size']) || str(it.size), MAX_SIZE);
     const skuCode = clip(str(it.skuCode), MAX_SKU_CODE);
-    const imageUrl = str(it.productImgUrl) || str(it.productBigImgUrl);
-    const qty = Math.max(1, Math.round(Number(it.productCount) || 1));
+    const imageUrl = str(it.productImgUrl) || str(it.productBigImgUrl) || str(it.imgUrl);
+    const qtyRaw = it.productCount === undefined ? it.qty : it.productCount;
+    const qty = Math.max(1, Math.round(Number(qtyRaw) || 1));
     // 同帧内**同一个 skuCode 只留一行**（芒果偶有重复行：合并订单展开）。没有 skuCode 时
     // 用"商品ID+色+码"作去重键 —— 宁可少一条重复行，不要同一件货算两遍。
     const identified = Boolean(itemId || color || size);
@@ -226,21 +287,29 @@ export function toInternal(frame: unknown): MangoToInternalResult {
     采集帧: JSON.stringify(o).slice(0, MAX_RAW_VALUE),
   };
   // 几个"人要看"的字段另存一份，免得翻 JSON 才能回答"这单发到哪、多重"。
-  const country = str(o.countryCode);
+  // 原始响应是 `countryCode`+`labelMap`+`weight(kg)`；扩展规整帧是 `countryCn`+`labels[]`+`weightGram`。
+  const country = str(o.countryCode) || str(o.countryCn);
   if (country) rawFields['目的地国家'] = country;
   const labels = mangoLabels(o.labelMap);
-  if (labels.length) rawFields['订单标签'] = labels.join('、');
-  const weight = Number(o.weight);
-  if (Number.isFinite(weight) && weight > 0) rawFields['重量kg'] = String(weight);
+  if (labels.length) {
+    rawFields['订单标签'] = labels.join('、');
+  } else if (Array.isArray(o.labels)) {
+    const names = o.labels.map((x) => str(x)).filter(Boolean);
+    if (names.length) rawFields['订单标签'] = names.join('、');
+  }
+  const weightKg = Number(o.weight);
+  const grams = Number(o.weightGram);
+  if (Number.isFinite(weightKg) && weightKg > 0) rawFields['重量kg'] = String(weightKg);
+  else if (Number.isFinite(grams) && grams > 0) rawFields['重量kg'] = (grams / 1000).toFixed(3);
 
   return {
     order: {
       orderNo,
-      orderTime: mangoTime(o.aeGmtCreate) || mangoTime(o.gmtPayTime),
+      orderTime: stampOrText(o.aeGmtCreate, o.orderTime) || stampOrText(o.gmtPayTime, o.payTime),
       bizStatus,
       shop,
       amountCents,
-      payTime: mangoTime(o.gmtPayTime),
+      payTime: stampOrText(o.gmtPayTime, o.payTime),
       shopAuthId,
       dealDeadline,
       timeoutAt,

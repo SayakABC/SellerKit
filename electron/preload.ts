@@ -18,6 +18,13 @@ const sanitizePurchaseItems = (items: any) => {
       priceCents: typeof it?.priceCents === 'number' ? Math.max(0, Math.round(it.priceCents)) : 0,
       suggestionQty:
         typeof it?.suggestionQty === 'number' ? Math.max(0, Math.round(it.suggestionQty)) : 0,
+      // 款色 id 是"已拿 ↔ 需求"的身份键（不是展示字段）：这里丢掉它，开出的单每行都会
+      // `style_color_id = 0`，编辑器就退回「色未定 · 选一个」，用户得再选一次色。
+      styleColorId:
+        typeof it?.styleColorId === 'number' ? Math.max(0, Math.round(it.styleColorId)) : 0,
+      // **下单码**（亚洲款加码）：`size` 是拿货码，这一列是订单原文码。
+      // 丢掉它 ⇒ 加码单的"这批货覆盖了哪几条订单行"整批匹配不上（见 `PurchaseItem.orderSize`）。
+      orderSize: typeof it?.orderSize === 'string' ? it.orderSize.slice(0, 50) : '',
     }))
     .slice(0, 500);
 };
@@ -50,7 +57,13 @@ const sanitizePickingExportRows = (rows: any) => {
       styleCode: typeof r?.styleCode === 'string' ? r.styleCode.slice(0, 60) : '',
       color: typeof r?.color === 'string' ? r.color.slice(0, 60) : '',
       size: typeof r?.size === 'string' ? r.size.slice(0, 20) : '',
+      // 下单码（亚洲款加码）：与 `size`（拿货码）不同时导出表里标成 `XL（下单L）`
+      orderSize: typeof r?.orderSize === 'string' ? r.orderSize.slice(0, 40) : '',
       pieces: typeof r?.pieces === 'number' ? Math.max(0, Math.round(r.pieces)) : 0,
+      // ⚠️ 之前漏了这两列：`buildPickingWorkbook` 读 `it.taken/it.remaining`，不在消毒里透传
+      // 就是恒 0 —— 界面「还差 12」、导出表「还差 0」，而且不报错（2026-11-02 补）。
+      taken: typeof r?.taken === 'number' ? Math.max(0, Math.round(r.taken)) : 0,
+      remaining: typeof r?.remaining === 'number' ? Math.max(0, Math.round(r.remaining)) : 0,
       orders: typeof r?.orders === 'number' ? Math.max(0, Math.round(r.orders)) : 0,
       unitPrice: money(r?.unitPrice),
       amount: money(r?.amount),
@@ -138,11 +151,7 @@ const sanitizeShopAccountInput = (payload: any) => {
   nonNeg('ziniaoAccountId');
   nonNeg('erpAccountId');
   // 记分分值：只收 ≥ 0 的有限数（可为小数；负数 / NaN 由主进程再挡一次）
-  if (
-    typeof payload?.score === 'number' &&
-    Number.isFinite(payload.score) &&
-    payload.score >= 0
-  ) {
+  if (typeof payload?.score === 'number' && Number.isFinite(payload.score) && payload.score >= 0) {
     out.score = Math.min(payload.score, 2147483647);
   }
 
@@ -158,7 +167,7 @@ const sanitizeShopAccountInput = (payload: any) => {
   }
   if (Array.isArray(payload?.clearSecrets)) {
     const clear = payload.clearSecrets.filter(
-      (v: unknown): v is string => typeof v === 'string' && allowedSecretKeys.includes(v),
+      (v: unknown): v is string => typeof v === 'string' && allowedSecretKeys.includes(v)
     );
     if (clear.length) out.clearSecrets = clear;
   }
@@ -242,6 +251,9 @@ const sanitizeCompanyInput = (payload: any) => {
     legalPerson: s(payload?.legalPerson, 60),
     contactName: s(payload?.contactName, 60),
     contactPhone: s(payload?.contactPhone, 40),
+    // ⚠️ 必须带：企业表的支付宝是店铺侧「扣运费账号」的唯一来源；sanitize 会把缺省字段压成空串，
+    // 漏传这一行 ⇒ 每次保存企业都把已维护的支付宝清空。
+    alipayAccount: s(payload?.alipayAccount, 200),
     contactEmail: s(payload?.contactEmail, 200),
     vatNo: s(payload?.vatNo, 60),
     eoriNo: s(payload?.eoriNo, 60),
@@ -316,7 +328,8 @@ const sanitizeMarketItem = (raw: any) => {
 // ⚠️ 这里的 `opt*` 系列**只在该字段确实存在时**才消毒，`undefined` 必须原样保留：
 //    主进程对 `undefined` 的语义是"保持原值"，一旦在 preload 折成 `''` / `0`，
 //    更新条目时就会把用户没碰过的备注、科目静默清空（这类 bug 界面上完全看不出来）。
-const optNum = (v: any): number | undefined => (v === undefined ? undefined : Math.trunc(Number(v)) || 0);
+const optNum = (v: any): number | undefined =>
+  v === undefined ? undefined : Math.trunc(Number(v)) || 0;
 const optStr = (v: any, max: number): string | undefined =>
   v === undefined ? undefined : String(v).slice(0, max);
 const optIdList = (v: any, limit: number): number[] => {
@@ -371,9 +384,11 @@ const sanitizeLedgerTemplateSheets = (sheets: any) => {
   return sheets.slice(0, 8).map((s: any) => ({
     name: typeof s?.name === 'string' ? s.name.slice(0, 31) : '',
     rows: (Array.isArray(s?.rows) ? s.rows.slice(0, 2000) : []).map((r: any) =>
-      (Array.isArray(r) ? r.slice(0, 40) : []).map((c: any) => String(c ?? '').slice(0, 500)),
+      (Array.isArray(r) ? r.slice(0, 40) : []).map((c: any) => String(c ?? '').slice(0, 500))
     ),
-    widths: (Array.isArray(s?.widths) ? s.widths.slice(0, 40) : []).map((w: any) => Math.trunc(Number(w)) || 0),
+    widths: (Array.isArray(s?.widths) ? s.widths.slice(0, 40) : []).map(
+      (w: any) => Math.trunc(Number(w)) || 0
+    ),
   }));
 };
 
@@ -386,8 +401,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('save-template', filePath, content),
   writeClipboard: (text: string) => ipcRenderer.invoke('write-clipboard', text),
   // 写图片剪贴板（PNG dataURL）：「复制给厂家」把发厂清单图送进系统剪贴板
-  writeClipboardImage: (dataUrl: string) =>
-    ipcRenderer.invoke('write-clipboard-image', dataUrl),
+  writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke('write-clipboard-image', dataUrl),
   // 打开外链（「打开店铺」；主进程只放行 http/https，且优先 Chrome、用不了回落系统默认浏览器）
   openExternal: (url: string) =>
     ipcRenderer.invoke('open-external', String(url ?? '').slice(0, 2048)),
@@ -398,6 +412,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkFileExists: (filePath: string) => ipcRenderer.invoke('check-file-exists', filePath),
   readFile: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
   getDefaultTemplatePath: () => ipcRenderer.invoke('get-default-template-path'),
+  // 规则求值隔离窗口（jsExpression）：含代码的规则一律送窗口执行。
+  // 主窗口不再有 `new Function` —— 见 electron/rule-eval-window.ts 与 index.html 的 CSP。
+  ruleEvalBatch: (payload: { rule: { id: string; code: string }; fields: Record<string, string>[] }) =>
+    ipcRenderer.invoke('rule-eval-batch', payload),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   resetStore: () => ipcRenderer.invoke('reset-store'),
   // 数据备份/恢复（换机迁移）：选目录 / 导出 / 导入 / 打开数据目录
@@ -444,14 +462,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
           : undefined,
       search: typeof payload?.search === 'string' ? payload.search.slice(0, 100) : undefined,
       // 导入日过滤：只放行 `yyyy-mm-dd`（主进程再按 `date(created_at)` 比）
-      importDate: typeof payload?.importDate === 'string' ? payload.importDate.slice(0, 10) : undefined,
+      importDate:
+        typeof payload?.importDate === 'string' ? payload.importDate.slice(0, 10) : undefined,
     }),
   orderClear: () => ipcRenderer.invoke('order-clear'),
   // 运费原始行（oi_orders 最小投影 id/order_no/raw_fields，只读；供按订单算运费的宿主 op 提取）
   orderAssignShop: (payload: any) =>
     ipcRenderer.invoke('order-assign-shop', {
       orderNos: Array.isArray(payload?.orderNos)
-        ? payload.orderNos.slice(0, 2000).map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
+        ? payload.orderNos
+            .slice(0, 2000)
+            .map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
         : [],
       shopName: typeof payload?.shopName === 'string' ? payload.shopName.slice(0, 200) : '',
     }),
@@ -810,12 +831,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ? [
           ...new Set(
             payload.sourceStyleIds.filter(
-              (n: unknown) => typeof n === 'number' && n > 0 && n !== target,
-            ),
+              (n: unknown) => typeof n === 'number' && n > 0 && n !== target
+            )
           ),
         ].slice(0, 50)
       : [];
-    return ipcRenderer.invoke('order-style-merge', { targetStyleId: target, sourceStyleIds: sources });
+    return ipcRenderer.invoke('order-style-merge', {
+      targetStyleId: target,
+      sourceStyleIds: sources,
+    });
   },
   // 拆开一次合并（按批次 id，不是行 id：一次 N→1 写 N 行）
   orderStyleUnmerge: (payload: any) =>
@@ -973,6 +997,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
               styleName: typeof s?.styleName === 'string' ? s.styleName.slice(0, 100) : '',
               color: typeof s?.color === 'string' ? s.color.slice(0, 50) : '',
               size: typeof s?.size === 'string' ? s.size.slice(0, 50) : '',
+              purchaseSize: typeof s?.purchaseSize === 'string' ? s.purchaseSize.slice(0, 50) : '',
               qty: typeof s?.qty === 'number' ? Math.max(1, Math.round(s.qty)) : 1,
             }))
             .slice(0, 100000)
@@ -1077,7 +1102,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   purchaseStyleColors: (payload: any) =>
     ipcRenderer.invoke('purchase-style-colors', {
       styleCodes: Array.isArray(payload?.styleCodes)
-        ? payload.styleCodes.slice(0, 500).map((c: any) => (typeof c === 'string' ? c.slice(0, 50) : ''))
+        ? payload.styleCodes
+            .slice(0, 500)
+            .map((c: any) => (typeof c === 'string' ? c.slice(0, 50) : ''))
         : [],
     }),
   // 款色改名（产品侧改色名 ⇒ 订单侧的色行跟着改标签；款色 id / 编码 / 绑定的图不动）。
@@ -1226,6 +1253,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }),
   /** 有当前进价的款编码集合（缺口卡用） */
   productPricedCodes: () => ipcRenderer.invoke('product-priced-codes'),
+  /**
+   * 亚洲款加码：一次取回「款 → 偏移」与「款 → 码链」。
+   * `codes` = 本次清单涉及的款编码（码链只按这批取，不做全库预取）。
+   */
+  productSizeShiftLoad: (payload: any) =>
+    ipcRenderer.invoke('product-size-shift-load', {
+      codes: Array.isArray(payload?.codes)
+        ? payload.codes.filter((c: any) => typeof c === 'string' && c.trim()).slice(0, 500)
+        : [],
+    }),
+  /** 设/撤一款的加码偏移（0 = 撤）；`shift` 非数字不传 ⇒ 主进程按非法入参拒绝 */
+  productSizeShiftSet: (payload: any) =>
+    ipcRenderer.invoke('product-size-shift-set', {
+      styleCode: typeof payload?.styleCode === 'string' ? payload.styleCode.slice(0, 64) : '',
+      ...(typeof payload?.shift === 'number' ? { shift: payload.shift } : {}),
+      ...(typeof payload?.note === 'string' ? { note: payload.note.slice(0, 200) } : {}),
+    }),
   productSummary: () => ipcRenderer.invoke('product-summary'),
   productNextCode: () => ipcRenderer.invoke('product-next-code'),
   // ---- Excel 批量导入 / 导出（解析在渲染层，本层只做形状消毒）----
@@ -1297,7 +1341,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('product-export', {
       sheetName: typeof payload?.sheetName === 'string' ? payload.sheetName.slice(0, 31) : '',
       headers: Array.isArray(payload?.headers)
-        ? payload.headers.slice(0, 64).map((h: any) => (typeof h === 'string' ? h.slice(0, 60) : ''))
+        ? payload.headers
+            .slice(0, 64)
+            .map((h: any) => (typeof h === 'string' ? h.slice(0, 60) : ''))
         : [],
       rows: Array.isArray(payload?.rows)
         ? payload.rows.slice(0, 20000).map((r: any) => ({
@@ -1430,7 +1476,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   productItemImagePool: (payload: any) =>
     ipcRenderer.invoke('product-item-image-pool', {
       itemIds: Array.isArray(payload?.itemIds)
-        ? payload.itemIds.slice(0, 1000).map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
+        ? payload.itemIds
+            .slice(0, 1000)
+            .map((x: any) => (typeof x === 'string' ? x.slice(0, 64) : ''))
         : [],
     }),
   // ---- 店铺实体（sk_shops / sk_name_map；DOMAIN_INTEGRATION_PLAN S1）----
@@ -1505,6 +1553,196 @@ contextBridge.exposeInMainWorld('electronAPI', {
             .filter((c: any) => !!c.color && !!c.imageUrl)
         : [],
     }),
+  // ---- 图案槽位域（POD；M3/M4 —— 绑定台 / 报单 / 余量看板）----
+  // 这里只做**形状裁剪**（类型/长度/条数上限）；业务口径校验一律在主进程（AGENTS §2.3 双防线）。
+  // `variantKey` 内含 `\u0000`，**原样透传**（不 trim、不按分隔符切）。
+  podWorklist: (payload: any) =>
+    ipcRenderer.invoke('pod-worklist', {
+      filter: typeof payload?.filter === 'string' ? payload.filter.slice(0, 20) : 'all',
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 60) : '',
+      page: Number(payload?.page) || 0,
+      pageSize: Number(payload?.pageSize) || 24,
+    }),
+  podPatternList: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-list', {
+      search: typeof payload?.search === 'string' ? payload.search.slice(0, 60) : '',
+      status: typeof payload?.status === 'string' ? payload.status.slice(0, 20) : '',
+    }),
+  podPatternCreate: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-create', {
+      code: typeof payload?.code === 'string' ? payload.code.slice(0, 60) : '',
+      name: typeof payload?.name === 'string' ? payload.name.slice(0, 120) : '',
+      artworkImageId: Number(payload?.artworkImageId) || 0,
+      previewImageId: Number(payload?.previewImageId) || 0,
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 500) : '',
+      source: typeof payload?.source === 'string' ? payload.source.slice(0, 20) : '',
+      // 识别图：指纹是"这张图只属于一个图案"的唯一身份，原样透传（校验在主进程）
+      images: Array.isArray(payload?.images)
+        ? payload.images.slice(0, 200).map((i: any) => ({
+            fingerprint:
+              typeof i?.fingerprint === 'string'
+                ? i.fingerprint.trim().toLowerCase().slice(0, 128)
+                : '',
+            imageId: Number(i?.imageId) || 0,
+          }))
+        : [],
+    }),
+  podPatternUpdate: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-update', {
+      id: Number(payload?.id) || 0,
+      // 只透传**出现过的键**：`undefined` = 不改，`''` = 清空（两者必须能分开）
+      ...(typeof payload?.name === 'string' ? { name: payload.name.slice(0, 120) } : {}),
+      ...(payload?.artworkImageId !== undefined
+        ? { artworkImageId: Number(payload.artworkImageId) || 0 }
+        : {}),
+      ...(payload?.previewImageId !== undefined
+        ? { previewImageId: Number(payload.previewImageId) || 0 }
+        : {}),
+      ...(typeof payload?.note === 'string' ? { note: payload.note.slice(0, 500) } : {}),
+      ...(typeof payload?.status === 'string' ? { status: payload.status.slice(0, 20) } : {}),
+    }),
+  // 图片落库：本地选图 / 远程色图 → md_images（只透传来源，路径校验在主进程）
+  podPatternImage: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-image', {
+      srcPath: typeof payload?.srcPath === 'string' ? payload.srcPath.slice(0, 1024) : '',
+      url: typeof payload?.url === 'string' ? payload.url.slice(0, 1024) : '',
+    }),
+  // 批量颜色图（下载 + 感知哈希/主色）：单批上限与主进程一致
+  podSlotImages: (payload: any) =>
+    ipcRenderer.invoke('pod-slot-images', {
+      urls: Array.isArray(payload?.urls)
+        ? payload.urls
+            .filter((u: any) => typeof u === 'string' && u.trim())
+            .map((u: string) => u.trim().slice(0, 1024))
+            .slice(0, 40)
+        : [],
+    }),
+  podBind: (payload: any) =>
+    ipcRenderer.invoke('pod-bind', {
+      patternId: Number(payload?.patternId) || 0,
+      source: typeof payload?.source === 'string' ? payload.source.slice(0, 20) : 'manual',
+      state: typeof payload?.state === 'string' ? payload.state.slice(0, 20) : 'bound',
+      slots: Array.isArray(payload?.slots)
+        ? payload.slots.slice(0, 200).map((s: any) => ({
+            variantKey: typeof s?.variantKey === 'string' ? s.variantKey : '',
+            imageKey: typeof s?.imageKey === 'string' ? s.imageKey.slice(0, 80) : '',
+            skuCode: typeof s?.skuCode === 'string' ? s.skuCode.slice(0, 80) : '',
+          }))
+        : [],
+    }),
+  podUnbind: (payload: any) =>
+    ipcRenderer.invoke('pod-unbind', {
+      keys: Array.isArray(payload?.keys)
+        ? payload.keys.filter((k: any) => typeof k === 'string' && k).slice(0, 200)
+        : [],
+    }),
+  // 按款色 / 订单图片认图案：指纹与款色 id 原样透传（格式校验、上限、图案是否可挂都在主进程）
+  podImageLink: (payload: any) =>
+    ipcRenderer.invoke('pod-image-link', {
+      patternId: Number(payload?.patternId) || 0,
+      source: typeof payload?.source === 'string' ? payload.source.slice(0, 20) : 'manual',
+      styleColorIds: Array.isArray(payload?.styleColorIds)
+        ? payload.styleColorIds
+            .map((n: any) => Number(n) || 0)
+            .filter((n: number) => n > 0)
+            .slice(0, 500)
+        : [],
+      images: Array.isArray(payload?.images)
+        ? payload.images.slice(0, 200).map((i: any) => ({
+            fingerprint:
+              typeof i?.fingerprint === 'string'
+                ? i.fingerprint.trim().toLowerCase().slice(0, 128)
+                : '',
+            imageId: Number(i?.imageId) || 0,
+          }))
+        : [],
+    }),
+  podImageUnlink: (payload: any) =>
+    ipcRenderer.invoke('pod-image-unlink', {
+      fingerprints: Array.isArray(payload?.fingerprints)
+        ? payload.fingerprints
+            .filter((f: any) => typeof f === 'string' && f)
+            .map((f: string) => f.trim().toLowerCase().slice(0, 128))
+            .slice(0, 200)
+        : [],
+      styleColorIds: Array.isArray(payload?.styleColorIds)
+        ? payload.styleColorIds
+            .map((n: any) => Number(n) || 0)
+            .filter((n: number) => n > 0)
+            .slice(0, 500)
+        : [],
+    }),
+  podPatternMerge: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-merge', {
+      targetId: Number(payload?.targetId) || 0,
+      sourceIds: Array.isArray(payload?.sourceIds)
+        ? payload.sourceIds
+            .map((n: any) => Number(n) || 0)
+            .filter((n: number) => n > 0)
+            .slice(0, 50)
+        : [],
+    }),
+  podPatternMergeUndo: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-merge-undo', {
+      batchId: typeof payload?.batchId === 'string' ? payload.batchId.slice(0, 64) : '',
+    }),
+  podPatternMergeHistory: (payload: any) =>
+    ipcRenderer.invoke('pod-pattern-merge-history', {
+      limit: Number(payload?.limit) || 50,
+    }),
+  podNeedData: () => ipcRenderer.invoke('pod-need-data'),
+  podReportExport: (payload: any) =>
+    ipcRenderer.invoke('pod-report-export', {
+      rows: Array.isArray(payload?.rows)
+        ? payload.rows.slice(0, 500).map((r: any) => ({
+            patternId: Number(r?.patternId) || 0,
+            code: typeof r?.code === 'string' ? r.code.slice(0, 60) : '',
+            name: typeof r?.name === 'string' ? r.name.slice(0, 120) : '',
+            artworkImageId: Number(r?.artworkImageId) || 0,
+            previewImageId: Number(r?.previewImageId) || 0,
+            needPieces: Number(r?.needPieces) || 0,
+            remainingPieces: Number(r?.remainingPieces) || 0,
+            netNeed: Number(r?.netNeed) || 0,
+            sheets: Number(r?.sheets) || 0,
+          }))
+        : [],
+      date: typeof payload?.date === 'string' ? payload.date.slice(0, 10) : '',
+      piecesPerSheet: Number(payload?.piecesPerSheet) || 1,
+      unboundPieces: Number(payload?.unboundPieces) || 0,
+      unboundRows: Number(payload?.unboundRows) || 0,
+      assumedRows: Number(payload?.assumedRows) || 0,
+    }),
+  podBatchList: (payload: any) =>
+    ipcRenderer.invoke('pod-batch-list', {
+      patternId: Number(payload?.patternId) || 0,
+      limit: Number(payload?.limit) || 200,
+    }),
+  podBatchCreate: (payload: any) =>
+    ipcRenderer.invoke('pod-batch-create', {
+      patternId: Number(payload?.patternId) || 0,
+      sheets: Number(payload?.sheets) || 0,
+      piecesPerSheet: Number(payload?.piecesPerSheet) || 0,
+      supplier: typeof payload?.supplier === 'string' ? payload.supplier.slice(0, 120) : '',
+      costCents: Number(payload?.costCents) || 0,
+      orderedAt: typeof payload?.orderedAt === 'string' ? payload.orderedAt.slice(0, 10) : '',
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 500) : '',
+      arrive: payload?.arrive === true,
+    }),
+  podBatchArrive: (payload: any) =>
+    ipcRenderer.invoke('pod-batch-arrive', { batchId: Number(payload?.batchId) || 0 }),
+  podPrint: (payload: any) =>
+    ipcRenderer.invoke('pod-print', {
+      patternId: Number(payload?.patternId) || 0,
+      pieces: Number(payload?.pieces) || 0,
+      refOrderItemId: Number(payload?.refOrderItemId) || 0,
+    }),
+  podAdjust: (payload: any) =>
+    ipcRenderer.invoke('pod-adjust', {
+      batchId: Number(payload?.batchId) || 0,
+      deltaPieces: Number(payload?.deltaPieces) || 0,
+      note: typeof payload?.note === 'string' ? payload.note.slice(0, 200) : '',
+    }),
+  podBalance: () => ipcRenderer.invoke('pod-balance'),
   // 订阅「采集已入库」事件（主进程→渲染层单向，接收端写库后广播）；返回退订函数
   onAeItemsIngested: (cb: (payload: any) => void) => {
     const listener = (_event: any, payload: any) => {
@@ -1513,6 +1751,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('ae-items-ingested', listener);
     return () => {
       ipcRenderer.removeListener('ae-items-ingested', listener);
+    };
+  },
+  // 订阅「芒果订单已同步」事件（`/mango/ingest` 处理完成后广播）；返回退订函数
+  onMangoIngested: (cb: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => {
+      if (cb) cb(payload);
+    };
+    ipcRenderer.on('mango-ingested', listener);
+    return () => {
+      ipcRenderer.removeListener('mango-ingested', listener);
     };
   },
   shopSummary: () => ipcRenderer.invoke('shop-summary'),
@@ -1699,6 +1947,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
       days: Math.min(365, Math.max(1, Number(payload?.days) || 30)),
     }),
   mailStats: () => ipcRenderer.invoke('mail-stats'),
+  // 待办归集：三类（罚单/纠纷·仲裁/订单关闭）按订单号合并；筛选只认 accountIds
+  mailTodoList: (payload: any) =>
+    ipcRenderer.invoke('mail-todo-list', {
+      accountIds: Array.isArray(payload?.accountIds)
+        ? payload.accountIds.map((n: any) => Math.trunc(Number(n) || 0)).filter((n: number) => n > 0).slice(0, 200)
+        : [],
+    }),
+  // 手工划掉 / 撤销一条待办：key 是订单号（解析不出单号时是 #messageId），只做形状消毒
+  mailTodoDismiss: (payload: any) =>
+    ipcRenderer.invoke('mail-todo-dismiss', {
+      key: String(payload?.key || '').slice(0, 64),
+      messageId: Math.max(0, Math.trunc(Number(payload?.messageId) || 0)),
+      kind: String(payload?.kind || '').slice(0, 24),
+    }),
+  mailTodoRestore: (payload: any) =>
+    ipcRenderer.invoke('mail-todo-restore', { key: String(payload?.key || '').slice(0, 64) }),
+  // 自动收信间隔下发：预加载层只收形（0–1440 的整数）；非法值原样透传，由主进程显式报错
+  // —— 不能在这里兜成 0，那会把"参数传错"伪装成"用户选择了关闭"
+  mailAutoSyncConfig: (payload: any) => {
+    const raw = Number(payload?.minutes);
+    return ipcRenderer.invoke('mail-auto-sync-config', {
+      minutes: Number.isFinite(raw) ? Math.min(1440, Math.max(0, Math.round(raw))) : null,
+    });
+  },
   // ---- 店铺商品清单（pl_shop_sku 扩展视图，支持一对多关联）----
   shopProductImport: (payload: any) =>
     ipcRenderer.invoke('shop-product-import', {
@@ -1762,6 +2034,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('mail-sync-event', listener);
     return () => {
       ipcRenderer.removeListener('mail-sync-event', listener);
+    };
+  },
+  // 订阅「打开某个模块」意图（通知点击等用户不在界面前的入口）；返回退订函数。
+  // 只收形：moduleId/action 一律截断成字符串，业务校验在渲染层（模块存在与否由外壳判）。
+  onOpenModule: (cb: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => {
+      if (!cb) return;
+      cb({
+        moduleId: typeof payload?.moduleId === 'string' ? payload.moduleId.slice(0, 60) : '',
+        action: typeof payload?.action === 'string' ? payload.action.slice(0, 60) : undefined,
+      });
+    };
+    ipcRenderer.on('open-module', listener);
+    return () => {
+      ipcRenderer.removeListener('open-module', listener);
+    };
+  },
+  // 订阅侧栏徽标（主进程算好的未读数等）；count=null = 撤掉徽标，不是"显示 0"
+  onNavBadge: (cb: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => {
+      if (!cb) return;
+      const raw = payload?.count;
+      const count =
+        raw === null || raw === undefined || !Number.isFinite(Number(raw))
+          ? null
+          : Math.max(0, Math.floor(Number(raw)));
+      cb({
+        moduleId: typeof payload?.moduleId === 'string' ? payload.moduleId.slice(0, 60) : '',
+        count,
+        title: typeof payload?.title === 'string' ? payload.title.slice(0, 80) : undefined,
+        todo: Boolean(payload?.todo),
+      });
+    };
+    ipcRenderer.on('nav-badge', listener);
+    return () => {
+      ipcRenderer.removeListener('nav-badge', listener);
     };
   },
 });

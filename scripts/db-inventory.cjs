@@ -27,6 +27,7 @@ const DOMAIN_FILES = [
   'company-db',
   'shop-db',
   'shop-accounts-db',
+  'master-data-db',
   'mail-db',
   'order-db',
   'product-db',
@@ -36,10 +37,16 @@ const DOMAIN_FILES = [
   'ship-rate-db',
   'picking-db',
   'ledger-db',
+  // 2026-11-01（M3/M5）补进来的三处：清单靠"跑一遍 ensure"数对象，
+  // 文件漏登记 → 它建的表就整段不出现在清单里（不是数错了，是**根本没数**）。
+  'pod-db',
+  // `mango-sync` 的 ensure 也建表（`sk_sync_log`）。它不叫 `*-db`，但确实是本仓的表 owner。
+  'mango-sync',
+  'scheduler',
 ];
 
 /** 内部表（不是业务对象，但确实落库，单独列出来免得被算成业务表） */
-const INTERNAL = new Set(['sk_mail_meta', 'sk_schema_migrations']);
+const INTERNAL = new Set(['sk_mail_meta', 'sk_schema_migrations', 'sk_auto_sync_log']);
 /** FTS5 自动建的影子表：计入 `sk_mail_fts` 这一张虚拟表 */
 const FTS_SHADOW = /^sk_mail_fts(_config|_content|_data|_docsize|_idx)$/;
 
@@ -53,10 +60,20 @@ function run() {
       .map((r) => String(r.name)),
   );
   const skipped = [];
+  // `ensure*` 其实有两类：建表的（无参，`ensureXxxSchema()`）和"确保**某个值**存在"的
+  // （有参，如 `master-data-db.ensureColorId(name)` / `ensureSizeId(size)`）。
+  // 后者不是 schema 入口，拿空参调必然抛「颜色名不能为空」—— 以前它被记成"某域 schema 初始化失败"
+  // ⇒ 这条命令长期 exit 1，§6 的数字只能手抄（2026-11-03 修：按**声明参数个数**分流，
+  // 不是靠维护一份名单 —— 名单会在下次加 resolver 时再次说谎）。
+  const inapplicable = [];
   for (const file of DOMAIN_FILES) {
     const mod = require(path.join(ROOT, 'dist', 'electron', `${file}.js`));
     for (const key of Object.keys(mod)) {
       if (!/^ensure/.test(key) || typeof mod[key] !== 'function') continue;
+      if (mod[key].length > 0) {
+        inapplicable.push(`${file}.${key}`);
+        continue;
+      }
       try {
         mod[key]();
       } catch (err) {
@@ -104,6 +121,7 @@ function run() {
     `  其中业务表 ${business.length} · 内部表 ${tables.length - business.length}` +
       `（${Array.from(INTERNAL).join(' / ')}）`,
   );
+  if (inapplicable.length) console.log(`（有参 ensure* 不是建表入口，未调用：${inapplicable.join(' · ')}）`);
   if (skipped.length) console.log(`⚠️ ensure 抛错被跳过：${skipped.join('; ')}`);
   const shadows = rows.filter((r) => FTS_SHADOW.test(String(r.name))).length;
   console.log(`（FTS5 影子表 ${shadows} 张不单独计数）`);

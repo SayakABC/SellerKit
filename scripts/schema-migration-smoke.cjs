@@ -24,16 +24,8 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const {
-  initDb,
-  closeDb,
-  dbRun,
-  dbGet,
-  dbQuery,
-  dbMigrate,
-  migrationVersion,
-} = require(
-  path.join(ROOT, 'dist', 'electron', 'db.js'),
+const { initDb, closeDb, dbRun, dbGet, dbQuery, dbMigrate, migrationVersion } = require(
+  path.join(ROOT, 'dist', 'electron', 'db.js')
 );
 const pdb = require(path.join(ROOT, 'dist', 'electron', 'product-db.js'));
 
@@ -92,22 +84,22 @@ check('迁移步数与源码一致（加了一步却忘了改常数 → 这里�
   assert.strictEqual(
     stepsInSource('product-db.ts', 'skuMigrationSteps'),
     PRODUCT_SKU_STEPS,
-    'product.sku 的步数变了：改 PRODUCT_SKU_STEPS，并复核 A/B 两个老库场景',
+    'product.sku 的步数变了：改 PRODUCT_SKU_STEPS，并复核 A/B 两个老库场景'
   );
   assert.strictEqual(
     stepsInSource('order-db.ts', 'orderMigrationSteps'),
     ORDER_MAIN_STEPS,
-    'order.main 的步数变了：改 ORDER_MAIN_STEPS，并复核 C/E 两个老库场景',
+    'order.main 的步数变了：改 ORDER_MAIN_STEPS，并复核 C/E 两个老库场景'
   );
   assert.strictEqual(
     stepsInSource('ae-db.ts', 'aeMigrationSteps'),
     AE_MAIN_STEPS,
-    'ae.main 的步数变了：改 AE_MAIN_STEPS，并复核 D 场景',
+    'ae.main 的步数变了：改 AE_MAIN_STEPS，并复核 D 场景'
   );
   assert.strictEqual(
     stepsInSource('purchase-db.ts', 'purchaseMigrationSteps'),
     PURCHASE_STEPS,
-    'purchase.main 的步数变了：改 PURCHASE_STEPS，并复核 F 场景',
+    'purchase.main 的步数变了：改 PURCHASE_STEPS，并复核 F 场景'
   );
 });
 
@@ -161,7 +153,7 @@ function insertRow(o) {
       o.status || 'confirmed',
       o.source || 'manual',
       o.note || '',
-    ],
+    ]
   );
 }
 
@@ -191,7 +183,7 @@ check('迁移前：确实是老形状（唯一键不含 product_id）+ 老库确
   assert.strictEqual(
     require(path.join(ROOT, 'dist', 'electron', 'db.js')).tableExists('pl_item_weights'),
     true,
-    '夹具没造出 pl_item_weights，v3 的 DROP 分支会静默跳过',
+    '夹具没造出 pl_item_weights，v3 的 DROP 分支会静默跳过'
   );
 });
 
@@ -232,7 +224,9 @@ check('唯一键已含 product_id（形状判定再跑为真）', () => {
 });
 
 check('索引没有在重建中丢掉', () => {
-  const names = dbQuery(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='pl_shop_sku'`)
+  const names = dbQuery(
+    `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='pl_shop_sku'`
+  )
     .map((r) => String(r.name))
     .sort();
   assert.ok(names.includes('idx_pl_shop_sku_lookup'), `缺 lookup 索引：${names.join(',')}`);
@@ -241,7 +235,7 @@ check('索引没有在重建中丢掉', () => {
 
 check('临时表已清理（不留 pl_shop_sku_legacy_struct）', () => {
   const n = dbGet(
-    `SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'pl_shop_sku_legacy_struct'`,
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'pl_shop_sku_legacy_struct'`
   );
   assert.strictEqual(Number(n.n), 0);
 });
@@ -249,16 +243,19 @@ check('临时表已清理（不留 pl_shop_sku_legacy_struct）', () => {
 check('一对多现在是允许的（同店同商品同规格挂第二个产品）', () => {
   insertRow({ platform: 'amazon', shopId: 1, itemId: 'A2', productId: 8 });
   const rows = dbQuery(
-    `SELECT product_id FROM pl_shop_sku WHERE item_id = 'A2' ORDER BY product_id`,
+    `SELECT product_id FROM pl_shop_sku WHERE item_id = 'A2' ORDER BY product_id`
   );
-  assert.deepStrictEqual(rows.map((r) => Number(r.product_id)), [7, 8]);
+  assert.deepStrictEqual(
+    rows.map((r) => Number(r.product_id)),
+    [7, 8]
+  );
 });
 
 check('AUTOINCREMENT 序列已重置：新 id 不复用', () => {
   const maxBefore = Number(dbGet(`SELECT MAX(id) AS m FROM pl_shop_sku`).m);
   const info = dbRun(
     `INSERT INTO pl_shop_sku (platform, shop_id, item_id, spec, product_id, status, source, note)
-     VALUES ('amazon', 1, 'A9', '*', 0, 'confirmed', 'shop-import', '')`,
+     VALUES ('amazon', 1, 'A9', '*', 0, 'confirmed', 'shop-import', '')`
   );
   assert.strictEqual(info.lastInsertRowid, maxBefore + 1);
 });
@@ -288,7 +285,9 @@ check(`新库一次到位：5 列唯一键 + 版本记为 ${PRODUCT_SKU_STEPS} +
   assert.strictEqual(db.migrationVersion('product.sku'), PRODUCT_SKU_STEPS);
   const idx = dbQuery(`PRAGMA index_info('sqlite_autoindex_pl_shop_sku_1')`).map((r) => r.name);
   assert.deepStrictEqual(idx, ['platform', 'shop_id', 'item_id', 'spec', 'product_id']);
-  const n = dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'pl_shop_sku_legacy_struct'`);
+  const n = dbGet(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'pl_shop_sku_legacy_struct'`
+  );
   assert.strictEqual(Number(n.n), 0);
 });
 check('新库上池/映射两个谓词都可用（种群标记查询不报错）', () => {
@@ -368,11 +367,11 @@ dbMigrate([
 dbRun(`INSERT INTO oi_styles (id, code, name, fingerprint) VALUES (1, 'S-OLD', '老款名', 'fp-s1')`);
 dbRun(`INSERT INTO oi_style_colors (id, style_id, color, code) VALUES (1, 1, '黑', 'S-OLD-BLACK')`);
 dbRun(
-  `INSERT INTO oi_images (id, url_fingerprint, source_url, local_path) VALUES (1, 'fp1', 'u', '/tmp/x')`,
+  `INSERT INTO oi_images (id, url_fingerprint, source_url, local_path) VALUES (1, 'fp1', 'u', '/tmp/x')`
 );
 dbRun(
   `INSERT INTO oi_orders (image_id, order_no, shop, size, order_time, raw_fields, status)
-   VALUES (1, 'LEGACY-1', '店A', 'L', '2026-08-30', '{"订单金额":"CN￥ 165.18"}', 'pending')`,
+   VALUES (1, 'LEGACY-1', '店A', 'L', '2026-08-30', '{"订单金额":"CN￥ 165.18"}', 'pending')`
 );
 const legacyBefore = dbGet(`SELECT id, order_no, shop, raw_fields FROM oi_orders`);
 
@@ -382,24 +381,43 @@ check(`迁移记账推进到 order.main = ${ORDER_MAIN_STEPS}（v1–v3 一次�
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
 });
 
-check('老库款色表补出 image_id 列 + 代表图索引建成 + 旧行原样（2026-10-30 真库事故的回归钉）', () => {
-  const cols = dbQuery(`PRAGMA table_info(oi_style_colors)`).map((r) => String(r.name));
-  assert.ok(cols.includes('image_id'), `老库 oi_style_colors 必须补上 image_id：${cols}`);
-  const idx = dbQuery(
-    `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_oi_style_colors_image'`,
-  );
-  assert.strictEqual(idx.length, 1, '补列之后代表图索引必须建得出来（顺序：先补列再 dbMigrate）');
-  const row = dbGet(`SELECT id, style_id, color, code FROM oi_style_colors WHERE id = 1`);
-  assert.deepStrictEqual(
-    row && { id: Number(row.id), style_id: Number(row.style_id), color: row.color, code: row.code },
-    { id: 1, style_id: 1, color: '黑', code: 'S-OLD-BLACK' },
-    '补列不许动存量行',
-  );
-});
+check(
+  '老库款色表补出 image_id 列 + 代表图索引建成 + 旧行原样（2026-10-30 真库事故的回归钉）',
+  () => {
+    const cols = dbQuery(`PRAGMA table_info(oi_style_colors)`).map((r) => String(r.name));
+    assert.ok(cols.includes('image_id'), `老库 oi_style_colors 必须补上 image_id：${cols}`);
+    const idx = dbQuery(
+      `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_oi_style_colors_image'`
+    );
+    assert.strictEqual(idx.length, 1, '补列之后代表图索引必须建得出来（顺序：先补列再 dbMigrate）');
+    const row = dbGet(`SELECT id, style_id, color, code FROM oi_style_colors WHERE id = 1`);
+    assert.deepStrictEqual(
+      row && {
+        id: Number(row.id),
+        style_id: Number(row.style_id),
+        color: row.color,
+        code: row.code,
+      },
+      { id: 1, style_id: 1, color: '黑', code: 'S-OLD-BLACK' },
+      '补列不许动存量行'
+    );
+  }
+);
 
 check('主干形状：主表含订单级列（金额/状态/时点），行级列（qty/raw_fields/size）已拆到明细', () => {
   const cols = dbQuery(`PRAGMA table_info(oi_orders)`).map((r) => String(r.name));
-  for (const c of ['order_no', 'shop', 'order_time', 'source', 'amount_cents', 'vat_cents', 'ddp_cents', 'tax_platform', 'biz_status', 'ship_time']) {
+  for (const c of [
+    'order_no',
+    'shop',
+    'order_time',
+    'source',
+    'amount_cents',
+    'vat_cents',
+    'ddp_cents',
+    'tax_platform',
+    'biz_status',
+    'ship_time',
+  ]) {
     assert.ok(cols.includes(c), `主表缺列 ${c}`);
   }
   // 订单级「总克重/总物流费」**不在**主表：B2 定案 Σ 包裹实时派生（`parcelTotals`），
@@ -408,16 +426,48 @@ check('主干形状：主表含订单级列（金额/状态/时点），行级�
     assert.ok(!cols.includes(absent), `主表不该有列 ${absent}（订单级总数字/行级快照都不落这里）`);
   }
   // 行级列已拆到明细表
-  for (const gone of ['image_id', 'size', 'raw_fields', 'category', 'color', 'qty', 'style_color_id', 'weight_g', 'cost_cents', 'corrected']) {
+  for (const gone of [
+    'image_id',
+    'size',
+    'raw_fields',
+    'category',
+    'color',
+    'qty',
+    'style_color_id',
+    'weight_g',
+    'cost_cents',
+    'corrected',
+  ]) {
     assert.ok(!cols.includes(gone), `该列应已拆到明细：${gone}`);
   }
   const itemCols = dbQuery(`PRAGMA table_info(oi_order_items)`).map((r) => String(r.name));
-  for (const c of ['id', 'order_id', 'image_id', 'size', 'raw_fields', 'qty', 'style_color_id', 'weight_g', 'cost_cents', 'actual_cost_cents', 'corrected']) {
+  for (const c of [
+    'id',
+    'order_id',
+    'image_id',
+    'size',
+    'raw_fields',
+    'qty',
+    'style_color_id',
+    'weight_g',
+    'cost_cents',
+    'actual_cost_cents',
+    'corrected',
+  ]) {
     assert.ok(itemCols.includes(c), `明细表缺列 ${c}`);
   }
   // image_id 可空：直接插一行不带图的订单（S2-b「订单报表免图导入」的前提）
-  const id = odb.insertOrder({ imageId: null, orderNo: 'NO-IMG', shop: '', size: '', orderTime: '',
-    category: '', color: '', logo: '', rawFields: { 商品ID: 'X1' } });
+  const id = odb.insertOrder({
+    imageId: null,
+    orderNo: 'NO-IMG',
+    shop: '',
+    size: '',
+    orderTime: '',
+    category: '',
+    color: '',
+    logo: '',
+    rawFields: { 商品ID: 'X1' },
+  });
   assert.ok(id > 0, 'image_id 为空的订单必须能落库');
   dbRun(`DELETE FROM oi_order_items WHERE id = ?`, [id]);
   dbRun(`DELETE FROM oi_orders WHERE order_no = 'NO-IMG'`);
@@ -434,7 +484,7 @@ check('老行：source=import、qty=NULL、金额为 NULL（不是 0）', () => 
   const row = dbGet(
     `SELECT o.amount_cents, o.vat_cents, o.biz_status, o.source, oi.qty
      FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id
-     WHERE o.order_no = 'LEGACY-1' LIMIT 1`,
+     WHERE o.order_no = 'LEGACY-1' LIMIT 1`
   );
   assert.strictEqual(row.amount_cents, null, '老行金额必须是 NULL（未知），不能是 0');
   assert.strictEqual(row.source, 'import', '老行一律是报表导入来的');
@@ -447,19 +497,42 @@ check('数据一条不丢（主表行数 / 明细行数 / raw_fields 原样）',
   assert.strictEqual(after.order_no, legacyBefore.order_no);
   assert.strictEqual(after.shop, legacyBefore.shop);
   const item = dbGet(`SELECT id, raw_fields FROM oi_order_items WHERE order_id = ?`, [after.id]);
-  assert.strictEqual(Number(item.id), Number(legacyBefore.id), '明细 id 原样保留老行 id（parcel_lines 零迁移）');
+  assert.strictEqual(
+    Number(item.id),
+    Number(legacyBefore.id),
+    '明细 id 原样保留老行 id（parcel_lines 零迁移）'
+  );
   assert.strictEqual(item.raw_fields, legacyBefore.raw_fields, 'raw_fields 必须原样搬进明细');
 });
 
 check('AUTOINCREMENT 已追平：重建后新插入的 id 必须大于历史最大 id', () => {
-  const id = odb.insertOrder({ imageId: 1, orderNo: 'NEW-1', shop: '店B', size: 'M',
-    orderTime: '08/30/2026 07:00', category: '', color: '', logo: '',
-    rawFields: { 订单号: 'NEW-1', 订单状态: '交易完成', 订单金额: 'CN￥ 165.18', 预计增值税: 'CN￥ 34.69', DDP关税: 'CN￥ 22.94', 平台是否代征代缴: '平台已税', 发货时间: '08/31/2026 12:57' } });
-  assert.ok(Number(id) > Number(legacyBefore.id), `新 id(${id}) 必须大于历史最大 id(${legacyBefore.id})`);
+  const id = odb.insertOrder({
+    imageId: 1,
+    orderNo: 'NEW-1',
+    shop: '店B',
+    size: 'M',
+    orderTime: '08/30/2026 07:00',
+    category: '',
+    color: '',
+    logo: '',
+    rawFields: {
+      订单号: 'NEW-1',
+      订单状态: '交易完成',
+      订单金额: 'CN￥ 165.18',
+      预计增值税: 'CN￥ 34.69',
+      DDP关税: 'CN￥ 22.94',
+      平台是否代征代缴: '平台已税',
+      发货时间: '08/31/2026 12:57',
+    },
+  });
+  assert.ok(
+    Number(id) > Number(legacyBefore.id),
+    `新 id(${id}) 必须大于历史最大 id(${legacyBefore.id})`
+  );
   const row = dbGet(
     `SELECT o.amount_cents, o.vat_cents, o.ddp_cents, o.tax_platform, o.biz_status, o.ship_time, o.source, oi.qty
      FROM oi_order_items oi JOIN oi_orders o ON o.id = oi.order_id WHERE oi.id = ?`,
-    [id],
+    [id]
   );
   assert.strictEqual(Number(row.amount_cents), 16518);
   assert.strictEqual(Number(row.vat_cents), 3469);
@@ -486,7 +559,9 @@ try {
 }
 
 // ────────────────────────────────────────────────────────── 场景 D：ae 域老库追上
-console.log('\n[D] ae 域老库：ae_cost_map 老形状（单主键）重建 + 弃表 ae_orders/ae_order_lines/ae_fees 删除');
+console.log(
+  '\n[D] ae 域老库：ae_cost_map 老形状（单主键）重建 + 弃表 ae_orders/ae_order_lines/ae_fees 删除'
+);
 const dirD = newDb('ae-legacy');
 const aedb = require(path.join(ROOT, 'dist', 'electron', 'ae-db.js'));
 // 老形状：一款一行、无 effective_from/source；另建三张 C1 合并前遗留的采集表（v3 迁移要删它们）
@@ -528,7 +603,9 @@ dbMigrate([
     currency TEXT NOT NULL DEFAULT 'USD'
   )`,
 ]);
-dbRun(`INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents, sample_count) VALUES ('S1','款1',1234,3)`);
+dbRun(
+  `INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents, sample_count) VALUES ('S1','款1',1234,3)`
+);
 dbRun(`INSERT INTO ae_orders (order_id) VALUES ('LEGACY-1')`);
 dbRun(`INSERT INTO ae_order_lines (ae_order_id, title) VALUES (1, '旧行')`);
 dbRun(`INSERT INTO ae_fees (ae_order_id, category, amount) VALUES (1, 'refund', 5)`);
@@ -547,7 +624,9 @@ check('迁移：ae.main 记到 v3，老行不丢且补上哨兵生效日', () =>
 
 check('v3 删除弃表：ae_orders / ae_order_lines / ae_fees 已不存在（含数据的也照删）', () => {
   const gone = (t) =>
-    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='${t}'`).n) === 0;
+    Number(
+      dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='${t}'`).n
+    ) === 0;
   assert.ok(gone('ae_orders'), 'ae_orders 应被删');
   assert.ok(gone('ae_order_lines'), 'ae_order_lines 应被删');
   assert.ok(gone('ae_fees'), 'ae_fees 应被删');
@@ -564,14 +643,18 @@ check('幂等：再跑 ensureAeSchema 不重复记账、不改行数', () => {
 // C2 删表挂在 **order.main v10**，不挂 ae 域：v9 要先把区间价回填进订单行，删表必须排在它后面。
 // 这里同时钉住"ae 域单独跑不会提前删"——否则两个域懒初始化谁先谁后不确定，回填源会被先删掉。
 check('ae 域单独迁移**不删**旧价目表（删表在 order.main v10）', () => {
-  const n = Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n);
+  const n = Number(
+    dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n
+  );
   assert.strictEqual(n, 1, 'ae 域提前删表 ⇒ v9 读不到回填源');
 });
 
 check('order.main 追到 v10：旧价目表被删', () => {
   odb.ensureOrderSchema();
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
-  const n = Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n);
+  const n = Number(
+    dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n
+  );
   assert.strictEqual(n, 0, 'v10 应在 v9 回填之后删掉 ae_cost_map');
 });
 
@@ -579,7 +662,9 @@ check('删表后 ae 域再 ensure 不会把表建回来、也不重复跑 v1', (
   aedb.ensureAeSchema();
   aedb.ensureAeSchema();
   assert.strictEqual(migrationVersion('ae.main'), 3);
-  const n = Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n);
+  const n = Number(
+    dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n
+  );
   assert.strictEqual(n, 0, 'SCHEMA 里已经没有这张表，幂等 DDL 不该再长出它');
 });
 
@@ -620,11 +705,15 @@ check('v9 能读旧形状价目表并回填，v10 随后删表', () => {
       updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )`,
   ]);
-  dbRun(`INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents) VALUES ('OLD-1', '旧款', 1234)`);
+  dbRun(
+    `INSERT INTO ae_cost_map (style_code, style_name, unit_price_cents) VALUES ('OLD-1', '旧款', 1234)`
+  );
   dbRun(`INSERT INTO oi_styles (id, code, fingerprint) VALUES (1, 'OLD-1', 'fp-old-1')`);
   dbRun(`INSERT INTO oi_style_colors (id, style_id, color, code) VALUES (11, 1, '黑', 'OLD-1-黑')`);
   dbRun(`INSERT INTO oi_orders (id, order_no, order_time) VALUES (1, 'OLD-ORDER', '2026-01-01')`);
-  dbRun(`INSERT INTO oi_order_items (id, order_id, size, raw_fields, style_color_id) VALUES (1, 1, 'M', '{}', 11)`);
+  dbRun(
+    `INSERT INTO oi_order_items (id, order_id, size, raw_fields, style_color_id) VALUES (1, 1, 'M', '{}', 11)`
+  );
   dbRun(`INSERT INTO pl_products (code, name, cost_cents) VALUES ('OLD-1', '旧款', 0)`);
 
   odb.ensureOrderSchema();
@@ -632,16 +721,18 @@ check('v9 能读旧形状价目表并回填，v10 随后删表', () => {
   assert.strictEqual(
     Number(dbGet(`SELECT cost_cents FROM oi_order_items WHERE id = 1`).cost_cents),
     1234,
-    '旧形状（无 effective_from）下也要能回填，不能因缺列炸迁移',
+    '旧形状（无 effective_from）下也要能回填，不能因缺列炸迁移'
   );
   assert.strictEqual(
     Number(dbGet(`SELECT cost_cents FROM pl_products WHERE code = 'OLD-1'`).cost_cents),
-    1234,
+    1234
   );
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
   assert.strictEqual(
-    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n),
-    0,
+    Number(
+      dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n
+    ),
+    0
   );
 });
 closeDb();
@@ -740,8 +831,12 @@ dbRun(`INSERT INTO ae_orders (order_id, shop_name, order_time, status, currency,
        VALUES ('A-1', '店A', '2026-08-01 10:00:00', '交易完成', 'USD', 10, 2, '{"k":"v"}')`);
 dbRun(`INSERT INTO ae_orders (order_id, shop_name, order_time, status, currency, goods_amount, shipping_income, raw_json)
        VALUES ('A-2', '店A', '2026-08-02 10:00:00', '等待发货', 'CNY', 50, 0, '{}')`);
-dbRun(`INSERT INTO ae_order_lines (ae_order_id, product_id, sku_props, qty) VALUES (1, 'P-1', 'Color:Red;Size:L', 2)`);
-dbRun(`INSERT INTO ae_order_lines (ae_order_id, product_id, sku_props, qty) VALUES (1, 'P-2', 'Color:Blue;Size:M', 1)`);
+dbRun(
+  `INSERT INTO ae_order_lines (ae_order_id, product_id, sku_props, qty) VALUES (1, 'P-1', 'Color:Red;Size:L', 2)`
+);
+dbRun(
+  `INSERT INTO ae_order_lines (ae_order_id, product_id, sku_props, qty) VALUES (1, 'P-2', 'Color:Blue;Size:M', 1)`
+);
 
 const odbE = require(path.join(ROOT, 'dist', 'electron', 'order-db.js'));
 odbE.ensureOrderSchema();
@@ -827,7 +922,7 @@ dbMigrate([
 dbRun(`INSERT INTO suppliers (id, name) VALUES (1, '厂X')`);
 dbRun(
   `INSERT INTO purchase_orders (id, supplier_id, biz_date, mode, status, total_cents, note)
-   VALUES (1, 1, '2026-10-01', 'detail', 'submitted', 12345, '首单备注')`,
+   VALUES (1, 1, '2026-10-01', 'detail', 'submitted', 12345, '首单备注')`
 );
 
 check('迁移前：老库确有 note 列（夹具自证，免得断言打在别的形状上）', () => {
@@ -844,7 +939,7 @@ check(`ensurePurchaseSchema 把 purchase.main 记到 v${PURCHASE_STEPS} 并把 n
 
 check('删列路径数据一条不丢（其余列取值原样）', () => {
   const r = dbGet(
-    `SELECT id, supplier_id, biz_date, mode, status, total_cents FROM purchase_orders WHERE id = 1`,
+    `SELECT id, supplier_id, biz_date, mode, status, total_cents FROM purchase_orders WHERE id = 1`
   );
   assert.strictEqual(Number(r.id), 1);
   assert.strictEqual(Number(r.supplier_id), 1);
@@ -857,7 +952,12 @@ check('删列路径数据一条不丢（其余列取值原样）', () => {
 // 同 `oi_styles.name` 的教训：列删了但 INSERT 还写它 → **老库上任何建单路径必抛**
 // （而夹具常建的是新库：新库形状本就无该列，写得出来却看不出来）⇒ 真建一张单，让这条路径实跑。
 check('老库删列后新建单可用（INSERT 不再引用 note；退回旧写法这条路必抛）', () => {
-  const id = pdbF.createPurchaseOrder({ supplierId: 1, bizDate: '2026-10-10', mode: 'detail', items: [] });
+  const id = pdbF.createPurchaseOrder({
+    supplierId: 1,
+    bizDate: '2026-10-10',
+    mode: 'detail',
+    items: [],
+  });
   assert.ok(Number(id) > 1, `新单 id 应大于历史最大 id：${id}`);
 });
 
@@ -905,11 +1005,11 @@ check('主表列序 === `ORDER_TABLE_COLUMNS`、明细列序 === `ORDER_ITEM_TAB
   // 非空转守卫：清单本身必须有内容，否则下面那条在"清单退化成空"时反而恒绿
   assert.ok(
     odb.ORDER_TABLE_COLUMNS.length >= 10,
-    `主表列清单条数异常（清单可能被清空）：${odb.ORDER_TABLE_COLUMNS.length}`,
+    `主表列清单条数异常（清单可能被清空）：${odb.ORDER_TABLE_COLUMNS.length}`
   );
   assert.ok(
     odb.ORDER_ITEM_TABLE_COLUMNS.length >= 12,
-    `明细列清单条数异常（清单可能被清空）：${odb.ORDER_ITEM_TABLE_COLUMNS.length}`,
+    `明细列清单条数异常（清单可能被清空）：${odb.ORDER_ITEM_TABLE_COLUMNS.length}`
   );
   assert.deepStrictEqual(headCols, odb.ORDER_TABLE_COLUMNS.slice());
   const itemCols = dbQuery(`PRAGMA table_info(oi_order_items)`).map((r) => String(r.name));
@@ -944,30 +1044,30 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
   dbRun(`UPDATE sk_schema_migrations SET version = 8 WHERE key = 'order.main'`);
 
   dbRun(
-    `INSERT INTO oi_styles (id, code, fingerprint) VALUES (1, 'S-COST-1', 'fp-c1'), (2, 'S-COST-2', 'fp-c2')`,
+    `INSERT INTO oi_styles (id, code, fingerprint) VALUES (1, 'S-COST-1', 'fp-c1'), (2, 'S-COST-2', 'fp-c2')`
   );
   dbRun(
-    `INSERT INTO oi_style_colors (id, style_id, color, code) VALUES (11, 1, '黑', 'S-COST-1-黑'), (12, 2, '黑', 'S-COST-2-黑')`,
+    `INSERT INTO oi_style_colors (id, style_id, color, code) VALUES (11, 1, '黑', 'S-COST-1-黑'), (12, 2, '黑', 'S-COST-2-黑')`
   );
   dbRun(
-    `INSERT INTO oi_orders (id, order_no, order_time) VALUES (100, 'COST-1', '2026-10-11 05:59:22'), (101, 'COST-0', '2026-01-01')`,
+    `INSERT INTO oi_orders (id, order_no, order_time) VALUES (100, 'COST-1', '2026-10-11 05:59:22'), (101, 'COST-0', '2026-01-01')`
   );
   dbRun(
     `INSERT INTO oi_order_items (id, order_id, size, raw_fields, style_color_id, cost_cents) VALUES
        (1001, 100, 'XL', '{}', 11, 3200),
        (1002, 100, 'M',  '{}', 11, NULL),
        (1003, 100, 'S',  '{}', 0,  NULL),
-       (1004, 101, 'L',  '{}', 11, NULL)`,
+       (1004, 101, 'L',  '{}', 11, NULL)`
   );
   // v12 的靶子：一行**带商品ID + 平台色**的老订单（真实报表形状）与一行没有任何商品信息的。
   // 老库里这两个字段只存在于 `raw_fields` 里 ⇒ 只有"从原文重算"才回填得出来。
   dbRun(
     `INSERT INTO oi_order_items (id, order_id, size, raw_fields, style_color_id, cost_cents) VALUES
        (1005, 100, 'M', '{"产品ID":"1005018888888001","产品信息":"【1】Old Row\\n(产品属性:Color:5,Size:M)"}', 0, NULL),
-       (1006, 100, 'L', '{"订单号":"NO-ITEM-ID"}', 0, NULL)`,
+       (1006, 100, 'L', '{"订单号":"NO-ITEM-ID"}', 0, NULL)`
   );
   dbRun(
-    `INSERT INTO pl_products (code, name, cost_cents) VALUES ('S-COST-1', '成本款', 0), ('S-COST-2', '已有价', 5000)`,
+    `INSERT INTO pl_products (code, name, cost_cents) VALUES ('S-COST-1', '成本款', 0), ('S-COST-2', '已有价', 5000)`
   );
   // C2 起 SCHEMA 不再建这张表（新库不该有）—— 本场景模拟老库，必须手工把旧价目表造出来
   dbMigrate([
@@ -999,17 +1099,18 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
     `INSERT INTO ae_cost_map (style_code, effective_from, source, style_name, unit_price_cents, sample_count, last_biz_date, updated_at)
      VALUES ('S-COST-1', '2026-10-10', 'manual',   '成本款', 2800, 0, '2026-10-10', datetime('now','localtime')),
             ('S-COST-1', '2026-10-17', 'purchase', '成本款', 3200, 1, '2026-10-17', datetime('now','localtime')),
-            ('S-COST-2', '2026-10-01', 'manual',   '已有价', 4000, 0, '2026-10-01', datetime('now','localtime'))`,
+            ('S-COST-2', '2026-10-01', 'manual',   '已有价', 4000, 0, '2026-10-01', datetime('now','localtime'))`
   );
-  dbRun(`INSERT INTO suppliers (name) VALUES ('成本厂')`);  const supId = Number(dbGet(`SELECT id FROM suppliers WHERE name = '成本厂'`).id);
+  dbRun(`INSERT INTO suppliers (name) VALUES ('成本厂')`);
+  const supId = Number(dbGet(`SELECT id FROM suppliers WHERE name = '成本厂'`).id);
   dbRun(
     `INSERT INTO purchase_orders (id, supplier_id, biz_date, status) VALUES (1, ?, '2026-10-17', 'submitted')`,
-    [supId],
+    [supId]
   );
   // 已提交拿货：M 码实付 32 —— 迁移要把它补到"原本没有旧实付"的那行
   dbRun(
     `INSERT INTO purchase_items (purchase_id, style_code, color, size, qty, price_cents, amount_cents, style_color_id)
-     VALUES (1, 'S-COST-1', '黑', 'M', 1, 3200, 3200, 11)`,
+     VALUES (1, 'S-COST-1', '黑', 'M', 1, 3200, 3200, 11)`
   );
 
   odb.ensureOrderSchema();
@@ -1032,12 +1133,12 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
   // ⑥ 产品当前价：空的补最新（10-17 的 32）；已有价不许被旧价目表覆盖
   assert.strictEqual(
     Number(dbGet(`SELECT cost_cents FROM pl_products WHERE code = 'S-COST-1'`).cost_cents),
-    3200,
+    3200
   );
   assert.strictEqual(
     Number(dbGet(`SELECT cost_cents FROM pl_products WHERE code = 'S-COST-2'`).cost_cents),
     5000,
-    '产品页已维护过的价，旧价目表无权覆盖',
+    '产品页已维护过的价，旧价目表无权覆盖'
   );
   // ⑦ 幂等：再跑一次不重复搬、版本不回退
   odb.ensureOrderSchema();
@@ -1046,31 +1147,47 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
   // ⑧ v10 在回填之后把旧价目表删掉（数据已经搬到订单行与产品行，删表不再丢信息）
   assert.strictEqual(
-    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n),
+    Number(
+      dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='ae_cost_map'`).n
+    ),
     0,
-    'v10 应删掉 ae_cost_map',
+    'v10 应删掉 ae_cost_map'
   );
   // ⑨ v11 删掉退役的 `oi_queue`（云端识别链已整条移除：它既没有写入方也没有读取方）
   assert.strictEqual(
-    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_queue'`).n),
+    Number(
+      dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_queue'`).n
+    ),
     0,
-    'v11 应删掉 oi_queue',
+    'v11 应删掉 oi_queue'
   );
   // ⑩ v12：变体键列 + 键表 + **存量从原文回填**（键只在导入时算一次，存量得靠迁移补）
   const v12Cols = dbQuery(`PRAGMA table_info(oi_order_items)`).map((c) => String(c.name));
   assert.ok(v12Cols.includes('variant_key'), 'v12 应给 oi_order_items 加 variant_key');
   assert.strictEqual(
-    Number(dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_variant_keys'`).n),
+    Number(
+      dbGet(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='oi_variant_keys'`)
+        .n
+    ),
     1,
-    'v12 应建出 oi_variant_keys',
+    'v12 应建出 oi_variant_keys'
   );
-  const vk1005 = String(dbGet(`SELECT variant_key FROM oi_order_items WHERE id = 1005`).variant_key);
-  assert.strictEqual(vk1005.split('\u0000').length, 3, `存量行未回填出三段键：${JSON.stringify(vk1005)}`);
-  assert.ok(vk1005.includes('1005018888888001'), '键里应含商品ID（从 raw_fields 重算，不是读 color 列）');
+  const vk1005 = String(
+    dbGet(`SELECT variant_key FROM oi_order_items WHERE id = 1005`).variant_key
+  );
+  assert.strictEqual(
+    vk1005.split('\u0000').length,
+    3,
+    `存量行未回填出三段键：${JSON.stringify(vk1005)}`
+  );
+  assert.ok(
+    vk1005.includes('1005018888888001'),
+    '键里应含商品ID（从 raw_fields 重算，不是读 color 列）'
+  );
   assert.strictEqual(
     String(dbGet(`SELECT variant_key FROM oi_order_items WHERE id = 1006`).variant_key),
     '',
-    '无商品ID 的老行不许被编出一个键（那会把无关订单并成一件）',
+    '无商品ID 的老行不许被编出一个键（那会把无关订单并成一件）'
   );
   // 收口（2026-10-29 回退后）：`ensureOrderSchema` 末尾**不再**"导入即归款" ——
   // `backfillVariantStyleColors` 只给**已归类行**补记 `oi_variant_keys` 绑定，没有任何映射时
@@ -1079,12 +1196,12 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
   assert.strictEqual(
     Number(dbGet(`SELECT COALESCE(style_color_id,0) AS s FROM oi_order_items WHERE id = 1005`).s),
     0,
-    '没有人工映射时带键的老行必须留在待认款（不许自动长款色）',
+    '没有人工映射时带键的老行必须留在待认款（不许自动长款色）'
   );
   assert.strictEqual(
     Number(dbGet(`SELECT COUNT(*) AS n FROM oi_style_colors`).n),
     2,
-    '收口不许新建款色（迁移只写键）',
+    '收口不许新建款色（迁移只写键）'
   );
   // ⑪ v13：芒果同步六列（老库走 ALTER 补，新库由列数组直建 —— 这里钉的是**升级路径**）
   const v13Head = dbQuery(`PRAGMA table_info(oi_orders)`).map((c) => String(c.name));
@@ -1100,7 +1217,7 @@ check('v9：实付搬家 / 预估按下单日回填 / 未归类留空 / 产品�
   assert.strictEqual(migrationVersion('order.main'), ORDER_MAIN_STEPS);
   // 不回填：存量行必须是空串（"没同步过"不能伪装成"付款时刻是 0"）
   const stale = dbGet(
-    `SELECT COUNT(*) AS n FROM oi_order_items WHERE item_id <> '' OR sku_code <> ''`,
+    `SELECT COUNT(*) AS n FROM oi_order_items WHERE item_id <> '' OR sku_code <> ''`
   );
   assert.strictEqual(Number(stale.n), 0, 'v13 不许编造存量值');
 });
@@ -1124,17 +1241,18 @@ const dirI = newDb('pod');
 try {
   const pod = require(path.join(ROOT, 'dist', 'electron', 'pod-db.js'));
 
-  // ① 空库直接调：输入域（sk_shops / pl_shop_items）由它自己去建，六件必须齐全
-  check('空库上 ensurePodSchema 一次建齐六件（四表 + 余量视图 + 待绑定清单）', () => {
+  // ① 空库直接调：输入域（sk_shops / pl_shop_items）由它自己去建，九件必须齐全
+  check('空库上 ensurePodSchema 一次建齐十件（八表 + 余量视图 + 待绑定清单）', () => {
     pod.ensurePodSchema();
     const rep = pod.podSchemaReport();
     assert.deepStrictEqual(rep.missing, [], JSON.stringify(rep));
-    assert.strictEqual(rep.tables.length, 4);
+    // 八表：图案主数据 / 识别图 / 款色→图案 / 合并头 / 合并明细 / 绑定台账 / 花纸批次 / 件流水
+    assert.strictEqual(rep.tables.length, 8);
     assert.strictEqual(rep.views.length, 2);
   });
 
   // ② 幂等：每次入口都会调它（绑定台/看板/报单页），重跑必须不报错
-  check('幂等：重复 ensure 不报错、六件仍在（CREATE IF NOT EXISTS 就是"补建"）', () => {
+  check('幂等：重复 ensure 不报错、十件仍在（CREATE IF NOT EXISTS 就是"补建"）', () => {
     pod.ensurePodSchema();
     pod.ensurePodSchema();
     assert.deepStrictEqual(pod.podSchemaReport().missing, []);
@@ -1145,6 +1263,10 @@ try {
   dbRun('DROP VIEW IF EXISTS pod_pattern_balance');
   dbRun('DROP TABLE IF EXISTS pod_sheet_ledger');
   dbRun('DROP TABLE IF EXISTS pod_sheet_batches');
+  dbRun('DROP TABLE IF EXISTS pod_pattern_merge_items');
+  dbRun('DROP TABLE IF EXISTS pod_pattern_merges');
+  dbRun('DROP TABLE IF EXISTS pod_style_color_patterns');
+  dbRun('DROP TABLE IF EXISTS pod_pattern_images');
   dbRun('DROP TABLE IF EXISTS pod_variant_patterns');
   dbRun('DROP TABLE IF EXISTS pod_patterns');
   check('老库（完全没有 pod% 对象）升级后同样建齐，且不需要版本步骤', () => {
@@ -1153,15 +1275,17 @@ try {
     assert.strictEqual(
       migrationVersion('pod.main'),
       0,
-      '图案域不该有版本步骤（全是新对象，幂等 CREATE 就是升级路径）',
+      '图案域不该有版本步骤（全是新对象，幂等 CREATE 就是升级路径）'
     );
   });
 
   // ④ 待绑定清单的键必须与 variantKey() 同构：char(0) 分隔、三/四段
-  dbRun(`INSERT INTO sk_shops (id, name, name_key, erp_shop_id, status) VALUES (1, '一店', '一店', '', 'active')`);
+  dbRun(
+    `INSERT INTO sk_shops (id, name, name_key, erp_shop_id, status) VALUES (1, '一店', '一店', '', 'active')`
+  );
   dbRun(
     `INSERT INTO pl_shop_items (shop_id, store_key, item_id, sku_json)
-     VALUES (1, '', 'IT-9', '[{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A1.jpg"},{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A2.jpg"}]')`,
+     VALUES (1, '', 'IT-9', '[{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A1.jpg"},{"color":"黑","imageUrl":"https://img.alicdn.com/kf/A2.jpg"}]')`
   );
   check('待绑定清单：同色两个图 ⇒ 键带第 4 段（图键），这是"色名塌陷"的唯一判据', () => {
     const rows = dbQuery(`SELECT variant_key, image_key, imgs_in_name FROM pod_binding_worklist`);
@@ -1175,7 +1299,7 @@ try {
   check('待绑定清单：同色只有一个图 ⇒ 键仍是三段（不许多出空段）', () => {
     dbRun(
       `INSERT INTO pl_shop_items (shop_id, store_key, item_id, sku_json)
-       VALUES (1, '', 'IT-10', '[{"color":"白","imageUrl":"https://img.alicdn.com/kf/B1.jpg"}]')`,
+       VALUES (1, '', 'IT-10', '[{"color":"白","imageUrl":"https://img.alicdn.com/kf/B1.jpg"}]')`
     );
     const r = dbQuery(`SELECT variant_key FROM pod_binding_worklist WHERE item_id = 'IT-10'`)[0];
     assert.strictEqual(String(r.variant_key).split('\u0000').length, 3, String(r.variant_key));
@@ -1237,7 +1361,9 @@ try {
     const cols = dbQuery(`PRAGMA table_info(pl_shop_items)`).map((c) => String(c.name));
     assert.ok(cols.includes('pod_n_colors'), cols.join(','));
     assert.ok(cols.includes('pod_n_images'), cols.join(','));
-    const r = dbQuery(`SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD'`)[0];
+    const r = dbQuery(
+      `SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD'`
+    )[0];
     assert.strictEqual(Number(r.a), 0);
     assert.strictEqual(Number(r.b), 0);
   });
@@ -1245,7 +1371,9 @@ try {
   //    于是 `WHERE pod_n_images > 1`（找塌陷链接的唯一入口）筛出 0 行 ——
   //    那不是"没有塌陷链接"，而是"没人算过"，而且长得跟真结论一模一样。
   check('迁移 v3 回填存量：真实矩阵的老行升级后两列就是真实值，不是 0', () => {
-    const r = dbQuery(`SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD2'`)[0];
+    const r = dbQuery(
+      `SELECT pod_n_colors AS a, pod_n_images AS b FROM pl_shop_items WHERE item_id='IT-OLD2'`
+    )[0];
     assert.strictEqual(Number(r.a), 2, '色 A / 色 B 两个色名');
     assert.strictEqual(Number(r.b), 2, '色 A 下挂了 2 张图（塌陷）；色 B 的 1 张不该把它抬到 3');
   });

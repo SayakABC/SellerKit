@@ -147,6 +147,9 @@ const TABLE_PURPOSES = {
   sk_mail_fts: '全文检索虚表（FTS5，rowid = sk_mail_messages.id）。',
 
   sr_rate_snapshots: '运价表快照（一行 = 一次导入，content_key 去重）；算账按订单日期取"当时那份"。',
+
+  sk_sync_log: '采集同步日志（一行 = 一次同步尝试）；抓 0 条也必须有一条。',
+  sk_auto_sync_log: '开机自动同步的尝试日志（一天最多 3 次补跑；跳过 / 放弃也要留一行原因）。',
 };
 
 // 跳过的表：SQLite 内建 / FTS 影子表 / 基础设施

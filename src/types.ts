@@ -39,6 +39,16 @@ export interface ElectronAPI {
   checkFileExists: (filePath: string) => Promise<APIResult<boolean>>;
   readFile: (filePath: string) => Promise<APIResult<ExcelFileResult | TemplateFileResult>>;
   getDefaultTemplatePath: () => Promise<APIResult<string>>;
+  /**
+   * 规则求值隔离窗口（`jsExpression`）：返回每行的求值结果。
+   * 主窗口**不执行任何 eval** —— 含代码的规则由主进程转交独立窗口（无 electronAPI、不可出网）。
+   */
+  ruleEvalBatch: (payload: {
+    rule: { id: string; code: string };
+    fields: Record<string, string>[];
+  }) => Promise<
+    APIResult<{ values: (string | null)[]; errors: { index: number; message: string }[]; cspViolations: number }>
+  >;
   getAppVersion: () => Promise<APIResult<string>>;
   resetStore: () => Promise<APIResult<void>>;
   // 数据备份/恢复（换机迁移）：选目录 / 导出 / 导入 / 打开数据目录
@@ -123,7 +133,10 @@ export interface ElectronAPI {
     shipCents?: number | null;
     weightG?: number | null;
   }) => Promise<APIResult<ParcelDetail | null>>;
-  orderParcelDelete: (payload: { id: number; orderNo?: string }) => Promise<APIResult<ParcelDetail | null>>;
+  orderParcelDelete: (payload: {
+    id: number;
+    orderNo?: string;
+  }) => Promise<APIResult<ParcelDetail | null>>;
   /** `qty <= 0` = 从该包移除这一行；超拆由主进程拒绝并回 `error` 文案 */
   orderParcelSetLine: (payload: {
     parcelId: number;
@@ -244,9 +257,9 @@ export interface ElectronAPI {
     }>
   >;
   // 全库重放已确认映射：修「映射在、订单没吃到」的历史漏网（`dryRun` 只报数不改库）
-  orderReplayMappings: (payload?: { dryRun?: boolean }) => Promise<
-    APIResult<SkuMappingReplayStats>
-  >;
+  orderReplayMappings: (payload?: {
+    dryRun?: boolean;
+  }) => Promise<APIResult<SkuMappingReplayStats>>;
   // 修改款式展示名（款编码级）
   orderStyleRename: (payload: {
     code: string;
@@ -279,10 +292,17 @@ export interface ElectronAPI {
    * 外部进程（Chrome 扩展）写库宿主页面无法感知，靠它触发重拉。返回退订函数。
    */
   onAeItemsIngested: (cb: (event: AeItemsIngestedEvent) => void) => () => void;
+  /**
+   * 订阅「芒果订单已同步」事件（`/mango/ingest` 处理完成后广播；主进程→渲染层单向）。
+   * 用于「去芒果采集」后的自动刷新 —— 不必等用户手动点刷新。返回退订函数。
+   */
+  onMangoIngested: (cb: (event: MangoIngestedEvent) => void) => () => void;
   // ⚠️ 2026-10-21（C2）：`aeCostMapImport / List / UpsertManual / DeleteManual` 随 ae_cost_map
   //    退役删除（成本真源 = 产品行当前价 + 订单明细行「进价 / 实际进价」）。
   /** ---- 结算明细（AE 后台导出的订单明细；解析在渲染层，主进程只落库）---- */
-  settleImport: (payload: { rows: unknown[] }) => Promise<
+  settleImport: (payload: {
+    rows: unknown[];
+  }) => Promise<
     APIResult<{ created: number; updated: number; failed: { orderNo: string; message: string }[] }>
   >;
   settleOrders: (payload: { orderNos: string[] }) => Promise<
@@ -464,12 +484,19 @@ export interface ElectronAPI {
    * 公共条目（scope='shared'）必须带 `allocations`，且其合计必须**恰好等于**金额，否则拒写。
    */
   ledgerEntryUpsert: (
-    payload: LedgerEntryInput,
-  ) => Promise<APIResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>>;
+    payload: LedgerEntryInput
+  ) => Promise<
+    APIResult<{ id: number; created: boolean; allocations: number; settledLocked: boolean }>
+  >;
   /** 作废条目（不删行；已被结算单占用的须先撤销结算） */
-  ledgerEntryVoid: (payload: { id: number; reason: string }) => Promise<APIResult<{ id: number; voided: boolean }>>;
+  ledgerEntryVoid: (payload: {
+    id: number;
+    reason: string;
+  }) => Promise<APIResult<{ id: number; voided: boolean }>>;
   /** 恢复作废条目（`void → active`）；被有效结算单占用时拒 */
-  ledgerEntryRestore: (payload: { id: number }) => Promise<APIResult<{ id: number; restored: boolean }>>;
+  ledgerEntryRestore: (payload: {
+    id: number;
+  }) => Promise<APIResult<{ id: number; restored: boolean }>>;
   /** 批量作废（「撤销本次导入」用）：整批一个事务，任一条不可作废则整批回滚 */
   ledgerEntriesVoid: (payload: {
     ids: number[];
@@ -500,7 +527,9 @@ export interface ElectronAPI {
     fromId: number;
     toId: number;
     note?: string;
-  }) => Promise<APIResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>>;
+  }) => Promise<
+    APIResult<{ fromId: number; toId: number; movedEntries: number; transferredCents: number }>
+  >;
   /** 往来台账：应收 / 应付 / 净往来 / 已结算 / 未结清（五个数缺一个用户就得自己减） */
   ledgerPartyLedger: (payload?: {
     includeArchived?: boolean;
@@ -551,7 +580,9 @@ export interface ElectronAPI {
     to?: string;
   }) => Promise<APIResult<LedgerShopBreakdown>>;
   /** 明细导出 xlsx（业务口径全由渲染层算好传入，主进程只画表存盘） */
-  ledgerExportExcel: (payload: LedgerExportInput) => Promise<APIResult<{ filePath: string; rows: number }>>;
+  ledgerExportExcel: (
+    payload: LedgerExportInput
+  ) => Promise<APIResult<{ filePath: string; rows: number }>>;
   /**
    * 文件里的相关人 / 科目 / 店铺名 → 库里 id（批量导入用）。
    * 归一与同名判定只在主进程做（`toNameKey` 与这些表都在这侧），渲染层只消费四态。
@@ -565,9 +596,7 @@ export interface ElectronAPI {
    * Excel 批量导入：**整批一个事务、只新增**（永不改已有条目、不产生结算单）。
    * 任一行不合法 → 整批回滚，错误带「第 N 行：」。
    */
-  ledgerEntryBatchCreate: (payload: {
-    entries: LedgerImportEntryInput[];
-  }) => Promise<
+  ledgerEntryBatchCreate: (payload: { entries: LedgerImportEntryInput[] }) => Promise<
     APIResult<{
       created: number;
       ids: number[];
@@ -655,9 +684,10 @@ export interface ElectronAPI {
    * 新增颜色到字典（「常用色」末尾的「＋ 新增颜色」）。
    * 幂等：同名已存在时 `created=false` 并返回既有行；纯数字色号会被拒绝。
    */
-  mdColorCreate: (payload: { name: string; hex?: string }) => Promise<
-    APIResult<{ color: MdColorItem | null; created: boolean }>
-  >;
+  mdColorCreate: (payload: {
+    name: string;
+    hex?: string;
+  }) => Promise<APIResult<{ color: MdColorItem | null; created: boolean }>>;
   /** 更新某个字典色的色块 hex（只改显示，不改名字；空串 = 没有标准色值） */
   mdColorUpdateHex: (payload: {
     id: number;
@@ -701,6 +731,19 @@ export interface ElectronAPI {
   }) => Promise<APIResult<{ found: boolean; updated: boolean }>>;
   /** 有当前进价的款编码集合（`pl_products.cost_cents > 0`；「今天」缺口卡用） */
   productPricedCodes: () => Promise<APIResult<{ codes: string[] }>>;
+  /**
+   * **亚洲款加码**：一次取回「款 → 偏移」与「款 → 码链」。
+   * 拣货清单换算前必须两样都有：偏移决定动不动、码链决定"下一个码是谁"（数字码/异形码靠它）。
+   */
+  productSizeShiftLoad: (payload: {
+    codes: string[];
+  }) => Promise<APIResult<{ shifts: Record<string, number>; chains: Record<string, string[]> }>>;
+  /** 设/撤一款的加码偏移（0 = 撤）。只影响拿货侧，不动订单原文与利润 */
+  productSizeShiftSet: (payload: {
+    styleCode: string;
+    shift: number;
+    note?: string;
+  }) => Promise<APIResult<{ styleCode: string; shift: number }>>;
   /** 汇总（总数 / 按状态 / 厂家分布 / 未关联厂家数；supplierOptions 为**全量**厂家，供下拉） */
   productSummary: () => Promise<APIResult<ProductSummary>>;
   /** 下一个款编码（建款向导「系统发号」只读展示；主进程发号器，渲染层勿自行 max+1） */
@@ -787,14 +830,16 @@ export interface ElectronAPI {
     limit?: number;
   }) => Promise<APIResult<{ adopted: number; pending: number }>>;
   // ---- SKU 子表（pl_variants：一个款下多个 SKU，每 SKU 一个克重）----
-  productVariantList: (payload: { productIds: number[] }) => Promise<APIResult<{ rows: VariantRow[] }>>;
-  productVariantUpsert: (payload: VariantUpsertInput) => Promise<APIResult<{ id: number; created: boolean }>>;
+  productVariantList: (payload: {
+    productIds: number[];
+  }) => Promise<APIResult<{ rows: VariantRow[] }>>;
+  productVariantUpsert: (
+    payload: VariantUpsertInput
+  ) => Promise<APIResult<{ id: number; created: boolean }>>;
   productVariantDelete: (payload: { id: number }) => Promise<APIResult<{ removed: number }>>;
-  productBatchUpdate: (
-    payload: ProductBatchUpdateInput,
-  ) => Promise<APIResult<{ updated: number }>>;
+  productBatchUpdate: (payload: ProductBatchUpdateInput) => Promise<APIResult<{ updated: number }>>;
   productMoveSupplier: (
-    payload: ProductMoveSupplierInput,
+    payload: ProductMoveSupplierInput
   ) => Promise<APIResult<{ changed: boolean }>>;
   // ---- 产品图片（pl_images / pl_item_images；srcPath 须来自用户对话框所选文件）----
   productImageAttach: (payload: {
@@ -888,7 +933,9 @@ export interface ElectronAPI {
   shopItemsImport: (payload: {
     shopId?: number;
     ids?: string[];
-  }) => Promise<APIResult<{ received: number; inserted: number; updated: number; skipped: number }>>;
+  }) => Promise<
+    APIResult<{ received: number; inserted: number; updated: number; skipped: number }>
+  >;
   /**
    * 下载采集图入库（主进程 net 下载 → landImageBuffer 去重 → 回填 pl_shop_items.image_id）。
    * `adoptMain=true` 且带 productId 时顺手采纳为款主图（只补空）；
@@ -902,6 +949,144 @@ export interface ElectronAPI {
   }) => Promise<APIResult<ShopItemImageFetchResult>>;
   /** 删一条采集行（按行 id；同一商品ID 在多家店下各是一行，不能按 item_id 删） */
   shopItemsDelete: (payload: { id: number }) => Promise<APIResult<{ removed: boolean }>>;
+  // ---- 图案槽位域（POD；M3/M4 —— 认图案 + 花纸库存 / 订花纸）----
+  // 口径约定：**净需件与张数不在这两处算**（唯一实现在渲染层 `src/lib/podNeed.ts`），
+  // 主进程只做「形状 + 值域」校验、落库与打包，避免出现第二套状态口径。
+  /** 待认颜色清单（缺省一页 24 个）+ 顶部四个汇总数；每行带已缓存色图的本地路径 */
+  podWorklist: (payload?: {
+    filter?: 'all' | 'unbound' | 'bound' | 'collapsed';
+    search?: string;
+    page?: number;
+    pageSize?: number;
+  }) => Promise<APIResult<PodWorklistResult>>;
+  /** 图案清单（「发货台 › 订花纸」用；带已绑颜色数、余量与本地图路径。2026-11-03 起不再有第二个页面读它） */
+  podPatternList: (payload?: {
+    search?: string;
+    status?: string;
+  }) => Promise<APIResult<PodPatternRow[]>>;
+  /** 新建图案（`code` 唯一，重码回人话错误）；`images` = 保存时顺手挂上的识别图 */
+  podPatternCreate: (payload: {
+    code: string;
+    name?: string;
+    /** 制版用图稿（**不是**预览图；红线 7） */
+    artworkImageId?: number;
+    previewImageId?: number;
+    note?: string;
+    /** 识别图（订单图指纹 → 图案；用户口径「根据订单中的图片来决定印什么花」） */
+    images?: { fingerprint: string; imageId?: number }[];
+    source?: string;
+  }) => Promise<APIResult<{ id: number; created: boolean; linked: number }>>;
+  /** 改图案：`undefined` = 不改，空串 = 清空（两者必须能分开） */
+  podPatternUpdate: (payload: {
+    id: number;
+    name?: string;
+    artworkImageId?: number;
+    previewImageId?: number;
+    note?: string;
+    status?: string;
+  }) => Promise<APIResult<{ changed: number }>>;
+  /**
+   * 图片落库（新建图案的"选图"路径）：本地选图 `srcPath` 或远程色图 `url` → `md_images`。
+   * 界面不直接填图片 id —— 用户只选图，主进程负责落唯一图片仓。
+   */
+  podPatternImage: (payload: {
+    /** 必须是用户在文件选择框里亲手选过的路径 */
+    srcPath?: string;
+    /** 远程图 URL（例如当前颜色图） */
+    url?: string;
+  }) => Promise<
+    APIResult<{ imageId: number; localPath: string; fingerprint: string; reused: boolean }>
+  >;
+  /** 批量下载颜色图并回感知哈希/主色（「自动找同款」只出建议，不自动绑定） */
+  podSlotImages: (payload: { urls: string[] }) => Promise<APIResult<{ items: PodSlotImageItem[] }>>;
+  /** 一次绑一批槽位（事务；上限 200，同批重复键幂等） */
+  podBind: (payload: {
+    patternId: number;
+    /** `variantKey` 含 `\u0000`，原样透传（不 trim） */
+    slots: { variantKey: string; imageKey?: string; skuCode?: string }[];
+    source?: 'image' | 'name' | 'manual';
+    state?: 'bound' | 'suspected_merge';
+  }) => Promise<APIResult<{ bound: number; patternId: number }>>;
+  /** 解绑（重绑错图案的回退路径） */
+  podUnbind: (payload: { keys: string[] }) => Promise<APIResult<{ removed: number }>>;
+  /**
+   * 按**款色 / 订单图片**认图案（「发货台 › 订花纸」的主路径）：一次把选中的几个颜色（可带图）
+   * 都归到一个图案。款色与图**同一事务**写入 —— 「下次遇到同款时就不用再对应了」靠的就是款色那一行。
+   * 同一张图 / 同一个款色原来属于别的图案时**改指过来**并回报 `moved*`
+   * （结构上不允许一张图或一个色有两个主人）。
+   */
+  podImageLink: (payload: {
+    patternId: number;
+    images: { fingerprint: string; imageId?: number }[];
+    /** 这次一起认的款色（`oi_style_colors.id`）；订单没归类时为空 */
+    styleColorIds?: number[];
+    source?: string;
+  }) => Promise<APIResult<PodImageLinkOutcome>>;
+  /** 取消挂图 / 撤销款色认领（认错了的回退路径；图案本身留着） */
+  podImageUnlink: (payload: {
+    fingerprints: string[];
+    /** 一并撤掉的款色（0 = 只撤图） */
+    styleColorIds?: number[];
+  }) => Promise<APIResult<{ removed: number; removedStyleColors: number }>>;
+  /** 图案合并（N→1）：搬识别图 + 颜色绑定 + 款色 + 花纸批次，源图案标 `merged`（可撤销） */
+  podPatternMerge: (payload: {
+    targetId: number;
+    sourceIds: number[];
+  }) => Promise<APIResult<PodPatternMergeOutcome>>;
+  /** 拆开一次合并（按批次；搬不回去的会 skip 并计数） */
+  podPatternMergeUndo: (payload: { batchId: string }) => Promise<APIResult<PodPatternMergeUndo>>;
+  /** 最近的合并记录（合并弹层里的"撤销"列表） */
+  podPatternMergeHistory: (payload?: {
+    limit?: number;
+  }) => Promise<APIResult<PodPatternMergeRecord[]>>;
+  /** 订花纸页的全部输入：待发行 + 绑定索引 + 图案余量（一次取齐，聚合在渲染层） */
+  podNeedData: () => Promise<APIResult<PodNeedData>>;
+  /** 生成并保存 `报单_YYYYMMDD.zip`（清单.xlsx + 图稿；取消保存回 `__canceled__`） */
+  podReportExport: (payload: {
+    rows: PodReportRowInput[];
+    /** `yyyy-mm-dd`；缺省 = 今天 */
+    date?: string;
+    piecesPerSheet: number;
+    /** 待发但没绑图案的件数（> 0 时清单顶部写警告行） */
+    unboundPieces?: number;
+    unboundRows?: number;
+    assumedRows?: number;
+  }) => Promise<APIResult<PodReportExportResult>>;
+  /** 花纸批次（按图案 / 新的在前） */
+  podBatchList: (payload?: {
+    patternId?: number;
+    limit?: number;
+  }) => Promise<APIResult<PodBatchRow[]>>;
+  /** 报单建批（**不扣余量**，到货才加；`arrive:true` 建完顺手到货） */
+  podBatchCreate: (payload: {
+    patternId: number;
+    sheets: number;
+    piecesPerSheet: number;
+    supplier?: string;
+    costCents?: number;
+    /** `yyyy-mm-dd`；空 = 今天（本地时区） */
+    orderedAt?: string;
+    note?: string;
+    arrive?: boolean;
+  }) => Promise<APIResult<{ batchId: number; arrivedPieces: number }>>;
+  /** 到货（幂等：点两次不会多一批货） */
+  podBatchArrive: (payload: {
+    batchId: number;
+  }) => Promise<APIResult<{ arrived: boolean; arrivedPieces: number }>>;
+  /** 印花扣减（FIFO 分批次；余量不足整批拒绝并回「还差 N 件」） */
+  podPrint: (payload: {
+    patternId: number;
+    pieces: number;
+    refOrderItemId?: number;
+  }) => Promise<APIResult<{ printed: number; allocations: { batchId: number; pieces: number }[] }>>;
+  /** 盘点调整（±，留一行带符号流水） */
+  podAdjust: (payload: {
+    batchId: number;
+    deltaPieces: number;
+    note?: string;
+  }) => Promise<APIResult<{ adjusted: number }>>;
+  /** 花纸库存（直读 `pod_pattern_balance`；显示在「图案」卡片下方） */
+  podBalance: () => Promise<APIResult<PodBalanceRow[]>>;
   // ---- 外置插件（Phase 3：独立插件目录 <userData>/plugins）----
   /** 扫描插件目录：返回每个目录的 manifest.json 原始内容（渲染层负责严格 schema 校验） */
   pluginsScan: () => Promise<APIResult<PluginScanResult>>;
@@ -953,6 +1138,14 @@ export interface ElectronAPI {
   mailSyncCancel: (payload: { accountId: number }) => Promise<APIResult<{ cancelled: boolean }>>;
   /** 当前同步队列状态 */
   mailSyncState: () => Promise<APIResult<{ active: number[]; queued: number[] }>>;
+  /**
+   * 下发自动收信间隔（分钟；0 = 关闭）。
+   *
+   * **间隔的唯一权威在渲染层设置**（`MailPrefs.pollMinutes`），主进程只执行 + 缓存：
+   * 真正的定时器在 `electron/mail-scheduler.ts`（渲染层轮询只在「邮件」页挂载时存在，
+   * 冷启动不进该页 / 关窗口到托盘时都不跑）。
+   */
+  mailAutoSyncConfig: (payload: { minutes: number }) => Promise<APIResult<{ minutes: number }>>;
   /** 邮件列表（纯本地查询，不触网） */
   mailMessagesList: (
     payload?: MailMessageListFilter
@@ -1005,6 +1198,14 @@ export interface ElectronAPI {
   }) => Promise<APIResult<{ deleted: number }>>;
   /** 收件箱汇总 */
   mailStats: () => Promise<APIResult<MailStats>>;
+  /** 待办归集（罚单 / 纠纷·仲裁 / 订单关闭，按订单号合并；只筛选邮箱） */
+  mailTodoList: (payload?: { accountIds?: number[] }) => Promise<APIResult<MailTodoResult>>;
+  /** 手工划掉一条待办（有新邮件会自动浮出） */
+  mailTodoDismiss: (payload: { key: string; messageId?: number; kind?: string }) => Promise<
+    APIResult<{ dismissed: boolean; key: string }>
+  >;
+  /** 撤销划掉 */
+  mailTodoRestore: (payload: { key: string }) => Promise<APIResult<{ restored: number }>>;
   /** 支持的邮箱服务商预设（只读展示，含授权码获取指引） */
   mailProviderList: () => Promise<APIResult<MailProviderPresetView[]>>;
   /** ---- 运价表快照（宿主中立层；一次导入 = 一条，按内容去重）---- */
@@ -1042,6 +1243,10 @@ export interface ElectronAPI {
   >;
   /** 订阅同步事件（主进程→渲染层单向推送）；返回退订函数 */
   onMailSyncEvent: (cb: (event: MailSyncEvent) => void) => () => void;
+  /** 订阅「打开某个模块」意图（通知点击等入口）；返回退订函数 */
+  onOpenModule: (cb: (event: OpenModuleEvent) => void) => () => void;
+  /** 订阅侧栏徽标（主进程算好的数值；`count: null` = 撤掉徽标）；返回退订函数 */
+  onNavBadge: (cb: (event: NavBadgeEvent) => void) => () => void;
 }
 
 /** 更新事件载荷（主进程 updater.ts 经 updater-event 通道广播，最小安全字段） */
@@ -1533,8 +1738,13 @@ export interface PurchaseItem {
   suggestionQty: number;
   /** 款色 id（身份键，来自缺口行）。0 = 老数据/色未定 ⇒ 回落文本匹配 */
   styleColorId?: number;
+  /**
+   * **下单码**（订单原文）；'' = 未加码（`size` 就是下单码）。
+   * 加码款（亚洲款）的 `size` 是**拿货码**（要照它拿货、也是已拿台账的键），
+   * 这一列用于追溯（界面 `L→XL`、导出「下单码」列）与来源订单行匹配。
+   */
+  orderSize?: string;
 }
-
 
 /** 拿货单的来源订单快照行（生成拿货单时锁定的订单明细，含店铺/尺码，用于按店铺拆分成本） */
 export interface PurchaseSourceRow {
@@ -1548,6 +1758,8 @@ export interface PurchaseSourceRow {
   qty: number;
   /** 指向 `oi_order_items.id`；0 = 无归属（加列之前的历史单 / 订单行不够） */
   orderItemId?: number;
+  /** 对应的**拿货码**（'' = 未加码/老数据 ⇒ 等于 `size`）；与明细的 `size` 对齐用 */
+  purchaseSize?: string;
 }
 
 /** 店铺对账汇总行（拿货成本按来源订单拆分到店铺） */
@@ -2008,6 +2220,8 @@ export interface UnifiedOrderRow {
   timeoutAt: string;
   /** 行图（`oi_order_items.image_id`；**0 = 没落地**）—— 图案槽位与「缺图」统计读它 */
   imageId: number;
+  /** 行图的本地路径（`md_images.local_path`；空串 = 没图）—— 「待发货」清单的缩略图读它 */
+  localPath: string;
   /** 原始整行（导入侧保真：件数解析、商品ID 提取都从这里；采集侧为空对象） */
   rawFields: Record<string, string>;
 }
@@ -2103,7 +2317,10 @@ export interface PickingRowProjection {
   styleColorId: number;
   /** 颜色 / 尺码（SKU 粒度 = 款×色×码） */
   color: string;
+  /** **拿货码**（亚洲款加码后；未加码时 = 订单原文码）。换算在聚合之前做，见 `lib/sizeShift` */
   size: string;
+  /** 下单码（订单原文）；缺省 = 未加码。展示 `L→XL` 与开单追溯用 */
+  orderSize?: string;
   itemId: string;
   /** 供应商；未识别款/未填厂家时 id=0、名为空 */
   supplierId: number;
@@ -2607,6 +2824,232 @@ export interface ShopItemImageFetchResult {
 }
 
 // ---------------------------------------------------------------------------
+// 图案槽位域（POD；M3/M4 —— 认图案 + 花纸库存 + 订花纸，2026-11-03 起同在一页「发货台 › 订花纸」）
+// ---------------------------------------------------------------------------
+
+/** 一个「颜色」（`pod_binding_worklist` 一行，业务上的槽位）+ 它现在的认领状态 */
+export interface PodWorklistRow {
+  variantKey: string;
+  shop: string;
+  itemId: string;
+  color: string;
+  /** 非空 = 同色多名多图时的那张图的键（界面叫「需看图确认」） */
+  imageKey: string;
+  /** 同色名下一共几张图（>1 = 需看图确认） */
+  imgsInName: number;
+  /** 这个颜色的色图 URL（空 = 该 SKU 没给色图） */
+  imageUrl: string;
+  /** 色图已落库时的本地路径（空 = 还没下载；界面会按需调 `podSlotImages`） */
+  imagePath: string;
+  patternId: number;
+  patternCode: string;
+  patternName: string;
+  state: string;
+  source: string;
+  skuCode: string;
+  boundAt: string;
+}
+
+export interface PodWorklistStats {
+  total: number;
+  bound: number;
+  unbound: number;
+  collapsed: number;
+  collapsedBound: number;
+}
+
+export interface PodWorklistResult {
+  rows: PodWorklistRow[];
+  total: number;
+  stats: PodWorklistStats;
+}
+
+export interface PodPatternRow {
+  id: number;
+  code: string;
+  name: string;
+  artworkImageId: number;
+  previewImageId: number;
+  /** 制版图的本地路径（空 = 还没配；界面显示占位，不让用户看到内部 id） */
+  artworkLocalPath: string;
+  /** 认图用的预览图本地路径（空 = 与制版图同图或没配） */
+  previewLocalPath: string;
+  status: string;
+  note: string;
+  boundSlots: number;
+  remainingPieces: number;
+  /** 挂了几张识别图（0 = 还没挂；图案卡片上显示「N 张识别图」） */
+  imageCount: number;
+  /** 识别图指纹（最多 8 个；界面做「这张图已经认到它了」提示与合并预览） */
+  imageFingerprints: string[];
+  /** 识别图的本地路径（与 imageFingerprints 同序；空串 = 那张图不在本地） */
+  imageLocalPaths: string[];
+}
+
+/** 挂识别图 / 认款色的结果（`pod-image-link`） */
+export interface PodImageLinkOutcome {
+  /** 本次挂上几张图 */
+  linked: number;
+  /** 其中几张原来属于别的图案（已改指过来 —— 这不是错误，是要说给用户的事实） */
+  moved: number;
+  /** 本次认了几个款色（「下次同款不用再认」的依据） */
+  styleColors: number;
+  /** 其中几个款色原来属于别的图案 */
+  movedStyleColors: number;
+  patternId: number;
+}
+
+/** 合并图案的结果（`pod-pattern-merge`） */
+export interface PodPatternMergeOutcome {
+  ok: boolean;
+  /** 失败原因（人话，可直接展示；空 = 成功） */
+  error: string;
+  /** 撤销键（一次 N→1 = 一批） */
+  batchId: string;
+  targetPatternId: number;
+  movedImages: number;
+  movedSlots: number;
+  movedStyleColors: number;
+  movedBatches: number;
+}
+
+/** 撤销一次合并的结果（`pod-pattern-merge-undo`） */
+export interface PodPatternMergeUndo {
+  ok: boolean;
+  error: string;
+  /** 搬回去了几样（图 / 颜色绑定 / 花纸批次 合计，明细按 kind 计数） */
+  restored: number;
+  /** 跳过几样（已被后来的操作改到别处 / 行已不存在）—— > 0 时要告诉用户 */
+  skipped: number;
+}
+
+/** 一条合并记录（`pod-pattern-merge-history`；撤销入口按 batchId） */
+export interface PodPatternMergeRecord {
+  batchId: string;
+  targetPatternId: number;
+  targetCode: string;
+  sources: { id: number; code: string }[];
+  movedImages: number;
+  movedSlots: number;
+  movedStyleColors: number;
+  movedBatches: number;
+  createdAt: string;
+}
+
+/** 一张颜色图的相似度特征（「自动找同款」的输入；只做建议，不自动绑定） */
+export interface PodSlotImageItem {
+  url: string;
+  ok: boolean;
+  /** ok=false 时的原因（可直接展示） */
+  error?: string;
+  imageId: number;
+  localPath: string;
+  /** 内容 SHA-256（相同 = 字节完全一致） */
+  fingerprint: string;
+  /** 感知哈希（64 位十六进制；构图相似即相近） */
+  dhash: string;
+  /** 平均主色（0..255） */
+  r: number;
+  g: number;
+  b: number;
+}
+
+/** 花纸批次的一行（余量来自流水求和） */
+export interface PodBatchRow {
+  id: number;
+  patternId: number;
+  patternCode: string;
+  sheets: number;
+  piecesPerSheet: number;
+  totalPieces: number;
+  remainingPieces: number;
+  supplier: string;
+  costCents: number;
+  orderedAt: string;
+  arrivedAt: string;
+  note: string;
+}
+
+/** 花纸库存一行（直读 `pod_pattern_balance`；显示在「图案」卡片下方） */
+export interface PodBalanceRow {
+  patternId: number;
+  code: string;
+  name: string;
+  remainingPieces: number;
+  boundSlots: number;
+}
+
+/** 「发货台 › 订花纸」的输入（一次取齐：订单行 + 绑定索引 + 图案余量 + 款色→图案） */
+export interface PodNeedData {
+  candidates: {
+    variantKey: string;
+    bizStatus: string;
+    qty: number | null;
+    shop: string;
+    orderNo: string;
+    /** 商品ID（图片卡片显示"商品 xxx"；不参与匹配） */
+    itemId: string;
+    /** 订单行的颜色原文（图片卡片显示"覆盖了哪些颜色"；**不参与匹配**，禁降级到色名） */
+    color: string;
+    /** 订单图的内容指纹（空 = 这一行没图，只能按变体键匹配） */
+    imageFingerprint: string;
+    /** 订单图的本地路径（空 = 没图；界面走缩略图通道） */
+    imagePath: string;
+    /** 订单图原始 URL（本地文件丢了时界面可重新下载） */
+    imageUrl: string;
+    /** 款 id / 款编码（0 / 空 = 还没在「归类核对」认到款色） */
+    styleId: number;
+    styleCode: string;
+    /** 款色 id（认图案的稳定身份；0 = 没归类） */
+    styleColorId: number;
+    /** 款色名（自家色名） */
+    styleColorName: string;
+    /** 款色代表图（款卡片里的那张"款图"；指纹空 = 这个色还没配图） */
+    styleImageFingerprint: string;
+    styleImagePath: string;
+  }[];
+  bindings: Record<string, number>;
+  /** 图片指纹 → 图案（**优先于** `bindings`：用户口径是"按订单图片认图案"） */
+  imageBindings: Record<string, number>;
+  /** 款色 id → 图案（**最优先**：同款换了商品图也还认得） */
+  styleColorBindings: Record<string, number>;
+  patterns: {
+    id: number;
+    code: string;
+    name: string;
+    artworkImageId: number;
+    previewImageId: number;
+    remainingPieces: number;
+    status: string;
+  }[];
+  bindingStats: { total: number; bound: number; collapsed: number; collapsedBound: number };
+  truncated: number;
+}
+
+/** 报单导出的一行（渲染层算好净需件与张数；主进程只打包） */
+export interface PodReportRowInput {
+  patternId: number;
+  code: string;
+  name: string;
+  artworkImageId: number;
+  previewImageId: number;
+  needPieces: number;
+  remainingPieces: number;
+  netNeed: number;
+  sheets: number;
+}
+
+export interface PodReportExportResult {
+  filePath: string;
+  /** 清单数据行数（= 应当打进的图稿张数） */
+  rows: number;
+  images: number;
+  /** 缺图稿的图案编码（空 = 齐） */
+  missingArtwork: string[];
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
 // 集中邮件收件箱（IMAP 只读；挂在「店铺账号管家」内）
 // ---------------------------------------------------------------------------
 
@@ -2771,6 +3214,55 @@ export interface MailStats {
   folders: { path: string; count: number }[];
 }
 
+/** 邮件待办：三类（罚单 / 纠纷·仲裁 / 订单关闭）按订单号合并后的单条 */
+export interface MailTodoEvent {
+  messageId: number;
+  /** 状态短句（"罚单待申诉（有申诉期）"），直接用于展示 */
+  label: string;
+  kind: MailTodoKind;
+  /** 3 = 有期限；2 = 已成事实待核对；1 = 仅知会 */
+  severity: MailTodoSeverity;
+  receivedAt: string;
+  subject: string;
+}
+
+export type MailTodoKind = 'penalty' | 'dispute' | 'closed';
+export type MailTodoSeverity = 1 | 2 | 3;
+
+/** 一条待办 = 一个订单（同单多封相关邮件合并；点击打开最新那封） */
+export interface MailTodoItem {
+  orderNo: string;
+  orderNoSource: 'subject' | 'body' | 'none';
+  kind: MailTodoKind;
+  label: string;
+  severity: MailTodoSeverity;
+  messageId: number;
+  subject: string;
+  receivedAt: string;
+  accountId: number;
+  accountEmail: string;
+  events: MailTodoEvent[];
+  /** 已被手工划掉（划掉之后没有新邮件） */
+  dismissed: boolean;
+  /** 划掉时间（ISO）；未划掉为空串 */
+  dismissedAt: string;
+  /** 划掉之后同单又来了新邮件 ⇒ 已自动浮出（"不是划掉失效，是事情有新进展"） */
+  resurfaced: boolean;
+}
+
+export interface MailTodoResult {
+  /** 全部（含已划掉），已划掉的排在最后 */
+  items: MailTodoItem[];
+  /** 还需处理的条数（不含已划掉） */
+  orders: number;
+  /** 已划掉的条数 */
+  dismissed: number;
+  /** 参与判定的邮件封数（含被合并的历史事件） */
+  mails: number;
+  /** 主题无单号且正文未缓存而无法归属的封数 */
+  unattributed: number;
+}
+
 /** 邮箱服务商预设（主进程精简下发，仅 UI 需要的字段） */
 export interface MailProviderPresetView {
   id: string;
@@ -2793,7 +3285,33 @@ export interface MailSyncEvent {
   status?: string;
   processed?: number;
   total?: number;
+  /** 本轮**新落库**的封数（只在 done 出现；`processed` 是"扫到的"，两者含义不同） */
+  newCount?: number;
   message?: string;
+}
+
+/**
+ * 侧栏徽标（主进程 → 外壳，通道 `nav-badge`）。
+ *
+ * `count: null` = **撤掉徽标**，不是"显示 0"—— 两者在用户眼里完全不同
+ * （前者"没有事了"，后者"还有 0 件"）。数值只由主进程算（例如未读数取 `mailStats().unread`），
+ * 渲染层不再自行推算，否则同一件事出现两套口径。
+ */
+export interface NavBadgeEvent {
+  /** 模块 id（`src/registry.generated.ts` 里的键） */
+  moduleId: string;
+  count: number | null;
+  /** 悬停说明 */
+  title?: string;
+  /** 待办性质：> 0 用警示色 */
+  todo?: boolean;
+}
+
+/** 「打开某个模块」意图（主进程 → 外壳，通道 `open-module`；通知点击等入口） */
+export interface OpenModuleEvent {
+  moduleId: string;
+  /** 模块内二级动作（交给目标模块的 switch-module 消费） */
+  action?: string;
 }
 
 /** 店铺账号汇总（总量 / 按状态 / 三种完整度），供统计条使用 */
@@ -2934,6 +3452,11 @@ export interface OrderCoverageRow {
   orderNo: string;
   shop: string;
   orderTime: string;
+  /**
+   * 这一单落进本地库的时刻（`oi_orders.created_at`）。
+   * 「今天导入 / 历史导入」按它判定 —— 下单日（`orderTime`）常常更早，用它会把今天采集的单说成"今天没单"。
+   */
+  importedAt: string;
   styleCode: string;
   styleName: string;
   styleColorId: number;
@@ -2996,6 +3519,28 @@ export interface AeItemsIngestedEvent {
   inserted: number;
   updated: number;
   /** 丢弃条数（含帧内消毒失败与 upsert 内跳过） */
+  skipped: number;
+  /** 广播时刻（ISO 8601） */
+  at: string;
+}
+
+/**
+ * 「芒果订单已同步」事件（主进程 → 渲染层单向广播）。
+ *
+ * 扩展推送的一批芒果订单在接收端**处理完成后**（写订单 + 图落地 + 同步日志）发出 ——
+ * 已打开的发货台据此重拉，用户点完「去芒果采集」不必再手动刷新。
+ *
+ * **`ok:false` 也会发**：抓 0 条 / 登录过期同样需要界面立刻更新采集状态条。
+ */
+export interface MangoIngestedEvent {
+  /** 这一批是否成功取到并处理了数据（`false` = 抓漏 / 登录过期 / 空帧异常） */
+  ok: boolean;
+  /** 实际收到的订单数 */
+  fetched: number;
+  /** 芒果说"这个筛选下共几单"（0 = 没给） */
+  totalItems: number;
+  inserted: number;
+  updated: number;
   skipped: number;
   /** 广播时刻（ISO 8601） */
   at: string;

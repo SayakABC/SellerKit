@@ -4,7 +4,7 @@
 // 标记为 ES 模块，避免顶层声明进入全局作用域与其他主进程文件冲突
 export {};
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -55,11 +55,19 @@ require('./shop-product-handlers');
 require('./ship-rate-handlers');
 // 拣货 IPC（未发货订单行投影：款色码 + 三层回落图 + 供应商；**只回投影，聚合与口径在渲染层纯函数**）
 require('./picking-handlers');
+// 图案域 IPC（POD：绑定台 / 报单 / 余量看板；图案与变体键绑定是本域唯一写入口）
+require('./pod-handlers');
 // 记账 IPC（店铺收支 + 公共费用分摊 + 资金相关人往来结算；分摊算法只在 src/lib/ledger.ts，本域只做守恒断言）
 require('./ledger-handlers');
 // 集中邮件收件箱 IPC（IMAP 只读同步：账号接入 / 连接测试 / 同步 / 本地邮件查询）
 const mailEngine = require('./mail-engine');
 require('./mail-handlers');
+// 邮件后台收信调度（定时器 + 新邮件系统通知）。必须在主进程：渲染层轮询只在「邮件」页
+// 挂载时存在，冷启动不进该页 / 关窗口到托盘时都不会跑（2026-11-04 修「不会自动收信」）
+const mailScheduler = require('./mail-scheduler');
+// 主进程 →「界面意图」下发（打开模块 / 侧栏徽标）：通知点击与未读角标都走这里
+const uiBridge = require('./ui-bridge') as typeof import('./ui-bridge');
+const { publishMailUnreadBadge } = require('./mail-badge') as typeof import('./mail-badge');
 // schema 启动编排（顺序有依赖，见 app.whenReady 内的注释）：企业 → 店铺（含迁移）→ 邮件
 const { ensureCompanySchema } = require('./company-db') as typeof import('./company-db');
 const { ensureShopSchema } = require('./shop-db') as typeof import('./shop-db');
@@ -67,6 +75,13 @@ const { ensureMailSchema } = require('./mail-db') as typeof import('./mail-db');
 // 「用户显式选择过的文件」白名单：收紧 read-file / save-template / check-file-exists 的路径权限（H-02）
 const { initApprovedUserFiles, approveUserFile, isUserFileAllowed, MAX_TEMPLATE_CHARS } =
   require('./user-file-allowlist') as typeof import('./user-file-allowlist');
+// 规则求值隔离窗口（S0）：`jsExpression` 的 new Function 从主窗口搬到这里执行，
+// 该窗口无 electronAPI、CSP `connect-src 'none'`，见 electron/rule-eval-window.ts 头部说明。
+const ruleEval = require('./rule-eval-window') as typeof import('./rule-eval-window');
+ruleEval.initRuleEval();
+// 开机自动化（M5）：托盘 / 自启 / 定时同步的编排在 scheduler.ts，判定在 schedulerPlan.ts
+const scheduler = require('./scheduler') as typeof import('./scheduler');
+const { HIDDEN_ARG, shouldStartHidden } = require('./schedulerPlan') as typeof import('./schedulerPlan');
 
 // 解析默认模板路径：开发模式使用项目根目录，打包后使用 resources 目录
 function getDefaultTemplatePath(): string {
@@ -78,6 +93,17 @@ function getDefaultTemplatePath(): string {
 
 let store: any = null;
 let mainWindow: any = null;
+/** 托盘（M5·T5-1）；`null` = 没建出来（那时关窗仍退出，行为与旧版一致） */
+let tray: any = null;
+/**
+ * 「真的在退出」。
+ *
+ * 有托盘之后，**关窗口 ≠ 退出**（T5-1 的判据就是"关窗口不退出进程"）：托盘菜单与
+ * macOS 的 ⌘Q / 系统关机才会置这个标记。少了它，用户点红点就再也收不到今天的自动同步。
+ */
+let isQuitting = false;
+/** 本次启动是否隐藏（开机自启不许弹窗，T5-2） */
+const START_HIDDEN = shouldStartHidden(process.argv);
 
 // Simple JSON-based store as fallback if electron-store fails to load
 class SimpleStore {
@@ -174,13 +200,16 @@ async function initStore() {
   initApprovedUserFiles(store);
 }
 
-function createWindow() {
+function createWindow(show = !START_HIDDEN) {
   mainWindow = new BrowserWindow({
     title: 'SellerKit',
     width: 1200,
     height: 800,
     minWidth: 900,
     minHeight: 600,
+    // 开机自启的隐藏启动（T5-2）：`--hidden` 时**不显示**窗口，只留托盘。
+    // 这里用 `show` 而不是创建后再 hide：后者会先闪一下窗口再消失（用户看到的最像是"弹广告"）。
+    show,
     // 隐藏原生标题栏，改用渲染进程自绘标题栏（与 App 主题同源，实现「一体」效果）
     titleBarStyle: 'hidden',
     webPreferences: {
@@ -225,6 +254,136 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // 页面就绪后重放「最后一次界面意图」（未读徽标 / 待打开的模块）。
+  // 窗口可能是刚刚被通知点击新建的，那时 `webContents.send` 只会被静默丢弃 ——
+  // 缓存在 ui-bridge，等到这一刻才送得出去（见该文件纪律 ②）。
+  mainWindow.webContents.on('did-finish-load', () => {
+    try {
+      uiBridge.flushUiBridge();
+    } catch (err: any) {
+      console.warn('[main] 重放界面意图失败：', err?.message || err);
+    }
+  });
+}
+
+/** 把主窗口拿出来（托盘菜单 / 通知点击 / Dock 激活共用一处，避免三份 `isMinimized` 判断） */
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed?.()) {
+    createWindow(true);
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/**
+ * 通知点击：把主窗口拿出来**并切到「邮件」**。
+ *
+ * 与 `showMainWindow` 分开是因为语义不同：托盘「显示主窗口」只是"我要回到应用"，
+ * 用户上次停在哪页就还是哪页；而新邮件通知的语义是"带我去看这几封信"。
+ * 页面尚未就绪时 `openModule` 会缓存，由 `did-finish-load` 重放，不会丢。
+ */
+function openMailInbox() {
+  showMainWindow();
+  uiBridge.openModule('mail');
+}
+
+/**
+ * 托盘图标路径（M5·T5-1）。
+ *
+ * 打包后走 `extraResources`（electron-builder.yml 里 `build/icon.png → icon.png`），
+ * 开发模式直接读仓库里的 `build/icon.png`。
+ * 找不到图标时**不建托盘**（返回 null）：一个看不见又点不到的托盘比重启后没有托盘更坏
+ * —— 而且关窗不退出会变成"应用消失了但进程还在"。
+ */
+function trayIconPath(): string {
+  const candidate = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(app.getAppPath(), 'build', 'icon.png');
+  return fs.existsSync(candidate) ? candidate : '';
+}
+
+/**
+ * 建托盘 + 三项菜单（T5-1：显示 / 立即同步 / 退出）。
+ *
+ * 为什么要有托盘：开机自启 + 关窗不退出之后，**没有托盘就再也找不到应用**（
+ * macOS 还有 Dock，Windows 就只有任务管理器）。托盘是隐藏启动的配套，不是装饰。
+ */
+function createTray() {
+  const iconPath = trayIconPath();
+  if (!iconPath) {
+    console.warn('[main] 找不到托盘图标，本次不建托盘（关窗仍退出）');
+    return;
+  }
+  try {
+    const size = process.platform === 'darwin' ? 18 : 16;
+    const image = nativeImage.createFromPath(iconPath).resize({ width: size, height: size });
+    // macOS 托盘用模板图（系统按深浅色自动反相）；Windows 保持原色
+    if (process.platform === 'darwin') image.setTemplateImage(true);
+    tray = new Tray(image);
+    tray.setToolTip('SellerKit');
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: '显示主窗口', click: () => showMainWindow() },
+        {
+          label: '立即同步',
+          // 人点的不受"今天已同步 / 一天 3 次"约束（那两条是给自动补跑的），但仍会留日志
+          click: () => {
+            scheduler.runAutoSync('manual').catch((err: any) => {
+              console.warn('[main] 手动同步异常：', err?.message || err);
+            });
+          },
+        },
+        { type: 'separator' },
+        {
+          label: '退出',
+          click: () => {
+            isQuitting = true;
+            app.quit();
+          },
+        },
+      ]),
+    );
+    // 左键点图标 = 显示主窗口（macOS 上右键/左键都会出菜单，这里只兜住"点图标"的直觉）
+    tray.on('click', () => showMainWindow());
+  } catch (err: any) {
+    console.warn('[main] 建托盘失败：', err?.message || err);
+    tray = null;
+  }
+}
+
+/**
+ * 开机自启 + 隐藏启动（T5-2）。
+ *
+ * 三条刻意的限制：
+ *   · **只在打包版**改这个系统设置 —— 开发时一跑 `npm run dev` 就往用户的自启项里塞一条
+ *     "用 electron 打开这个仓库"，既跑不起来也删不掉（用户只能自己去系统设置里找）。
+ *   · Windows / Linux 的 `openAsHidden` **不生效**，必须把 `--hidden` 写进自启参数里；
+ *     `shouldStartHidden(process.argv)` 读的就是这个标记（两处同字，改一处要改两处）。
+ *   · 允许用 `SELLERKIT_DISABLE_AUTOSTART=1` 关掉（排障 / 不想自启的用户）。
+ */
+function configureLoginItem() {
+  if (process.env.SELLERKIT_DISABLE_AUTOSTART === '1') {
+    console.log('[main] 已按 SELLERKIT_DISABLE_AUTOSTART=1 跳过开机自启配置');
+    return;
+  }
+  if (!app.isPackaged) {
+    console.log('[main] 开发模式不改开机自启（改用 SELLERKIT_AUTO_SYNC=1 单独测自动同步）');
+    return;
+  }
+  try {
+    const settings: { openAtLogin: boolean; openAsHidden?: boolean; args?: string[] } = {
+      openAtLogin: true,
+    };
+    if (process.platform === 'darwin') settings.openAsHidden = true;
+    else settings.args = [HIDDEN_ARG];
+    app.setLoginItemSettings(settings);
+  } catch (err: any) {
+    // 自启失败不许阻断启动（Windows 组策略 / 受限账户都可能拒绝）
+    console.warn('[main] 配置开机自启失败：', err?.message || err);
+  }
 }
 
 app.whenReady().then(async () => {
@@ -251,21 +410,54 @@ app.whenReady().then(async () => {
   initPluginUiProtocol();
   // 注册 sk-mail:// 请求处理：邮件正文（含内联/远程图片）的渲染入口
   initMailBodyProtocol();
+  // Windows 的系统通知要 appUserModelId（否则通知静默不弹；macOS/Linux 无此要求）
+  if (process.platform === 'win32') app.setAppUserModelId('com.sellerkit.app');
   createWindow();
+  // 托盘（T5-1）：建在窗口之后 —— 托盘菜单的「显示主窗口」需要一个窗口可显示；
+  // 托盘建不出来时 `tray === null`，`window-all-closed` 会退回"关窗即退出"的旧行为。
+  createTray();
+  // 开机自启 + 隐藏启动（T5-2）
+  configureLoginItem();
   // 注入窗口引用：updater.ts 随即注册 autoUpdater 事件（向渲染层广播 updater-event）
   updater.initUpdater(() => mainWindow);
   // 邮件同步进度广播（mail-sync-event）同样需要窗口引用
   mailEngine.setMailEventWindow(() => mainWindow);
+  // 界面意图（open-module / nav-badge）的窗口引用；随后先播一次未读数，
+  // 冷启动那一刻窗口多半还在加载，值会缓存起来、由 did-finish-load 重放。
+  uiBridge.setUiBridgeWindow(() => mainWindow);
+  publishMailUnreadBadge();
+  // 邮件后台收信：首轮延迟 15s（等 schema / 窗口 / 网络），间隔按渲染层下发的设置排程；
+  // 新邮件只在**自动轮次**弹系统通知，点通知 = 拿出窗口并切到「邮件」（见 openMailInbox）
+  mailScheduler.setMailSchedulerWindowHook({ show: showMainWindow, openInbox: openMailInbox });
+  mailScheduler.startMailScheduler();
   // 采集入库广播（ae-items-ingested）：扩展推帧落库后，已打开的页面据此重拉
   aeReceiver.setAeEventWindow(() => mainWindow);
+  // 通知点击 / 托盘菜单都从这一处拿窗口
+  scheduler.setAutoSyncWindowHooks({ show: showMainWindow });
+  // 开机自动同步（T5-3）：**打包版默认开**；开发模式下会一重启就开一次 Chrome，
+  // 所以只在显式 `SELLERKIT_AUTO_SYNC=1` 时才跑（手动测这条链路就加这个环境变量）。
+  if (app.isPackaged || process.env.SELLERKIT_AUTO_SYNC === '1') {
+    scheduler.startAutoSync();
+  } else {
+    console.log('[main] 开发模式跳过启动时自动同步（要测就 SELLERKIT_AUTO_SYNC=1 npm run dev）');
+  }
+});
+
+app.on('before-quit', () => {
+  // ⌘Q / 系统关机 / updater 的 quitAndInstall 都走这里：置了标记后 `window-all-closed` 才真的退
+  isQuitting = true;
+  // 求值窗口是隐藏窗口：不主动销毁会拖住退出（用户看到"点了退出没反应"）
+  ruleEval.shutdownRuleEval();
 });
 
 app.on('window-all-closed', () => {
-  app.quit();
+  // 有托盘时**关窗口不退出**（T5-1 的判据）：退出了就再也不会自动同步今天的单。
+  // 没有托盘（图标缺失 / 建失败）时保持旧行为，否则应用会变成"看不见的常驻进程"。
+  if (isQuitting || !tray) app.quit();
 });
 
 app.on('activate', () => {
-  if (mainWindow === null) createWindow();
+  showMainWindow();
 });
 
 // --- IPC Handlers ---

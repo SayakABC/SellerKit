@@ -93,7 +93,9 @@ const DB_OPS: Record<string, Record<string, (payload: any) => Promise<unknown>>>
         rejectOverLimit('表头列数', rawHeaders.length, EC_MAX_HEADERS);
       }
       const headers = rawHeaders.map((h: unknown) => ecStr(h, 200)).filter(Boolean);
-      const result = applyFieldProcessor(records as never, headers, rules as never);
+      // 2026-11-04：applyFieldProcessor 改为 async —— `jsExpression` 规则不再在宿主渲染层
+      // 用 new Function 求值，而是经 rule-eval-batch 交给隔离窗口（无 electronAPI / 不可出网）。
+      const result = await applyFieldProcessor(records as never, headers, rules as never);
       return {
         records: result.records,
         newHeaders: result.newHeaders,

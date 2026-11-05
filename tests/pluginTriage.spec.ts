@@ -404,8 +404,9 @@ describe('excel-copy 岛已对齐内建版能力（下记后不得悄悄缩水�
   // 背景（2026-09-22）：excel-copy（TV模版）内建视图包下记后，功能由 ui-plugins/excel-copy 独家提供。
   // 该岛有两处**必须走宿主**的硬约束，且都属于"违反了也不报错、只是功能不对"的类型：
   //   ① Excel 解析：岛内不打包 xlsx（宿主已有解析器，重复引入会让两端口径漂移）；
-  //   ② 规则求值：iframe 的 CSP 是 `script-src 'self'`，**没有 unsafe-eval**，
-  //      jsExpression 规则用的是 new Function —— 岛内根本无法执行。
+  //   ② 规则求值：iframe 的 CSP 是 `script-src 'self'`，**没有 unsafe-eval** —— 岛内跑不了
+  //      `jsExpression`（2026-11-04 起宿主自己也不跑：求值统一交给无 electronAPI、
+  //      `default-src 'none'` 的隔离窗口，见 electron/rule-eval-window.ts）。
   // 因此下面既查"宿主域每个 op 都被用上"，也查"岛内不得自行 eval / 引 xlsx"。
   const ISLAND = 'excel-copy';
 
@@ -424,6 +425,18 @@ describe('excel-copy 岛已对齐内建版能力（下记后不得悄悄缩水�
 
   it('规则求值确实走宿主 applyRules', () => {
     expect(/\bec\('applyRules'/.test(islandSource(ISLAND))).toBe(true);
+  });
+
+  // 2026-11-04 补：上面那条只钉住"岛侧确实调用了 applyRules"，**钉不住宿主侧有没有净化**。
+  // 来历是变异测试：把 host.ts 的 `sanitizeRules(p?.rules)` 换成 `p?.rules`（原样透传），
+  // 全量单测 1440 项**仍然全绿** —— `sanitizeRules` 自己有一整套用例，但"调用点接没接上"没人管。
+  // 而载荷伪造（岛被换掉 / 桥被打穿）时，这条调用是最后一道闸：少了它，`EC_RULE_TYPES`
+  // 白名单、条数上限、字段长度截断全部等于不存在，非法规则直接进规则引擎。
+  it('宿主 applyRules 先把岛传来的规则净化，再交给规则引擎（不是原样透传）', () => {
+    const hostSrc = readFileSync(resolve(root, 'src/core/plugin/host.ts'), 'utf-8');
+    expect(/\bsanitizeRules\s*\(\s*p\?\.rules\s*\)/.test(hostSrc)).toBe(true);
+    // 反向：交给 applyFieldProcessor 的必须是净化后的 `rules`，不许出现 `p?.rules` 直传
+    expect(/applyFieldProcessor\([^;]*p\?\.rules/.test(hostSrc)).toBe(false);
   });
 
   it('配置命名空间为 excel-copy（与内建 modules.excel-copy 同源 → 老配置自动继承）', () => {

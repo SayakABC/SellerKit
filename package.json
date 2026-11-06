@@ -39,6 +39,7 @@
     "plugins:create": "node scripts/plugin-create.js",
     "plugins:create:ui": "node scripts/plugin-create.js --ui",
     "rebuild": "node scripts/rebuild-native.js",
+    "icons": "node scripts/gen-icon.js",
     "postinstall": "npm run rebuild",
     "market:serve": "node scripts/serve-market.mjs",
     "preview": "vite preview",

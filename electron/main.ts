@@ -293,15 +293,19 @@ function openMailInbox() {
 /**
  * 托盘图标路径（M5·T5-1）。
  *
- * 打包后走 `extraResources`（electron-builder.yml 里 `build/icon.png → icon.png`），
- * 开发模式直接读仓库里的 `build/icon.png`。
- * 找不到图标时**不建托盘**（返回 null）：一个看不见又点不到的托盘比重启后没有托盘更坏
+ * 打包后走 `extraResources`（electron-builder.yml 里 build/ 下的图标 → resources 根目录），
+ * 开发模式直接读仓库里的 `build/`。
+ * macOS 用专用模板图：`setTemplateImage(true)` 只按 alpha 渲染剪影，彩色应用图标带整块
+ * 不透明底板 ⇒ 剪影退化成实心圆角方块、S 完全消失；故单独一份透明底单色轮廓。
+ * Windows 保持原色（应用图标 256px 缩到 16px）。
+ * 找不到图标时**不建托盘**（返回空串）：一个看不见又点不到的托盘比重启后没有托盘更坏
  * —— 而且关窗不退出会变成"应用消失了但进程还在"。
  */
 function trayIconPath(): string {
+  const name = process.platform === 'darwin' ? 'tray-template.png' : 'icon.png';
   const candidate = app.isPackaged
-    ? path.join(process.resourcesPath, 'icon.png')
-    : path.join(app.getAppPath(), 'build', 'icon.png');
+    ? path.join(process.resourcesPath, name)
+    : path.join(app.getAppPath(), 'build', name);
   return fs.existsSync(candidate) ? candidate : '';
 }
 
@@ -318,8 +322,12 @@ function createTray() {
     return;
   }
   try {
-    const size = process.platform === 'darwin' ? 18 : 16;
-    const image = nativeImage.createFromPath(iconPath).resize({ width: size, height: size });
+    const base = nativeImage.createFromPath(iconPath);
+    // macOS：模板图自带 18px 与 @2x 36px 两个表示，createFromPath 会按同目录的 @2x
+    // 文件自动合并；这里**不 resize**，否则会把多表示压平成单张，高分屏菜单栏发虚。
+    // Windows 保持原色并缩到 16px。
+    const image =
+      process.platform === 'darwin' ? base : base.resize({ width: 16, height: 16 });
     // macOS 托盘用模板图（系统按深浅色自动反相）；Windows 保持原色
     if (process.platform === 'darwin') image.setTemplateImage(true);
     tray = new Tray(image);

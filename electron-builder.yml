@@ -17,10 +17,16 @@ files:
 extraResources:
   - from: 默认模板.txt
     to: 默认模板.txt
-  # 托盘图标（M5·T5-1）：`main.ts#trayIconPath()` 打包版读 `<resources>/icon.png`。
+  # 托盘图标（M5·T5-1）：`main.ts#trayIconPath()` 打包版读 `<resources>/` 下的图标。
   # 漏了它 = 打包版没有托盘 = 关窗就退出 = 开机自启之后找不到应用。
   - from: build/icon.png
     to: icon.png
+  # macOS 菜单栏模板图（透明底单色 S）：1x 与 @2x 必须同时带，
+  # nativeImage.createFromPath('tray-template.png') 靠同目录的 @2x 文件合并表示。
+  - from: build/tray-template.png
+    to: tray-template.png
+  - from: build/tray-template@2x.png
+    to: tray-template@2x.png
 afterPack: ./scripts/afterPack.js
 # macOS 双架构：arm64（Apple Silicon）+ x64（Intel），dmg / zip 各自产出（zip 供 electron-updater 更新）
 mac:

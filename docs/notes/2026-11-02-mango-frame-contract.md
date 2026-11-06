@@ -410,3 +410,81 @@ closeDb(); process.exit(0)   // 立刻退出，exit 0
 
 排障备忘：再遇到「抓到了 N 单但状态没变」，先看 `sk_sync_log.detail_json` 里的
 `columns` 与 `shipUnknown`，别先怀疑 popup —— 历史不补决定了大多数帧本来就该被忽略。
+
+---
+
+## 2026-11-05 续：帧里还有一整组字段没人取（发货回执），以及"回写"为什么不能走原入库路径
+
+用户问「到芒果抓已发货怎么抓、抓哪些、历史补不补」。核查后三条答案，附两个坑。
+
+### 1. 抓取侧零改动：切筛选即可，但**别信 `source.status`**
+
+扩展 hook 的是 `POST /erp/order/data/search.json`，**直接复制页面自己发的请求体**、只改
+`page/pageSize` 再重放翻页 ⇒ 筛选条件就在 body 里。把芒果页面切到「已发货」，同一段 hook
+自动抓那一批。
+
+但它随帧推的 `source.status` 是**芒果自己的编码**（`sp.get('status')`），语义随版本变；
+拿它判"这是哪一批"等于把版本差异变成静默错分。**判据要取帧内的事实**：每单自己的
+`cnOrderStatus` + `gmtSend` 是否非空。`planShipReceipt().withShipTime` 就是干这个的 ——
+只写进日志让人看"12 单里 12 单带发货时间"，不参与任何分流。
+
+### 2. 帧里一直有、宿主一直没取的字段
+
+| 需要的 | 原始响应键 | 规整帧键（S2 补） | 此前状态 |
+|---|---|---|---|
+| 发货时间 | `gmtSend`（毫秒；未发货时 `null`） | `shipTime` | 没人取 ⇒ `oi_orders.ship_time` 至今**全空** |
+| 运单号 | `logisticsNo` / `mailNo` | `logisticsNo` | 没人取 |
+| 承运商 | `logisticsServiceName` / `logisticsTypeCode` | `logisticsCarrier` | 没人取 |
+
+**`raw_fields.采集帧` 里挖不出历史发货时间**：那些帧是待发货时抓的，`gmtSend` 本来就是
+`null`；挖一遍只能捞到"采集那一刻已发出去"的零星单 —— 有偏样本比没有更误导。
+
+落库进主表（`logistics_no` / `logistics_carrier`），不塞 `raw_fields`：查件按运单号查、
+算运费按承运商聚，JSON 挖得出但索引不了。
+
+### 3. 回写**绝不能**喂 `upsertCollectedOrder`（这是整件事的重点）
+
+它是**整单替换**（DELETE 主表 + DELETE 全部明细 + 重插）。一单从待发变已发后照常重采集，
+会静默丢掉：
+
+- `oi_order_items.style_color_id` —— **归类结果**（行是重插的新 id）；
+- `oi_item_parts` —— 图案绑定（POD 命根子，`ON DELETE CASCADE`）
+- `parcels` / `parcel_lines` —— 代码**显式删除**；
+- `purchase_sources.order_item_id` —— 软键（无外键）⇒ 变**悬空 id**，覆盖率 join 不上，
+  "已拿"掉回 0、"还差"虚高，**界面不报错**。
+
+行数守卫救不了：已发货单行数不变，`lines.length < oldCount` 不成立 ⇒ 照样替换。
+这条已在 `scripts/order-db-smoke.cjs` 的 `[9.5]` 写成**对照实验**：同一单走
+`upsertCollectedOrder` 后 `style_color_id` 全变 0、包裹归零。哪天它变绿了，说明整单替换的
+缺陷被修了，那时该改写 `applyShipStatus` 头上"为什么必须有它"的注释，而不是默默删掉。
+
+`applyShipStatus` 的三条不变量（都有冒烟 + 变异验证）：
+1. **只写 4 列**，金额与时效（`amount_cents` / `deal_deadline` / `timeout_at`）一个都不写 ——
+   写了会让利润表与截止风险历史随"什么时候点的采集"漂移；
+2. **幂等**：目标值 == 现值不写（同一批跑两遍，第二遍全 `unchanged`）；
+3. **空值不算指令**：`''` = "这次没给"，不是"清空"（一次不完整的帧不该把运单号抹掉）。
+
+### 4. `ship_time` 默认不写 —— 它有两个不同的下游
+
+- 发货台队列读 **`biz_status`**（`isWaitingShip`）⇒ 写它就够让队列清零；
+- 拣货 / 拿货读 **`ship_time = ''`**（`picking-db` / `purchase-db` 的过滤）⇒ 写它会让这些单
+  **从拿货页静默消失**，"发了货但没拿货"的欠货变得不可见。
+
+所以 `opts.writeShipTime` 缺省 `false`。要开这一列，先给那类单一个可见入口，别顺手打开。
+
+### 5. 两个坑
+
+**坑一：新列写进已发布的迁移版本 = 存量库永远拿不到。**
+`migrate()` 只跑 `version > current` 的步骤。把
+`ALTER TABLE oi_orders ADD COLUMN logistics_no` 加进 **v13**（用户库早已记账到 13）⇒
+新库建表带上、老库永远没有，运行时 `SELECT logistics_no` 报 `no such column`
+（不在建表时炸，更难查）。必须是**新的 v14**。
+实测（`sqlite3 .backup` 出真库副本 → 跑 `ensureOrderSchema`）：
+`order.main v13 · logistics 列 = []` → `v14 · ["logistics_no","logistics_carrier"]`，
+二次 `ensureOrderSchema` 不抛错，7 单 `ship_time` 仍全空（只加列不回填）。
+
+**坑二：`npm run order:smoke` 在本机会假红。**
+继承 `ELECTRON_RUN_AS_NODE=1` 时 `require('electron')` 返回路径串 ⇒ `app` 是 `undefined`，
+报 `Cannot read properties of undefined (reading 'getPath')`，看着像数据层坏了。
+用 `env -u ELECTRON_RUN_AS_NODE npm run order:smoke`。**判是不是自己改坏的**：先
+`git stash push -- <三个文件>` 跑一遍对照 —— 这条已确认改前就红。

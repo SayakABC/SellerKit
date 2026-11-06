@@ -18,6 +18,8 @@ function ok(p: Partial<SyncBannerInput['last']> = {}) {
     shopUnmatched: 0,
     partial: false,
     reason: '',
+    shipped: 0,
+    shipUnknown: 0,
     ...p,
   };
 }
@@ -109,6 +111,32 @@ describe('syncBanner · 采集状态条文案与配色（T2-3）', () => {
     expect(loud.text).toContain('跳过 2');
     expect(loud.text).toContain('5 行没图');
     expect(loud.text).toContain('1 单没认到店');
+  });
+
+  it('已发货批：单列「已发货 N」，且**不并进「入库」**（否则与芒果总数对不上）', () => {
+    // 全是已发货单的一批：inserted/updated 都是 0 —— 不加这一句，界面就是
+    // 「抓 5 条 · 入库 0」，看着像采集失败，实际全部成功。
+    const allShipped = syncBanner({
+      last: ok({ fetched: 5, inserted: 0, updated: 0, totalItems: 5, shipped: 5 }),
+      error: '',
+    });
+    expect(allShipped.text).toContain('抓 5 条');
+    expect(allShipped.text).toContain('入库 0');
+    expect(allShipped.text).toContain('已发货 5');
+    expect(allShipped.tone).toBe('ok'); // 全成功，不该染黄/红
+
+    // 混批：入库 3 + 已发货 2，两个数各自独立（3 不变成 5）
+    const mixed = syncBanner({ last: ok({ fetched: 5, inserted: 2, updated: 1, shipped: 2 }), error: '' });
+    expect(mixed.text).toContain('入库 3');
+    expect(mixed.text).toContain('已发货 2');
+  });
+
+  it('已发货但本地没有的单：必须说出来（沉默会让人以为都归位了）', () => {
+    const v = syncBanner({ last: ok({ fetched: 4, inserted: 0, updated: 0, shipped: 4, shipUnknown: 2 }), error: '' });
+    expect(v.text).toContain('已发货 4');
+    expect(v.text).toContain('2 单本地没有');
+    // 为 0 时不占篇幅
+    expect(syncBanner({ last: ok(), error: '' }).text).not.toContain('本地没有');
   });
 
   it('脏值 / 空输入不抛错，也不显示 NaN', () => {

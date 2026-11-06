@@ -2151,6 +2151,15 @@ export interface MangoSyncStatusRow {
   partial: boolean;
   /** 失败原因（空串 = 正常）；界面在它有值时把条染成警示色 */
   reason: string;
+  /**
+   * 这批里判为**已发货**的单数（只回写主表，不进 `inserted/updated` 的计数）。
+   *
+   * 为什么单独给出来：全是已发货单的一批，`inserted + updated` 是 0，
+   * 界面会显示「抓 5 条 · 入库 0」—— 看着像失败，其实全成功了。
+   */
+  shipped: number;
+  /** 已发货批里「本地库里没有」的单数（不新建，但让人知道有单从没采集过） */
+  shipUnknown: number;
 }
 
 /**

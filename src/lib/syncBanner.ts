@@ -68,6 +68,13 @@ export function syncBanner(input: SyncBannerInput | null | undefined): SyncBanne
   }
 
   const bits = [`抓 ${num(last.fetched)} 条`, `入库 ${num(last.inserted) + num(last.updated)}`];
+  // 已发货回执单独说一个数（S2）。为什么要单列而不是并进「入库」：
+  //   · 口径上它不进 upsert（只 UPDATE 主表四列），并进「入库」会让这个数与芒果的总数对不上；
+  //   · 体验上「抓 5 条 · 入库 0」看着像失败 —— 加一句「已发货 5」才说得通。
+  if (num(last.shipped) > 0) bits.push(`已发货 ${num(last.shipped)}`);
+  // 平台已发货、本地库却没有的单：不新建（只有状态没有明细就是永远展开为空的幽灵行），
+  // 但必须说出来 —— 沉默会让人以为这些单都归位了。
+  if (num(last.shipUnknown) > 0) bits.push(`${num(last.shipUnknown)} 单本地没有`);
   if (num(last.skipped) > 0) bits.push(`跳过 ${num(last.skipped)}`);
   if (num(last.missingImage) > 0) bits.push(`${num(last.missingImage)} 行没图`);
   if (num(last.shopUnmatched) > 0) bits.push(`${num(last.shopUnmatched)} 单没认到店`);

@@ -1,4 +1,4 @@
-# 成本维护与进价页退役：37 条结论（蒸馏自 5 篇，2026-10-09 ~ 2026-10-23）
+# 成本维护与进价页退役：38 条结论（蒸馏自 5 篇，2026-10-09 ~ 2026-10-23；§38 为 2026-11-06 续）
 
 > **蒸馏笔记**：由 5 篇同期笔记合并（清单见文末）。结论与取证全部保留，仅去重重排。
 > 原文可取回：`git show b5df35c:docs/notes/<原文件名>`
@@ -478,6 +478,34 @@ grep -rn "ae_rates\|aeRateList" electron/ src/                          # 只有
 **取证**：`SyntaxError: Unexpected identifier 'oi_orders'`；`PRODUCT_LIBRARY.md` P4 行已加「⛔ 2026-10-22 退役 / 现状入口」。
 
 **源**：`2026-10-23-cost-page-retirement`（2026-10-23）
+
+---
+
+## 38. 统计页 P0：先把「这批数能不能信」做成一等公民，图表往后排
+
+**结论**（用户三项决策：默认全部 / 趋势按下单日 / 先方案后落地）：
+
+- **「默认全部」的实质不是加时间窗，是不许静默截断**。宿主 `shippingRows` 物理上限 2000
+  （`electron/order-db.ts:4681`），把 `limit` 默认从 500 提到 2000 之后，**到上限必须显式说**
+  「更早的订单可能没算进来（只少报，不多报）」；不到上限时整条提示**不渲染**（零的正确表达是不出现）。
+  2000 不等于无限，提示是边界声明，不是修好了截断。
+- **统计页新增区块不许出金额**。新增的 `trustSummary(rows)` 只数行数：参与合计行数、精准/预测轨行数、
+  缺口行数、估算运费行数、结算覆盖率；**刻意不返回任何金额字段**，单测里还有一条结构反向守卫钉住这件事。
+  金额继续全部来自既有 `OrderCostSummary` / 页面 `summary` —— `grossTotal`（预测公式，精准行也走预测）
+  与 `preciseGrossProfit`（平台结算净收入）**两轨只并排、不相加**。
+- **覆盖率必须文本与条宽同源**：无结算样本时是 0% 且条宽 `0%`，不许出现「写着 0% 却画满」或恒 100 的假桥。
+- **缺口跳补入口唯一**：一个按钮 `switchModule('shop-accounts', 'health')` 到「基础数据 › 待补清单」，
+  不在统计页复制六套跳转（六类缺口各自去哪补已经写在待补清单里）。
+- **口径不靠猜**：口径行写死「全部订单 · 按下单日 · 只含非关闭单」，并带估算运费行数 / 平台费扣没扣。
+  `trendOf` 本就按 `dateKey(r.orderTime)` 归档 ⇒ 用户拍板「按下单日」**不需要改算法**，只把口径写到界面上。
+- 徽标状态用**边框形状**（虚线 = warn）区分，不靠颜色编码；同屏只让异常发声。
+
+**取证**：`src/lib/orderCost.ts` 的 `TrustSummary` / `trustSummary`；`src/modules/order-cost/OrderCostView.vue`
+的 `.oc-trust` 区块（`limit = ref(2000)` / `rowLimitHit` / `onLimitChange` / `goHealth`）；
+`tests/trustSummary.spec.ts` 6 用例；`npm run order-profit:ui` 新增 `trust` 段 12 条断言、
+全量 103 条 PASS。方案与逐条门禁见 `docs/plans/STATS_REBUILD_PLAN_2026-11-06.md` §10。
+
+**源**：`docs/plans/STATS_REBUILD_PLAN_2026-11-06.md`（2026-11-06）
 
 ---
 

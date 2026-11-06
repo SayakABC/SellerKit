@@ -1,4 +1,4 @@
-# 冒烟与守卫纪律：18 条结论（蒸馏自 4 篇，2026-09-30 ~ 2026-10-05）
+# 冒烟与守卫纪律：21 条结论（蒸馏自 4 篇，2026-09-30 ~ 2026-10-05；§19–§21 为 2026-11-06 续）
 
 > **蒸馏笔记**：由 4 篇同期笔记合并（清单见文末）。结论与取证全部保留，仅去重重排。
 > 原文可取回：`git show b5df35c:docs/notes/2026-10-30-smoke-and-guard-discipline.md`（其余三篇同法，路径见文末清单）
@@ -268,6 +268,61 @@ grep -rn MUTANT src/ scripts/ tests/ electron/   # 收工必须为空
 同次评审的 P0 是「复制清单图」**假动作**：`copyingId` 判等写成恒真，卡片永远停在「生成中…」——判据见 `2026-10-30-ui-style-and-hierarchy`（"假动作"行）。
 
 **源**：`UI_REVIEW_PURCHASE_2026-10-17`（2026-10-17，原评审文档已归档）
+
+---
+
+## 19. `v-model.number` + 无匹配 option ⇒ `undefined` ⇒ preload 静默回落默认值
+
+**结论**：`select` 配 `v-model.number` 时，Vue 取的是「**被选中 option 的 `_value`**」，不是 `el.value`。
+一旦没有任何 option 被选中（冒烟里手动 `sel.value = '1'` 而选项只有 100/500/1000/2000），
+`selectedVal[0]` 就是 `undefined`，`limit` 被写成 `undefined`，请求 payload 里的键直接消失。
+下游 preload 对非 number 的 `limit` 又**静默回落 500**（`electron/preload.ts:479-484`）——
+用户看到的是「选了新档位，数字却按 500 行算」，没有任何报错。
+
+修法不是加 `nextTick` 就完事（那只能解决「读到旧值」）：**从 `event.target.value` 显式读、判合法、夹到
+合法区间、再赋给 ref**，非法值一次都不许发请求；并给冒烟补一条「非法档位不取数」的反向守卫。
+判据：`Number.isFinite(n) && n >= 1`，且 `Math.min(Math.max(Math.round(n), 1), 2000)`。
+
+**取证**：`npm run order-profit:ui` 曾报
+`FAIL 改档位真的按新上限重新取数 | {}`，`{}` 正是 `{ limit: undefined }` 序列化后的形状；
+改成合法 option 后 payload 为 `{"limit":100}`。对应实现 `src/modules/order-cost/OrderCostView.vue` 的
+`onLimitChange(event)` 与 `scripts/order-profit-ui-smoke.mjs` 的 `trust` 段。
+
+**源**：`docs/plans/STATS_REBUILD_PLAN_2026-11-06.md` §10.3（2026-11-06）
+
+---
+
+## 20. 夹具不许制造用户到不了的 DOM 状态；「撞上限」要复刻宿主截断
+
+**结论**：要测「取数到上限时页面提示」，不能靠给 select 塞一个非法值把行数造小 —— 那是真实用户
+到不了的状态（§19 就是这么踩的）。正确做法是**只走合法 option，并让假桥复刻宿主的结构行为**：
+宿主 `shippingRows` 会按 `limit` 截断返回，夹具就造 100+ 行、按 `p.limit` 切片返回。
+这样 `100 行 / limit=100` 真的取满 ⇒ 页面有资格报「已达上限」；改回 `2000` 时 `100 < 2000` ⇒ 提示自然消失，
+同一个夹具同时验了「出现」和「可撤」。
+
+**取证**：`scripts/order-profit-ui-smoke.mjs` 的 `window.__capRows`；跑出的提示原文
+「本次取到 100 行，已达上限 100 行 —— 更早的订单可能没算进来」。
+若仍用 1 行样本 + 100 行档位，`rawRowCount >= limit` 恒 false ⇒ 上限提示这条守卫**恒不触发**（语义空转）。
+
+**源**：`docs/plans/STATS_REBUILD_PLAN_2026-11-06.md` §10.3（2026-11-06）
+
+---
+
+## 21. 精确次数断言别赌异步时序：改成「每次取数 1:1 配平」
+
+**结论**：`report('克重批量取', calls('productList').length === 1 && ... )` 当初能绿，靠的是
+「刷新那次还走在半路、没轮到取克重」这个**时序巧合**。前面只要多一次正常重取数（例如新增的
+口径门禁改档位），它就假红，且红的原因跟它要守的事毫无关系。
+
+正确判据是**关系而不是常量**：先 `waitFor` 等这一批异步链落地，再断言
+`productList 次数 === productVariantList 次数 === orderShippingRows 次数` —— 每次取数必须各调一次，
+一次都不许少、也不许多。比 `=== 1` 更严（守住了「逐次都取」），也不受前面刷新了几次影响。
+
+**取证**：`scripts/order-profit-ui-smoke.mjs` 的 `wiring` 段；改前
+`FAIL 克重按款色码批量取 | productList=3 variantList=3`，改后
+`PASS ... | 取数=3 productList=3 variantList=3`。
+
+**源**：`docs/plans/STATS_REBUILD_PLAN_2026-11-06.md` §10.2（2026-11-06）
 
 ---
 

@@ -779,6 +779,56 @@ export function trendOf(
   });
 }
 
+/**
+ * 统计页「口径门禁」的只读汇总（P0，2026-11-06）。
+ *
+ * ⚠️ **本函数刻意不出任何金额**：`grossTotal` 是全部非关闭单按**预测公式**求和（精准行也走预测公式），
+ * 而 `preciseGrossProfit` 是**平台结算净收入**口径，两者不能相加。再在这里算一遍毛利，
+ * 就会出现"同一页两套金额实现"（本仓铁律：每个数字只能有一处实现）。
+ * 本层只回答"这批数能不能信"：谁有真值、谁带缺口、谁的运费是估算、结算覆盖了多少。
+ *
+ * 口径：关闭单排除（与 `OrderCostSummary` 的金额合计一致）；认不出的行不丢，按事实分桶。
+ */
+export interface TrustSummary {
+  /** 参与金额合计的行数（非关闭单） */
+  liveRows: number;
+  /** 有平台结算真值、走精准轨的行数 */
+  preciseRows: number;
+  /** 走预测轨的行数（在途 / 无结算数据） */
+  forecastRows: number;
+  /** 带任一缺口的行数（缺成本 / 缺运费 / 未识别款…） */
+  gapRows: number;
+  /** 运费由运价表估算的行数（不是包裹实付真值） */
+  estimatedFreightRows: number;
+  /** 结算覆盖率（0–100）；没有有效行时返回 null —— 缺就写「—」，不写 0 */
+  coveragePercent: number | null;
+}
+
+export function trustSummary(rows: OrderCostRow[] | null | undefined): TrustSummary {
+  const list = Array.isArray(rows) ? rows : [];
+  let liveRows = 0;
+  let preciseRows = 0;
+  let forecastRows = 0;
+  let gapRows = 0;
+  let estimatedFreightRows = 0;
+  for (const r of list) {
+    if (r.bucket === 'closed') continue;
+    liveRows += 1;
+    if (r.tier === 'precise') preciseRows += 1;
+    else forecastRows += 1;
+    if (Array.isArray(r.gaps) && r.gaps.length > 0) gapRows += 1;
+    if (r.shippingSource === 'rate') estimatedFreightRows += 1;
+  }
+  return {
+    liveRows,
+    preciseRows,
+    forecastRows,
+    gapRows,
+    estimatedFreightRows,
+    coveragePercent: liveRows ? Math.round((preciseRows / liveRows) * 100) : null,
+  };
+}
+
 /** 运费拒算分类 → 缺口标识（口径来自 `quoteOrders`，本层不自己判运费能不能算） */
 function gapOfReason(reason: string): OrderCostGap | null {
   if (reason === 'noCountry') return 'country';

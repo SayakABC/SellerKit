@@ -156,6 +156,75 @@
       </div>
     </div>
 
+    <!-- 口径门禁（P0，2026-11-06）：只增不改。
+         ⚠️ `.oc-topbar` / `.oc-gaps` 被 order-profit:ui 按整段 textContent 与 data-act 取用，
+            所以这一块**放在既有容器之外**，锚点全部新命名；既有锚点一个不动、一个不拆。
+         ⚠️ 不新增金额：`grossTotal`（预测公式，含精准行）与 `preciseGross`（结算净收入）口径不同，
+            并排可以，相加不行 —— 这里只把"谁有真值、谁带缺口、谁在估"说清楚。 -->
+    <section
+      v-if="!loading && !error"
+      class="oc-trust"
+      data-act="oc-trust"
+      aria-label="数据口径与可信度"
+    >
+      <div class="oc-trust__head">
+        <span
+          class="oc-trust__badge"
+          :data-level="trustLevel === '数据基本齐全' ? 'ok' : 'warn'"
+          data-act="trust-level"
+          >{{ trustLevel }}</span
+        >
+        <span class="oc-trust__headline">{{ trustHeadline }}</span>
+      </div>
+
+      <div class="oc-trust__tracks">
+        <div class="oc-trust__track" data-act="trust-precise">
+          <span class="oc-trust__track-label">精准轨 · 平台结算口径</span>
+          <b>{{ trust.preciseRows }}</b> 行
+        </div>
+        <div class="oc-trust__track" data-act="trust-forecast">
+          <span class="oc-trust__track-label">预测轨 · 估算口径</span>
+          <b>{{ trust.forecastRows }}</b> 行
+        </div>
+        <span class="oc-trust__track-note">两轨口径不同，只并列、不相加</span>
+      </div>
+
+      <div class="oc-trust__meter" data-act="trust-coverage">
+        <div class="oc-trust__meter-bar">
+          <span :style="{ width: (trust.coveragePercent ?? 0) + '%' }"></span>
+        </div>
+        <span
+          >结算真值覆盖 {{ trust.coveragePercent === null ? '—' : trust.coveragePercent + '%' }}（{{
+            trust.preciseRows
+          }}
+          / {{ trust.liveRows }} 行）</span
+        >
+      </div>
+
+      <div class="oc-trust__scope" data-act="trust-scope">
+        全部订单 · 按下单日 · 只含非关闭单 · 运费按运价表估算
+        {{ trust.estimatedFreightRows }} 行 · 平台费{{
+          summary.platformFeeMissing ? '未扣' : '按 ' + feeRatePercent + '% 近似'
+        }}
+      </div>
+
+      <p v-if="rowLimitHit" class="oc-trust__limit" data-act="trust-limit">
+        本次取到 {{ rawRowCount }} 行，已达上限 {{ limit }} 行 —— 更早的订单可能没算进来（只少报，不多报）
+      </p>
+
+      <div class="oc-trust__actions">
+        <button
+          class="wb-btn wb-btn--primary oc-btn"
+          type="button"
+          data-act="trust-goto-health"
+          @click="goHealth"
+        >
+          去「基础数据 › 待补清单」补数据
+        </button>
+        <span class="oc-trust__hint">缺 {{ trust.gapRows }} 行 · 补完回来点「刷新」</span>
+      </div>
+    </section>
+
     <!-- 低频操作收进「费率与归属」：首屏只留要看的数字与主操作（原则：界面精简、聚焦重点）。
          里面放的都是"算钱要用的基准参数"与批量动作 —— 按钮名直接写出来，别再叫「更多」
          （「更多」等于没说：用户得先点开才知道值不值得点）。 -->
@@ -177,11 +246,6 @@
           />
           %
         </label>
-        <select v-model.number="limit" class="wb-input wb-input--sm" :disabled="loading">
-          <option :value="100">最近 100 行</option>
-          <option :value="500">最近 500 行</option>
-          <option :value="1000">最近 1000 行</option>
-        </select>
         <select
           ref="shopSelRef"
           v-model="shopPick"
@@ -216,12 +280,30 @@
       </div>
     </div>
 
-    <!-- 口径条：**只放两个会改变上面数字的开关**，一句说明都不写。
+    <!-- 口径条：**只放会改变上面数字的开关**，一句说明都不写。
+         · 「取数范围」2026-11-06 由「费率与归属」搬来 —— 它决定"哪些单进合计"，是口径不是低频维护，
+           且默认「全部」必须一眼可见；上限 2000 是宿主 shippingRows 的物理边界。
          · 「数据来源」到底指什么，紧邻的两枚「采集 N 行 / 导入 N 行」已经说完；
          · 「税口径」只作用于订单自己没写税的行 ⇒ 进 title；选项里的括号**只留后果**
            （税记 0 / 标缺口），删掉"默认""不按 0 算"这类句子。
          ⚠️ 两枚 `data-act="source-count"` 的文案仍被冒烟按词取用（"采集 1 行"）。 -->
     <div class="oc-scope">
+      <!-- ⚠️ 原来这个 select 没有 change 处理：选了档位不点「刷新」就什么都不发生（静默失效）。
+           搬到口径条时一并接上，让"选了"立刻"生效"。 -->
+      <select
+        v-model.number="limit"
+        class="wb-input wb-input--sm"
+        data-act="row-limit"
+        aria-label="取数范围"
+        title="默认全部；2000 行是宿主取数上限，到上限会在口径门禁里提示"
+        :disabled="loading"
+        @change="onLimitChange"
+      >
+        <option :value="100">最近 100 行</option>
+        <option :value="500">最近 500 行</option>
+        <option :value="1000">最近 1000 行</option>
+        <option :value="2000">全部（最多 2000 行）</option>
+      </select>
       <select
         v-model="sourceFilter"
         class="wb-input wb-input--sm"
@@ -633,6 +715,7 @@ import {
   settleQtyKey,
   summarizeOrderCosts,
   trendOf,
+  trustSummary,
   type BizBucket,
   type CostGroupDim,
   type OrderCostGap,
@@ -659,7 +742,13 @@ const costRatesKey = ref(0);
 const EMPTY_ICON =
   '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5C4 5.1 7.6 4 12 4s8 1.1 8 2.5S16.4 9 12 9 4 7.9 4 6.5z"/><path d="M4 6.5v11C4 18.9 7.6 20 12 20s8-1.1 8-2.5v-11"/><path d="M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"/></svg>';
 
-const limit = ref(500);
+/**
+ * 取数行数上限（用户 2026-11-06 裁定「默认全部」）。
+ * 宿主 `order-db.ts#shippingRows` 的物理上限是 2000（`Math.min(..., 2000)`），所以"全部"= 取满这个上限。
+ * ⚠️ 原默认 500 会**静默少算**：超过 500 行的库，更早的订单不进任何合计，而页面一个字都不说。
+ *    到上限时下面有显式提示（只少报，不多报），不假装"全部"真的等于无限。
+ */
+const limit = ref(2000);
 const loading = ref(false);
 const importing = ref(false);
 const error = ref('');
@@ -1019,6 +1108,56 @@ const preciseGross = computed(
   () =>
     Math.round(preciseRows.value.reduce((s, r) => s + (r.preciseGrossProfit ?? 0), 0) * 100) / 100
 );
+
+// ── 口径门禁（P0，2026-11-06）──────────────────────────────────────────────
+// ⚠️ 这一块**只回答"这批数能不能信"，不新增任何金额**。
+//    `summary.grossTotal` 是全部非关闭单按**预测公式**求和（精准行也走预测公式），
+//    而 `preciseGross` 是**平台结算净收入**口径 —— 两者并排但绝不相加。
+//    金额继续只用 .oc-topbar / .oc-buckets 里那几个既有实现（每个数字只能有一处实现）。
+const trust = computed(() => trustSummary(summary.value.rows));
+/** 本次真正读进来的行数（在 sourceFilter 之前）——用于判断是否被 limit 截断 */
+const rawRowCount = computed(() => inputs.value?.orders.length ?? 0);
+/** 到上限：宁可多提示一次，也不静默少算。零行时不提示（零的正确表达是不出现） */
+const rowLimitHit = computed(() => rawRowCount.value > 0 && rawRowCount.value >= limit.value);
+const trustLevel = computed(() => {
+  const t = trust.value;
+  if (!t.liveRows) return '暂无可判断的订单';
+  if (t.gapRows > 0 || summary.value.platformFeeMissing) return '这批数还不能拿去结算';
+  if ((t.coveragePercent ?? 0) < 50) return '预测为主';
+  return '数据基本齐全';
+});
+const trustHeadline = computed(() => {
+  const t = trust.value;
+  if (!t.liveRows) return '还没有参与合计的订单行';
+  return `${t.liveRows} 行参与合计，其中 ${t.gapRows} 行带缺口、${t.estimatedFreightRows} 行运费为估算`;
+});
+
+/**
+ * 改取数范围后立即重取。
+ * ⚠️ 不直接信 `v-model` 的结果：`v-model.number` 对 select 是「取被选中 option 的 _value」，
+ *    一旦 DOM 上出现无匹配项（选中态被外部改坏 / 选项还没渲染完），它会把 `limit` 写成
+ *    `undefined`。宿主 preload 对非 number 的 limit **静默回落 500** —— 用户看到的是
+ *    "选了新档位，数字却按 500 行算"且一声不响。所以这里从事件目标显式读、判合法、再落值。
+ * ⚠️ 仍要等一个 tick：指令的 change 监听与 `@change` 合并后执行顺序不保证，
+ *    直接读旧值会出现"选了 100 行却按 2000 行取数"且不报错。
+ */
+function onLimitChange(event: Event): void {
+  const el = event.target as HTMLSelectElement | null;
+  const n = Number(el?.value);
+  if (!el || !Number.isFinite(n) || n < 1) return;
+  limit.value = Math.min(Math.max(Math.round(n), 1), 2000);
+  void nextTick(() => {
+    void load();
+  });
+}
+
+/**
+ * 缺口跳补：**入口唯一**。六类缺口各自去哪补已经写在「基础数据 › 待补清单」里，
+ * 这里只给一个出口，不在统计页复制六套跨模块跳转（改一处忘一处的经典来源）。
+ */
+function goHealth(): void {
+  switchModule('shop-accounts', 'health');
+}
 
 /** 毛利单元格的悬停说明：写清这一行用的是哪一轨、另一个轨的值是多少 */
 function profitTitle(r: {
@@ -1482,5 +1621,98 @@ onMounted(async () => {
 }
 .oc-empty .wb-empty__actions {
   margin-top: 12px;
+}
+
+/* ── 口径门禁（P0，2026-11-06）────────────────────────────────────────────
+   不新增色值 / 字号令牌，全部复用 --wb-*；主按钮直接用既有的 .wb-btn--primary。
+   状态徽标靠**边框形状**（实线 / 虚线）区分，不靠颜色编码（11-04 方案 §6.1 同一条纪律）。 */
+.oc-trust {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-surface);
+}
+.oc-trust__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.oc-trust__badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--wb-border-strong);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--wb-text-muted);
+  white-space: nowrap;
+}
+.oc-trust__badge[data-level='warn'] {
+  border-style: dashed;
+}
+.oc-trust__headline {
+  font-size: 13px;
+  color: var(--wb-text);
+}
+.oc-trust__tracks {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.oc-trust__track {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-md);
+  background: var(--wb-surface-2);
+  font-size: 13px;
+  color: var(--wb-text);
+}
+.oc-trust__track b {
+  font-weight: 600;
+}
+.oc-trust__track-label,
+.oc-trust__track-note,
+.oc-trust__scope,
+.oc-trust__hint,
+.oc-trust__meter {
+  font-size: 11px;
+  color: var(--wb-text-muted);
+}
+.oc-trust__meter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.oc-trust__meter-bar {
+  width: 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--wb-border);
+  overflow: hidden;
+}
+.oc-trust__meter-bar span {
+  display: block;
+  height: 100%;
+  background: var(--wb-primary);
+}
+.oc-trust__limit {
+  margin: 0;
+  font-size: 11px;
+  color: var(--wb-warning);
+}
+.oc-trust__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 </style>

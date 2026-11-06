@@ -13,6 +13,34 @@
 
 ## [Unreleased]
 
+### Added · 统计页 P0「口径门禁」+ 默认取数改为全部订单（2026-11-06）
+
+用户三项决策：**默认全部 / 趋势按下单日 / 先出方案和计划再按计划落地**。方案与分期见
+[`docs/plans/STATS_REBUILD_PLAN_2026-11-06.md`](docs/plans/STATS_REBUILD_PLAN_2026-11-06.md)（落地承接 11-04 设计稿，
+不是第二份设计方案）；本批**只做 P0**，P1–P3 未动。
+
+- **修掉静默截断**：`limit` 默认 `500 → 2000`（宿主 `shippingRows` 物理上限），取数档位移到常驻口径条并接上
+  `@change`（原来选了档位不点「刷新」什么都不发生）；**到上限显式提示**「本次取到 N 行，已达上限 N 行 ——
+  更早的订单可能没算进来（只少报，不多报）」，不到上限则整条不渲染。
+- **先回答「这批数能不能信」**：新增 `.oc-trust` 口径门禁 —— 成熟度徽标、精准轨 / 预测轨行数并列且写明
+  「两轨口径不同，只并列、不相加」、结算真值覆盖率（文本与进度条同源，无样本时是 0% 不是恒 100）、
+  口径行「全部订单 · 按下单日 · 只含非关闭单」、估算运费行数 / 平台费扣没扣。
+- **金额零新增**：`src/lib/orderCost.ts` 只加只读的 `trustSummary(rows)`（只数行数，**刻意不返回任何金额**），
+  金额继续全部复用既有 `OrderCostSummary` / 页面 `summary`，守「每个数字只能有一处实现」。
+- **缺口跳补入口唯一**：一个按钮走 `switchModule('shop-accounts', 'health')` 到「基础数据 › 待补清单」，
+  不在统计页复制六套跳转。
+- **趋势按下单日未改算法**：`trendOf` 本就按 `dateKey(r.orderTime)` 归档，本轮只把口径写到界面上。
+- **守卫**：`tests/trustSummary.spec.ts` 6 用例（含一条「返回键里不许有金额字段」的结构反向守卫）；
+  `order-profit:ui` 新增 `trust` 段 12 条断言，另把「克重批量取」由 `=== 1` 升级为「每次取数 1:1 配平」。
+- **修掉一个静默失败**：`v-model.number` 的 select 在无匹配项时会把 `limit` 写成 `undefined`，宿主 preload 对
+  非 number 的 `limit` 静默回落 500 ⇒ 用户看到「选了新档位却按 500 行算」。改为从 `event.target.value`
+  显式读值、判合法、夹到 `[1,2000]`，非法档位一次都不取数；冒烟为此加了反向守卫。
+
+门禁：`tsc` / `vue-tsc` / `verify` / `verify:docs` / `build` / `vitest run`（80 文件 1542 用例）/
+`order-profit:ui`（103 条 PASS，`SMOKE: ALL PASS`）/ `master-data:ui` / `today:ui` / `shipping-rate:ui` 全绿。
+两处与本批无关的存量红灯如实记在方案 §10.5：`goods:ui` 宽视口一条「两条页签」断言已陈旧（实际是三条，多了「颜色」），
+`plugins:island:smoke` 因本机未安装任何 UI 岛而退出。
+
 ### Fix · 芒果「已发货」回执按实证接入（2026-11-06）
 
 先用 `mango-probe` 真跑侦查，再写抓取代码。实证：已发货页调

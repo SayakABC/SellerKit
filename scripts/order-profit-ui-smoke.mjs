@@ -72,6 +72,10 @@ const FAKE_BRIDGE = `<script>
   window.__noQtyInfo = false;
   // 采集侧（C1 合并的第二条摄取通道）：默认关闭，最后一步打开验证"合并"接线
   window.__collectedOn = false;
+  // 口径门禁「到上限」用：打开后夹具模拟"库里有 100+ 行，宿主按 limit 截断后返回"。
+  // ⚠️ 不给这个夹具，1 行样本永远撞不到 100 行档位 ⇒ 上限提示这条断言语义空转。
+  //    夹具必须复刻到结构层：真实宿主就是按 limit 截断，不是凭空多造一个 UI 状态。
+  window.__capRows = false;
   // 采集帧的**真实缺口**：无店铺 / 无商品ID / 无代征代缴列 / 无款编码；件数是采集真值
   var COLLECTED = [{
     id: 9001, orderNo: 'C-1', source: 'collect', shop: '', orderTime: '2026-09-25 10:00:00',
@@ -120,7 +124,20 @@ const FAKE_BRIDGE = `<script>
         });
       }
       // **一个读口**：采集行与导入行在同一个返回里（按 source 区分，标签由宿主给）
-      return { success: true, data: window.__collectedOn ? [row].concat(collected) : [row] };
+      var base = window.__collectedOn ? [row].concat(collected) : [row];
+      if (window.__capRows) {
+        // 模拟宿主：库里有 100 行，按本次 limit 截断返回。这样 100 行档位会真的"取满"，
+        // 页面才有资格报"已达上限"；改回 2000 档位时 100 < 2000，提示自然消失。
+        var many = [];
+        for (var i = 0; i < 100; i++) {
+          var c = {}; for (var k in row) c[k] = row[k];
+          c.id = row.id + i; c.orderNo = 'CAP-' + i; c.rawFields = row.rawFields;
+          many.push(c);
+        }
+        var cap = Number(p && p.limit) > 0 ? Number(p.limit) : 2000;
+        return { success: true, data: many.slice(0, cap) };
+      }
+      return { success: true, data: base };
     },
     // ⚠️ **已删通道的绊线**：productWeightGet（商品ID → 克重，pl_item_weights）随 2026-10-01 的
     //    领域裁定整条退场（克重是 SKU 属性），表已被 product.sku v3 迁移 DROP。
@@ -248,6 +265,89 @@ async function main() {
     await waitFor(function () { return document.querySelector('.oc-view'); }, 10000);
     report('挂载：订单利润视图渲染', true);
 
+    step('trust');
+    // P0 口径门禁（2026-11-06）：默认全部、到上限要说、两轨不相加、跳补真的调用出去。
+    // 本段放在最前：此时夹具最干净（无结算数据），覆盖率必为 0%，可验算。
+    report('口径门禁区块存在', !!document.querySelector('[data-act="oc-trust"]'));
+    var scopeTxt = flat(document.querySelector('[data-act="trust-scope"]'));
+    report('口径行写明「全部订单 / 按下单日 / 只含非关闭单」',
+      scopeTxt.indexOf('全部订单') >= 0 && scopeTxt.indexOf('按下单日') >= 0 &&
+        scopeTxt.indexOf('只含非关闭单') >= 0, scopeTxt);
+    report('精准 / 预测两轨并列且明确不相加',
+      !!document.querySelector('[data-act="trust-precise"]') &&
+        !!document.querySelector('[data-act="trust-forecast"]') &&
+        flat(document.querySelector('.oc-trust__tracks')).indexOf('不相加') >= 0,
+      flat(document.querySelector('.oc-trust__tracks')));
+    var covTxt = flat(document.querySelector('[data-act="trust-coverage"]'));
+    var covBar = document.querySelector('.oc-trust__meter-bar span');
+    report('无结算样本时覆盖率 0%，且条宽与文本同源（不是恒 100）',
+      covTxt.indexOf('0%') >= 0 && !!covBar && covBar.style.width === '0%',
+      'text=' + covTxt + ' width=' + (covBar ? covBar.style.width : '(missing)'));
+    report('不到上限时不摆提示（零的正确表达是不出现）',
+      !document.querySelector('[data-act="trust-limit"]'), covTxt);
+
+    var limSel = document.querySelector('[data-act="row-limit"]');
+    report('行数上限选择器存在且默认全部（2000）', !!limSel && limSel.value === '2000',
+      limSel ? limSel.value : '(missing)');
+    var firstCall = calls('orderShippingRows')[0];
+    report('首次取数带 limit=2000（默认全部，不是 500）',
+      !!firstCall && firstCall.limit === 2000, JSON.stringify(firstCall));
+    // 选了就生效：改成 100 行档 → 自动重取 → 夹具模拟宿主正好截断到 100 行 → 上限提示必须出现。
+    // 这条同时钉住「select 没接 change」这个静默失效：不接的话调用数不会涨。
+    // ⚠️ 必须用**真实存在的 option 值**：写 1 时 select 无匹配项，v-model.number 会把 limit
+    //    写成 undefined，宿主 preload 对非 number 静默回落 500 —— 表现为 payload 成了 {}，
+    //    页面还会按 500 行算且一声不响。夹具不许制造真实用户到不了的状态。
+    window.__capRows = true;
+    var callsBefore = calls('orderShippingRows').length;
+    limSel.value = '100';
+    limSel.dispatchEvent(new Event('change'));
+    await waitFor(function () { return calls('orderShippingRows').length > callsBefore; }, 6000);
+    var afterOne = calls('orderShippingRows')[calls('orderShippingRows').length - 1];
+    report('改档位真的按新上限重新取数（选了就生效，不是读旧值）',
+      !!afterOne && afterOne.limit === 100, JSON.stringify(afterOne));
+    await waitFor(function () { return document.querySelector('[data-act="trust-limit"]'); }, 6000);
+    report('到上限显式提示，且写明具体上限',
+      flat(document.querySelector('[data-act="trust-limit"]')).indexOf('上限 100 行') >= 0,
+      flat(document.querySelector('[data-act="trust-limit"]')));
+
+    // 反向守卫：非法档位一次都不许取数。宿主 preload 会把非 number 的 limit 静默回落 500，
+    // 若页面不挡，用户选了个坏值就会看到"按 500 行算"且没有任何提示（2026-11-06 实测踩到）。
+    var badBefore = calls('orderShippingRows').length;
+    limSel.value = 'no-such-option';
+    limSel.dispatchEvent(new Event('change'));
+    await new Promise(function (r) { setTimeout(r, 250); });
+    report('非法档位不取数（绝不静默回落宿主默认的 500 行）',
+      calls('orderShippingRows').length === badBefore,
+      'before=' + badBefore + ' after=' + calls('orderShippingRows').length);
+
+    // 恢复初始夹具与档位，后面各段仍按 1 行样本精确断言。
+    window.__capRows = false;
+    limSel.value = '2000';
+    limSel.dispatchEvent(new Event('change'));
+    await waitFor(function () {
+      var c = calls('orderShippingRows');
+      return c.length > badBefore && c[c.length - 1].limit === 2000 &&
+        !!document.querySelector('[data-act="oc-trust"]') &&
+        !document.querySelector('[data-act="trust-limit"]');
+    }, 6000);
+    report('改回全部后提示消失（状态可撤）',
+      !document.querySelector('[data-act="trust-limit"]'));
+
+    // 跳补：临时接管 dispatchEvent，只截这一次 switch-module。
+    // 为什么不真派发：AppShell 会真的把页面切走，后面所有步骤还要用 .oc-view；
+    // 也不能靠后注册的监听去拦 —— dispatch 目标就是 window，监听按注册顺序跑，拦不住先注册的。
+    var realDispatch = window.dispatchEvent;
+    var trustDetail = null;
+    window.dispatchEvent = function (ev) {
+      if (ev && ev.type === 'switch-module') { trustDetail = ev.detail; return true; }
+      return realDispatch.call(window, ev);
+    };
+    document.querySelector('[data-act="trust-goto-health"]').click();
+    window.dispatchEvent = realDispatch;
+    report('缺口跳补真的调用 switch-module → shop-accounts / health',
+      !!trustDetail && trustDetail.moduleId === 'shop-accounts' && trustDetail.action === 'health',
+      JSON.stringify(trustDetail));
+
     step('table');
     await waitFor(function () { return document.querySelectorAll('.oc-table tbody tr').length >= 1; }, 10000);
     // ⚠️ 判据从"逐格整串比对（cells.indexOf('125.18')）"升级为**按 data-act 取单元格**：
@@ -368,9 +468,20 @@ async function main() {
       gaps);
 
     step('wiring');
-    report('克重按款色码批量取（productList → productVariantList 两次调用都没少）',
-      calls('productList').length === 1 && calls('productVariantList').length === 1,
-      'productList=' + calls('productList').length + ' variantList=' + calls('productVariantList').length);
+    // ⚠️ 旧断言写死 === 1，其实赌的是"refresh 那次还走在半路、没轮到取克重"——
+    //    一旦前面多一次正常重取数（如口径门禁改档位），它就会假红。改成**逐次配平**：
+    //    每次 orderShippingRows 都必须配一次 productList + 一次 productVariantList，
+    //    一次都不许少、也不许多。比原来更严，且不受前面多了几次刷新影响。
+    await waitFor(function () {
+      var n = calls('orderShippingRows').length;
+      return n > 0 && calls('productList').length === n && calls('productVariantList').length === n;
+    }, 8000);
+    var plCalls = calls('productList').length;
+    report('克重按款色码批量取（每次取数各一次 productList → productVariantList，一次都没少）',
+      plCalls === calls('orderShippingRows').length &&
+        calls('productVariantList').length === plCalls,
+      '取数=' + calls('orderShippingRows').length + ' productList=' + plCalls +
+        ' variantList=' + calls('productVariantList').length);
     // 绊线：已删的通道一次都不许调（调了说明页面又回去读那张已 DROP 的表）
     report('不碰已删通道 productWeightGet（商品ID 克重那条链已整条退场）',
       (calls('productWeightGet') || []).length === 0, JSON.stringify(calls('productWeightGet') || []));
@@ -385,7 +496,9 @@ async function main() {
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () { return calls('orderShippingRows').length > before; }, 6000);
     var last = calls('orderShippingRows')[calls('orderShippingRows').length - 1];
-    report('刷新真的重新取数且带 limit', !!last && last.limit === 500, JSON.stringify(last));
+    // 2026-11-06：默认取数上限由 500 改为 2000（用户裁定「默认全部」）。
+    // 改这个常量本身不是目的 —— 断言它，是为了防止哪天又悄悄退回"默认只算最近几百行"。
+    report('刷新真的重新取数且带 limit=2000（默认全部）', !!last && last.limit === 2000, JSON.stringify(last));
 
     step('stats');
     // 同 refresh 步：刷新期间整块被 v-if 摘掉 → 先等统计表回来

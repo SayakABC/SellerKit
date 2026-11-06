@@ -112,7 +112,7 @@ git show --stat b5df35c -- docs/notes      # 看整批
 | [记账核心修正](2026-10-30-ledger-core-fixes.md) | 口径公式修复、界面判定、全期间口径（27 条） |
 | [记账相关人与结算](2026-10-30-ledger-parties-and-settlement.md) | 分摊方案、相关人与科目、重补与视图、导入自动建、结算冲抵（36 条） |
 | [发货台与物流运费](2026-10-30-shipping-desk-and-rate.md) | 页签、命名与日范围、运价回收、成本出运费台、包裹运费进利润（43 条） |
-| [成本维护与进价页退役](2026-10-30-cost-maintenance-and-retire.md) | 维护面板、瘦身、页签缩略图、两个字段、进价整页退役（37 条） |
+| [成本维护与进价页退役](2026-10-30-cost-maintenance-and-retire.md) | 维护面板、瘦身、页签缩略图、两个字段、进价整页退役、**统计页口径门禁与默认全部**（38 条） |
 
 ### H. 数据、平台与外围
 
@@ -121,7 +121,7 @@ git show --stat b5df35c -- docs/notes      # 看整批
 | [数据库表结构与迁移](2026-10-30-db-schema-and-migration.md) | 重建存量表三坑、表必要性审查、60 表审计、拿货单列收敛（23 条） |
 | [数据模型与依赖](2026-10-30-data-model-and-dependencies.md) | 数据依赖优化、主数据整合、包裹与组合件模型、真库四条教训（39 条） |
 | [Electron 与平台能力](2026-10-30-electron-and-platform.md) | `prompt` 不支持、剪贴板写图、ipc.ts 覆盖、付费授权、preload 载荷、优先 Chrome（38 条） |
-| [冒烟与守卫纪律](2026-10-30-smoke-and-guard-discipline.md) | 文案守卫落哪层、`waitFor` 陷阱、固定成本不进计时测试、处理器调用点冒烟（18 条） |
+| [冒烟与守卫纪律](2026-10-30-smoke-and-guard-discipline.md) | 文案守卫落哪层、`waitFor` 陷阱、固定成本不进计时测试、处理器调用点冒烟、**select 静默回落 / 夹具复刻 / 次数断言配平**（21 条） |
 | [UI 岛与宿主边界](2026-10-30-island-host-boundary.md) | 岛 = 可选加工手段、宿主 = 必经主干；read 能力域、主数据回迁、收编顺序（14 条） |
 | [岛发布与下架](2026-10-30-island-publish-and-retire.md) | 发布四步、三坐标下架、孤儿代码清理（20 条） |
 | [速卖通采集管线](2026-10-30-ae-collection-pipeline.md) | 采集广播、走店、分页与增量（31 条） |

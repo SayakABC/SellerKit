@@ -386,7 +386,7 @@ detail_json: {"skips":[{"orderNo":"#1","reason":"缺少 orderId"}, … ×4]}
 | 编号 | 任务 | 落点 | 判据 | 依赖 |
 |---|---|---|---|---|
 | **T2-1** | 芒果状态 → 内部 bucket 映射表（`正常/待发货/已发货/已完成/已取消/退款中/部分发货` → `pending/shipped/finished/cancelled`）。**唯一实现**，别在别处再写一套 LIKE | 新 `src/lib/mangoStatus.ts`（纯函数）+ 主进程同一份 | 单测：8 种原文全覆盖，未知值落 `unknown` 不落 `pending` | — |
-| **T2-2** | 「发货台·总览」四数改口径：`待发货 N`（`bucket='pending'`）/ `有截止风险 M`（`deal_deadline` 距今 < 24h）/ `件数` / `缺图 K`。保留现有 `daily` 四数不动，**新增一行**而非替换 | `src/modules/today/tabs/OverviewPanel.vue` + `flowCtx.ts` 汇总 | `npm run today:ui` 全绿，新断言钉在 `data-act="stat-pending"` / `data-act="stat-risk"` | T2-1 |
+| **T2-2** | 「发货台·总览」四数改口径：`待发货 N`（`bucket='pending'`）/ `有截止风险 M`（`deal_deadline` 距今 < 24h）/ `件数` / `缺图 K`。保留现有 `daily` 四数不动，**新增一行**而非替换 | `OverviewPanel.vue`（**已删除**：2026-11-05 与「待发货」合并为 `OrderPanel.vue`）+ `flowCtx.ts` 汇总 | `npm run today:ui` 全绿，新断言钉在 `data-act="stat-pending"` / `data-act="stat-risk"` | T2-1 |
 | **T2-3** | 采集状态条：`上次同步 今天 09:12 · 抓 3 条 · 入库 3 · partial=false`；失败时红条 + 原因（`登录过期 / 扩展未装 / 抓 0 条但总数 12`） | 总览页顶部 | 断网演练时条变色且文案说明"可能是网络，不是没单" | T1-6 |
 | **T2-4** | 待发货清单：按 `deal_deadline` 升序，列 = 订单号 / 店铺 / 图案 / 件数 / 剩余时间 / 图案状态（已绑/待绑/缺图） | 发货台新 tab 或总览下钻 | 抓 3 单时清单显示 3 行，最紧急的在最上 | T2-2 |
 | **T2-5** | 冒烟断言：空态（0 单）与有数据两种形态都要钉；**空态不能说"今天没有订单"** 而要说"还没同步，点这里" | `scripts/today-ui-smoke.mjs` | 变异测试：把 `pending` 改回 `unshipped` 断言必须变红 | T2-2 |
@@ -406,7 +406,7 @@ detail_json: {"skips":[{"orderNo":"#1","reason":"缺少 orderId"}, … ×4]}
 | T2-1 状态分桶 | `src/lib/mangoStatus.ts`（5 桶 + 唯一实现） | `tests/mangoStatus.spec.ts` 25 例；变异「认不出→pending」立刻红 |
 | T2-2 第二行四数 | `src/lib/shippingPulse.ts`（纯函数）+ `flowCtx.ShippingSummary.pulse` + `TodayView.reload()` + `OverviewPanel` 新块 | `tests/shippingPulse.spec.ts` 12 例；`today:ui` 3 条新断言；两次变异确认会红 |
 | T2-3 采集状态条 | `src/lib/syncBanner.ts`（纯函数）+ 新 IPC `mango-sync-status` + `OverviewPanel` 顶部 | `tests/syncBanner.spec.ts` 13 例；`today:ui` 3 条接线断言；变异「error 字段丢掉」立刻红 |
-| T2-4 待发货清单 | `shippingQueue`（`src/lib/shippingPulse.ts`，与四数**同一份实现**）+ 新页签 `src/modules/today/tabs/QueuePanel.vue`（`flowCtx` 加 `pulseRows` 行源）+ 总览下钻按钮 | `tests/shippingQueue.spec.ts` 16 例；`today:ui` 5 条接线断言（含"没有截止期的垫底"与"清单单数 == 页签徽标"）；两次变异确认会红 |
+| T2-4 待发货清单 | `shippingQueue`（`src/lib/shippingPulse.ts`，与四数**同一份实现**）+ 新页签 `QueuePanel.vue`（**已删除**：2026-11-05 并入 `OrderPanel.vue`；`flowCtx` 加 `pulseRows` 行源）+ 总览下钻按钮 | `tests/shippingQueue.spec.ts` 16 例；`today:ui` 5 条接线断言（含"没有截止期的垫底"与"清单单数 == 页签徽标"）；两次变异确认会红 |
 | T2-5 空态骨化 | `isNeverSynced`（`src/lib/syncBanner.ts`）+ `src/modules/today/mangoOpen.ts`（`MANGO_PENDING_URL` + `openMangoPending`）+ 总览/清单两处空态各分两支 | `syncBanner.spec.ts` 追加 3 例；`today:ui` 5 条断言（含"出口打开的是待发货筛选页"）；两次变异确认会红 |
 
 **与计划的三处偏离（都是实现时才发现的口径问题）**：

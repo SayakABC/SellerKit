@@ -64,3 +64,6 @@ market-out/
 # AI 工具本机记忆（软链到 .workbuddy/memory/MEMORY.md，不入库）
 AGENTS.local.md
 .cache/
+
+# JetBrains IDE 本机配置（IDEA 打开项目时生成，含自动搁置补丁，不入库）
+.idea/

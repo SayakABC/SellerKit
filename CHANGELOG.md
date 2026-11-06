@@ -13,6 +13,181 @@
 
 ## [Unreleased]
 
+### Fix · 芒果「已发货」回执按实证接入（2026-11-06）
+
+先用 `mango-probe` 真跑侦查，再写抓取代码。实证：已发货页调
+`POST /erp/order/data/package/delivered`（`phase=shipment&status=delivered`），
+返回的是**包裹**列表（`data.list[]`），不是订单列表；单号 / 运单号 / 发货时间都在包裹顶层，
+内嵌 `orderResponse.logisticsNo` 实测为 `null`，顶层没有 `orderItemList`。
+
+- 扩展 1.1.2：新增独立的包裹→回执解析（不复用 `toOrder`，避免空明细帧被整单替换）；
+  按单号去重保留最晚发货的运单号；只取最近一页，历史不补。
+- 宿主 `electron/mango-sync.ts`：`source.kind='shipped'` 的批整批强制走 `applyShipStatus`，
+  只写主表状态 / 运单号 / 承运商，绝不碰明细；沿用 `schema: mango-order/v1`。
+- **双闸门**：扩展侧剔除无 `gmtSend` 的包裹、有效帧 0 条就整批不推；宿主侧逐帧校验，
+  缺时间或缺单号就 `ok:false` 整批拒收，杜绝静默清掉归类 / 图案绑定 / 包裹。
+- 测试：扩展新增 2 个测试文件 + 脱敏夹具；`scripts/order-db-smoke.cjs` 新增 `[18]` 段
+  （正常批写主表后明细 id / 归类 / 包裹零变化；坏帧批零写入）。
+- **S3 真实验收已通过**（2026-11-06 13:27 / 13:28 两次真跑）：第一页 98 个包裹，
+  `shipUpdated=6→0` / `shipUnknown=92` / `noShipTime=0` / `duplicate=2` / `platformTotal=897`；
+  库内 6 单转为「已发货」并写入运单号与承运商，待发队列 7→1。第二次重抓 `shipUpdated=0`
+  （幂等），且两批 `inserted=updated=0`（没走 DELETE+重插）；
+  7 单明细 / 归类 / `purchase_sources` 关联逐项仍在。
+
+细节见 `docs/notes/2026-11-02-mango-frame-contract.md`「2026-11-06 续四」与
+`docs/plans/ORDER_STAGE_TRACKING_PLAN_2026-11-05.md` §12。
+
+### Docs · 发货台改「订单维度状态跟踪」方案（2026-11-05）
+
+用户反馈「『按此开始发货』跳到待发货有歧义，发货台应是发货前的准备，要以订单维度跟踪状态」。
+新增 [`docs/plans/ORDER_STAGE_TRACKING_PLAN_2026-11-05.md`](docs/plans/ORDER_STAGE_TRACKING_PLAN_2026-11-05.md)：
+
+- **四条根因**（均带 `文件:行`）：①`OverviewPanel.vue:181-189` 的按钮写「开始发货」，
+  落点 `QueuePanel.vue:238-245` 却是**只读**清单（应用内本就没有发货动作）；②「待发货」
+  同时是 `SHIPPING_TAB_NAMES.queue`（流程第 1 步）与 `MANGO_BUCKET_LABELS.pending`（平台状态）；
+  ③`TodayView.vue:343-398` 的 `flow` 按四个聚合数推导 ⇒ 每单并行的业务被画成全局串行、`now` 恒为 1 步；
+  ④订单身份跨页丢失（只传单号；拿货页是款色级）。
+- **五档派生状态**：缺图 / 待归类 / 待拿货 / 已备齐 / 已发出，订单档 = 行里最差那档。
+  判据全部复用 `patternStateOf()` + `planCoverage()` + `mangoStatus`，落 `src/lib` 下新增的
+  orderStage 模块，**零新表、零新 IPC**（输入就是 `reload()` 已取的两份）。
+- **IA**：6 页签 → 5（总览并入「订单」，去步号）；首屏改「状态分组 + 按单清单 + 每档主操作」。
+- **硬约束**：`ship_time` 无回写路径 ⇒ 「已备齐」永不离队，必须在界面写明"发货在芒果点"，
+  并排 P3a（扩展抓已发货页）/ P3b（复制单号）两条出口。
+
+当次**只出方案，未改代码**（待拍板 D-1~D-4：合并两屏 / 去步号 / 出口顺序 / 是否显示面单对象）；
+D-1（合并两屏）与 D-2（去步号）已由用户拍板，实施见下一条「Changed」。
+
+### Added · 发货回执数据层：「已发货」能回写状态，且**不动明细**（2026-11-05，P3a / S1）
+
+到芒果「已发货」页采一轮，把平台状态同步回库里。这一批**只做数据层**（不接 UI），
+先把"只改主表、明细一行不动、幂等"证明出来。
+
+- **`electron/order-db.ts`**
+  - `applyShipStatus(input[], { writeShipTime? })`：只写 `biz_status` / `logistics_no` /
+    `logistics_carrier`（`ship_time` 需显式开启）。返回 `{updated, unchanged, missing,
+    invalid, missingNos, columns}`；**不新建**库里没有的单（只有状态没有明细 = 展开为空的幽灵行）。
+  - `ORDER_HEADER_COLS` += `logistics_no` / `logistics_carrier`；**v14 迁移**
+    `addShipReceiptColumns()` 给存量库补这两列（逐列 `PRAGMA` 判存在，重复执行安全）。
+- **`electron/mango-ingest.ts`**
+  - `toShipReceipt()` / `planShipReceipt()`：帧 → 回执纯映射，原始响应（`gmtSend` 毫秒、
+    `logisticsNo`、`logisticsServiceName`）与扩展规整帧（`shipTime` 等）**两套键名都认**。
+  - 抽出 `pickOrderNo()` / `pickBizStatus()`：`toInternal` 与回执**共用一份取键顺序**
+    （各写一遍会"入库写成 A、回执记到 B"，不报错只是有几单永远更新不到）。
+- **为什么必须新开一条路径**：`upsertCollectedOrder` 是整单替换（DELETE 主表 + 全部明细 + 重插），
+  已发货单行数不变 ⇒ 行数守卫放行 ⇒ 会静默丢 `style_color_id`（归类）、`oi_item_parts`
+  （图案绑定）、`parcels`（拆包），并把 `purchase_sources.order_item_id` 变成悬空 id
+  （"已拿"掉回 0、"还差"虚高，**界面不报错**）。冒烟 `[9.5]` 里留了**对照实验**钉这一点。
+- **`ship_time` 默认不回写**：发货台队列只读 `biz_status`（写它就够清零），而拣货/拿货读
+  `ship_time = ''` —— 写了会让"发了货但没拿货"的单从拿货页静默消失，欠货不可见。
+
+守卫：`tests/mangoShipReceipt.spec.ts` 14 例 + `scripts/order-db-smoke.cjs` `[9.5]` 10 例，
+均做变异验证（去掉幂等 / 去掉空值跳过 / 只认 `orderId` 各自会红）。
+
+**踩到并修掉的坑**：新列最初加进**已发布的 v13**，而 `migrate()` 只跑 `version > current`
+⇒ 存量库永远拿不到（运行时 `no such column`）。改成 v14 并用**真库副本实测**：
+`order.main v13 · logistics=[]` → `v14 · ["logistics_no","logistics_carrier"]`，二次执行不抛错，
+7 单 `ship_time` 仍全空（只加列不回填）。
+
+### Added · 回执接上入库链路：已发货单不再被整单替换（2026-11-06，P3a / S2）
+
+S1 只证明"能安全写主表"，本次把它接到真实采集链路：一帧芒果数据进来，带发货时间的单走
+回执、不带的走原 upsert。**扩展侧与宿主侧各改一处，判据只有一条。**
+
+- **`SellerKitExtensions/extensions/mango-order/src/mango-parse.js`**：`toOrder()` 补
+  `shipTime`（`gmtSend` → 本地串）/ `logisticsNo` / `logisticsCarrier`。未发货时三者都是 `''`
+  —— 宿主把 `''` 读作"这次没给"，不是"清空"，所以不会把已有值抹掉。
+  扩展测试新增第 10 组：**自己造一条已发货帧**（样本全是待发货，只用样本断言"空串"是半边测试）。
+- **`electron/mango-ingest.ts`**：新增 `splitShipBatch()` —— **分流判据的唯一实现**。
+  判据只认「帧内带不带发货时间」：`source.status` 是芒果自己的编码（语义随版本变）、
+  `cnOrderStatus` 是异步的（平台先改状态后写时间）、"有没有运单号"反向错（先填单号再发货是常态）。
+  三种错判据**都会让已发货单走进整单替换**，而那会静默清掉归类与图案绑定。
+- **`electron/mango-sync.ts`**：映射循环改遍历 `split.pending`（已发货单连图都不下）；
+  在 upsert 循环前调 `applyShipStatus(receipts, { writeShipTime: false })`；
+  `MangoIngestResult` 加 `shipped` / `shipUpdated` / `shipUnknown`，写进 `detail_json`。
+- **`src/lib/syncBanner.ts` + `src/types.ts`**：状态条单列「已发货 N」「N 单本地没有」。
+  为什么必须单列：纯回执批的 `inserted + updated` 是 0，界面原本显示「抓 5 条 · 入库 0」，
+  **看着像采集失败，其实全成功**。同理扩展 popup 的推送回执也加了这一项。
+- **口径**：`sk_sync_log.inserted/updated` **不统计回执** —— 混进去后「入库 12」会和芒果的
+  "共 12 单"对不上，且只在有已发货单混批的那几天对不上，最难查。
+
+守卫：`tests/mangoShipReceipt.spec.ts` +7 例；`scripts/order-db-smoke.cjs` 新增 `[17]` 端到端 5 例
+（走**真实** `ingestMangoOrders`，证明"分完真按这个走"，而不只是纯函数分对了）；
+`tests/syncBanner.spec.ts` +2 例。变异验证 4 处全部变红，其中"让 receipts 也走 upsert"
+会让「明细 id 不许换」当场红 —— 那条就是这个功能存在的唯一理由。
+
+**有意不做两件事（都是"不猜"）**：
+① **没做「去芒果收发货回执」按钮** —— 芒果「已发货」筛选页的 URL 段名没有抓包证据
+（`status/正常/normal` 里 `正常/normal` 是订单分组）；打开错列表不报错，用户会以为"芒果就是这样的"。
+② **没假设「正常」分组里含已发货单** —— 这是 扩展仓库的芒果探针笔记里列的待验证问题之一。
+真实库现状：7 单全是「等待卖家发货」、`ship_time` 全空 ⇒ **一单已发货都没采过**。
+所以这一批目前的价值是**预防性**的，不是"队列已经能清零了"。
+
+**踩到并修掉的坑**：`order-db-smoke.cjs` 是同步脚本，新加的 async 段若不 await，
+进程会在断言执行前 `exit 0` —— **报告写"全部通过"，实际一条都没验**（假绿）。
+收尾整体挪进 async IIFE 并把异常计进 `failed`。
+
+### Added · 「收已发货回执」入口 + 一条不会沉默的诊断（2026-11-06，P3a / S2b）
+
+上一批里"不做这个按钮"的理由是**已发货页 URL 的筛选段没有实证**。用户当天从浏览器地址栏
+给出真实地址，于是补做入口 —— 同时补上那个真正会让人白忙的东西：**抓不到时的沉默**。
+
+- **`src/modules/today/mangoOpen.ts`**：新增 `MANGO_SHIPPED_URL`
+  （`…/erp/#/erp/order/shipment/search/status/%E5%B7%B2%E5%8F%91%E8%B4%A7/delivered`）
+  与 `openMangoShipped()`；两个入口的失败处理抽成一份 `openMangoPage()`
+  （`.success=false` / 抛异常 / 系统拒绝三条分支都必须说话 —— 这一步失败的唯一表现就是"没反应"）。
+- **`src/modules/today/tabs/OrderPanel.vue`**：页头加 ghost 按钮 `order-shipped`「收已发货回执」，
+  与「去芒果采集」成对：一个收待发、一个收已发。**不承诺"点了就清零"** —— 能不能收到取决于
+  扩展在那一页是否命中接口，空口保证会让"没收到"看起来像数据坏了。
+- **`SellerKitExtensions` `mango-main.js`**：新增 `type: 'unmatched'` 诊断。判据是**结构**
+  （`data.list` 非空且元素带 `orderNo`/`orderId`），不是路径白名单 —— 白名单会把"芒果改版"
+  判成"这一页没有订单"。两处触发：接口路径不匹配、`phase` 不匹配；每（URL+原因）每页报一次。
+- **`bridge.js` / `popup.js`**：诊断落 `storage.unmatched`，**不写 `at`**（`at` 是"上次抓取时间"，
+  写进去 popup 会显示"刚抓过"却一条没有，比没有诊断更误导）；popup 在它比最近一次抓取更新时
+  排在 `notice` 最前（否则会被上一次的 `skip` 文案"内容与上次一致"盖掉），真抓成后自动消失。
+
+**为什么"能打开"不等于"能抓到"**：待发货是 `order/list`、已发货是 `order/shipment`，
+是芒果的**两个路由模块**；而扩展 hook 只认 `POST /erp/order/data/search.json` 且
+`phase` 必须为空或 `order`。任一条不成立 ⇒ 一条都不抓且不报错，界面上与"芒果没有已发货单"
+**完全无法区分**。放宽白名单不能靠猜：加错的后果是把打包/发货阶段的单混进订单状态语义。
+
+守卫（变异全部变红）：`tests/mangoOpen.spec.ts` 8 例（主断言是"两个地址必须指向两个不同模块段"，
+变异成照抄待发货 ⇒ 红 2 条）；`today:ui` +2 条（按钮是 ghost 且文案说清"已发货"；点击打开的 URL
+含 `order/shipment` 且**不含** `order/list`，变异成接线到 `openMangoPending` ⇒ 红）；
+扩展 `mango-order-collect.test.mjs` +2 组（没接上要报一次且不误抓；空列表/非订单列表不许报）。
+
+### Changed · 发货台改成「订单维度状态跟踪」：「总览 + 待发货」合并成一屏「订单」（2026-11-05）
+
+用户拍板 D-1（合并两屏）+ D-2（去步号）后按 P0 → P3 顺序开工，**P0 / P1 / P2 / P3b 已落地**
+（P3a 抓「已发货」页回写 `ship_time` 另立）。**零主进程改动**：输入就是容器已取的
+`order-shipping-rows` 与 `purchase-order-coverage`。
+
+- **新增 `src/lib/orderStage.ts`**：订单准备档的**唯一实现**（缺图 / 待归类 / 待拿货 / 待核对 /
+  已备齐）。订单档 = 明细行里最差的一档（木桶）；覆盖度读不到或行没有订单行身份（`id=0`）⇒
+  `unknown`，**绝不**默认已备齐。件数只认一处（喂 `planCoverage` 时 `qty: pieces, rawFields: {}`）。
+  **「已发出」不是第五档**：`shippingQueue` 只用 `isWaitingShip` 过滤，已发货单自动离队。
+  恒等式：五档（含 `unknown`）之和 ≡ `pulse.pending`。
+- **新增 `src/modules/today/tabs/OrderPanel.vue`**：采集状态条 → 「今天进来」四数 → 状态分组四格
+  （点一下筛到该档，再点取消）→ 汇总行 → 按单清单（缩略图 / 单号 / 剩余时间 / 档位 chip / 动作）
+  → 行内展开明细行（款色码 × 件数 × 缺口 + 带上下文去归类 / 去拿货）→ Excel 备选区（仍默认收起）。
+- **删除 `OverviewPanel.vue` / `QueuePanel.vue`**；`SHIPPING_TAB_NAMES` 6→5（`orders: '订单'`），
+  步号 `1–4`、`flow` / `flowNow` / `stateOf()` 与相关 CSS 一并撤掉 —— 流程是**每单并行**，
+  "第 1 步"暗示整批顺序完成，正是"看不太明白"的来源。
+- **「按此开始发货」→「开始处理」**：旧按钮写着发货、落点却是只读清单（应用内本就没有发货动作）。
+  新按钮只做它说的事 —— 把清单筛到**当前最卡的一档**（首屏唯一实心按钮，文案不含"发货"）；
+  采集按钮从 primary 降为页头常驻工具按钮。
+- **跨页带上下文**：`classifyFocus`（单号）+ 新增 `purchaseFocus`（单号 / 款 / 色 / 还差件数），
+  拿货页高亮并滚到那一行；款色键抽成 `colorGroupKey()`（`src/lib/picking.ts`）单一实现，
+  否则两页各写一遍，改一次就静默失配。
+- **守卫**：`tests/orderStage.spec.ts` 28 例（含三段变异守卫 + RK-2 与 `planCoverage` 的交叉断言，
+  已用「少 1 件也算齐」变异确认会红）；`today:ui` 443 条全 PASS，新增「五页签 / 默认落订单 /
+  两旧页签都不在 / 页签无步号 / 四档之和 = 合计 / 点分组筛 2 单再复位 3 单 / 首屏唯一实心按钮」
+  等断言；`uxEntryNames` 拦住 6 处改名后的悬空入口名（`OrderCostView` / `PickingView` ×3 /
+  `PodOrderPanel` / `OrderPanel`）。
+- **不做（有意）**：拿货页「按单核对」不改读 `orderStage` —— 它按 `purchase-order-coverage`
+  覆盖**跨天未发货**（窗口更宽），改读会把历史单抹掉；漂移风险改由交叉断言守。
+- **顺带修**：5 条因删文件产生的悬空文档引用（`CHANGELOG` / 两份旧计划与笔记）。
+
+
 ### Fix · 邮件待办改成「左队列 / 右单据」，正文不再被压成一条缝（2026-11-05）
 
 「点开待办看不全邮件」是三条叠加，只修一条都有残余：
@@ -2901,7 +3076,8 @@ C2 之后「进价」已经是 `pl_products.cost_cents` **一个字段**，而�
 用户裁定：「总览中的功能暂时没什么意义，先去掉，修改成展示：今天一共要发多少单、一共多少件商品、
 已经拿了多少件、还差多少件。样式要简洁明了。」
 
-- `src/modules/today/tabs/OverviewPanel.vue` 整页重写：撤掉**流程卡**（四步主线）与
+- `OverviewPanel.vue`（原路径 `src/modules/today/tabs/`；**2026-11-05 已随「总览 + 待发货」合并删除**，
+  现存实现见 `OrderPanel.vue`）整页重写：撤掉**流程卡**（四步主线）与
   **订单 / 待拣 / 钱算得准吗**三张卡，只留四格数字 + 一条进度条 + 一句结论。
   空态保留一句话与「导入 Excel」按钮（否则这一屏是死路）；空态不挂口径小字、不摆一排 0。
 - 新增纯函数 `src/lib/dailyShip.ts`（`dailyShip()`）：**四个数只有这一处实现**。

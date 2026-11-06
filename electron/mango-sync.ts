@@ -17,9 +17,15 @@
 import { dbMigrate, dbQuery, dbRun } from './db';
 import { ensureMasterDataSchema } from './master-data-db';
 import { landOrderImageByUrl } from './order-image-land';
-import { ensureOrderSchema, upsertCollectedOrder } from './order-db';
+import { ensureOrderSchema, applyShipStatus, upsertCollectedOrder } from './order-db';
 import { bindErpShopIdIfEmpty, ensureShopSchema, shopIdentityIndex } from './shop-db';
-import { buildShopMatchIndex, matchShop, toInternal, type ShopMatchIndex } from './mango-ingest';
+import {
+  buildShopMatchIndex,
+  matchShop,
+  splitShipBatch,
+  toInternal,
+  type ShopMatchIndex,
+} from './mango-ingest';
 
 /**
  * 同步日志表。
@@ -83,6 +89,24 @@ export interface MangoIngestResult {
    */
   onClosedShop: number;
   partial: boolean;
+  /**
+   * 本批里被判为**发货回执**的单数（帧内带 `gmtSend` / `shipTime`）。
+   *
+   * 这批单**不进 upsert 路径**：整单替换会删掉明细再重插，连带清掉
+   * `style_color_id`（归类）、`oi_item_parts`（图案绑定）与包裹，并让
+   * `purchase_sources.order_item_id` 变悬空 —— 且**界面不报错**。
+   * 它们只走 `applyShipStatus`（只写主表四列）。
+   */
+  shipped: number;
+  /** 回执里实际改动了主表的单数（幂等：与现值相同的不算） */
+  shipUpdated: number;
+  /**
+   * 回执里「库里查不到这一单」的数量。
+   *
+   * 不新建：只有状态没有明细的单会变成"展开永远为空"的幽灵行。
+   * 常见于"昨天晚上发的货，本地从没采集过" —— 记账给人看，不猜。
+   */
+  shipUnknown: number;
   /** 逐条跳过原因（复用 `/ae/ingest` 的形状） */
   skips: { orderNo: string; reason: string }[];
   /** 不影响入库但要记账的提示（缺图 / 币种未折算 / 店名认不出 …） */
@@ -161,6 +185,9 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
     shopUnmatched: 0,
     onClosedShop: 0,
     partial,
+    shipped: 0,
+    shipUpdated: 0,
+    shipUnknown: 0,
     skips: [],
     warnings: [],
     learned: [],
@@ -214,7 +241,12 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
     shopId: number;
     matchedBy: string;
   }[] = [];
-  for (const raw of rawOrders) {
+  // 已发货回执单独一条道：**带发货时间的单不进 upsert 路径**（整单替换会清掉归类与图案绑定）。
+  // 分流判据的唯一实现在 `splitShipBatch`（帧内事实，不是 `source.status`）。
+  // 同一批里允许混着待发与已发 —— 芒果的"全部"筛选本来就会混。
+  const split = splitShipBatch(rawOrders);
+  const receipts = split.receipts;
+  for (const raw of split.pending) {
     const mapped = toInternal(raw);
     if (!mapped.order) {
       result.skipped += 1;
@@ -271,6 +303,25 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
     );
   }
 
+  // 回执先落（只 UPDATE 主表，**绝不碰明细** —— 理由见 `applyShipStatus` 的注释）。
+  // 放在 upsert 循环之前：同一批里"已发"与"待发"各走各的，日志两个数互不覆盖。
+  if (receipts.length) {
+    const r = applyShipStatus(receipts, { writeShipTime: false });
+    result.shipped = receipts.length;
+    result.shipUpdated = r.updated;
+    result.shipUnknown = r.missing;
+    if (r.invalid > 0) {
+      result.warnings.push(`${r.invalid} 单回执缺订单号，已跳过`);
+    }
+    // 库里没有的单**不新建**（幽灵行）。但必须说出来：这通常意味着"这单从没采集过"，
+    // 而不是"同步成功"。沉默会让人以为已发货单都归位了。
+    if (r.missing > 0) {
+      const head = r.missingNos.slice(0, 3).join('、');
+      const more = r.missing > 3 ? ` 等 ${r.missing} 单` : '';
+      result.warnings.push(`平台已发货但本地库里没有（不新建）：${head}${more}`);
+    }
+  }
+
   // 写库：一单一次（upsertCollectedOrder 内部是整单替换）
   for (const d of drafts) {
     const { draft } = d;
@@ -325,6 +376,13 @@ export async function ingestMangoOrders(payload: unknown): Promise<MangoIngestRe
       missingImage: result.missingImage,
       shopUnmatched: result.shopUnmatched,
       onClosedShop: result.onClosedShop,
+      // 回执三个数：`shipped` = 判为已发的单数，`shipUpdated` = 真改了主表的，
+      // `shipUnknown` = 库里没有的。三者分开写，才能区分"同步成功"与"这批全是没见过的单"。
+      // （`sk_sync_log` 的 `inserted/updated` 只统计 upsert 那一路，不要把回执混进去 ——
+      //   混了以后「今天入库 12 单」会变成 12 + 已发货数，对不上芒果的总数。）
+      shipped: result.shipped,
+      shipUpdated: result.shipUpdated,
+      shipUnknown: result.shipUnknown,
       ordered: drafts.length,
       imageFetched: imageIdByUrl.size,
       skips: result.skips,
@@ -386,6 +444,16 @@ export interface MangoSyncStatus {
   shopUnmatched: number;
   partial: boolean;
   reason: string;
+  /**
+   * 这批里判为**已发货**的单数（走 `applyShipStatus`，不走 upsert）。
+   *
+   * 从 `detail_json` 里取，不是独立列：它是"这批的性质"，不是"入库计数"。
+   * 与 `inserted/updated` **分开口径** —— 混在一起会让「入库 12」和芒果的总数对不上，
+   * 而那个对不上的偏差只在"有已发货单混进来"的日子出现，最难查。
+   */
+  shipped: number;
+  /** 已发货批里「本地库里没有」的单数（不新建，但要让人知道） */
+  shipUnknown: number;
 }
 
 export function lastMangoSync(): MangoSyncStatus | null {
@@ -395,6 +463,15 @@ export function lastMangoSync(): MangoSyncStatus | null {
       `SELECT * FROM sk_sync_log WHERE kind = 'mango' ORDER BY id DESC LIMIT 1`,
     )[0];
     if (!r) return null;
+    // `detail_json` 是自由形状（每批写什么由 `ingestMangoOrders` 决定），
+    // 解析失败不能让状态条整块消失 —— 缺的按 0 处理，其余字段照常给。
+    let detail: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(String(r.detail_json ?? '') || '{}');
+      if (parsed && typeof parsed === 'object') detail = parsed as Record<string, unknown>;
+    } catch {
+      detail = {};
+    }
     return {
       at: String(r.finished_at ?? ''),
       fetched: Number(r.fetched) || 0,
@@ -406,6 +483,8 @@ export function lastMangoSync(): MangoSyncStatus | null {
       shopUnmatched: Number(r.shop_unmatched) || 0,
       partial: Number(r.partial) === 1,
       reason: String(r.reason ?? ''),
+      shipped: Number(detail.shipped) || 0,
+      shipUnknown: Number(detail.shipUnknown) || 0,
     };
   } catch {
     return null; // 读状态这条路不该抛（采集状态条自己坏了也不能让主界面白屏）

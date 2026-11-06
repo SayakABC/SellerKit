@@ -277,7 +277,13 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
     return accountStatePromise;
   }
 
-  async function loadMessages(): Promise<void> {
+  /**
+   * 读取邮件列表。
+   * @param opts.keepSelected 「只看未读」下**刚被读过的那封**要留在列表里（见 markRead）：
+   *   不保留的话，列表一刷新这封就被筛掉，`selectedId` 随即被清空、正文跟着一起消失，
+   *   用户看到的就是"点开未读邮件 → 左栏消失 + 右栏空白"。
+   */
+  async function loadMessages(opts: { keepSelected?: boolean } = {}): Promise<void> {
     loading.value = true;
     try {
       const result = await mailMessagesList({
@@ -291,7 +297,20 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
         toast(result.error || '读取邮件失败', 'error');
         return;
       }
-      messages.value = result.data?.items || [];
+      const items = result.data?.items || [];
+      // 把正在看的那封按时间倒序插回原位（列表口径：received_at DESC）
+      const keepId = opts.keepSelected ? selectedId.value : 0;
+      if (keepId && !items.some((m) => m.id === keepId)) {
+        const kept = messages.value.find((m) => m.id === keepId);
+        if (kept) {
+          const at = items.findIndex(
+            (m) => new Date(m.receivedAt).getTime() <= new Date(kept.receivedAt).getTime()
+          );
+          if (at < 0) items.push(kept);
+          else items.splice(at, 0, kept);
+        }
+      }
+      messages.value = items;
       total.value = result.data?.total || 0;
       if (selectedId.value && !messages.value.some((m) => m.id === selectedId.value)) {
         selectedId.value = 0;
@@ -450,8 +469,9 @@ export const useMailStore = defineStore('shop-accounts-mail', () => {
         const changed = Number(result.data?.changed) || 0;
         toast(read ? `已标记 ${changed} 封为已读` : `已恢复 ${changed} 封为未读`, 'success');
       }
-      // 「只看未读」下标记为已读的邮件应从列表消失
-      if (unreadOnly.value && read) void loadMessages();
+      // 「只看未读」下标记为已读的邮件应从列表消失；
+      // 但**打开邮件时自动标的这次**（silent）例外：用户正在看它，列表不能把它和正文一起收走
+      if (unreadOnly.value && read) void loadMessages({ keepSelected: opts.silent === true });
       return true;
     } catch (e: unknown) {
       if (!opts.silent) toast(`标记失败: ${normalizeError(e)}`, 'error');

@@ -697,6 +697,18 @@ function sizeOrder(a: string, b: string): number {
 }
 
 /**
+ * 款色行的分组键（`款 · 色`，缺哪一段就把哪一段标出来）。
+ *
+ * 为什么要单独一个函数：`groupByColor` 用它建键，发货台「订单」屏的「带款色去拿货」
+ * 也用它算出"该高亮哪一行"（`PickingView` 的 `focusKey`）—— 拼法一旦有两处，
+ * 改了回落词（`(未识别款)` / `(无颜色)`）就会变成"点过去没有任何行被点亮"，
+ * 而两边各自看起来都对。
+ */
+export function colorGroupKey(styleCode: unknown, color: unknown): string {
+  return `${String(styleCode ?? '') || '(未识别款)'} · ${String(color ?? '') || '(无颜色)'}`;
+}
+
+/**
  * 把（同一批）拣货项按**款色**折成界面行。
  *
  * 输入通常传一个厂家段里的 `PickingGroup[]`（`summary.suppliers[i].groups`），
@@ -710,7 +722,7 @@ export function groupByColor(groups: PickingGroup[] | null | undefined): Picking
   const list = Array.isArray(groups) ? groups : [];
   const buckets = new Map<string, { row: PickingColorGroup; groups: PickingGroup[] }>();
   for (const g of list) {
-    const key = `${g.styleCode || '(未识别款)'} · ${g.color || '(无颜色)'}`;
+    const key = colorGroupKey(g.styleCode, g.color);
     let b = buckets.get(key);
     if (!b) {
       b = {

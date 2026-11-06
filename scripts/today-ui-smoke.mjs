@@ -1491,16 +1491,14 @@ function pickingGenCalls() {
  * ⚠️ 2026-11-01：新增「待发货」页签（T2-4，无步骤号）⇒ 六页签。
  * ⚠️ 2026-11-02：「导入订单」页签**并进「待发货」**（用户："合并为待发货，弱化 Excel 导入，
  *    以芒果采集为主"）⇒ 回到五页签。Excel 入口与回执现在住在「待发货」页里的一块**默认收起**的
- *    备选区（queue-excel-toggle 展开），所以 import 不再是一个能 activateTab 的页签 ——
- *    下面的导入步全部改为 activateTab('queue') + 先展开备选区。
+ *    备选区（order-excel-toggle 展开），所以 import 不再是一个能 activateTab 的页签 ——
+ *    下面的导入步全部改为 activateTab('orders') + 先展开备选区。
  */
 var PANEL_SEL = {
-  // ⚠️ 2026-10-22：总览改版成"四格数字"，判据从「[data-act="flow"]」（流程卡）换成「daily-summary」。
-  //    流程卡与三张卡已撤掉 —— 守着旧锚点会恒红（看着像功能坏了），守着一个"随便有什么元素"的
-  //    选择器又会恒绿，所以钉在**这块面板自己的根**上。
-  overview: '[data-act="daily-summary"]',
-  // 「待发货」清单：钉在面板根上（表体在空态时不存在，不能拿 queue-table 当"面板挂上了"的判据）
-  queue: '[data-act="queue-panel"]',
+  // ⚠️ 2026-11-05：「总览」+「待发货」合并成「订单」（用户拍板 D-1）—— 两屏回答的是同一个问题
+  //    （"我有几单、是哪几单"），只差聚合与明细。合并后**只剩一个面板**，钉在它自己的根上
+  //    （清单在空态时不存在，不能拿 order-list 当"面板挂上了"的判据）。
+  orders: '[data-act="order-panel"]',
   classify: '[data-act="classify-panel"]',
   // 「订花纸」（2026-11-02 第二轮新增）：钉面板根（表格在空态时不存在，不能拿 rows 当"挂上了"）
   pod: '[data-act="pod-order-panel"]',
@@ -1594,18 +1592,18 @@ async function activateTab(id) {
  *
  * 原先导入/回执在独立页签「导入订单」里 ⇒ 一步 activateTab('import') 就够；
  * 合并后 Excel 是**默认收起**的次级入口（这是"弱化 Excel"的具体做法），要先用页头的
- * queue-excel-toggle 展开，否则按钮虽在 DOM 里却看不见 —— 点击还能生效，但"看不见的按钮点了"
+ * order-excel-toggle 展开，否则按钮虽在 DOM 里却看不见 —— 点击还能生效，但"看不见的按钮点了"
  * 正是这一轮要消掉的东西（断言必须按用户真能操作的路径走）。
  * 幂等：已经展开时不再点（点第二次会**收起**）。
  */
 async function openExcelArea() {
-  await activateTab('queue');
-  await waitFor(function () { return !!card('queue-excel-toggle'); }, 10000);
-  var area = card('queue-excel');
+  await activateTab('orders');
+  await waitFor(function () { return !!card('order-excel-toggle'); }, 10000);
+  var area = card('order-excel');
   var visible = !!area && area.offsetParent !== null;
-  if (!visible) card('queue-excel-toggle').click();
+  if (!visible) card('order-excel-toggle').click();
   await waitFor(function () {
-    var el = card('queue-excel');
+    var el = card('order-excel');
     return !!el && el.offsetParent !== null && !!card('import');
   }, 8000);
   return true;
@@ -1673,25 +1671,21 @@ async function clickReady(act, timeout) {
 async function main() {
   try {
     step('boot');
-    await waitFor(function () { return document.querySelector('.td-view'); }, 10000);
+    await waitFor(function () { return document.querySelector('[data-act="order-panel"]'); }, 10000);
     report('挂载：今天页渲染', true);
     // 等总览那块四格数字真的算出来（不是"面板挂上了"就算 —— 数字要等 reload 回来）
     await waitFor(function () { return flat(card('daily-summary')).indexOf('件商品') >= 0; }, 8000);
 
     step('tabs');
-    // 页签栏（2026-10-05「发货台」改造）：四步 + 总览 = 五个。
-    //   2026-10-10：原第 3 步「生成拣货单」并进「拿货」⇒ 六步 → 五步，页签少一个。
-    //   2026-10-17：算钱整步撤出（归拢到独立「统计」页）⇒ 五步 → 四步，再少一个。
-    //   2026-11-01（T2-4）：「待发货」清单进页签栏（无步骤号 —— 它不属四步里的任何一步）。
-    //   2026-11-02：用户裁定"待发货与导入订单合并，弱化 Excel、以芒果采集为主" ⇒ 「导入订单」页签
-    //    撤掉（Excel 变成「待发货」页内的折叠备选区），页签回到五个，且「待发货」带上第 1 步编号。
-    //   2026-11-02（第二轮）：用户口径「订花纸放在发货台的归类核对后面」⇒ 新增「订花纸」页签。
-    //   它**刻意不带步号**（拿货仍是第 3 步）：库存够用时这一步根本不用做，是拿货前的可选旁路。
-    //   于是页签回到六个：总览 + 待发货 + 归类核对 + 订花纸 + 拿货 + 结算对账。
-    // ⚠️ 「懒加载」也要验：只断言"页签在"不够 —— 面板若是全量挂载，五个整页视图
+    // 页签栏（2026-11-05）：**五个**，且**全部没有步号**。
+    //   历史：四步 + 总览 = 五 → 加「待发货」= 六 → 「导入订单」并进「待发货」→ 加「订花纸」= 六。
+    //   本轮用户拍板两件事：D-1「总览与待发货合并成一屏『订单』」、D-2「去掉页签步号 1–4」。
+    //   理由（用户原话）：「现在的流程感觉是相对独立的，让人看不太明白」—— 流程是**每单并行**的，
+    //   "第 1 步"暗示必须整批做完才轮到第 2 步，而真实处境是四类活同时压在四张不同的单上。
+    // ⚠️ 「懒加载」也要验：只断言"页签在"不够 —— 面板若是全量挂载，几个整页视图
     //    （拣货上千行、各自取数）会在进页面时一起跑，表现是打开就很慢。
-    var tabIds = ['overview', 'queue', 'classify', 'pod', 'purchase', 'recon'];
-    report('页签栏：六个页签齐全（总览 + 待发货 + 归类核对 + 订花纸 + 拿货 + 结算对账）',
+    var tabIds = ['orders', 'classify', 'pod', 'purchase', 'recon'];
+    report('页签栏：五个页签齐全（订单 + 归类核对 + 订花纸 + 拿货 + 结算对账）',
       tabIds.every(function (id) { return !!tabEl(id); }),
       tabIds.map(function (id) { return id + '=' + !!tabEl(id); }).join(' '));
     report('「订花纸」直接排在「归类核对」后面（用户口径：归类核对后面）',
@@ -1703,35 +1697,49 @@ async function main() {
     // 反向守卫：「导入订单」页签不许回来（2026-11-02 合并）。它一回来，用户又得在"单从哪进"
     // 与"哪些单还没发"两屏之间来回跳 —— 那正是这一轮要消掉的东西。
     // ⚠️ 判据同时钉**页签**与**它的独立面板根**：只钉页签的话，把面板换成别的挂载点也能绿。
-    report('「导入订单」页签已撤（连同它独立的整页面板一起），导入只在「待发货」页里',
+    report('「导入订单」页签已撤（连同它独立的整页面板一起），导入只在「订单」屏里',
       !tabEl('import') && !document.querySelector('[data-act="tab-import"]') &&
         !document.querySelector('.td-import'), '');
-    report('「待发货」页签带第 1 步编号（订单进来是四步的起点）',
-      !!document.querySelector('[data-act="tab-no-queue"]') &&
-        flat(document.querySelector('[data-act="tab-no-queue"]')) === '1',
-      'no=' + (document.querySelector('[data-act="tab-no-queue"]')
-        ? flat(document.querySelector('[data-act="tab-no-queue"]')) : '无') +
-        ' tab=' + flat(tabEl('queue')));
+    // 反向守卫（D-1 合并）：两块旧屏**不许回来**。它们一回来，"我有几单"又变成两个入口。
+    // ⚠️ 同时钉页签与面板根：只钉页签的话，把面板挂到别的 id 上也能绿。
+    report('「总览」「待发货」两个旧页签都不在了（合并成「订单」，同一个问题不再有两个入口）',
+      !tabEl('overview') && !tabEl('queue') &&
+        !document.querySelector('[data-act="tab-overview"]') &&
+        !document.querySelector('[data-act="tab-queue"]'),
+      'overview=' + !!tabEl('overview') + ' queue=' + !!tabEl('queue'));
+    // 反向守卫（D-2 去步号）：页签上**不许**再有步号。它回来就等于把"整批串行"那套
+    // 心智模型又装回去了 —— 而用户看不懂的正是那一套。
+    report('页签上不再有步号（流程是每单并行，"第 N 步"会暗示必须整批顺序完成）',
+      !document.querySelector('[data-act^="tab-no-"]'),
+      '残留=' + Array.prototype.map.call(
+        document.querySelectorAll('[data-act^="tab-no-"]'),
+        function (el) { return flat(el); }).join(','));
     // 反向守卫：算钱页签**不许回来**（2026-10-17 用户裁定：都归拢到「统计」菜单）。
     // 它一回来，"同一份利润表两个入口、两个口径"就复辟 —— 那正是这一轮要消掉的东西。
     report('算钱页签与它的面板都不在本页（钱只在「统计」页看）',
       !tabEl('cost') && !document.querySelector('[data-act="tab-cost"]') &&
         !document.querySelector('.oc-view'), '');
-    report('进入页面默认落在「总览」', onTab('overview'), '');
+    report('进入页面默认落在「订单」（它是这一页的主屏，其余四个是围着它转的工具）', onTab('orders'), '');
     // 自证非空转：KNOWN_TABS 解析失败会返回 []，于是"回执的下一步指向真实页签"那条守卫
     // 悄悄退化成"只认模块 id"（页签类按钮全被判悬空 → 假红；或反过来配上副本 → 恒绿）。
     report('页签 id 清单从 flowCtx 真的读到了（否则"下一步"的页签守卫是空转的）',
       KNOWN_TABS.length >= 5 && KNOWN_TABS.indexOf('classify') >= 0 &&
         KNOWN_TABS.indexOf('pod') >= 0 && KNOWN_TABS.indexOf('purchase') >= 0,
       JSON.stringify(KNOWN_TABS));
-    report('懒加载：还没点过的页签，面板一个都没挂载（DOM 里查不到）',
-      !document.querySelector('[data-act="queue-panel"]') &&
+    // ⚠️ 2026-11-05「总览 + 待发货」合并成「订单」后，**默认页签就是订单屏** ⇒
+    //    它必然已挂载（KeepAlive 只管"切走的还留着"，管不了"没点过的别进来"）。
+    //    所以这条断言拆成两半：默认那几个**在**、没点过的四个**不在**。
+    //    只留"一个都没挂载"的老写法会恒红（首屏本来就挂了订单屏）；
+    //    反过来只写"另外四个不在"又会放过"订单屏其实没渲染出来"——两边都钉才算非空转。
+    report('懒加载：默认页签（订单屏）真的挂上了，没点过的另外四个面板一个都没挂载',
+      !!document.querySelector('[data-act="order-panel"]') &&
         !document.querySelector('.pu-view') &&
         !document.querySelector('[data-act="pod-order-panel"]') &&
         !document.querySelector('[data-act="classify-panel"]') &&
-        !document.querySelector('[data-act="recon-panel"]'), '');
+        !document.querySelector('[data-act="recon-panel"]'),
+      '订单屏=' + !!document.querySelector('[data-act="order-panel"]'));
 
-    step('overview');
+    step('orders');
     // 总览改版（2026-10-22 用户裁定："总览里的功能暂时没什么意义，先去掉"）：
     //   流程卡（四步主线）+ 订单 / 待拣 / 钱算得准吗 三张卡**全部撤掉**，只留四格数字 ——
     //   今天要发几单 / 共几件 / 已拿几件 / 还差几件。
@@ -1767,36 +1775,38 @@ async function main() {
     report('账能自洽：已拿 + 还差 = 件数',
       Number(numOf('stat-taken')) + Number(numOf('stat-remaining')) === Number(numOf('stat-pieces')),
       numOf('stat-taken') + ' + ' + numOf('stat-remaining') + ' vs ' + numOf('stat-pieces'));
-    // 口径小字必须写着范围（"今天导入"）：没有它，这四格会被读成"库里一共这么多"
-    report('总览写明口径（今天导入的订单 · 不含已关闭/已完成）',
+    // 口径小字必须写着范围（"今天导入"）：没有它，这几个数会被读成"库里一共这么多"
+    report('「今天进来」写明口径（今天导入的订单 · 不含已关闭/已完成）',
       flat(document.querySelector('[data-act="daily-scope"]')).indexOf('今天导入') >= 0 &&
         flat(document.querySelector('[data-act="daily-scope"]')).indexOf('关闭') >= 0,
       flat(document.querySelector('[data-act="daily-scope"]')));
 
-    // ---- D-1（2026-11-03 用户拍板 B）：首屏从"报表"变"工作台" ------------------------
-    // 守三件事：① 主卡末尾**有**一个开始按钮（光看数字不算开始）；② 它是**实心**主按钮
-    // （本屏唯一焦点，描边按钮不算"开始"）；③ 点了**真的**落到第 1 步「待发货」。
-    // ⚠️ 第 ③ 条必须真点：只断言"有个按钮"的话，把 @click 删掉照样绿。
-    var startBtn = document.querySelector('[data-act="daily-start"]');
-    report('主卡给「按此开始发货」实心主按钮（首屏从"看数字"变成"能开工"）',
+    // ---- 「开始处理」= 筛到最卡的一档（2026-11-05 取代旧的「按此开始发货」）-------------
+    // 旧按钮写着「按此开始发货」，落点却是一个**只读清单**（那一屏明写不做任何写操作）——
+    // 按钮承诺了它做不到的事，这是用户"看不明白"的第一根因。现在这个按钮只做它说的事：
+    // **筛一下清单**（发货仍然在芒果点，页面顶部已经写清这条边界）。
+    // 守三件事：① 它是**实心**主按钮（本屏唯一焦点）；② 文案不再承诺"发货"；
+    //          ③ 点了**真的**筛到最卡的那一档（缺图 → 待归类 → 待拿货 → 已备齐）。
+    var startBtn = document.querySelector('[data-act="order-start"]');
+    report('首屏主按钮是「开始处理」实心按钮，且**不再**承诺"发货"（它只筛清单）',
       !!startBtn && /wb-btn--primary/.test(startBtn.className) &&
-        flat(startBtn).indexOf('开始发货') >= 0,
+        flat(startBtn).indexOf('开始') >= 0 && flat(startBtn).indexOf('发货') < 0,
       startBtn ? flat(startBtn) + ' | class=' + startBtn.className : 'missing');
     if (startBtn) startBtn.click();
-    try { await waitFor(function () { return onTab('queue'); }, 6000); } catch (e) {}
-    report('点「按此开始发货」就地切到第 1 步「待发货」（不跳模块、不新开一条动线）',
-      onTab('queue'), 'onQueue=' + onTab('queue') + ' startBtn=' + !!startBtn);
-    // ⚠️ 必须**先切回总览**再数按钮：上面那一下已经把页面切到「待发货」，而面板是 KeepAlive 保活的
-    //    —— 保活 = 从文档里**摘出去**（不是 display:none），所以此刻从 document 里根本查不到它。
-    //    这条踩过：判据放在切换之后 ⇒ 数出来 0 个，红得莫名其妙。
-    await activateTab('overview');
-    // 一屏一个焦点：两块卡加起来**只许一个**实心主按钮（主卡那个）。
-    // 第二块的下钻必须是描边 —— 两个实心按钮等于没有焦点，用户还得读一遍才知道哪个是"开始"。
+    await new Promise(function (r) { setTimeout(r, 200); });
+    // 夹具里最卡的一档是「缺图」（I-1 与 I-OLD 都没图）：点完这一格必须是选中态
+    var noImgBtn = card('stage-noImage');
+    report('点「开始处理」筛到最卡的一档（夹具里是「缺图」，该格进入选中态）',
+      !!startBtn && !!noImgBtn && /is-on/.test(noImgBtn.className),
+      'noImage class=' + (noImgBtn ? noImgBtn.className : '无'));
+    if (noImgBtn) noImgBtn.click();   // 复位成"不筛"（再点一下 = 取消）
+
+    // 一屏一个焦点：状态分组那一块**只许一个**实心主按钮。
     var solidBtns = Array.prototype.slice
-      .call(document.querySelectorAll('[data-act="daily-summary"] .wb-btn--primary, [data-act="pulse-summary"] .wb-btn--primary'))
+      .call(document.querySelectorAll('[data-act="pulse-summary"] .wb-btn--primary'))
       .filter(function (b) { return b.offsetParent !== null; });
-    report('总览只有主卡一个实心主按钮（第二块的下钻是描边，不是第二个"开始"）',
-      solidBtns.length === 1 && solidBtns[0].getAttribute('data-act') === 'daily-start',
+    report('状态分组那块只有一个实心主按钮（分组本身是描边/浅底的格子，不是第二个"开始"）',
+      solidBtns.length === 1 && solidBtns[0].getAttribute('data-act') === 'order-start',
       'solid=' + solidBtns.map(function (b) { return b.getAttribute('data-act'); }).join(','));
 
     // ---- 「现在还没发」第二行（T2-2）------------------------------------------------
@@ -1849,30 +1859,33 @@ async function main() {
       evts('switch-module').length === swBefore,
       'switch-module=' + evts('switch-module').length);
     window.__events.length = 0;   // ⚠️ 别把上面这次点击留给后面按 [0] 取的断言
-    await activateTab('overview');   // 后面的断言都在总览页签上（保活：切回来内容还在）
+    await activateTab('orders');   // 后面的断言都在总览页签上（保活：切回来内容还在）
 
     step('import');
     // 「商品信息」表：2026-10-01 起**不再是可导入类型**（克重是 SKU 属性，商品ID 上没有克重）。
     // 用户真拿它来导时，必须给一句**指路**（不许干说"认不出"），且**一个字节都不写库**。
     // ⚠️ 2026-11-02：导入不再有独立页签 —— 它在「待发货」页内的**折叠备选区**里 ⇒ 先切页签再展开。
-    await activateTab('queue');
-    // ── 合并后的入口主次（用户：弱化 Excel、以芒果采集为主）──────────────────────────
-    // 这三条是"弱化"唯一能被机器验到的部分（文案/样式改了它照样会坏，且坏得不显眼）：
-    //   ① 主按钮 = 采集，且**真的是 primary 样式**（主次不是靠用户读文案猜的）；
+    await activateTab('orders');
+    // ── 合并后的入口主次 ─────────────────────────────────────────────────────────
+    // 2026-10-22 的裁定是"弱化 Excel、以芒果采集为主"；2026-11-05 合并成「订单」屏后主次又变了：
+    //   **首屏唯一焦点是「开始处理」（筛清单）**，采集降为页头常驻的**工具按钮**——
+    //   因为采集是"随时可重跑的动作"，不是"这一屏要你做的下一步"。
+    // 这三条是"主次"唯一能被机器验到的部分（文案/样式改了它照样会坏，且坏得不显眼）：
+    //   ① 采集按钮**不再是 primary**（焦点只有一个，就在「开始处理」上；上面已单独钉过）；
     //   ② Excel 入口是 ghost 小按钮、**默认收起**（展开后回执与投放区才出现）；
     //   ③ 采集按钮真的打开芒果待发货页（不是首页 —— 打开错页会抓错列表且不报错）。
-    var collectBtn = card('queue-collect');
-    report('「待发货」页头的主入口是「去芒果采集」（primary），不是 Excel',
-      !!collectBtn && collectBtn.className.indexOf('primary') >= 0 &&
+    var collectBtn = card('order-collect');
+    report('「订单」屏的采集是常驻工具按钮（不再占 primary：首屏焦点让给「开始处理」）',
+      !!collectBtn && collectBtn.className.indexOf('primary') < 0 &&
         flat(collectBtn).indexOf('采集') >= 0,
       'btn=' + (collectBtn ? flat(collectBtn) + ' class=' + collectBtn.className : '无'));
-    var excelToggle = card('queue-excel-toggle');
+    var excelToggle = card('order-excel-toggle');
     report('Excel 导入降为**次级 ghost 按钮**，且内容默认收起（备选区不可见）',
       !!excelToggle && excelToggle.className.indexOf('ghost') >= 0 &&
         flat(excelToggle).indexOf('备选') >= 0 &&
-        !!card('queue-excel') && card('queue-excel').offsetParent === null,
+        !!card('order-excel') && card('order-excel').offsetParent === null,
       'toggle=' + (excelToggle ? flat(excelToggle) : '无') +
-        ' 备选区可见=' + (card('queue-excel') ? card('queue-excel').offsetParent !== null : '无'));
+        ' 备选区可见=' + (card('order-excel') ? card('order-excel').offsetParent !== null : '无'));
     var nCollectOpen = calls('openExternal').length;
     if (collectBtn) collectBtn.click();
     await waitSoft(function () { return calls('openExternal').length > nCollectOpen; }, 6000);
@@ -1887,9 +1900,9 @@ async function main() {
     // 展开备选区：后面整段导入都从这条路走（用户真能操作的路径，而不是点一个看不见的按钮）
     await openExcelArea();
     report('点「Excel 导入（备选）」真的展开备选区（投放区出现，按钮文案翻成「收起」）',
-      !!card('queue-excel') && card('queue-excel').offsetParent !== null &&
-        flat(card('queue-excel-toggle')).indexOf('收起') >= 0,
-      'toggle=' + flat(card('queue-excel-toggle')));
+      !!card('order-excel') && card('order-excel').offsetParent !== null &&
+        flat(card('order-excel-toggle')).indexOf('收起') >= 0,
+      'toggle=' + flat(card('order-excel-toggle')));
     var beforeWrites = calls('settleImport').length + calls('shipRateSnapshotSave').length + calls('orderInsert').length;
     await waitImportIdle();
     document.querySelector('[data-act="import"]').click();
@@ -2041,7 +2054,7 @@ async function main() {
     // ⚠️ 这里**刻意不补一条"数字跟着导入变了"的断言**：假桥的「orderShippingRows」恒回同一批行，
     //    数字在导入前后必然一样 —— 那种断言怎么写都恒绿，等于给后面的人一个假守卫。
     //    真要验"导入后汇总重取"，看「bump()」与「watch(token)」那两条既有链路（本文件后半段）。
-    await activateTab('overview');
+    await activateTab('orders');
 
     step('import-mango');
     // ⚠️ 2026-11-02：「导入订单」页签已并进「待发货」⇒ 回到合并页并**展开 Excel 备选区**。
@@ -2258,7 +2271,7 @@ async function main() {
     step('empty');
     // 空态：给的是"动作"，不是一句"暂无数据"；而且动作必须是**宿主自己能做的那一步**
     // （S2-b 起宿主能直接导订单报表 —— 旧按钮把用户送去装「订单归类」，指向已过时）
-    await activateTab('overview');
+    await activateTab('orders');
     window.__emptyOrders = true;
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () {
@@ -2337,15 +2350,17 @@ async function main() {
       opened.length > nOpen && lastUrl.indexOf('order/list') >= 0 && lastUrl.indexOf('status/') >= 0,
       'url=' + lastUrl);
 
-    // 清单页签的空态用**同一份判据**（同一个 0 不许在两屏上说两种话）
-    await activateTab('queue');
-    await waitSoft(function () { return !!card('queue-empty'); }, 8000);
-    var qEmptyNever = flat(card('queue-empty'));
-    report('清单空态与总览空态同口径：从没同步过时说"还没同步过"，并给同一个出口',
-      qEmptyNever.indexOf('还没同步') >= 0 && !!card('queue-open-mango'),
-      '文案=' + qEmptyNever + ' 按钮=' + !!card('queue-open-mango'));
-    // 切回总览：下面的「Excel 导入」按钮在总览这块（保活只缓存实例，切走就不在 DOM 里）
-    await activateTab('overview');
+    // 合并后**只有一处空态**（2026-11-05）：同一屏里"今天进来 0 单"与"待发货 0 单"是两件事，
+    // 各说一句、互不冒充 —— 以前它们分住两屏，用户得自己判断哪句在说哪件事。
+    await activateTab('orders');
+    await waitSoft(function () { return !!card('pulse-empty'); }, 8000);
+    var qEmptyNever = flat(card('pulse-empty'));
+    var briefText = flat(card('daily-summary'));
+    report('合并后只有一处空态：口径行说"今天还没有订单"、主体说"还没同步过"（两件事各说一句）',
+      qEmptyNever.indexOf('还没同步') >= 0 && !!card('pulse-open-mango') &&
+        briefText.indexOf('今天还没有订单') >= 0 &&
+        document.querySelectorAll('[data-act="pulse-empty"]').length === 1,
+      '口径=' + briefText.slice(0, 60) + ' | 主体=' + qEmptyNever);
     // 恢复成"同步过"的形态 —— 后面的步骤（以及最后的 T2-3 状态条段）都假设是正常态。
     // 这里**不必再刷一次**：紧接着的「导入 Excel」点击之后有 nav 那一步的刷新会带上这个值。
     window.__syncMode = 'ok';
@@ -2358,17 +2373,17 @@ async function main() {
     report('空态按钮真的走导入链路（点了就弹选文件）', calls('selectExcel').length > beforeSel,
       'selectExcel=' + calls('selectExcel').length);
     report('空态的 Excel 备选按钮：切到「待发货」页并展开备选区（一步直达，不让用户再找按钮）',
-      onTab('queue') && !!card('queue-excel') && card('queue-excel').offsetParent !== null &&
+      onTab('orders') && !!card('order-excel') && card('order-excel').offsetParent !== null &&
         !!document.querySelector('[data-act="import"]'),
-      'onQueue=' + onTab('queue') +
-        ' 备选区可见=' + (card('queue-excel') ? card('queue-excel').offsetParent !== null : '无'));
+      'onQueue=' + onTab('orders') +
+        ' 备选区可见=' + (card('order-excel') ? card('order-excel').offsetParent !== null : '无'));
     step('nav');
     // 数据回来（关掉空态开关再刷新）：四格数字必须重新出现 ——
     // 只验"空态出现了"不够：空态若把面板换成了回不来的 DOM（v-if 写反 / 状态没重置），
     // 用户点刷新就永远看不到数，而界面上"有一句空态文案"看上去还挺正常。
     // ⚠️ 先切回总览：KeepAlive 只是**缓存**组件实例，切走的页签**不在 DOM 里** ——
     //    停在导入页签时 stat-orders 根本查不到，等待必然超时（不是数据没回来）。
-    await activateTab('overview');
+    await activateTab('orders');
     window.__emptyOrders = false;
     document.querySelector('[data-act="refresh"]').click();
     await waitFor(function () { return !!card('stat-orders'); }, 8000);
@@ -3699,10 +3714,10 @@ async function main() {
     var emptyImpBefore = evts('switch-module').length;
     card('empty-import').click();
     // 2026-11-02：合并后这里落到「待发货」页签（原来落到「导入订单」页签，该页签已撤）。
-    await waitFor(function () { return onTab('queue'); }, 6000);
+    await waitFor(function () { return onTab('orders'); }, 6000);
     report('清单空态的「去「待发货」页」= 就地切到合并后的「待发货」页签（内嵌事件交给宿主，不跳模块）',
-      onTab('queue') && evts('switch-module').length === emptyImpBefore,
-      'onQueue=' + onTab('queue') + ' switch-module=' + (evts('switch-module').length - emptyImpBefore));
+      onTab('orders') && evts('switch-module').length === emptyImpBefore,
+      'onQueue=' + onTab('orders') + ' switch-module=' + (evts('switch-module').length - emptyImpBefore));
     // 拿货单空态不用单独给：没有单子时"已开单"区整块不渲染、厂家卡跟着消失（已拿卡由单子生成），
     // 概览条右侧的「新建空白单」就是开单入口（不再是死胡同）。
 
@@ -3711,7 +3726,7 @@ async function main() {
     window.__noGap = false;
     window.__noPurchaseOrders = false;
     await clickRefresh();
-    // ⚠️ 上一段「去「待发货」页」把页签切到了 queue（就地切页签，不跳模块）——
+    // ⚠️ 上一段「去订单屏」把页签切到了 orders（就地切页签，不跳模块）——
     // 精简条 / 款色行都长在拿货页签上，不切回来这条只能 timeout 出 'no-bar'。
     await activateTab('purchase');
     var okBack = true;
@@ -5015,7 +5030,7 @@ async function main() {
       }, 8000);
     } catch (e) { okClEmpty = false; }
     report('待核对清零时给空态，并说清"核对的对象从哪来"（不是干巴巴的"暂无数据"）',
-      okClEmpty && flat(card('cl-empty')).indexOf('采集') >= 0 && !!card('cl-goto-queue'),
+      okClEmpty && flat(card('cl-empty')).indexOf('采集') >= 0 && !!card('cl-goto-orders'),
       (okClEmpty ? flat(card('cl-empty')) : 'timeout') +
         ' | err=' + (card('cl-error') ? flat(card('cl-error')) : '无') +
         ' | 已核对徽标=' + (card('cl-count-corrected') ? flat(card('cl-count-corrected')) : '?') +
@@ -5056,10 +5071,10 @@ async function main() {
     //    另两个仍是本页动作 —— 所以判据从"都切页签"改成"第一个必须派发 switch-module"。
     report('「都核对完了」空态给三个可点出口：去「统计」看利润 + 去看要拿什么（第 3 步）+ 看已核对的行',
       !!card('cl-goto-cost') && !!card('cl-goto-purchase') && !!card('cl-goto-corrected') &&
-        !card('cl-goto-queue') && flat(card('cl-goto-cost')).indexOf('统计') >= 0,
+        !card('cl-goto-orders') && flat(card('cl-goto-cost')).indexOf('统计') >= 0,
       'cost=' + (card('cl-goto-cost') ? '在' : '无') + ' purchase=' + (card('cl-goto-purchase') ? '在' : '无') +
         ' corrected=' + (card('cl-goto-corrected') ? '在' : '无') +
-        ' queue=' + (card('cl-goto-queue') ? '在（错：这不是"没导过"）' : '无'));
+        ' orders=' + (card('cl-goto-orders') ? '在（错：这不是"没导过"）' : '无'));
     // ⭐ 第三个出口要**真的切范围并列出内容**（不是"点了仍停在空态"）：两个范围共用同一个
     //    视图与同一个取数实现 ⇒ 切过去应该看到行。__allCorrected 还开着 ⇒ 那边列的是全部行。
     card('cl-goto-corrected').click();
@@ -5094,7 +5109,7 @@ async function main() {
     // 回到本页继续后面的断言（回程同样等 today 真的挂上 —— 判据双向）
     window.dispatchEvent(new CustomEvent('switch-module', { detail: { moduleId: 'today' } }));
     await waitFor(function () {
-      return !!document.querySelector('.td-view') && !!document.querySelector('[data-act="tab-classify"]') &&
+      return !!document.querySelector('[data-act="order-panel"]') && !!document.querySelector('[data-act="tab-classify"]') &&
         !document.querySelector('.oc-view');
     }, 10000);
     await activateTab('classify');
@@ -5385,7 +5400,7 @@ async function main() {
         flat(card('cl-empty')).indexOf('都核对完了') < 0,
       okCorrEmpty ? flat(card('cl-empty')) : 'timeout');
     report('已核对空态的出口是**回到待核对**（而不是"去统计"那套往前走的话术）',
-      !!card('cl-goto-pending') && !card('cl-goto-cost') && !card('cl-goto-queue'),
+      !!card('cl-goto-pending') && !card('cl-goto-cost') && !card('cl-goto-orders'),
       'goto-pending=' + (card('cl-goto-pending') ? '在' : '无（错）') +
         ' goto-cost=' + (card('cl-goto-cost') ? '在（错）' : '无'));
     card('cl-goto-pending').click();
@@ -5724,22 +5739,22 @@ async function main() {
     //   · I-OLD  —— 没有截止期（三天前导入）⇒ 垫底，且**必须出现在清单里**
     //     最后这条是这个夹具的全部价值：按导入日筛的话它不在，而"昨天没发完的单今天还在"
     //     正是这一块与上面「今天要发」必须分开的理由。
-    step('queue');
-    function qRows() { return queryAll('[data-act="queue-row"]'); }
+    step('orders');
+    function qRows() { return queryAll('[data-act="order-row"]'); }
     // ⚠️ 单号按**锚点**取，不按下标 children[0]（2026-11-05 加了缩略图列）：
     //    按下标的话，以后每加一列都要改一次断言，而"顺序对不对"真正关心的是单号本身。
     function qNos() {
       return qRows().map(function (r) {
-        var el = r.querySelector('[data-act="queue-no"]');
+        var el = r.querySelector('[data-act="order-no"]');
         return el ? flat(el) : '';
       }).join(',');
     }
-    await activateTab('queue');
+    await activateTab('orders');
     await waitSoft(function () { return qRows().length > 0; }, 8000);
 
-    report('「待发货」页签能打开，并真的渲染出清单（3 行待发货）',
-      !!card('queue-panel') && qRows().length === 3,
-      '面板=' + !!card('queue-panel') + ' 行数=' + qRows().length + ' 单号=' + qNos());
+    report('「订单」屏能打开，并真的渲染出清单（3 张待发货单，一单一行）',
+      !!card('order-panel') && qRows().length === 3,
+      '面板=' + !!card('order-panel') + ' 行数=' + qRows().length + ' 单号=' + qNos());
 
     // 顺序：C-1（1 小时）→ I-1（30 天）→ I-OLD（没有截止期，垫底）
     // ⚠️ 无截止期的**必须垫底**：排最前或按 0 排最前，都会让"不知道"看起来像"最急"。
@@ -5747,52 +5762,58 @@ async function main() {
       qNos() === 'C-1,I-1,I-OLD',
       '单号顺序=' + qNos());
 
-    // 图案状态列：C-1 有图没归类 ⇒ 待绑；I-1 / I-OLD 没图 ⇒ 缺图
+    // 状态列 = **订单准备档**（2026-11-05 起，不再是行级"图案状态"）：
+    //   · C-1 有图但没归到款色 ⇒ 待归类（有图、无款色身份）；
+    //   · I-1 / I-OLD 没图 ⇒ 缺图（拿货再齐也印不了）。
+    // ⚠️ 按**前缀**判，不整串相等：chip 上可能带后缀（如"· 差 2 件"），整串相等会假红。
     var qChips = qRows().map(function (r) {
-      return flat(r.querySelector('[data-act="queue-pattern"]'));
-    }).join(',');
-    report('图案状态真的读"有没有图 + 归没归类"（有图未归类⇒待绑，没图⇒缺图）',
-      qChips === '待绑,缺图,缺图', '状态列=' + qChips);
+      return flat(r.querySelector('[data-act="order-stage"]'));
+    });
+    // chip 上可能带后缀（"待拿货 · 差 2 件"），所以按**前缀**判，不整串相等
+    var chipAt = function (i, word) {
+      return !!qChips[i] && qChips[i].indexOf(word) === 0;
+    };
+    report('状态列真的读"有没有图 + 归没归类"（有图未归类⇒待归类，没图⇒缺图）',
+      qChips.length === 3 && chipAt(0, '待归类') && chipAt(1, '缺图') && chipAt(2, '缺图'),
+      '状态列=' + qChips.join(','));
 
-    // 同源校验：徽标走容器的 summary.pulse.pending，清单行走 shippingQueue(pulseRows) ——
-    // 两条独立的路必须同一个数。两边各取一份数的典型症状就是"徽标 3 单、清单 2 行"。
-    var qBadge = flat(document.querySelector('[data-act="tab-badge-queue"]'));
-    var qSum = flat(card('queue-sum'));
-    report('清单的"共 N 单"与页签徽标一致（两处各算一遍不算，必须同源）',
-      qBadge === '3 单' && qSum.indexOf('共 3 单') >= 0,
+    // 同源校验：徽标走容器的 summary.pulse.pending，四档计数走 orderStage（内部再用 shippingQueue）
+    // —— 两条独立的路必须同一个数。两边各取一份数的典型症状就是"徽标 3 单、清单 2 行"。
+    var qBadge = flat(document.querySelector('[data-act="tab-badge-orders"]'));
+    var qSum = flat(card('order-sum'));
+    report('「合计 N 单」与页签徽标一致（两处各算一遍不算，必须同源）',
+      qBadge === '3 单' && qSum.indexOf('合计') >= 0 && qSum.indexOf('3') >= 0,
       '徽标=' + qBadge + ' 汇总=' + qSum);
 
-    // 形状分离（2026-11-03 界面方案 §5.10）：页签左侧的"步骤号"与右侧的"数量"必须**不同形**。
-    // 原来两者都是一圈浅边 + 浅底的小块，「1 归类核对 1 未归类」里两个 "1" 一个是序号、
-    // 一个是待办数，用户要读三遍才分得清。现在靠**填充**分开：序号空心（透明底 + 一圈边）、
-    // 数量实心（有底色 + 无边框）。
-    // ⚠️ 判据取**计算样式**而不是类名：类名改了不该让它失效 —— "看起来又是一样"才是要拦的结果。
-    // ⚠️ 这条与"页签徽标数字"的那条是两个方向：那条看**文本**对不对，这条看**长得是不是两样**。
-    var noEl = document.querySelector('[data-act="tab-no-queue"]');
-    var bdEl = document.querySelector('[data-act="tab-badge-queue"]');
-    var noCs = noEl ? getComputedStyle(noEl) : null;
-    var bdCs = bdEl ? getComputedStyle(bdEl) : null;
-    var isHollow = function (cs) {
-      return !!cs && cs.backgroundColor === 'rgba(0, 0, 0, 0)' &&
-        parseFloat(cs.borderTopWidth) >= 1;
-    };
-    var isSolid = function (cs) {
-      return !!cs && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' &&
-        !(parseFloat(cs.borderTopWidth) >= 1);
-    };
-    report('页签「步骤号」空心、「数量」实心（同形不同义 ⇒ 两个 1 分不清）',
-      isHollow(noCs) && isSolid(bdCs),
-      '序号[底=' + (noCs ? noCs.backgroundColor : '无') + ' 边=' + (noCs ? noCs.borderTopWidth : '无') +
-        '] 数量[底=' + (bdCs ? bdCs.backgroundColor : '无') + ' 边=' + (bdCs ? bdCs.borderTopWidth : '无') + ']');
+    // **这一屏唯一能自证的恒等式**（本轮的核心守卫）：四档计数之和 = 待发货单数。
+    // 四格加起来 4 而"合计"说 3，用户会怀疑整屏每一个数字。夹具账：
+    //   缺图 2（I-1 / I-OLD 没图）+ 待归类 1（C-1 有图没款色）+ 待拿货 0 + 已备齐 0 = 3
+    // ⚠️ 变异：把"已备齐"判定改成恒真 / 删掉"缺图"判定，这条会立刻红。
+    var stageKeys = ['noImage', 'unclassified', 'waitingStock', 'ready'];
+    var stageNums = stageKeys.map(function (k) {
+      var el = card('stage-' + k);
+      return el ? Number(flat(el.querySelector('b')) || 0) : -1;
+    });
+    var stageSum = stageNums.reduce(function (a, b) { return a + b; }, 0);
+    report('四档计数之和 = 「合计 N 单待发货」（同一份来源，否则又回到"说 3 单列 2 行"）',
+      stageNums[0] === 2 && stageNums[1] === 1 && stageNums[2] === 0 && stageNums[3] === 0 &&
+        stageSum === Number(numOf('stat-pending')),
+      '四档=' + stageNums.join('+') + '=' + stageSum + ' 合计=' + numOf('stat-pending'));
 
-    // 下钻：总览「现在还没发」那块 →「待发货」页签（就地切，不跳模块）
-    await activateTab('overview');
-    await waitSoft(function () { return !!card('pulse-goto-queue'); }, 4000);
-    var drillBtn = card('pulse-goto-queue');
-    if (drillBtn) drillBtn.click();
-    try { await waitFor(function () { return onTab('queue'); }, 6000); } catch (e) {}
-    report('总览的下钻按钮真的切到「待发货」页签（就地切页签，不跳模块）',
-      !!drillBtn && onTab('queue'), 'button=' + !!drillBtn + ' onQueue=' + onTab('queue'));
+    // 状态分组 = **筛子**（2026-11-05）：点「缺图 2」应只剩那 2 单，再点一下取消。
+    // 这条替代了旧的"总览下钻到待发货页签"——合并后没有第二屏可下钻，
+    // 下钻变成了**同一屏内筛一下**，而它正是"从哪开始"的引导（哪个档非零就做哪个）。
+    // ⚠️ 必须真点：只断言"分组在"的话，把 @click 删掉照样绿。
+    var stageNoImg = card('stage-noImage');
+    if (stageNoImg) stageNoImg.click();
+    await new Promise(function (r) { setTimeout(r, 200); });
+    var afterFilter = qNos();
+    var filteredCount = qRows().length;
+    if (stageNoImg) stageNoImg.click();   // 再点一下 = 取消筛选
+    await new Promise(function (r) { setTimeout(r, 200); });
+    report('点「缺图」那一格真的把清单筛到 2 单，再点一下恢复 3 单（分组就是筛子）',
+      filteredCount === 2 && afterFilter === 'I-1,I-OLD' && qRows().length === 3,
+      '筛后=' + filteredCount + '(' + afterFilter + ') 复位=' + qRows().length);
 
     // ---- 缩略图 + 单行详情 + 带单号跳归类（2026-11-05）---------------------------
     // 三条一起验，因为它们是同一个诉求的三段：这一屏原来"看得出缺图、却点不动、也走不到能改它的页"。
@@ -5800,29 +5821,38 @@ async function main() {
     //   · 详情：点第 1 行开弹层，弹层里的单号必须是**点中的那一单**（不是恒取第一单）；
     //   · 跳转：按钮真的切到第 2 步，且把单号填进了搜索框（填不上等于让用户手打）。
     // 少任何一环，用户仍然卡在"看得出问题、改不了"。
-    await activateTab('queue');
+    await activateTab('orders');
     await waitSoft(function () { return qRows().length > 0; }, 8000);
     var qThumbs = qRows().map(function (r) {
-      var im = r.querySelector('[data-act="queue-thumb"]');
+      var im = r.querySelector('[data-act="order-thumb"]');
       return im && im.getAttribute('src') ? 'img' : 'empty';
     }).join(',');
     report('清单有缩略图列：有图的行出图、没图的行出空占位（C-1 有图，I-1/I-OLD 没图）',
       qThumbs === 'img,empty,empty', '缩略图=' + qThumbs);
 
     var firstRow = qRows()[0];
-    if (firstRow) firstRow.click();
-    await waitSoft(function () { return !!card('queue-detail'); }, 4000);
-    var dlg = card('queue-detail');
-    var dlgNo = dlg ? flat(dlg.querySelector('[data-act="queue-detail-no"]')) : '-';
-    report('点清单某一行打开只读详情（单号是点中的那一单）',
-      !!dlg && dlgNo === 'C-1', '弹层=' + !!dlg + ' 单号=' + dlgNo);
+    // ⚠️ 点**行头**（order-row-head），不是整行「order-row」容器：
+    //    行头才是 role=button + @click 的那一层（容器只是 for 循环的壳）。
+    //    点壳在 DOM 上不会冒泡到 @click（事件源不在行头子树里）⇒ 展开恒 false，
+    //    而"断言里读不到展开区"很容易被当成"面板没实现展开"。
+    var firstHead = firstRow ? firstRow.querySelector('[data-act="order-row-head"]') : null;
+    if (firstHead) firstHead.click();
+    await waitSoft(function () { return !!card('order-lines'); }, 4000);
+    var detail = card('order-lines');
+    // 展开区里是**明细行**（款/色/码 × 件数 × 已拿），单号仍挂在行头 —— 所以核"展开的是点中那一单"
+    // 要读行头，不能指望展开区里有单号（2026-11-05 从弹层改成行内展开）。
+    var detailRowNo = firstRow ? flat(firstRow.querySelector('[data-act="order-no"]')) : '-';
+    var detailLines = detail ? detail.querySelectorAll('[data-act="order-line"]').length : 0;
+    report('点某一单展开明细行（展开的就是点中的那一单，C-1 只有 1 行明细）',
+      !!detail && detailRowNo === 'C-1' && detailLines === 1,
+      '展开=' + !!detail + ' 行=' + String(detailRowNo) + ' 明细=' + detailLines);
 
-    var toClassify = dlg ? dlg.querySelector('[data-act="queue-detail-classify"]') : null;
+    var toClassify = detail ? detail.querySelector('[data-act="order-act-classify"]') : null;
     if (toClassify) toClassify.click();
     try { await waitFor(function () { return onTab('classify'); }, 6000); } catch (e) {}
     await waitSoft(function () { return !!card('cl-search'); }, 6000);
     var clSearch = card('cl-search');
-    report('详情里「去归类核对改这一单」真的切到第 2 步，并把单号填进搜索框',
+    report('展开区里「带单号去归类核对」真的切到归类页，并把单号填进搜索框',
       onTab('classify') && !!clSearch && clSearch.value === 'C-1',
       'onClassify=' + onTab('classify') + ' 搜索=' + (clSearch ? clSearch.value : '-'));
     // 复位：归类页是保活的，留着搜索词会影响后面任何"这一页看到几行"的断言
@@ -5834,7 +5864,7 @@ async function main() {
       if (clQuery) clQuery.click();
       await new Promise(function (r) { setTimeout(r, 300); });
     }
-    await activateTab('overview');
+    await activateTab('orders');
 
     // ---- 采集状态条（T2-3）-----------------------------------------------------
     // ⚠️ 分段原则：**四种形态的文案/配色由单测覆盖**（tests/syncBanner.spec.ts，13 例），
@@ -5849,7 +5879,7 @@ async function main() {
     //
     // ⚠️ 但要先**切回「总览」**：前面几段最后停在「归类核对」页签上，状态条不在 DOM 里 ——
     //    漏这一步的后果是三条断言全红而文案是空的（文案= 色=(无)，看起来像"状态条没实现"）。
-    await activateTab('overview');
+    await activateTab('orders');
     await waitSoft(function () { return !!card('sync-bar'); }, 4000);
 
     function syncBar() { return card('sync-bar'); }
@@ -6325,7 +6355,7 @@ if (!m) {
     '✗ 没抓到 #smoke-result（页面可能没挂载）。排查：产物新鲜度（npm run build）→ 资源 404 → 内联脚本语法错 → fake 桥缺键'
   );
   console.error(
-    `  DEBUG dom=${dom.length}B td-view=${dom.includes('td-view')} preAttr=${dom.includes('id="smoke-result"')} app=${dom.includes('data-v-app')}`
+    `  DEBUG dom=${dom.length}B order-panel=${dom.includes('order-panel')} preAttr=${dom.includes('id="smoke-result"')} app=${dom.includes('data-v-app')}`
   );
   console.error('  DEBUG tail=' + JSON.stringify(dom.slice(-260)));
   process.exit(1);

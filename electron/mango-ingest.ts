@@ -103,6 +103,20 @@ interface MangoOrderLike {
   weightGram?: unknown;
   /** 扩展的明细数组：`{ itemId, skuCode, qty, color, size, imgUrl, attrs }` */
   lines?: unknown;
+  // ── 发货回执（P3a / S1）────────────────────────────────────────────────
+  // 原始响应里**一直都有**这三个（`gmtSend` 未发货时是 `null`），扩展规整帧此前**没带**。
+  // 两套键名都认：扩展补上字段后宿主零改动（S2），而原始帧今天就能被 `mango-ingest-smoke` 验证。
+  /** 原始响应：发货时间（毫秒时间戳；`null` = 还没发） */
+  gmtSend?: unknown;
+  /** 原始响应：运单号（中文键名族见 `logisticsServiceName`） */
+  logisticsNo?: unknown;
+  mailNo?: unknown;
+  /** 原始响应：承运商名 / 承运商编码（两个都存才有 "中文名对不上编码" 时的人工核对余地） */
+  logisticsServiceName?: unknown;
+  logisticsTypeCode?: unknown;
+  /** 规整帧（S2 起）：扩展已格式化的本地时间串与承运商名 */
+  shipTime?: unknown;
+  logisticsCarrier?: unknown;
   [key: string]: unknown;
 }
 
@@ -113,6 +127,8 @@ const MAX_COLOR = 64;
 const MAX_SIZE = 64;
 const MAX_ITEM_ID = 64;
 const MAX_SKU_CODE = 64;
+/** 运单号 / 承运商上限（与状态列同量级；运单号最长实测 20 余位，64 够且不撑爆列） */
+const MAX_LOGISTICS = 64;
 /** `raw_fields` 单值上限（整帧快照也走这个；一条脏数据不该把列撑爆） */
 const MAX_RAW_VALUE = 20000;
 
@@ -188,6 +204,146 @@ function stampOrText(ms: unknown, text: unknown): string {
 }
 
 /**
+ * 订单一的一把钥匙（两套键名都认）。
+ *
+ * 抽成函数而不是各处写一遍：`toInternal`（入库）与 `toShipReceipt`（回执同步）必须
+ * **认同一个单号**。两边各写一遍的顺序一旦分叉（比如一边先看 `orderNo`），同一帧会出现
+ * "入库写成 A、回执记到 B"，而且不会报错 —— 只是有几单永远更新不到。
+ */
+function pickOrderNo(o: MangoOrderLike): string {
+  return clip(str(o.orderId) || str(o.orderNo), MAX_ORDER_NO);
+}
+
+/**
+ * 状态原文（芒果界面显示的那个）。
+ *
+ * 取键顺序**只此一份**：`cnOrderStatus`（原始）→ `platformStatusCn`（规整帧）→
+ * `orderStatus` / `platformStatus` / `status`（平台英文码兜底）。
+ *
+ * ⚠️ 这里**不做 bucket 映射**：那是 `src/lib/mangoStatus.ts` 的唯一职责。
+ * 换个地方写一套"含已发 ⇒ shipped"就是把「发货台说 3 单待发」和「报单说 5 件要印」
+ * 变成两个口径。本层只负责"原样取出来"。
+ */
+function pickBizStatus(o: MangoOrderLike): string {
+  return clip(
+    str(o.cnOrderStatus) || str(o.platformStatusCn) || str(o.orderStatus) || str(o.platformStatus) || str(o.status),
+    MAX_STATUS,
+  );
+}
+
+/** 一单的**发货回执**（只含主表那四列需要的值；`''` = 这次没给） */
+export interface MangoShipReceipt {
+  orderNo: string;
+  bizStatus: string;
+  shipTime: string;
+  logisticsNo: string;
+  logisticsCarrier: string;
+}
+
+/**
+ * 芒果帧里的一单 → 发货回执（**纯映射，不写库**）。
+ *
+ * 为什么单独一个函数而不是复用 `toInternal`：后者的产物是"入库草稿"（含明细/金额/时效，
+ * 少一样就整单拒收）；回执只需要四列，且**必须能在"这一单缺明细"时也完成同步** ——
+ * 已发货批里出现残缺帧不该让状态同步失败。
+ *
+ * 字段来源两套都认（原始响应 / 扩展规整帧），与 `toInternal` 同序：
+ *   · `gmtSend`（毫秒，未发货时 `null`）↔ `shipTime`（扩展格式化后的本地串）
+ *   · `logisticsNo` / `mailNo`（原始）↔ 扩展 S2 起直接给 `logisticsNo`
+ *   · `logisticsServiceName` / `logisticsTypeCode`（原始）↔ `logisticsCarrier`
+ *
+ * ⚠️ **不从 `raw_fields.采集帧` 里挖历史发货时间**：待发货时抓的帧里 `gmtSend` 本来就是
+ *   `null`，挖一遍只能捞到"采集那一刻已经发出去"的零星单 —— 补出来的样本有偏，
+ *   比"没有"更容易误导。
+ */
+export function toShipReceipt(frame: unknown): { receipt: MangoShipReceipt | null; reason: string } {
+  if (!frame || typeof frame !== 'object') return { receipt: null, reason: '订单不是对象' };
+  const o = frame as MangoOrderLike;
+  const orderNo = pickOrderNo(o);
+  if (!orderNo) return { receipt: null, reason: '缺少订单号（orderId / orderNo）' };
+  return {
+    receipt: {
+      orderNo,
+      bizStatus: pickBizStatus(o),
+      shipTime: stampOrText(o.gmtSend, o.shipTime),
+      logisticsNo: clip(str(o.logisticsNo) || str(o.mailNo), MAX_LOGISTICS),
+      logisticsCarrier: clip(
+        str(o.logisticsServiceName) || str(o.logisticsCarrier) || str(o.logisticsTypeCode),
+        MAX_LOGISTICS,
+      ),
+    },
+    reason: '',
+  };
+}
+
+/** 一批帧 → 回执入参（`bad` 是跳过原因，绝不静默丢单） */
+export interface MangoShipReceiptPlan {
+  receipts: MangoShipReceipt[];
+  bad: { orderNo: string; reason: string }[];
+  /**
+   * 这批里**带发货时间**的单数。
+   *
+   * 这是判断"这一帧是不是回执批"的**机械事实**，不是猜筛选参数（`source.status` 是芒果
+   * 自己的编码，语义随版本变）。用途只有一个：日志里写"12 单里 12 单带发货时间"，
+   * 让人一眼看出"这次抓的是已发货列表"还是"待发货列表被误当回执处理了"。
+   */
+  withShipTime: number;
+}
+
+/**
+ * 批量映射（纯计算，不碰网络/库）。
+ *
+ * `bad` 保留前 50 条（与 `ingestMangoOrders` 的 skips 同口径）：一次坏 500 单时
+ * 界面只显示 500 个原因没人读，显示 50 个 + 总数才有用。
+ */
+export function planShipReceipt(orders: unknown): MangoShipReceiptPlan {
+  const list = Array.isArray(orders) ? orders : [];
+  const plan: MangoShipReceiptPlan = { receipts: [], bad: [], withShipTime: 0 };
+  for (const raw of list) {
+    const r = toShipReceipt(raw);
+    if (!r.receipt) {
+      if (plan.bad.length < 50) {
+        // 用 `pickOrderNo` 而不是只认 `orderId`：规整帧只有 `orderNo`，
+        // 只认一套会让"跳过原因"里的单号显示成 `#1`（人照着编号去芒果搜不到这单）。
+        const no = pickOrderNo(raw as MangoOrderLike);
+        plan.bad.push({ orderNo: no || `#${plan.receipts.length + plan.bad.length + 1}`, reason: r.reason });
+      }
+      continue;
+    }
+    if (r.receipt.shipTime) plan.withShipTime += 1;
+    plan.receipts.push(r.receipt);
+  }
+  return plan;
+}
+
+/**
+ * 一批帧 → 回执批 / 待发批（**分流判据的唯一实现**）。
+ *
+ * 判据只有一条：**帧内这一单带没带发货时间**（`gmtSend` 原始值 / `shipTime` 规整值）。
+ *
+ * 为什么不用 `source.status`：那是芒果自己的筛选编码（`sp.get('status')`），语义随版本变；
+ * 拿它分流等于把"平台改了个枚举"变成"已发货单被当成待发货单做整单替换"，
+ * 而整单替换会**静默**清掉归类与图案绑定（`upsertCollectedOrder` 是 DELETE + 重插）。
+ *
+ * 缺单号的帧落回 `pending`，交给 `toInternal` 用它那套更具体的原因拒收
+ * （"缺少订单号（orderId / orderNo）"），不在这里造一个次等理由。
+ */
+export function splitShipBatch(orders: unknown): {
+  receipts: MangoShipReceipt[];
+  pending: unknown[];
+} {
+  const list = Array.isArray(orders) ? orders : [];
+  const receipts: MangoShipReceipt[] = [];
+  const pending: unknown[] = [];
+  for (const raw of list) {
+    const rc = toShipReceipt(raw);
+    if (rc.receipt && rc.receipt.shipTime) receipts.push(rc.receipt);
+    else pending.push(raw);
+  }
+  return { receipts, pending };
+}
+
+/**
  * 一帧芒果订单 → 内部草稿。
  *
  * 三条判定：
@@ -206,20 +362,14 @@ export function toInternal(frame: unknown): MangoToInternalResult {
   }
   const o = frame as MangoOrderLike;
   // 两套键名：原始响应 `orderId` / 扩展规整帧 `orderNo`。哪个有值用哪个（不许只认一套）。
-  const orderNo = clip(str(o.orderId) || str(o.orderNo), MAX_ORDER_NO);
+  const orderNo = pickOrderNo(o);
   if (!orderNo) return { order: null, reason: '缺少订单号（orderId / orderNo）', warnings };
 
   const shopAuthId = clip(str(o.authId) || str(o.shopAuthId), MAX_ORDER_NO);
   const shop = clip(str(o.alias) || str(o.shopName), MAX_SHOP);
   if (!shop) warnings.push(`店铺别名为空（authId=${shopAuthId || '无'}），落未登记桶`);
 
-  // 状态取中文原文（芒果界面显示的那个）。`cnOrderStatus` 缺失时回落 `orderStatus`（平台英文码）
-  // —— 两者都存原文，**不在这里做 bucket 映射**（那是 `src/lib/mangoStatus.ts` 的唯一职责，
-  // 一处实现；这里换一套就是把「发货台说 3 单待发」和「报单说 5 件要印」变成两个口径）。
-  const bizStatus = clip(
-    str(o.cnOrderStatus) || str(o.platformStatusCn) || str(o.orderStatus) || str(o.platformStatus) || str(o.status),
-    MAX_STATUS,
-  );
+  const bizStatus = pickBizStatus(o);
   if (!bizStatus) warnings.push('订单状态为空（发货台无法判断待发/已发）');
 
   // 金额：`payAmount` 是订单实付。币种不是 CNY 时**不折算、给 null** ——

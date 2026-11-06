@@ -813,6 +813,199 @@ check('T0-4 采集帧行数比已有少：整单不写 + 回执给原因（不�
   );
 });
 
+// ─────────────────────────────────────────────── [9.5] 发货回执（applyShipStatus）
+//
+// 场景：到芒果「已发货」页采一轮 → 回写主表状态与物流，**明细一行都不许动**。
+//
+// 为什么单独一条路径而不是喂 `upsertCollectedOrder`（下面最后一条用例就是证据）：
+// 后者整单替换 ⇒ 明细 id 全换 ⇒ `style_color_id`（归类）清零、`oi_item_parts`（图案绑定）
+// 级联消失、`parcels` 被显式删掉、`purchase_sources.order_item_id` 变悬空 id。
+// 这些**都不报错**，只表现为"某天开始拿货页少了几单货"。
+//
+// 覆盖的不变量：
+//   · 只写 4 列（biz_status / ship_time / logistics_no / logistics_carrier），
+//     **金额与时效列一个都不写**（写了会让利润表与截止风险历史随采集时刻漂移）
+//   · 幂等：同一批跑第二遍必须全是 `unchanged`，库里值不变
+//   · 空串不算指令（"这次没给" ≠ "清空"）
+//   · 库里没有的单 → `missing`，**不新建**（只有状态没有明细 = 永远展开为空的幽灵行）
+//   · `ship_time` 默认不写（它一写，拣货/拿货的"未发货"过滤就把这单排除了）
+console.log('\n[9.5] 发货回执：只同步主表四列，明细一行不动');
+
+/** 造一单"已归类 + 已拆包 + 有金额时效"的采集单，返回它的关键现场 */
+function makeShippedTarget() {
+  const no = 'SHIP-1';
+  odb.upsertCollectedOrder({
+    orderNo: no,
+    orderTime: '2026-11-01 09:00:00',
+    bizStatus: '等待卖家发货',
+    shop: '店A',
+    amountCents: 5000,
+    payTime: '2026-11-01 09:00:00',
+    dealDeadline: '2026-11-11 23:59:59',
+    timeoutAt: '2026-11-05 23:59:59',
+    lines: [
+      { itemId: 'i1', qty: 2, color: '黑', size: 'M' },
+      { itemId: 'i2', qty: 1, color: '白', size: 'L' },
+    ],
+  });
+  // 模拟"人已经归过类"：直接落一个**真实存在**的款式色（`oi_style_colors.id` 有外键，
+  // 随手写个 7 会 FOREIGN KEY 失败 —— 这条踩过一次）。归类 API 已在 [13] 覆盖，
+  // 这里只需要一个非零现值。
+  dbRun(`INSERT OR IGNORE INTO oi_styles (code, fingerprint) VALUES ('SHIP-S1', 'f-ship1')`);
+  const shipStyleId = Number(dbGet(`SELECT id FROM oi_styles WHERE code = 'SHIP-S1'`).id);
+  dbRun(
+    `INSERT OR IGNORE INTO oi_style_colors (style_id, color, code) VALUES (?, '黑色', 'SHIP-S1-BLACK')`,
+    [shipStyleId],
+  );
+  const shipColorId = Number(dbGet(`SELECT id FROM oi_style_colors WHERE code = 'SHIP-S1-BLACK'`).id);
+  dbRun(
+    `UPDATE oi_order_items SET style_color_id = ?
+      WHERE order_id = (SELECT id FROM oi_orders WHERE order_no = ?)`,
+    [shipColorId, no],
+  );
+  // 再模拟"已经拆过包"：回执同步不该让包裹消失
+  const parcel = odb.createParcel({ orderNo: no, label: '箱1', shipCents: 880, weightG: 300 });
+  const firstItem = Number(
+    dbGet(`SELECT id FROM oi_order_items WHERE order_id = (SELECT id FROM oi_orders WHERE order_no = ?) ORDER BY id LIMIT 1`, [no]).id,
+  );
+  odb.setParcelLineQty(parcel.id, firstItem, 2);
+  const h = dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]);
+  const itemIds = dbQuery(`SELECT id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [Number(h.id)]).map((r) => Number(r.id));
+  const styleColors = dbQuery(`SELECT style_color_id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [Number(h.id)]).map((r) => Number(r.style_color_id));
+  return { no, orderId: Number(h.id), itemIds, styleColors, colorId: shipColorId };
+}
+
+const shipTarget = makeShippedTarget();
+
+check('回执只改主表四列：金额 / 时效 / 店铺 / 下单时刻**一个都没动**', () => {
+  const before = dbGet(`SELECT * FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  const r = odb.applyShipStatus([
+    {
+      orderNo: shipTarget.no,
+      bizStatus: '已发货',
+      shipTime: '2026-11-04 12:00:00',
+      logisticsNo: 'LP00123456789',
+      logisticsCarrier: '菜鸟无忧物流-标准',
+    },
+  ]);
+  assert.strictEqual(r.updated, 1, '应有 1 单被写');
+  assert.strictEqual(r.unchanged, 0);
+  assert.strictEqual(r.missing, 0);
+  assert.deepStrictEqual(r.columns, ['biz_status', 'logistics_carrier', 'logistics_no'],
+    '默认只写状态与两个物流列（ship_time 见下一条）');
+
+  const after = dbGet(`SELECT * FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  assert.strictEqual(after.biz_status, '已发货');
+  assert.strictEqual(after.logistics_no, 'LP00123456789');
+  assert.strictEqual(after.logistics_carrier, '菜鸟无忧物流-标准');
+  // 金额与时效是"历史事实"，不许被回执改写（改了利润表与截止风险会随采集时刻漂移）
+  for (const col of ['amount_cents', 'vat_cents', 'ddp_cents', 'deal_deadline', 'timeout_at', 'pay_time', 'order_time', 'shop', 'source']) {
+    assert.strictEqual(after[col], before[col], `列 ${col} 不该被回执改动`);
+  }
+});
+
+check('明细一行不动：id 集合与归类结果完全不变（这正是不能用整单替换的原因）', () => {
+  const nowIds = dbQuery(`SELECT id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [shipTarget.orderId]).map((r) => Number(r.id));
+  const nowSc = dbQuery(`SELECT style_color_id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [shipTarget.orderId]).map((r) => Number(r.style_color_id));
+  assert.deepStrictEqual(nowIds, shipTarget.itemIds, '明细 id 不许换（换了就等于全删重插）');
+  assert.deepStrictEqual(nowSc, shipTarget.styleColors, '归类结果必须还在');
+  assert.ok(nowSc.every((v) => v === shipTarget.colorId), '两行的归类都该还是原来那个色');
+});
+
+check('包裹还在：回执不是"重新入库"，拆包结果不能被清', () => {
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM parcels WHERE order_no = ?`, [shipTarget.no]).n), 1);
+  const t = odb.parcelTotals(shipTarget.no);
+  assert.strictEqual(t.shipCents, 880);
+  assert.strictEqual(t.weightG, 300);
+});
+
+check('幂等：同一批再跑一遍 ⇒ 一行都不写（updated 0 / unchanged 1），值不变', () => {
+  const r = odb.applyShipStatus([
+    {
+      orderNo: shipTarget.no,
+      bizStatus: '已发货',
+      shipTime: '2026-11-04 12:00:00',
+      logisticsNo: 'LP00123456789',
+      logisticsCarrier: '菜鸟无忧物流-标准',
+    },
+  ]);
+  assert.strictEqual(r.updated, 0, '目标值 == 现值就不许写');
+  assert.strictEqual(r.unchanged, 1);
+  assert.deepStrictEqual(r.columns, [], '没写就不该报出任何列名');
+  const after = dbGet(`SELECT biz_status, logistics_no FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  assert.strictEqual(after.biz_status, '已发货');
+  assert.strictEqual(after.logistics_no, 'LP00123456789');
+});
+
+check('空串不算指令：这次没给运单号，不能把已存的抹掉', () => {
+  const r = odb.applyShipStatus([{ orderNo: shipTarget.no, bizStatus: '', logisticsNo: '', logisticsCarrier: '' }]);
+  assert.strictEqual(r.updated, 0);
+  assert.strictEqual(r.unchanged, 1);
+  const after = dbGet(`SELECT biz_status, logistics_no FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  assert.strictEqual(after.biz_status, '已发货', '空状态不许清空已有状态');
+  assert.strictEqual(after.logistics_no, 'LP00123456789');
+});
+
+check('ship_time 默认不写（它一写，拣货/拿货的"未发货"过滤就把这单排除了）', () => {
+  const t = dbGet(`SELECT ship_time FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  assert.strictEqual(t.ship_time, '', '默认路径必须留空');
+});
+
+check('显式要写才写：writeShipTime:true 之后 ship_time 落值，且只写这一列变化', () => {
+  const r = odb.applyShipStatus(
+    [{ orderNo: shipTarget.no, shipTime: '2026-11-04 12:00:00' }],
+    { writeShipTime: true },
+  );
+  assert.strictEqual(r.updated, 1);
+  assert.deepStrictEqual(r.columns, ['ship_time']);
+  const t = dbGet(`SELECT ship_time FROM oi_orders WHERE order_no = ?`, [shipTarget.no]);
+  assert.strictEqual(t.ship_time, '2026-11-04 12:00:00');
+  // 写回去，别影响后面依赖"未发货"的用例
+  dbRun(`UPDATE oi_orders SET ship_time = '' WHERE order_no = ?`, [shipTarget.no]);
+});
+
+check('库里没有的单 ⇒ missing，且**不新建**（只有状态没有明细 = 展开为空的幽灵行）', () => {
+  const before = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n);
+  const r = odb.applyShipStatus([
+    { orderNo: 'SHIP-NOT-IN-DB', bizStatus: '已发货', logisticsNo: 'LP-X' },
+    { orderNo: shipTarget.no, bizStatus: '已发货' },
+  ]);
+  assert.strictEqual(r.missing, 1);
+  assert.deepStrictEqual(r.missingNos, ['SHIP-NOT-IN-DB']);
+  assert.strictEqual(r.unchanged, 1, '另一单已是最新');
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), before, '不许凭空建单');
+});
+
+check('空单号 ⇒ invalid（与 missing 分开：那是"库里没有"，这是"入参就坏"）', () => {
+  const r = odb.applyShipStatus([{ orderNo: '   ', bizStatus: '已发货' }, {}]);
+  assert.strictEqual(r.invalid, 2);
+  assert.strictEqual(r.missing, 0);
+  assert.strictEqual(r.updated, 0);
+});
+
+check('对照实验：走整单替换会**丢掉归类**（证明这条路径不是白加的）', () => {
+  // 这条如果哪天变绿了（即 upsert 也能保住 style_color_id），说明整单替换的缺陷被修了，
+  // 那时应回到 `applyShipStatus` 的注释里重写"为什么必须有它"，而不是默默删掉这段。
+  const before = dbQuery(`SELECT style_color_id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [shipTarget.orderId]).map((r) => Number(r.style_color_id));
+  assert.ok(before.every((v) => v === shipTarget.colorId), '前提：两行都已归类');
+  odb.upsertCollectedOrder({
+    orderNo: shipTarget.no,
+    orderTime: '2026-11-01 09:00:00',
+    bizStatus: '已发货',
+    shop: '店A',
+    amountCents: 5000,
+    lines: [
+      { itemId: 'i1', qty: 2, color: '黑', size: 'M' },
+      { itemId: 'i2', qty: 1, color: '白', size: 'L' },
+    ],
+  });
+  const after = dbQuery(`SELECT style_color_id FROM oi_order_items WHERE order_id = (SELECT id FROM oi_orders WHERE order_no = ?) ORDER BY id`, [shipTarget.no]).map((r) => Number(r.style_color_id));
+  assert.strictEqual(after.length, 2, '两行还在（行数守卫放行了）');
+  assert.ok(after.every((v) => v === 0), '但归类被清成 0 —— 这就是必须走 applyShipStatus 的原因');
+  assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM parcels WHERE order_no = ?`, [shipTarget.no]).n), 0, '包裹也被清掉了');
+});
+
+
 // ───────────────────────────────────────────────────────────── [10] 套装部件
 //
 // 场景：一件实物 = 多个款色（上衣与裤子各自不同款不同色），平台当一个商品卖。
@@ -1916,17 +2109,166 @@ check('合并 → 再合并 → 只拆后者：前一次的合并仍然生效（
   odb.unmergeStyles(b1.batchId);
 });
 
-closeDb();
-try {
-  fs.rmSync(dir, { recursive: true, force: true });
-} catch {
-  /* 清理失败不影响结论 */
+// ─────────────────────────────────────── [17] 采集入库的分流（S2 接线，端到端）
+//
+// [9.5] 证明的是 `applyShipStatus` **这一层**只写主表；这里证明的是**库里的东西真的能到它手上**：
+// 一帧芒果数据进来，带发货时间的单必须走回执、不带的必须走原 upsert。
+//
+// 为什么必须在冒烟里跑一遍而不是只测纯函数：分流点藏在 `ingestMangoOrders` 的循环里，
+// 纯函数 `splitShipBatch` 绿了也只说明"分对了"，不说明"分完真按这个走"。
+// 接线反了（比如 receipts 收下来但还是 upsert 了一遍）时纯函数全绿、归类全丢。
+
+async function runShipIngestChecks() {
+  console.log('\n[17] 采集入库分流：已发货批只写主表，待发批照原样 upsert');
+  const mg = require(path.join(ROOT, 'dist', 'electron', 'mango-sync.js'));
+
+  /** 造一单"已归类 + 已拆包"的待发单，返回现场；走的是正常采集入库 */
+  function seedPending(no) {
+    odb.upsertCollectedOrder({
+      orderNo: no,
+      orderTime: '2026-11-01 09:00:00',
+      bizStatus: '等待卖家发货',
+      shop: '店B',
+      amountCents: 6600,
+      payTime: '2026-11-01 09:00:00',
+      dealDeadline: '2026-11-10 23:59:59',
+      timeoutAt: '2026-11-04 23:59:59',
+      lines: [{ itemId: `i-${no}-1`, qty: 2, color: '黑', size: 'M' }],
+    });
+    const h = dbGet(`SELECT id FROM oi_orders WHERE order_no = ?`, [no]);
+    const orderId = Number(h.id);
+    const itemIds = dbQuery(`SELECT id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [orderId]).map((r) => Number(r.id));
+    dbRun(`UPDATE oi_order_items SET style_color_id = ? WHERE order_id = ?`, [shipTarget.colorId, orderId]);
+    const parcel = odb.createParcel({ orderNo: no, label: '箱X', shipCents: 500, weightG: 120 });
+    odb.setParcelLineQty(parcel.id, itemIds[0], 2);
+    return { no, orderId, itemIds };
+  }
+
+  /** 一帧"已发货"的原始响应（键名照抄抓包；`gmtSend` 是毫秒） */
+  function shippedFrame(no, over = {}) {
+    return {
+      orderId: no,
+      cnOrderStatus: '已发货',
+      orderStatus: 'send_goods',
+      gmtSend: 1762200000000, // 2026-11-04 12:00:00 本地
+      logisticsNo: `LP-${no}`,
+      logisticsServiceName: '菜鸟无忧物流-标准',
+      authId: '32958002',
+      alias: '店B',
+      orderItemList: [{ id: `li-${no}`, productId: `i-${no}-1`, productCount: 2, productImgUrl: '' }],
+      ...over,
+    };
+  }
+
+  /** 一帧"待发货"的原始响应（`gmtSend` 为 null —— 这就是分流的唯一判据） */
+  function pendingFrame(no, over = {}) {
+    return {
+      orderId: no,
+      cnOrderStatus: '等待卖家发货',
+      orderStatus: 'wait_seller_send',
+      gmtSend: null,
+      logisticsNo: null,
+      authId: '32958002',
+      alias: '店B',
+      orderItemList: [{ id: `li-${no}`, productId: `i-${no}-1`, productCount: 1, productImgUrl: '' }],
+      ...over,
+    };
+  }
+
+  const src = { totalItems: 1, fetched: 1, partial: false, status: 'send_goods' };
+
+  // ① 已发货单：只写主表，明细与包裹一行不动
+  const a = seedPending('ING-A');
+  const beforeA = dbQuery(`SELECT id, style_color_id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [a.orderId]);
+  const rA = await mg.ingestMangoOrders({ orders: [shippedFrame('ING-A')], source: src });
+  check('已发货帧：shipped=1，且 inserted/updated 都是 0（没走 upsert 那一路）', () => {
+    assert.strictEqual(rA.shipped, 1);
+    assert.strictEqual(rA.shipUpdated, 1);
+    assert.strictEqual(rA.inserted, 0, '已发货单不许再算一次"新入库"');
+    assert.strictEqual(rA.updated, 0, '也不许算"整单替换"');
+    const o = dbGet(`SELECT biz_status, logistics_no, logistics_carrier, amount_cents, deal_deadline, ship_time FROM oi_orders WHERE order_no = 'ING-A'`);
+    assert.strictEqual(o.biz_status, '已发货', '状态要回写（队列靠它清零）');
+    assert.strictEqual(o.logistics_no, 'LP-ING-A', '运单号要落库（查件靠它）');
+    assert.strictEqual(o.logistics_carrier, '菜鸟无忧物流-标准');
+    assert.strictEqual(Number(o.amount_cents), 6600, '金额是历史事实，不许被回执改');
+    assert.strictEqual(o.deal_deadline, '2026-11-10 23:59:59', '时效同理');
+    assert.strictEqual(o.ship_time, '', 'ship_time 默认不写（写了这单会从拿货页消失）');
+  });
+
+  check('已发货帧：明细 id 与归类结果、包裹全都还在（这才是分流的全部意义）', () => {
+    const now = dbQuery(`SELECT id, style_color_id FROM oi_order_items WHERE order_id = ? ORDER BY id`, [a.orderId]);
+    assert.deepStrictEqual(now.map((r) => Number(r.id)), beforeA.map((r) => Number(r.id)), '明细 id 不许换');
+    assert.deepStrictEqual(now.map((r) => Number(r.style_color_id)), beforeA.map((r) => Number(r.style_color_id)), '归类必须还在');
+    assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM parcels WHERE order_no = 'ING-A'`).n), 1, '包裹不许被清');
+  });
+
+  // ② 待发货单：照原样 upsert（反向守卫 —— 分流判据恒真就会把待发批也当回执，
+  //    那样"不新建"会让新单永远进不来，而且界面上一条报错都没有）
+  const rB = await mg.ingestMangoOrders({ orders: [pendingFrame('ING-B')], source: src });
+  check('待发货帧：shipped=0 且 inserted=1（待发批行为零变化）', () => {
+    assert.strictEqual(rB.shipped, 0, '没有发货时间就不许进回执批');
+    assert.strictEqual(rB.inserted, 1);
+    const o = dbGet(`SELECT biz_status, logistics_no FROM oi_orders WHERE order_no = 'ING-B'`);
+    assert.strictEqual(o.biz_status, '等待卖家发货');
+    assert.strictEqual(o.logistics_no, '', '待发批没有运单号');
+    assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_order_items WHERE order_id = (SELECT id FROM oi_orders WHERE order_no='ING-B')`).n), 1);
+  });
+
+  // ③ 混批：芒果的"全部"筛选本来就会混，分流是逐单判的
+  seedPending('ING-C');
+  const rMix = await mg.ingestMangoOrders({
+    orders: [shippedFrame('ING-C'), pendingFrame('ING-D')],
+    source: { totalItems: 2, fetched: 2, partial: false, status: 'all' },
+  });
+  check('混批：同一帧里已发 1 + 待发 1，各走各的道', () => {
+    assert.strictEqual(rMix.shipped, 1);
+    assert.strictEqual(rMix.inserted, 1);
+    assert.strictEqual(dbGet(`SELECT biz_status FROM oi_orders WHERE order_no='ING-C'`).biz_status, '已发货');
+    assert.strictEqual(dbGet(`SELECT biz_status FROM oi_orders WHERE order_no='ING-D'`).biz_status, '等待卖家发货');
+    assert.strictEqual(
+      dbQuery(`SELECT style_color_id FROM oi_order_items WHERE order_id = (SELECT id FROM oi_orders WHERE order_no='ING-C')`)[0].style_color_id,
+      shipTarget.colorId,
+      '混批里那张已发货单的归类也要保住',
+    );
+  });
+
+  // ④ 库里没有的已发货单：不新建，但必须说出来
+  const cntBefore = Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n);
+  const rGhost = await mg.ingestMangoOrders({ orders: [shippedFrame('ING-NEVER-SEEN')], source: src });
+  check('库里没有的已发货单：shipUnknown=1 + 一条 warning，且**不新建**', () => {
+    assert.strictEqual(rGhost.shipUnknown, 1);
+    assert.strictEqual(rGhost.shipped, 1);
+    assert.strictEqual(Number(dbGet(`SELECT COUNT(*) AS n FROM oi_orders`).n), cntBefore, '不许凭空建幽灵单');
+    assert.ok(
+      rGhost.warnings.some((w) => w.includes('本地库里没有')),
+      '沉默会让人以为已发货单都归位了；must 说出来：' + JSON.stringify(rGhost.warnings),
+    );
+  });
 }
 
-console.log('\n' + '\u2500'.repeat(64));
-if (failed) {
-  console.log(`\u2717 订单域数据层冒烟失败：${failed} 项\n`);
-  process.exit(1);
-}
-console.log('\u2713 订单域数据层冒烟全部通过\n');
-process.exit(0);
+// [17] 是 async 的（`ingestMangoOrders` 内部有图下载的 Promise），所以收尾整体进这个 IIFE：
+// 段内抛异常也必须走完 closeDb 与报告 —— 否则会变成 `UnhandledPromiseRejection`，
+// 那东西在本机只会打一行警告，脚本照样 exit 0（"全绿"是假的）。
+(async () => {
+  try {
+    await runShipIngestChecks();
+  } catch (err) {
+    failed++;
+    console.log(`  \u2717 [17] 段整体异常：${err && err.message ? err.message : err}`);
+  }
+
+  closeDb();
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* 清理失败不影响结论 */
+  }
+
+  console.log('\n' + '\u2500'.repeat(64));
+  if (failed) {
+    console.log(`\u2717 订单域数据层冒烟失败：${failed} 项\n`);
+    process.exit(1);
+  }
+  console.log('\u2713 订单域数据层冒烟全部通过\n');
+  process.exit(0);
+})();

@@ -13,6 +13,107 @@
 
 ## [Unreleased]
 
+### Fix · 「只看未读」下打开邮件，邮件从列表消失且右侧空白（2026-11-06）
+
+用户反馈「邮件-全部邮件-选中未读时点击邮件，邮件会自动在列表中消失，并且右边没显示邮件内容」。
+
+- **根因**：`openMessage` 会静默标记已读（IMAP 只读，`read_at` 只能本地兜底），
+  `markRead` 见「只看未读」为真就立刻重拉列表；服务端查询条件是
+  `seen = 0 AND read_at = ''`，刚读的那封必然被筛掉，`loadMessages` 再发现
+  `selectedId` 不在新列表里 → 置 0、`detail = null`。左栏消失与右栏空白是**同一个原因**
+  （`mailStore.ts` 两处：`markRead` 的重拉、`loadMessages` 的清理）。
+- **修**：`loadMessages({ keepSelected })` 重拉后若当前选中邮件被筛掉，把它按
+  `received_at DESC` 插回原位置（保留已读样式，即"正在阅读的那封"），选中态与正文都不再清空；
+  `markRead` 只在**打开邮件自动标记（silent）**这次传 `keepSelected`，
+  「全部已读」这类显式批量操作照旧清空列表。
+- 顺带修掉一个竞态：连点两封时，先到的标已读重拉不会再把新选中那封清掉。
+- 门禁：`npx tsc -p tsconfig.json --noEmit` 通过（本机 Node 版本过旧，eslint / vitest
+  工具链无法启动，与本改动无关）。
+
+### Docs · 发货台改「订单维度状态跟踪」方案（2026-11-05）
+
+用户反馈「『按此开始发货』跳到待发货有歧义，发货台应是发货前的准备，要以订单维度跟踪状态」。
+新增 [`docs/plans/ORDER_STAGE_TRACKING_PLAN_2026-11-05.md`](docs/plans/ORDER_STAGE_TRACKING_PLAN_2026-11-05.md)：
+
+- **四条根因**（均带 `文件:行`）：①`OverviewPanel.vue:181-189` 的按钮写「开始发货」，
+  落点 `QueuePanel.vue:238-245` 却是**只读**清单（应用内本就没有发货动作）；②「待发货」
+  同时是 `SHIPPING_TAB_NAMES.queue`（流程第 1 步）与 `MANGO_BUCKET_LABELS.pending`（平台状态）；
+  ③`TodayView.vue:343-398` 的 `flow` 按四个聚合数推导 ⇒ 每单并行的业务被画成全局串行、`now` 恒为 1 步；
+  ④订单身份跨页丢失（只传单号；拿货页是款色级）。
+- **五档派生状态**：缺图 / 待归类 / 待拿货 / 已备齐 / 已发出，订单档 = 行里最差那档。
+  判据全部复用 `patternStateOf()` + `planCoverage()` + `mangoStatus`，落 `src/lib` 下新增的
+  orderStage 模块，**零新表、零新 IPC**（输入就是 `reload()` 已取的两份）。
+- **IA**：6 页签 → 5（总览并入「订单」，去步号）；首屏改「状态分组 + 按单清单 + 每档主操作」。
+- **硬约束**：`ship_time` 无回写路径 ⇒ 「已备齐」永不离队，必须在界面写明"发货在芒果点"，
+  并排 P3a（扩展抓已发货页）/ P3b（复制单号）两条出口。
+
+当次**只出方案，未改代码**（待拍板 D-1~D-4：合并两屏 / 去步号 / 出口顺序 / 是否显示面单对象）；
+D-1（合并两屏）与 D-2（去步号）已由用户拍板，实施见下一条「Changed」。
+
+### Added · 发货回执数据层：「已发货」能回写状态，且**不动明细**（2026-11-05，P3a / S1）
+
+到芒果「已发货」页采一轮，把平台状态同步回库里。这一批**只做数据层**（不接 UI），
+先把"只改主表、明细一行不动、幂等"证明出来。
+
+- **`electron/order-db.ts`**
+  - `applyShipStatus(input[], { writeShipTime? })`：只写 `biz_status` / `logistics_no` /
+    `logistics_carrier`（`ship_time` 需显式开启）。返回 `{updated, unchanged, missing,
+    invalid, missingNos, columns}`；**不新建**库里没有的单（只有状态没有明细 = 展开为空的幽灵行）。
+  - `ORDER_HEADER_COLS` += `logistics_no` / `logistics_carrier`；**v14 迁移**
+    `addShipReceiptColumns()` 给存量库补这两列（逐列 `PRAGMA` 判存在，重复执行安全）。
+- **`electron/mango-ingest.ts`**
+  - `toShipReceipt()` / `planShipReceipt()`：帧 → 回执纯映射，原始响应（`gmtSend` 毫秒、
+    `logisticsNo`、`logisticsServiceName`）与扩展规整帧（`shipTime` 等）**两套键名都认**。
+  - 抽出 `pickOrderNo()` / `pickBizStatus()`：`toInternal` 与回执**共用一份取键顺序**
+    （各写一遍会"入库写成 A、回执记到 B"，不报错只是有几单永远更新不到）。
+- **为什么必须新开一条路径**：`upsertCollectedOrder` 是整单替换（DELETE 主表 + 全部明细 + 重插），
+  已发货单行数不变 ⇒ 行数守卫放行 ⇒ 会静默丢 `style_color_id`（归类）、`oi_item_parts`
+  （图案绑定）、`parcels`（拆包），并把 `purchase_sources.order_item_id` 变成悬空 id
+  （"已拿"掉回 0、"还差"虚高，**界面不报错**）。冒烟 `[9.5]` 里留了**对照实验**钉这一点。
+- **`ship_time` 默认不回写**：发货台队列只读 `biz_status`（写它就够清零），而拣货/拿货读
+  `ship_time = ''` —— 写了会让"发了货但没拿货"的单从拿货页静默消失，欠货不可见。
+
+守卫：`tests/mangoShipReceipt.spec.ts` 14 例 + `scripts/order-db-smoke.cjs` `[9.5]` 10 例，
+均做变异验证（去掉幂等 / 去掉空值跳过 / 只认 `orderId` 各自会红）。
+
+**踩到并修掉的坑**：新列最初加进**已发布的 v13**，而 `migrate()` 只跑 `version > current`
+⇒ 存量库永远拿不到（运行时 `no such column`）。改成 v14 并用**真库副本实测**：
+`order.main v13 · logistics=[]` → `v14 · ["logistics_no","logistics_carrier"]`，二次执行不抛错，
+7 单 `ship_time` 仍全空（只加列不回填）。
+
+### Changed · 发货台改成「订单维度状态跟踪」：「总览 + 待发货」合并成一屏「订单」（2026-11-05）
+
+用户拍板 D-1（合并两屏）+ D-2（去步号）后按 P0 → P3 顺序开工，**P0 / P1 / P2 / P3b 已落地**
+（P3a 抓「已发货」页回写 `ship_time` 另立）。**零主进程改动**：输入就是容器已取的
+`order-shipping-rows` 与 `purchase-order-coverage`。
+
+- **新增 `src/lib/orderStage.ts`**：订单准备档的**唯一实现**（缺图 / 待归类 / 待拿货 / 待核对 /
+  已备齐）。订单档 = 明细行里最差的一档（木桶）；覆盖度读不到或行没有订单行身份（`id=0`）⇒
+  `unknown`，**绝不**默认已备齐。件数只认一处（喂 `planCoverage` 时 `qty: pieces, rawFields: {}`）。
+  **「已发出」不是第五档**：`shippingQueue` 只用 `isWaitingShip` 过滤，已发货单自动离队。
+  恒等式：五档（含 `unknown`）之和 ≡ `pulse.pending`。
+- **新增 `src/modules/today/tabs/OrderPanel.vue`**：采集状态条 → 「今天进来」四数 → 状态分组四格
+  （点一下筛到该档，再点取消）→ 汇总行 → 按单清单（缩略图 / 单号 / 剩余时间 / 档位 chip / 动作）
+  → 行内展开明细行（款色码 × 件数 × 缺口 + 带上下文去归类 / 去拿货）→ Excel 备选区（仍默认收起）。
+- **删除 `OverviewPanel.vue` / `QueuePanel.vue`**；`SHIPPING_TAB_NAMES` 6→5（`orders: '订单'`），
+  步号 `1–4`、`flow` / `flowNow` / `stateOf()` 与相关 CSS 一并撤掉 —— 流程是**每单并行**，
+  "第 1 步"暗示整批顺序完成，正是"看不太明白"的来源。
+- **「按此开始发货」→「开始处理」**：旧按钮写着发货、落点却是只读清单（应用内本就没有发货动作）。
+  新按钮只做它说的事 —— 把清单筛到**当前最卡的一档**（首屏唯一实心按钮，文案不含"发货"）；
+  采集按钮从 primary 降为页头常驻工具按钮。
+- **跨页带上下文**：`classifyFocus`（单号）+ 新增 `purchaseFocus`（单号 / 款 / 色 / 还差件数），
+  拿货页高亮并滚到那一行；款色键抽成 `colorGroupKey()`（`src/lib/picking.ts`）单一实现，
+  否则两页各写一遍，改一次就静默失配。
+- **守卫**：`tests/orderStage.spec.ts` 28 例（含三段变异守卫 + RK-2 与 `planCoverage` 的交叉断言，
+  已用「少 1 件也算齐」变异确认会红）；`today:ui` 443 条全 PASS，新增「五页签 / 默认落订单 /
+  两旧页签都不在 / 页签无步号 / 四档之和 = 合计 / 点分组筛 2 单再复位 3 单 / 首屏唯一实心按钮」
+  等断言；`uxEntryNames` 拦住 6 处改名后的悬空入口名（`OrderCostView` / `PickingView` ×3 /
+  `PodOrderPanel` / `OrderPanel`）。
+- **不做（有意）**：拿货页「按单核对」不改读 `orderStage` —— 它按 `purchase-order-coverage`
+  覆盖**跨天未发货**（窗口更宽），改读会把历史单抹掉；漂移风险改由交叉断言守。
+- **顺带修**：5 条因删文件产生的悬空文档引用（`CHANGELOG` / 两份旧计划与笔记）。
+
+
 ### Fix · 邮件待办改成「左队列 / 右单据」，正文不再被压成一条缝（2026-11-05）
 
 「点开待办看不全邮件」是三条叠加，只修一条都有残余：
@@ -2901,7 +3002,8 @@ C2 之后「进价」已经是 `pl_products.cost_cents` **一个字段**，而�
 用户裁定：「总览中的功能暂时没什么意义，先去掉，修改成展示：今天一共要发多少单、一共多少件商品、
 已经拿了多少件、还差多少件。样式要简洁明了。」
 
-- `src/modules/today/tabs/OverviewPanel.vue` 整页重写：撤掉**流程卡**（四步主线）与
+- `OverviewPanel.vue`（原路径 `src/modules/today/tabs/`；**2026-11-05 已随「总览 + 待发货」合并删除**，
+  现存实现见 `OrderPanel.vue`）整页重写：撤掉**流程卡**（四步主线）与
   **订单 / 待拣 / 钱算得准吗**三张卡，只留四格数字 + 一条进度条 + 一句结论。
   空态保留一句话与「导入 Excel」按钮（否则这一屏是死路）；空态不挂口径小字、不摆一排 0。
 - 新增纯函数 `src/lib/dailyShip.ts`（`dailyShip()`）：**四个数只有这一处实现**。

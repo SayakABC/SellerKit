@@ -254,6 +254,14 @@ const ORDER_HEADER_COLS: { name: string; ddl: string }[] = [
   { name: 'shop_auth_id', ddl: "shop_auth_id TEXT NOT NULL DEFAULT ''" },
   { name: 'deal_deadline', ddl: "deal_deadline TEXT NOT NULL DEFAULT ''" },
   { name: 'timeout_at', ddl: "timeout_at TEXT NOT NULL DEFAULT ''" },
+  // ── 发货回执（2026-11-05，P3a / S1）────────────────────────────────────
+  // 芒果帧里**一直都有**这三个字段（`gmtSend` / `logisticsNo` / `logisticsServiceName`），
+  // 只是此前没人取 —— `ship_time` 至今全空就是这条链路断了的证据。
+  // 进主表而不塞 `raw_fields`：查件要按运单号查、算运费要按承运商聚，JSON 里挖得出来但索引不了。
+  // ⚠️ 三列都**不参与任何判定**：它们只回答"这单是怎么发出去的"，不回答"该不该发"
+  //   （后者是 `biz_status` 的事，见 `src/lib/mangoStatus.ts`）。
+  { name: 'logistics_no', ddl: "logistics_no TEXT NOT NULL DEFAULT ''" },
+  { name: 'logistics_carrier', ddl: "logistics_carrier TEXT NOT NULL DEFAULT ''" },
 ];
 
 /**
@@ -766,6 +774,11 @@ function orderMigrationSteps(): MigrationStep[] {
       name: '芒果同步：主表 += pay_time/shop_auth_id/deal_deadline/timeout_at · 明细 += item_id/sku_code',
       up: addMangoSyncColumns,
     },
+    {
+      version: 14,
+      name: '发货回执：主表 += logistics_no/logistics_carrier（只加列不回填）',
+      up: addShipReceiptColumns,
+    },
   ];
 }
 
@@ -903,6 +916,31 @@ function addMangoSyncColumns(): void {
   add('oi_orders', head, 'timeout_at', "timeout_at TEXT NOT NULL DEFAULT ''");
   add('oi_order_items', item, 'item_id', "item_id TEXT NOT NULL DEFAULT ''");
   add('oi_order_items', item, 'sku_code', "sku_code TEXT NOT NULL DEFAULT ''");
+}
+
+/**
+ * **v14：主表 += 发货回执两列**（2026-11-05，P3a / S1）。
+ *
+ * ⚠️ 为什么必须是**新的一步**、而不是往 v13 里多写两行 `add(...)`：
+ * `migrate()` 只跑 `version > current` 的步骤。v13 早已在用户库里记账跑过 ⇒
+ * 往 v13 里加列**对存量库永远不生效**，而新库会带上、老库不会 —— 同一个版本号对应两种结构，
+ * 接着就是运行时 `SELECT logistics_no` 报 `no such column`（而不是建表时炸，更难查）。
+ * 本函数自身仍逐列 `PRAGMA` 判存在，所以重复执行安全（脚本/冒烟会反复 `ensureOrderSchema`）。
+ *
+ * 只加列、不回填：历史单的发货时间在库里根本没有（`ship_time` 至今全空），
+ * 凭空补一个数就是编 —— 与 v7 的"快照列不回填"同一条纪律。
+ */
+function addShipReceiptColumns(): void {
+  const cols = new Set(
+    dbQuery<{ name: string }>(`PRAGMA table_info(oi_orders)`).map((c) => String(c.name)),
+  );
+  if (cols.size === 0) return; // 新库：由 `ORDER_HEADER_COLS` 建表时带上
+  if (!cols.has('logistics_no')) {
+    dbRun(`ALTER TABLE oi_orders ADD COLUMN logistics_no TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols.has('logistics_carrier')) {
+    dbRun(`ALTER TABLE oi_orders ADD COLUMN logistics_carrier TEXT NOT NULL DEFAULT ''`);
+  }
 }
 
 /**
@@ -4317,6 +4355,125 @@ export function upsertCollectedOrder(input: CollectedOrderInput): CollectedOrder
     }
   });
   return { rows, replaced, refusedReason };
+}
+
+/** 一次发货回执同步的入参（一单一条） */
+export interface ShipStatusInput {
+  orderNo: string;
+  /** 平台当前状态原文（`''` = 这次没给，**不清空已有值**） */
+  bizStatus?: string;
+  /** 平台给的发货时间（`''` = 未发货 / 这次没给）。**默认不落库**，理由见 `applyShipStatus` 头 */
+  shipTime?: string;
+  logisticsNo?: string;
+  logisticsCarrier?: string;
+}
+
+export interface ShipStatusResult {
+  /** 真的写了库（至少一列值变了） */
+  updated: number;
+  /** 库里已有、但目标值与现值相同 ⇒ 一行没改（**幂等靠这里**，不靠调用方自己去重） */
+  unchanged: number;
+  /**
+   * 库里没有这一单 ⇒ **跳过，不新建**。
+   *
+   * 已发货批里这很常见（这单从没在待发货时被采过 / 更早的库），不是错误。
+   * 但绝不在这里顺手 insert：新建订单要有明细行，只有状态没有明细的单会变成
+   * "清单里永远有一条展开是空的"幽灵行。
+   */
+  missing: number;
+  /** 单号为空 ⇒ 无法定位（与 `missing` 分开：那是"库里没有"，这是"入参就坏"） */
+  invalid: number;
+  /** 跳过的单号（前 20，给人看） */
+  missingNos: string[];
+  /** 本批实际写过的列名（断言用：证明没碰金额与时效列） */
+  columns: string[];
+}
+
+/**
+ * **发货回执：只同步主表的四列，绝不碰明细**（2026-11-05，P3a / S1）。
+ *
+ * 为什么必须有这条路径，而不是喂给 `upsertCollectedOrder` 就完事：
+ * 后者是**整单替换**（DELETE 主表 + DELETE 全部明细 + 重插）。一单从「待发」变「已发」后
+ * 照常重采集，会静默丢掉这些东西：
+ *   · `oi_order_items.style_color_id` —— **归类结果**（行是重插的新 id，归类跟着没了）；
+ *   · `oi_item_parts` —— 图案绑定（POD 的命根子，`ON DELETE CASCADE` 一起没）；
+ *   · `parcel_lines` / `parcels` —— 拆包被代码显式删除；
+ *   · `purchase_sources.order_item_id` —— 软键（无外键）⇒ 变**悬空 id**，覆盖率 join 不上，
+ *     "已拿"掉回 0、"还差"虚高，而且**界面不报错**。
+ * 行数守卫也救不了：已发货单行数不变，`lines.length < oldCount` 不成立 ⇒ 照样整单替换。
+ *
+ * 三条不变量（`scripts/order-db-smoke.cjs` 逐条钉住）：
+ *   1. **只写这四列**（`biz_status` / `ship_time` / `logistics_no` / `logistics_carrier`），
+ *      金额（`amount_cents` 等）与时效（`deal_deadline` / `timeout_at`）**一个都不写** ——
+ *      回写它们会让利润表与截止风险历史随"什么时候点的采集"漂移；
+ *   2. **幂等**：目标值 == 现值就不写（同一批跑两遍，第二遍必须全是 `unchanged`）；
+ *   3. **空值不算指令**：`''` 表示"这次没给"，不是"清空"（否则一次不完整的帧就把运单号抹了）。
+ *
+ * ⚠️ `ship_time` **默认不写**（`opts.writeShipTime` 缺省 false），这不是偷懒：
+ *   拣货（`picking-db`）与拿货（`purchase-db`）的"未发货"过滤读的就是 `o.ship_time = ''`。
+ *   回写它 ⇒ **"发了货但没拿货"的单从拿货页静默消失**，欠货变得不可见。
+ *   而发货台队列只读 `biz_status`（`isWaitingShip`）⇒ 写 `biz_status` 就足以让队列清零。
+ *   要开这一列，先给那类单一个可见入口（计划 P3a-2），别在这里顺手打开。
+ */
+export function applyShipStatus(
+  input: ShipStatusInput[],
+  opts: { writeShipTime?: boolean } = {},
+): ShipStatusResult {
+  const d = initDb();
+  const list = Array.isArray(input) ? input : [];
+  const writeShipTime = opts?.writeShipTime === true;
+  const result: ShipStatusResult = {
+    updated: 0,
+    unchanged: 0,
+    missing: 0,
+    invalid: 0,
+    missingNos: [],
+    columns: [],
+  };
+  const touched = new Set<string>();
+  const sel = d.prepare(
+    `SELECT id, biz_status, ship_time, logistics_no, logistics_carrier
+       FROM oi_orders WHERE order_no = ? LIMIT 1`,
+  );
+  dbTransaction(() => {
+    for (const it of list) {
+      const no = String(it?.orderNo ?? '').trim().slice(0, 64);
+      if (!no) {
+        result.invalid += 1;
+        continue;
+      }
+      const cur = sel.get(no) as Record<string, unknown> | undefined;
+      if (!cur) {
+        result.missing += 1;
+        if (result.missingNos.length < 20) result.missingNos.push(no);
+        continue;
+      }
+      const want: [string, string][] = [
+        ['biz_status', String(it?.bizStatus ?? '').trim().slice(0, 64)],
+        ['logistics_no', String(it?.logisticsNo ?? '').trim().slice(0, 64)],
+        ['logistics_carrier', String(it?.logisticsCarrier ?? '').trim().slice(0, 64)],
+      ];
+      if (writeShipTime) want.push(['ship_time', String(it?.shipTime ?? '').trim().slice(0, 32)]);
+      const sets: string[] = [];
+      const args: (string | number)[] = [];
+      for (const [col, val] of want) {
+        if (!val) continue; // 没给 ≠ 要清空
+        if (String(cur[col] ?? '') === val) continue; // 幂等：目标值 == 现值则不写
+        sets.push(`${col} = ?`);
+        args.push(val);
+        touched.add(col);
+      }
+      if (!sets.length) {
+        result.unchanged += 1;
+        continue;
+      }
+      args.push(Number(cur.id));
+      d.prepare(`UPDATE oi_orders SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+      result.updated += 1;
+    }
+  });
+  result.columns = [...touched].sort();
+  return result;
 }
 
 /** 最近订单列表（联图片指纹/路径），供界面明细展示 */

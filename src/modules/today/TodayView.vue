@@ -10,11 +10,13 @@
     <header class="wb-head">
       <div class="wb-head__main">
         <h1 class="wb-head__title">发货台</h1>
-        <!-- 说明句缩成一行（2026-11-05）：原来两行、括号里还塞了两条"别处"的指引，
-             老用户每天上班看一遍全是噪音。现在只说这条线长什么样，
-             两个旁路（订花纸按需 / 利润在统计）各自在页签与模块名上就能看到。 -->
+        <!-- 说明句（2026-11-05 重写）：这句话现在是**定位**，不是流程目录。
+             用户原话：「发货台准确的定位应该是发货前的准备工作，准备完成，就代表这个订单
+             已经完成了准备」。所以先说"把单准备好"，再当场划清边界"发货在芒果点" ——
+             不写后半句，用户会在这一页找"发货"按钮，而这一页根本没有那个能力。
+             两个旁路（订花纸按需 / 利润在统计）各自在页签与模块名上就能看到，不再占这一行。 -->
         <p class="wb-head__desc">
-          采集 → 归类 → 拿货 → 对账；订花纸按需，利润在「统计」
+          把待发货的订单准备好（补图 / 归类 / 拿货）；发货在芒果点
         </p>
       </div>
       <div class="wb-head__actions">
@@ -24,7 +26,10 @@
       </div>
     </header>
 
-    <!-- 流程页签：把四步摆成一条可点的线（编号 + 名称 + 这一步还有多少活）。
+    <!-- 页签栏：**没有步号，也没有"当前步"标记**（2026-11-05 起）。
+         步号暗示"必须整批按顺序做完第 1 步才轮到第 2 步"，而真实处境是四类活同时压在
+         四张不同的单上（A 单差件、B 单已齐、C 单缺图、D 单没认出色）—— 那个标记答的是
+         "整批"，用户问的是"我这几单"。引导改由「订单」屏的状态分组承担。
          ⚠️ 断言钉在 `data-act` 上（`tab-<id>`），不按整段文本匹配。
          ⚠️ 页签上的数字**来自容器统一取的那一份汇总**（`ctx.summary`），不各自取数 ——
             否则会出现"页签说 3 个 SKU、点进去说 0 个"（保活让这份错更隐蔽）。 -->
@@ -33,11 +38,7 @@
         v-for="t in TABS"
         :key="t.id"
         class="td-tab"
-        :class="{
-          'is-on': tab === t.id,
-          'is-now': stateOf(t.id) === 'now',
-          'is-pending': t.pending,
-        }"
+        :class="{ 'is-on': tab === t.id }"
         role="tab"
         :aria-selected="tab === t.id"
         :tabindex="tab === t.id ? 0 : -1"
@@ -45,7 +46,6 @@
         :title="t.hint"
         @click="go(t.id)"
       >
-        <span v-if="t.no" class="td-tab__no" :data-act="`tab-no-${t.id}`">{{ t.no }}</span>
         <span class="td-tab__name">{{ t.name }}</span>
         <span v-if="badge(t)" class="td-tab__badge" :data-act="`tab-badge-${t.id}`">{{
           badge(t)
@@ -68,25 +68,21 @@
 </template>
 
 <script setup lang="ts">
-// 「今天」= **发货台**：把「导入 → 归类 → 拿货 → 对账」四步收进一页多页签。
+// 「今天」= **发货台**：把「订单 → 归类 → 拿货 → 对账」收进一页多页签。
 //
 // 为什么这么改（用户 2026-10-05）：原先是四步流程卡，点一步**跳到别的模块**——
 // 跳走以后要回来得再点导航，中间的表单/清单全丢，一天几十单的操作里这很磨人。
-// 现在：四步 = 四个页签，点击就地切换（`KeepAlive` 保活），页面不重建、列表不重取。
+// 现在：各屏 = 页签，点击就地切换（`KeepAlive` 保活），页面不重建、列表不重取。
 //
-// 2026-10-10：原第 3 步「生成拣货单」并进「拿货」（六步 → 五步）—— 拣货清单就是"要拿什么"，
-// 与拿货是同一件事的两半（理由详见 `tabs/PurchasePanel.vue` 头注释）。步号整体前移一位。
+// 2026-11-05（用户原话「怎么才能以订单维度来跟踪当前订单的状态…现在的流程感觉是相对独立的」）：
+//   · 「总览」+「待发货」合并成「订单」（D-1），**步号 1–4 取消**（D-2）；
+//   · 「全局串行流程」模型（`flow`）删除 —— 它是"看不太明白"的结构性来源，见下面那段注释。
+//   · 本页的定位从此写在页头：**把待发货的订单准备好，发货在芒果点**。
 //
-// ⚠️ 2026-10-17：**「算钱」整步撤出本页**（五步 → 四步）。用户裁定："发货台中的算钱步骤去掉，
-//    都归拢到算钱菜单中"（该菜单同批改名为「统计」）。判据是这一步**不产生任何写操作**，
-//    它只是"看这批订单赚不赚"—— 与发货这条有去有回的流水线不同节奏，嵌在这里反而让
-//    "当前该做哪一步"多出一个永远不动的节点。算钱仍只有一份实现（`@/modules/order-cost`），
-//    本页连"存在性检查"都不再做了（2026-10-22：那张卡随总览改版撤掉），
-//    要点钱 = 真跳「统计」模块（`openModule('order-cost')`），不再是页签。
-//
-// **本页只做两件事**：① 汇总指标的取数与分发（`ctx.summary`，各页签徽标与总览共用同一份）；
-// ② 页签切换。**业务算法一律不在这页** —— 仍在 `src/lib/dailyShip.ts` / `picking.ts` /
-// `orderCost.ts` 那几处，各面板只调用（用户 2026-09-30 定的原则：数字的算法只有一处）。
+// **本页只做两件事**：① 汇总指标的取数与分发（`ctx.summary`，各页签徽标与订单屏共用同一份）；
+// ② 页签切换。**业务算法一律不在这页** —— 仍在 `src/lib/dailyShip.ts` / `shippingPulse.ts` /
+// `orderStage.ts` / `picking.ts` / `orderCost.ts` 那几处，各面板只调用（用户 2026-09-30 定的原则：
+// 数字的算法只有一处）。
 import {
   computed,
   defineAsyncComponent,
@@ -111,7 +107,6 @@ import { purchaseCounts } from './purchase';
 import {
   SHIPPING_CTX,
   SHIPPING_TAB_NAMES as TN,
-  type FlowStep,
   type ShippingCtx,
   type ShippingSummary,
 } from './flowCtx';
@@ -119,50 +114,36 @@ import {
 interface TabDef {
   id: string;
   name: string;
-  /** 流程里的第几步（「总览」不是某一步，故留空） */
-  no?: string;
   /** 鼠标悬停的一句话说明 */
   hint: string;
-  /** 尚未内建完（当前借道插件）：页签上如实标注，不伪装成"点了没反应" */
-  pending?: boolean;
   comp: Component;
-  /** 页签上的数字（这一步还有多少活）。返回空串 = 不显示 */
+  /** 页签上的数字（这一屏还有多少活）。返回空串 = 不显示 */
   badge?: (s: ShippingSummary) => string;
 }
 
 /**
- * 页签定义。顺序 = 流程顺序（与流程卡、与用户说的四步一致 —— 2026-10-17 算钱整步撤出前是五步）。
+ * 页签定义（2026-11-05：六个 → 五个，且**全部去掉步号**）。
  * ⚠️ `defineAsyncComponent` 必须在模块顶层建一次：写进 `computed` 会在每次渲染时新建包装器，
  * 于是 `KeepAlive` 永远认不出"这是同一个组件"，保活失效（切换即重建，等于没做）。
  *
- * 2026-11-01（T2-4）：新增 `queue`「待发货」，位置紧跟「总览」。
- *   · 它是总览那块「现在还没发」的**下钻落点**（那块的按钮 `go('queue')` 就切到这里）。
- * 2026-11-02：`import`「导入订单」页签**并进 `queue`「待发货」**（用户口径："两个页面合并，
- *   统一合并为待发货，弱化 Excel 导入按钮，以芒果采集为主"）。于是：
- *   · 「待发货」带上第 1 步编号 —— 它现在就是"把单弄进来"的入口；
- *   · Excel 投放区成为该页内**默认收起**的备选区（主入口 = 芒果采集）；
- *   · 页签栏从六个回到五个。
+ * 变化与理由：
+ *   · 「总览」+「待发货」**合并成「订单」**（用户拍板 D-1）：两屏回答的其实是同一个问题
+ *     （"我有几单、是哪几单"），只差聚合与明细；分成两屏是历史包袱，用户还得自己对照。
+ *   · 步号 1/2/3/4 **取消**（用户拍板 D-2）：流程是每单并行，"第 N 步"暗示整批顺序完成。
+ *   · 「订单」排第一并作为默认落点：它是这一页的**主屏**，其余四个是围着它转的工具。
  */
 const TABS: TabDef[] = [
   {
-    id: 'overview',
-    name: TN.overview,
-    hint: '今天要发几单、共几件、已拿多少、还差多少',
-    comp: defineAsyncComponent(() => import('./tabs/OverviewPanel.vue')),
-  },
-  {
-    id: 'queue',
-    name: TN.queue,
-    no: '1',
-    hint: '把订单采集进来（芒果为主 / Excel 备选），并按最晚发货时间排好要发的单',
-    comp: defineAsyncComponent(() => import('./tabs/QueuePanel.vue')),
-    // 徽标 = 待发货**单数**（与总览那一格同一个数、同一份来源 `summary.pulse`）
+    id: 'orders',
+    name: TN.orders,
+    hint: '每张待发货订单准备到哪一档（缺图 / 待归类 / 待拿货 / 已备齐），展开看明细行',
+    comp: defineAsyncComponent(() => import('./tabs/OrderPanel.vue')),
+    // 徽标 = 待发货**单数**（与订单屏那句「合计 N 单待发货」同一个数、同一份来源 `summary.pulse`）
     badge: (s) => (s.pulse.pending ? `${s.pulse.pending} 单` : ''),
   },
   {
     id: 'classify',
     name: TN.classify,
-    no: '2',
     hint: '把订单行归到款式/颜色上（批量识别 + 逐行修正）',
     comp: defineAsyncComponent(() => import('./tabs/ClassifyPanel.vue')),
     badge: (s) => (s.gaps.style ? `${s.gaps.style} 未归类` : ''),
@@ -176,7 +157,6 @@ const TABS: TabDef[] = [
   {
     id: 'purchase',
     name: TN.purchase,
-    no: '3',
     hint: '按厂家一卡看完要拿什么（图 + 款色码 + 进价）与已开的单 → 生成拿货单 → 填价提交',
     comp: defineAsyncComponent(() => import('./tabs/PurchasePanel.vue')),
     badge: (s) => (s.purchase.gap ? `${s.purchase.gap} 款色` : ''),
@@ -184,7 +164,6 @@ const TABS: TabDef[] = [
   {
     id: 'recon',
     name: TN.recon,
-    no: '4',
     hint: '跟厂家对账（欠款 / 付款）+ 成本按店铺分摊',
     comp: defineAsyncComponent(() => import('./tabs/ReconPanel.vue')),
     badge: (s) => (s.purchase.orders ? `${s.purchase.orders} 单` : ''),
@@ -193,7 +172,7 @@ const TABS: TabDef[] = [
 
 const loading = ref(false);
 const error = ref('');
-const tab = ref('overview');
+const tab = ref('orders');
 const token = ref(0);
 const receipt = ref<AutoImportResult | null>(null);
 /**
@@ -219,11 +198,6 @@ const summary = ref<ShippingSummary>({
 const activeComp = computed<Component>(
   () => (TABS.find((t) => t.id === tab.value) ?? TABS[0]!).comp
 );
-
-/** 某个 tab 对应步骤的状态（页签上的"当前步"标记读它；「总览」不算任何一步 ⇒ 空） */
-function stateOf(tabId: string): string {
-  return flow.value.find((s) => s.tab === tabId)?.state ?? '';
-}
 
 function badge(t: TabDef): string {
   return t.badge ? t.badge(summary.value) : '';
@@ -315,108 +289,50 @@ function onSwitchModule(e: Event): void {
 }
 
 /**
- * ⚠️ 前置口径（2026-10-11，用户拍板）：**第 1–2 步看"今天进来的那批"，第 3–4 步看"未结清"**。
- *    所以这里的 `orders` / `gaps` / `daily` 是**今天**的数（`reload()` 按导入日筛，见那里的注释），
- *    而 `purchase` 是跨天的（未结清）。这正是"每天上班采集一次、货和钱跨天结转"的真实工作流；
- *    两条口径都在界面上写出来了（「待发货」页的计数、总览的口径小字），不要把它们合并成一个数。
+ * ⚠️ 前置口径（2026-10-11，用户拍板，**仍然成立**）：`orders` / `gaps` / `daily` 是**今天**的数
+ *    （`reload()` 按导入日筛，服务采集与归类），而 `purchase` 是跨天的（未结清）。
+ *    两条口径在界面上各自写出来了（订单屏「今天进来」那行 vs「合计 N 单待发货」），不要合并成一个数。
  *
- * 四步主线。**只由 `summary` 推导**，不新增取数（页签的 `is-now` 标记读它）：
- *   · 第 1 步看 `orders.total`（**今天**采集/导进来多少）
- *   · 第 2 步看 `gaps.style`（今天这批里还有多少行没识别出款）
- *   · 第 3 步看 `purchase.gap`（还有多少款色没拿 —— 由订单需求 − 已提交拿货单推出，宿主算好）
- *   · 第 4 步看 `purchase.balance`（还欠厂家多少钱；`0` 才算结清）
- *
- * ⚠️ **串联语义**（2026-10-05 拍图才发现的 bug，别再犯）：前一步没完成时，后面的步骤一律
- *    `todo` + 写明"等第 N 步"，使 `now` **恒为 1**。初版各步独立判断 ⇒ 有未识别款时
- *    第 2/3/4 步同时高亮（三块橙边），"当前该做哪一步"这个唯一要回答的问题反而答不出来。
- *
- * 2026-10-10：原第 3 步「生成拣货单」并进第 4 步「拿货」（六步 → 五步）—— 拣货清单按
- *    厂家/款色码/图/进价汇总，而"拿货"要的正是这张单，两步其实是一件连贯的事（详见
- *    `PurchasePanel.vue` 的头注释）。于是 SKU 数**不再是主线的一环**，后面的步号整体前移一位。
- *
- * 2026-10-17：**「算钱」这一步撤出**（五步 → 四步）。它**不写任何数据**、也不是发货的必经动作，
- *    把它挂在这条线上只会让"数据缺口"一直参与"下一步是谁"的推导（数据缺口 ≠ 有活要干）。
- * 2026-10-22：总览改版（四个数）后，原本挂在流线上方的流程卡与三张卡一并撤掉；
- *    这条 `flow` 仍在——**页签左侧的「当前步」标记**（`.td-tab.is-now`）读它，那是页签唯一的
- *    "现在该点哪个"提示，删掉它页签就只剩一排没有主次的按钮。
+ * 2026-11-05：**「全局串行流程」（`FlowStep` / `flow` / `flowNow`）整块删除**。
+ *    它用四个聚合数推导"现在该做第几步"（`now` 恒为 1 步），隐含假设是"整批走完一步才进下一步"。
+ *    真实处境是四类活同时压在四张不同的单上，串行模型答不了"我这几单"，只会让页签那点 3px
+ *    标记变成噪音。现在"从哪开始"由「订单」屏的状态分组回答，而且它答的是**每一单**。
+ *    删掉之后这里少了一条每次 `summary` 变化都要重算的推导，也少了一处"卡上当前步 ≠ tab 上当前步"的隐患。
  */
-const flow = computed<FlowStep[]>(() => {
-  const o = summary.value.orders;
-  const g = summary.value.gaps;
-  const pu = summary.value.purchase;
-  const hasOrders = o.total > 0;
-  const needClassify = hasOrders && g.style > 0;
-  const needPurchase = pu.gap > 0;
-  const needRecon = pu.balance !== 0;
-  const wait2 = !hasOrders ? '等第 1 步' : needClassify ? '等第 2 步' : '';
-  const wait3 = wait2 || (needPurchase ? '等第 3 步' : '');
-  const wait4 = wait3;
-  return [
-    {
-      no: 1,
-      key: 'queue',
-      name: '待发货',
-      tab: 'queue',
-      act: '去采集',
-      where: '本页「待发货」',
-      // 第 1 步 = 把单弄进来（芒果采集为主，Excel 导入备选）。有单就算走完 ——
-      // 具体"还有几单没发"是清单自己的事，不参与这条主线的状态推导。
-      note: hasOrders ? `今天 ${o.total} 行订单` : '今天还没有订单',
-      state: hasOrders ? 'done' : 'now',
-    },
-    {
-      no: 2,
-      key: 'classify',
-      name: '归类核对',
-      tab: 'classify',
-      act: '去核对',
-      where: '本页「归类核对」',
-      note: !hasOrders ? '等第 1 步' : g.style ? `${g.style} 行未识别款` : '款式都识别了',
-      state: !hasOrders ? 'todo' : needClassify ? 'now' : 'done',
-    },
-    {
-      no: 3,
-      key: 'purchase',
-      name: '拿货',
-      tab: 'purchase',
-      act: '去拿货',
-      where: '本页「拿货」',
-      note: wait3 || (needPurchase ? `${pu.gap} 款色还差货` : '该拿的都拿了'),
-      state: wait3 ? 'todo' : needPurchase ? 'now' : 'done',
-    },
-    {
-      no: 4,
-      key: 'recon',
-      name: '结算对账',
-      tab: 'recon',
-      act: '去对账',
-      where: '本页「结算对账」',
-      note: wait4 || (needRecon ? `还欠 ¥${(pu.balance / 100).toFixed(2)}` : '账已结清'),
-      state: wait4 ? 'todo' : needRecon ? 'now' : 'done',
-    },
-  ];
-});
 
-/** 当前该做的那一步：在**可执行**的步骤里取第一条 `now`；都完成时落在最后一条可执行步 */
-const flowNow = computed((): FlowStep => {
-  const list = flow.value.filter((s) => !s.pending);
-  return list.find((s) => s.state === 'now') ?? (list[list.length - 1] as FlowStep);
-});
-
+/** 导入进行中（按钮的 disabled 与文案读它）—— 必须在 `ctx` 之前声明（对象字面量求值时就要取值） */
 /** 导入进行中（按钮的 disabled 与文案读它）—— 必须在 `ctx` 之前声明（对象字面量求值时就要取值） */
 const importing = ref(false);
 
 /**
- * 「待发货」清单 → 「归类核对」的**带单号跳转**（2026-11-05）。
+ * 「订单」屏 → 「归类核对」的**带单号跳转**（2026-11-05）。
  * 只在两屏之间传一个单号，不搬运行数据（归类页自己按单号搜，口径与手打一致）。
  */
 const classifyFocus = ref('');
 
+/**
+ * 「订单」屏 → 「拿货」的**带款色跳转**（2026-11-05）。
+ * 拿货页是几十行款色宫格，只说"去拿货"等于把人丢进去自己找 —— 这里把哪一单、哪一款色、
+ * 还差几件带过去，拿货页据此高亮并滚到那一行（不做过滤：过滤会把同厂其它要拿的藏起来）。
+ */
+const purchaseFocus = ref<ShippingCtx['purchaseFocus']['value']>(null);
+
+/**
+ * 逐行覆盖度（2026-11-05）：**容器取一次，订单屏与「今天进来」共用**。
+ *
+ * `ok=false` 表示这一次没读到 —— 订单屏据此把判不出来的单落「待核对」，
+ * 而不是折成"一件没拿"（会让用户重复下单）或"已经齐了"（会少发一批货）。
+ */
+const coverage = ref<ShippingCtx['coverage']['value']>({
+  covered: {},
+  pool: {},
+  ok: false,
+});
+
 const ctx: ShippingCtx = {
   summary,
   pulseRows,
-  flow,
-  flowNow,
+  coverage,
   loading,
   error,
   token,
@@ -429,6 +345,7 @@ const ctx: ShippingCtx = {
   importExcel,
   importFile,
   classifyFocus,
+  purchaseFocus,
 };
 provide(SHIPPING_CTX, ctx);
 
@@ -537,8 +454,12 @@ async function reload(): Promise<void> {
     //    ⚠️ 不再读 `purchase-taken` 整条台账：那会把"有归属的"再算一遍，已拿虚高、缺口提前变 0（漏货）。
     //    ⚠️ 失败按"一件没拿"处理：这一屏是**看数**的，取不到不该让整页汇总挂掉
     //       （真拿不准时用户点进「拿货」页签会看到真正的错误）。
+    //    2026-11-05：同一份结果也交给「订单」屏（`coverage`），但**带上 `ok`** ——
+    //       订单屏要把"这次没读到"显示成「待核对」，而不是"一件没拿"或"已经齐了"。
     const cv = await ipc.purchaseOrderCoverage();
-    const { covered, pool } = coverageInputs(cv.success ? cv.data : null);
+    const cin = coverageInputs(cv.success ? cv.data : null);
+    const { covered, pool } = cin;
+    coverage.value = { covered, pool, ok: !!cv.success };
 
     // 3) 四个数：算法在 `@/lib/dailyShip`（纯函数，vitest 覆盖）—— 本页只喂数据。
     //    判定与「拿货」页的「按单核对」清单**同一份实现**（`planCoverage`），
@@ -683,58 +604,23 @@ onBeforeUnmount(() => {
   box-shadow: var(--wb-elev-1);
 }
 
-/* 「当前该做这一步」：左侧一条主色边（与流程卡的 is-now 同一套语言） */
-.td-tab.is-now::before {
-  content: '';
-  width: 3px;
-  height: 14px;
-  margin-left: -4px;
-  border-radius: 2px;
-  background: var(--wb-primary);
-}
-
-/* 尚未内建完的页签：虚线底边，一眼看出"这个还没做完"，而不是"点了没反应" */
-.td-tab.is-pending {
-  border-bottom-style: dashed;
-  border-bottom-color: var(--wb-border-strong);
-}
-
-/* 步骤号 = **位置标记**（空心环），数量 = **数值**（实心胶囊）。
-   ⚠️ 这两者原来**同形**：都是一圈浅边 + 浅底的小块，字号也接近，
-      于是「1 归类核对 1 未归类」里两个 "1" 一个是序号、一个是待办数，
-      用户要读三遍才分得清（2026-11-03 界面审查，方案 §5 表）。
-      分离手段**只靠填充**，一个新颜色都不加：
-        · 序号 → 透明底 + 一圈细边 + 字重 500（像列表标号，不抢视线）
-        · 数量 → 实心底 + 无边框 + 字重 600（像数值，一眼看出"这是个量"）
-      深色主题下两套填充同样成立（底都是令牌，不写死颜色）。 */
-.td-tab__no {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--wb-border-strong);
-  color: var(--wb-text-muted);
-  font-size: var(--wb-fs-micro);
-  font-weight: 500;
-  line-height: 1;
-}
-
-.td-tab.is-on .td-tab__no {
-  border-color: var(--wb-primary);
-  color: var(--wb-primary);
-}
+/* 2026-11-05：**「当前步」标记（`.td-tab.is-now`）与「步号」（`.td-tab__no`）随
+   "全局串行流程"一起删掉**。理由是它答错了问题：那个标记答"整批走到第几步"，
+   而用户问的是"我这几单各自到哪了"（现在由「订单」屏的状态分组回答）。
+   一个答不对问题的提示，比没有提示更贵 —— 它让用户以为这页只有一条主线。
+   ⚠️ 别再照着旧实现加回来：`.td-tab__no` 曾是"空心环"、徽标是"实心胶囊"，
+      那一整套形状分离（2026-11-03 方案 §5.10）是为了区分"序号 vs 数量"；
+      序号没了，这套区分也就没有对象了。 */
 
 .td-tab__name {
   min-width: 0;
 }
 
-/* 页签上的"还有多少活"：实心胶囊 —— 与左侧空心序号形成"数值 vs 标号"的形状对立。
+/* 页签上的"还有多少活"：实心胶囊。
    ⚠️ 去掉边框：边框是**控件**语言（可点的框），填充是**数据**语言（一个量）。
-      页签本身已经是可以点的按钮了，徽标再画一圈边，就成了"按钮里套按钮"。 */
+      页签本身已经是可以点的按钮了，徽标再画一圈边，就成了"按钮里套按钮"。
+   2026-11-05：左侧的"步号"删掉后，这颗胶囊就是页签行上唯一的数字 —— 它现在是
+      "这一屏还有多少活"的唯一读数，不再是"序号 vs 数量"的形状对立的一半。 */
 .td-tab__badge {
   flex-shrink: 0;
   padding: 1px 6px 2px;

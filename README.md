@@ -22,13 +22,24 @@
 
 ## 快速开始
 
-环境要求：Node.js 22+、Python 3（编译 `better-sqlite3` 原生模块）、macOS 或 Windows。
+环境要求：Node.js 22+（`.nvmrc` 固定 22.22.2，`package.json` 的 `engines` 会拦旧版本）、
+Python 3（编译 `better-sqlite3` 原生模块）、macOS 或 Windows。
+
+**macOS 系统版本是硬门槛**：Electron 44 要求 **macOS 13 (Ventura) 及以上**
+（包内 `LSMinimumSystemVersion = 13.0`）。在 macOS 12 上运行二进制会直接
+`dyld: Symbol not found: _OBJC_CLASS_$_SMAppService` —— 这既影响 `npm run dev` 拉起宿主，
+也影响打开打好的安装包。Windows 侧只要 Windows 10+（仅 x64），不受影响。
 
 ```bash
 npm install                       # postinstall 会自动重建原生模块
 cp .env.example .env.development  # 按需修改 API 地址
-npm run dev                       # Vite HMR + Electron
+npm run dev                       # Vite HMR + Electron（需 macOS 13+）
+npm run dev:web                   # 只起 Vite，浏览器预览界面（无主进程，数据一律显示"未连接"）
 ```
+
+> `npm run dev:web` 走 `public/web-bridge.js` 的空桥：所有 IPC 调用都返回失败，
+> 页面能渲染、能看布局与交互，但**不会有真实数据**。它是给「这台机器跑不了 Electron」
+> 时用的降级入口，不是第二条运行路径 —— 打包产物是 `file://`，不会加载该垫片。
 
 ## 打包
 

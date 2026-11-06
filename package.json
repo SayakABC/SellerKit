@@ -4,8 +4,13 @@
   "description": "SellerKit - Template Copy Tool",
   "license": "UNLICENSED",
   "main": "dist/electron/main.js",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && tsc -p tsconfig.electron.json && electron .\"",
+    "dev:web": "vite",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "build:minimal": "MODULE_PROFILE=minimal npm run build",
     "build:standard": "MODULE_PROFILE=standard npm run build",

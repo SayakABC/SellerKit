@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SellerKit 品牌标识规范</title>
+    <link rel="icon" type="image/svg+xml" href="logo-icon.svg" />
+    <style>
+      :root[data-theme='dark'] {
+        --bg: #0f1115;
+        --surface: #191c22;
+        --surface-2: #212630;
+        --border: #2b303a;
+        --border-strong: #3a414d;
+        --text: #e6e8ec;
+        --muted: #9aa1ad;
+        --faint: #6c7480;
+        --sig: #8ca0ff;
+        --mark: #e4e7eb;
+        --ok: #4ade80;
+        --no: #f87171;
+      }
+      :root[data-theme='light'] {
+        --bg: #eff1f5;
+        --surface: #ffffff;
+        --surface-2: #f7f9fb;
+        --border: #e6e9ef;
+        --border-strong: #d6dbe4;
+        --text: #1f2328;
+        --muted: #666d79;
+        --faint: #8a909a;
+        --sig: #5b74f0;
+        --mark: #2b2f36;
+        --ok: #15803d;
+        --no: #dc2626;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          'PingFang SC', 'Microsoft YaHei', sans-serif;
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.65;
+        font-size: 13px;
+      }
+      .wrap {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 40px 28px 80px;
+      }
+      .top {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding-bottom: 22px;
+        border-bottom: 1px solid var(--border);
+      }
+      .top img {
+        width: 44px;
+        height: 44px;
+        flex: none;
+      }
+      .top h1 {
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .top p {
+        margin: 2px 0 0;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .top .spacer {
+        flex: 1;
+      }
+      button.theme {
+        height: 28px;
+        padding: 0 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--text);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button.theme:hover {
+        border-color: var(--border-strong);
+      }
+      section {
+        margin-top: 44px;
+      }
+      h2 {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 6px;
+      }
+      .lead {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin: 0 0 18px;
+        max-width: 78ch;
+      }
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+      .g3 {
+        grid-template-columns: repeat(3, 1fr);
+      }
+      .g4 {
+        grid-template-columns: repeat(4, 1fr);
+      }
+      .g2 {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      .card h3 {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0 0 5px;
+      }
+      .card p {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .tag {
+        display: inline-block;
+        font-size: 10.5px;
+        padding: 1px 7px;
+        border-radius: 6px;
+        background: var(--surface-2);
+        color: var(--muted);
+        border: 1px solid var(--border);
+      }
+      .stage {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        min-height: 132px;
+        padding: 16px;
+      }
+      .stage--light {
+        background: #eff1f5;
+        border-color: #e6e9ef;
+      }
+      .stage--dark {
+        background: #191c22;
+        border-color: #2b303a;
+      }
+      .stage img {
+        display: block;
+      }
+      .cap {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .hero {
+        display: flex;
+        gap: 24px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .hero .stage {
+        width: 230px;
+        min-height: 230px;
+      }
+      .hero img.big {
+        width: 160px;
+        height: 160px;
+      }
+      .hero .txt {
+        flex: 1;
+        min-width: 280px;
+      }
+      .hero .txt p {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin: 0 0 10px;
+      }
+      .hero .txt ul {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .sk-mark {
+        display: block;
+        width: 76px;
+        height: 76px;
+        color: var(--mark);
+        --sk-signal: var(--sig);
+      }
+      .swatches {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+      .sw {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        background: var(--surface);
+      }
+      .sw .chip {
+        height: 78px;
+      }
+      .sw .info {
+        padding: 11px 13px;
+      }
+      .sw .info b {
+        font-size: 12.5px;
+        font-weight: 600;
+        display: block;
+      }
+      .sw .info code {
+        font:
+          11px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: var(--sig);
+      }
+      .sw .info span {
+        display: block;
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      th {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--muted);
+        background: var(--surface-2);
+      }
+      td code {
+        font:
+          11.5px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: var(--sig);
+      }
+      .construct {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      .construct svg {
+        width: 232px;
+        height: 232px;
+        flex: none;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      .rules {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .rule {
+        display: flex;
+        gap: 10px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        font-size: 12.5px;
+      }
+      .rule .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+        margin-top: 6px;
+      }
+      .rule.yes .dot {
+        background: var(--ok);
+      }
+      .rule.no .dot {
+        background: var(--no);
+      }
+      .rule b {
+        font-weight: 600;
+        display: block;
+        margin-bottom: 2px;
+      }
+      .rule span {
+        color: var(--muted);
+      }
+      pre {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow: auto;
+        font:
+          11.5px/1.7 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: var(--text);
+        margin: 0;
+      }
+      .note {
+        margin-top: 14px;
+        padding: 11px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface-2);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer {
+        margin-top: 52px;
+        padding-top: 18px;
+        border-top: 1px solid var(--border);
+        font-size: 11.5px;
+        color: var(--faint);
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      @media (max-width: 760px) {
+        .g3,
+        .g4,
+        .g2,
+        .swatches,
+        .rules {
+          grid-template-columns: 1fr 1fr;
+        }
+        .hero .stage {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      style="position: absolute; width: 0; height: 0"
+      aria-hidden="true"
+    >
+      <symbol id="mk" viewBox="0 0 64 64">
+        <g
+          fill="none"
+          stroke="currentColor"
+          stroke-width="10"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27" />
+          <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16" />
+        </g>
+        <rect x="27" y="26" width="10" height="10" rx="2.5" fill="var(--sk-signal, #5B74F0)" />
+      </symbol>
+    </svg>
+    <div class="wrap">
+      <div class="top">
+        <img src="logo-icon.svg" alt="SellerKit 图标" />
+        <div>
+          <h1>SellerKit 品牌标识规范</h1>
+          <p>插槽 S · v1.0 · 2026-11-06 · 已接入项目 · 与 --wb-* 设计令牌同源</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="theme" id="tg" type="button">切换主题</button>
+      </div>
+
+      <section>
+        <h2>01 · 概念</h2>
+        <p class="lead">
+          符号从项目自身长出来，不用通用电商意象。识别靠形状，不靠颜色；颜色只是增强。
+        </p>
+        <div class="grid g3">
+          <div class="card">
+            <span class="tag">Seller / SellerKit</span>
+            <h3>一笔 S</h3>
+            <p>单条连续笔画构成字母 S，一笔到底、无装饰，小尺寸仍能认出轮廓。</p>
+          </div>
+          <div class="card">
+            <span class="tag">宿主 + UI 岛</span>
+            <h3>中段插槽</h3>
+            <p>S 的腰部断开 10 单位，嵌入一块独立模块，对应「可插拔模块 / 市场 UI 岛」的架构。</p>
+          </div>
+          <div class="card">
+            <span class="tag">导入 → 对账</span>
+            <h3>一条流水线</h3>
+            <p>从右上入、经中段、向左下出的走向，呼应发货台的数据流，也顺带形成方向感。</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>02 · 主标与变体</h2>
+        <p class="lead">
+          应用图标固定不随主题反相（Dock / 桌面辨识要稳定）；界面内联标才跟随主题。本项目侧栏与
+          「设置 › 关于」用的是<b>应用图标</b>，故不反相。
+        </p>
+        <div class="hero">
+          <div class="stage stage--light">
+            <img class="big" src="logo-icon.svg" alt="应用图标" />
+          </div>
+          <div class="txt">
+            <p>
+              <b>应用图标</b> · 石墨圆角方底 + 白色 S + 靛色模块。圆角 16/64 = 25%，与侧栏
+              <code>rounded-lg</code> 的 8px 同源。
+            </p>
+            <ul>
+              <li>浅色 / 深色桌面上用同一份，不切换</li>
+              <li>底板带 1px、16% 白描边，避免深色 Dock 上糊成一块</li>
+              <li>白色笔画对底板 13.44:1；模块靛 3.33:1（图形元素达标）</li>
+            </ul>
+          </div>
+        </div>
+        <div class="grid g4" style="margin-top: 12px">
+          <div>
+            <div class="stage stage--light">
+              <svg class="sk-mark" style="--sk-signal: #5b74f0; color: #2b2f36">
+                <use href="#mk" />
+              </svg>
+            </div>
+            <div class="cap">界面标 · 浅色主题</div>
+          </div>
+          <div>
+            <div class="stage stage--dark">
+              <svg class="sk-mark" style="--sk-signal: #8ca0ff; color: #e4e7eb">
+                <use href="#mk" />
+              </svg>
+            </div>
+            <div class="cap">界面标 · 深色主题</div>
+          </div>
+          <div>
+            <div class="stage stage--dark">
+              <svg class="sk-mark" style="--sk-signal: #ffffff; color: #ffffff">
+                <use href="#mk" />
+              </svg>
+            </div>
+            <div class="cap">单色反白 · 断口自然合拢</div>
+          </div>
+          <div>
+            <div class="stage stage--light">
+              <svg class="sk-mark" style="--sk-signal: #2b2f36; color: #2b2f36">
+                <use href="#mk" />
+              </svg>
+            </div>
+            <div class="cap">单色实心 · 印刷 / 雕刻</div>
+          </div>
+        </div>
+        <div class="note">
+          单色降级是有意设计：模块与笔画同色时，断口被填满，符号退化为一个干净的
+          S。传真、单色印刷、托盘图标都可用，概念不会丢失。
+        </div>
+      </section>
+
+      <section>
+        <h2>03 · 构造网格</h2>
+        <p class="lead">全部几何基于 64 × 64 单位网格，任意尺寸等比缩放，不单独重画。</p>
+        <div class="construct">
+          <svg viewBox="0 0 232 232" role="img" aria-label="64 单位构造网格">
+            <g transform="translate(20 20) scale(3)">
+              <rect
+                x="0"
+                y="0"
+                width="64"
+                height="64"
+                rx="16"
+                fill="none"
+                stroke="var(--border-strong)"
+                stroke-width="0.33"
+              />
+              <g stroke="var(--border)" stroke-width="0.18">
+                <path
+                  d="M 8 0 V 64 M 16 0 V 64 M 24 0 V 64 M 32 0 V 64 M 40 0 V 64 M 48 0 V 64 M 56 0 V 64"
+                />
+                <path
+                  d="M 0 8 H 64 M 0 16 H 64 M 0 24 H 64 M 0 32 H 64 M 0 40 H 64 M 0 48 H 64 M 0 56 H 64"
+                />
+              </g>
+              <g
+                fill="none"
+                stroke="var(--mark)"
+                stroke-width="10"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27" />
+                <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16" />
+              </g>
+              <rect x="27" y="26" width="10" height="10" rx="2.5" fill="var(--sig)" />
+            </g>
+          </svg>
+          <div style="flex: 1; min-width: 300px">
+            <table>
+              <thead>
+                <tr>
+                  <th>参数</th>
+                  <th>值（64 网格）</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>底板圆角</td>
+                  <td><code>rx = 16</code></td>
+                  <td>25% 边长，仅应用图标使用</td>
+                </tr>
+                <tr>
+                  <td>笔画宽度</td>
+                  <td><code>10</code></td>
+                  <td>圆头圆角，两段路径</td>
+                </tr>
+                <tr>
+                  <td>转折半径</td>
+                  <td><code>6</code></td>
+                  <td>上、下两个 C 形弯</td>
+                </tr>
+                <tr>
+                  <td>中段断口</td>
+                  <td><code>x 27 → 37</code></td>
+                  <td>10 单位，与笔画等宽</td>
+                </tr>
+                <tr>
+                  <td>模块方块</td>
+                  <td><code>10 × 10, rx 2.5</code></td>
+                  <td>居中 (32, 31)</td>
+                </tr>
+                <tr>
+                  <td>符号占位</td>
+                  <td><code>x 11–55, y 11–51</code></td>
+                  <td>四边留 11–13 单位</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>04 · 配色</h2>
+        <p class="lead">
+          主色直接取现有 <code>--wb-*</code> 令牌，只新增一个信号色；信号色不作为文字色使用。
+        </p>
+        <div class="swatches">
+          <div class="sw">
+            <div class="chip" style="background: #2b2f36"></div>
+            <div class="info">
+              <b>Graphite 石墨</b><code>#2B2F36</code
+              ><span>底板 / 浅色主题笔画 · = --wb-primary</span>
+            </div>
+          </div>
+          <div class="sw">
+            <div class="chip" style="background: #ffffff; border-bottom: 1px solid #e6e9ef"></div>
+            <div class="info">
+              <b>Paper 反白</b><code>#FFFFFF</code><span>图标 S 笔画 · 对底板 13.44:1</span>
+            </div>
+          </div>
+          <div class="sw">
+            <div class="chip" style="background: #5b74f0"></div>
+            <div class="info">
+              <b>Signal 信号靛 · 浅</b><code>#5B74F0</code
+              ><span>模块块 · 对石墨 3.33:1 / 对画布 3.57:1</span>
+            </div>
+          </div>
+          <div class="sw">
+            <div class="chip" style="background: #8ca0ff"></div>
+            <div class="info">
+              <b>Signal 信号靛 · 深</b><code>#8CA0FF</code
+              ><span>深色主题模块 · 对深表面 6.98:1</span>
+            </div>
+          </div>
+          <div class="sw">
+            <div class="chip" style="background: #5a6472"></div>
+            <div class="info">
+              <b>Slate 冷灰</b><code>#5A6472</code
+              ><span>字标 Kit · = --wb-accent · 对画布 5.31:1</span>
+            </div>
+          </div>
+          <div class="sw">
+            <div class="chip" style="background: #eff1f5; border-bottom: 1px solid #e6e9ef"></div>
+            <div class="info">
+              <b>Canvas 画布</b><code>#EFF1F5</code><span>浅色背景 · = --wb-bg</span>
+            </div>
+          </div>
+        </div>
+        <div class="note">
+          按 WCAG 1.4.11，非文本图形元素门槛为 3:1 —— 信号靛作为「模块」达标；但 3.57:1 低于正文
+          4.5:1，因此禁止用它排文字。深色主题下笔画取 <code>--wb-primary</code> 的冷白值
+          <code>#E4E7EB</code>。
+        </div>
+      </section>
+
+      <section>
+        <h2>05 · 字标与组合</h2>
+        <p class="lead">
+          字标沿用项目系统字体栈；<b>Seller</b> 用主文字色 600，<b>Kit</b> 用冷灰
+          400，形成两档而非两种颜色。
+        </p>
+        <div class="grid g2">
+          <div>
+            <div class="stage stage--light" style="min-height: 150px">
+              <img src="logo-horizontal.svg" alt="横版组合标" width="184" height="48" />
+            </div>
+            <div class="cap">横版 · 侧栏展开态 / 关于页 / 文档页眉</div>
+          </div>
+          <div>
+            <div class="stage stage--light" style="min-height: 150px">
+              <img src="logo-vertical.svg" alt="竖版组合标" width="160" height="104" />
+            </div>
+            <div class="cap">竖版 · 启动屏 / 安装包背景</div>
+          </div>
+        </div>
+        <div class="note">
+          字标目前在 SVG 中以
+          <code>&lt;text&gt;</code>
+          呈现，界面内使用与项目字体栈一致；若要用于对外印刷、市场物料或跨平台绝对一致，需先转曲为路径。当前资产尚未转曲。
+        </div>
+      </section>
+
+      <section>
+        <h2>06 · 留白、最小尺寸与尺寸阶梯</h2>
+        <div class="grid g2">
+          <div class="card">
+            <h3>安全留白</h3>
+            <p>
+              四周净空 ≥ 1 个模块方块宽度（10/64 ≈ 16% 边长），最小不低于
+              8px。横版组合标中，标志与字标间距 = 12px（40px 标志时）。
+            </p>
+          </div>
+          <div class="card">
+            <h3>最小尺寸</h3>
+            <p>
+              完整版（带断口与模块）不低于 32px；16–24px 一律换用
+              <code>logo-mark-sm.svg</code>，断口合并、模块省略，避免细部糊成噪点。
+            </p>
+          </div>
+        </div>
+        <div
+          class="stage stage--light"
+          style="
+            margin-top: 12px;
+            gap: 44px;
+            min-height: 110px;
+            justify-content: center;
+            flex-wrap: wrap;
+          "
+        >
+          <div style="text-align: center">
+            <svg
+              class="sk-mark"
+              style="
+                width: 16px;
+                height: 16px;
+                margin: 0 auto;
+                --sk-signal: #2b2f36;
+                color: #2b2f36;
+              "
+            >
+              <use href="#mk" />
+            </svg>
+            <div class="cap">16px</div>
+          </div>
+          <div style="text-align: center">
+            <svg
+              class="sk-mark"
+              style="
+                width: 24px;
+                height: 24px;
+                margin: 0 auto;
+                --sk-signal: #2b2f36;
+                color: #2b2f36;
+              "
+            >
+              <use href="#mk" />
+            </svg>
+            <div class="cap">24px</div>
+          </div>
+          <div style="text-align: center">
+            <svg
+              class="sk-mark"
+              style="
+                width: 32px;
+                height: 32px;
+                margin: 0 auto;
+                --sk-signal: #5b74f0;
+                color: #2b2f36;
+              "
+            >
+              <use href="#mk" />
+            </svg>
+            <div class="cap">32px</div>
+          </div>
+          <div style="text-align: center">
+            <svg
+              class="sk-mark"
+              style="
+                width: 48px;
+                height: 48px;
+                margin: 0 auto;
+                --sk-signal: #5b74f0;
+                color: #2b2f36;
+              "
+            >
+              <use href="#mk" />
+            </svg>
+            <div class="cap">48px</div>
+          </div>
+          <div style="text-align: center">
+            <svg
+              class="sk-mark"
+              style="
+                width: 64px;
+                height: 64px;
+                margin: 0 auto;
+                --sk-signal: #5b74f0;
+                color: #2b2f36;
+              "
+            >
+              <use href="#mk" />
+            </svg>
+            <div class="cap">64px</div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>07 · 用法边界</h2>
+        <div class="rules">
+          <div class="rule yes">
+            <span class="dot"></span>
+            <div>
+              <b>允许 · 主题化内联</b
+              ><span
+                >界面内用内联 SVG，<code>currentColor</code> 取 --wb-primary，模块取
+                --sk-signal。</span
+              >
+            </div>
+          </div>
+          <div class="rule yes">
+            <span class="dot"></span>
+            <div><b>允许 · 单色降级</b><span>模块与笔画同色，断口自然合拢为完整 S。</span></div>
+          </div>
+          <div class="rule yes">
+            <span class="dot"></span>
+            <div>
+              <b>允许 · 等比缩放</b><span>只改 width/height，不改 viewBox 与路径比例。</span>
+            </div>
+          </div>
+          <div class="rule yes">
+            <span class="dot"></span>
+            <div>
+              <b>允许 · 固定色应用图标</b
+              ><span>Dock、安装包、任务栏一律用 logo-icon.svg，不随主题换色。</span>
+            </div>
+          </div>
+          <div class="rule no">
+            <span class="dot"></span>
+            <div><b>禁止 · 拉伸或压扁</b><span>不得单独改宽高比，S 的弯折角度会失真。</span></div>
+          </div>
+          <div class="rule no">
+            <span class="dot"></span>
+            <div><b>禁止 · 重绘笔画</b><span>不得改线宽、转折半径、断口宽度或圆头端点。</span></div>
+          </div>
+          <div class="rule no">
+            <span class="dot"></span>
+            <div>
+              <b>禁止 · 换色 / 加渐变投影</b
+              ><span>不用品牌色之外的填充，不加投影、渐变、描边发光。</span>
+            </div>
+          </div>
+          <div class="rule no">
+            <span class="dot"></span>
+            <div><b>禁止 · 信号靛排字</b><span>3.57:1 低于正文 AA 门槛，只作图形块。</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>08 · 资产与接入落地</h2>
+        <div class="grid g2" style="margin-bottom: 14px">
+          <div class="card">
+            <h3>矢量资产</h3>
+            <p>
+              logo-icon.svg · logo-appicon.svg（1024 源）· logo-mark.svg（主题化）·
+              logo-mark-sm.svg（≤24px）· logo-tray-template.svg（macOS 托盘）· logo-horizontal.svg ·
+              logo-vertical.svg
+            </p>
+          </div>
+          <div class="card">
+            <h3>当前状态 · 已接入</h3>
+            <p>
+              应用图标位图、侧栏品牌位、「设置 › 关于」、macOS 托盘、页面 favicon 与三个 Chrome
+              扩展图标已全部换成「插槽 S」。<b>build/ 里的位图不要手改</b>， 一律跑
+              <code>npm run icons</code>。
+            </p>
+          </div>
+        </div>
+        <p class="lead">落地位置（2026-11-06）：</p>
+        <pre>
+① 应用图标：scripts/gen-icon.js 从 brand/logo-appicon.svg 渲染
+   → build/icon.png、build/icons/png/*、icon.icns、icon.ico
+   → npm run icons 可复现，逐产物字节一致
+
+② 界面：新增 src/core/components/AppLogo.vue 作为唯一引用点
+   → AppShell.vue 侧栏「SK」、SettingsModal.vue 关于区「SK」都换成 AppLogo
+
+③ 方案调整：界面用固定色「应用图标」，不是透明底主题化 mark
+   → 未新增 --wb-logo-signal，也未改 WB_THEME_TOKENS
+   → logo-mark.svg 保留给将来真正需要主题化的内联场景
+
+④ macOS 托盘：单独一份透明底单色模板图（1x 18px / @2x 36px）
+   → main.ts 按平台分流，darwin 不 resize、保留 @2x 表示
+   → electron-builder.yml 的 extraResources 同时带两份
+
+⑤ favicon 与 Chrome 扩展
+   → index.html 引用 brand/logo-icon.svg，Vite 按 base:'./' 重写成相对路径
+   → 兄弟仓库三个 MV3 扩展补 icons / action.default_icon，并升 patch 版本</pre>
+        <div class="note">
+          两个踩坑：① CDP 截图只给 <code>omitBackground: true</code> 仍输出
+          RGB，圆角四角会被合成白角； 必须再叠加
+          <code>Emulation.setDefaultBackgroundColorOverride</code>。② macOS
+          <code>setTemplateImage(true)</code> 只按 alpha 渲染剪影，实心底板会变成黑 / 白方块、S
+          消失； 模板图还得把断口加大到 20 单位，否则圆头端点会把断口填满又变回连续笔画。
+          <b>分发注意</b>：源文件变了 ≠ 用户机器上变了 —— 安装包要重打包重装；已加载的 Chrome
+          扩展要指向新版本目录或刷新（Chrome 以版本号为唯一更新信号）。
+        </div>
+      </section>
+
+      <footer>
+        <span>SellerKit 品牌标识规范 · 插槽 S · v1.0</span
+        ><span>设计依据：AGENTS.md 架构基线 / src/styles/index.css 设计令牌</span>
+      </footer>
+    </div>
+    <script>
+      document.getElementById('tg').addEventListener('click', function () {
+        var r = document.documentElement;
+        r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark';
+        this.textContent = r.dataset.theme === 'dark' ? '切换主题' : '切换主题';
+      });
+    </script>
+  </body>
+</html>

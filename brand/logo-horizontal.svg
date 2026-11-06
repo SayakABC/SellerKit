@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 48" width="184" height="48" role="img" aria-labelledby="title desc">
+  <title id="title">SellerKit 横版组合标</title>
+  <desc id="desc">标志在左，SellerKit 字标在右，用于浅色背景</desc>
+  <g transform="translate(2 4) scale(0.625)">
+    <g fill="none" stroke="#2B2F36" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27"/>
+      <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16"/>
+    </g>
+    <rect x="27" y="26" width="10" height="10" rx="2.5" fill="#5B74F0"/>
+  </g>
+  <text x="52" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="23" font-weight="600" letter-spacing="-0.5" fill="#1F2328">Seller<tspan fill="#5A6472" font-weight="400">Kit</tspan></text>
+</svg>

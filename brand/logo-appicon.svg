@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">SellerKit 应用图标 1024 源文件</title>
+  <desc id="desc">用于导出 icon.png / icon.icns / icon.ico 的矢量源，内容已留出约 17% 安全边距</desc>
+  <rect x="0" y="0" width="1024" height="1024" rx="256" fill="#2B2F36"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="248" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="16"/>
+  <g transform="scale(16)" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27"/>
+    <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16"/>
+  </g>
+  <rect x="432" y="416" width="160" height="160" rx="40" fill="#5B74F0" stroke="#2B2F36" stroke-width="16"/>
+</svg>

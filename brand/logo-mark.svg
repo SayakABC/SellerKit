@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="title desc">
+  <title id="title">SellerKit 主题化标志</title>
+  <desc id="desc">透明底，笔画取 currentColor，模块取 --sk-signal。仅供内联 SVG 使用以跟随主题</desc>
+  <g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27"/>
+    <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16"/>
+  </g>
+  <rect x="27" y="26" width="10" height="10" rx="2.5" fill="var(--sk-signal, #5B74F0)"/>
+</svg>

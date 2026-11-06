@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="title desc">
+  <title id="title">SellerKit macOS 菜单栏托盘模板图</title>
+  <desc id="desc">透明底、纯黑单色的 S 轮廓，腰部保留可见断口；供 macOS 模板图（Template Image）按 alpha 渲染剪影</desc>
+  <g fill="none" stroke="#000000" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 56 12 H 18 A 8 8 0 0 0 10 20 V 24 A 8 8 0 0 0 18 32 H 24"/>
+    <path d="M 44 32 H 46 A 8 8 0 0 1 54 40 V 44 A 8 8 0 0 1 46 52 H 8"/>
+  </g>
+</svg>

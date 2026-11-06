@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="title desc">
+  <title id="title">SellerKit 应用图标</title>
+  <desc id="desc">石墨色圆角方形底板，白色 S 形笔画中段断开，嵌入一块靛色模块</desc>
+  <rect x="0" y="0" width="64" height="64" rx="16" fill="#2B2F36"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="15.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="1"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 50 16 H 22 A 6 6 0 0 0 16 22 V 25 A 6 6 0 0 0 22 31 H 27"/>
+    <path d="M 37 31 H 43 A 6 6 0 0 1 49 37 V 40 A 6 6 0 0 1 43 46 H 16"/>
+  </g>
+  <rect x="27" y="26" width="10" height="10" rx="2.5" fill="#5B74F0" stroke="#2B2F36" stroke-width="1"/>
+</svg>

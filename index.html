@@ -26,6 +26,13 @@
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173 http://localhost:5173 http://127.0.0.1:5173; frame-src sk-plugin: sk-mail:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      品牌图标（2026-11-06）：单一来源 brand/logo-icon.svg，Vite 会把它当 asset
+      按 base:'./' 重写成相对路径，dev server 与 Electron loadFile 下都能加载。
+      显式指定 rel=icon 后浏览器不再盲请求 /favicon.ico（此前主窗口一直吃 404）。
+      CSP 的 img-src 已含 'self'，同源资源不受影响。
+    -->
+    <link rel="icon" type="image/svg+xml" href="./brand/logo-icon.svg" />
     <title>SellerKit</title>
     <!--
       首屏防闪白 / 防闪黑：见 public/theme-init.js 头部说明（为何不能再写成内联脚本）。

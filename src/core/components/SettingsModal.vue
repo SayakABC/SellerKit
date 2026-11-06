@@ -62,11 +62,7 @@
             <!-- 关于 -->
             <section>
               <div class="flex items-center gap-3 mb-2">
-                <div
-                  class="w-9 h-9 rounded-lg bg-[var(--wb-primary)] flex items-center justify-center text-[var(--wb-primary-contrast)] text-sm font-bold"
-                >
-                  SK
-                </div>
+                <AppLogo :size="36" />
                 <div>
                   <div class="text-sm font-medium text-[var(--wb-text)]">SellerKit</div>
                   <div class="text-xs text-[var(--wb-text-muted)]">
@@ -203,6 +199,7 @@ import type { BuiltinPluginManager } from '../plugin';
 import { toast } from '../services/toast';
 import { ipc } from '../services/ipc';
 import type { SettingPanelDef, UiIslandSettingPanelDef } from '../plugin/sdk';
+import AppLogo from './AppLogo.vue';
 import PluginCenter from './PluginCenter.vue';
 import IslandSettingsPanel from './IslandSettingsPanel.vue';
 

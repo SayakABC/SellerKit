@@ -26,11 +26,12 @@
           ]"
         >
           <button
-            class="w-8 h-8 rounded-lg bg-[var(--wb-primary)] flex items-center justify-center text-[var(--wb-primary-contrast)] text-xs font-bold shadow-sm flex-shrink-0 hover:opacity-90 transition-opacity"
+            class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 hover:opacity-80 transition-opacity"
             :title="`SellerKit v${appVersion}`"
+            :aria-label="`SellerKit v${appVersion}，返回默认模块`"
             @click="activate(sortedMetas[0]?.id)"
           >
-            SK
+            <AppLogo :size="32" />
           </button>
           <div v-if="!collapsed" class="min-w-0 leading-tight">
             <p class="text-[13px] font-semibold text-[var(--wb-text)] tracking-tight">SellerKit</p>
@@ -376,6 +377,7 @@
 <script setup lang="ts">
 import { shallowRef, ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { createBuiltinPluginManager } from './plugin';
+import AppLogo from './components/AppLogo.vue';
 import TitleBar from './components/TitleBar.vue';
 import ToastHost from './components/ToastHost.vue';
 import CommandPalette from './components/CommandPalette.vue';

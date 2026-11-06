@@ -1,5 +1,5 @@
 <template>
-  <div class="wb-page pk-view" :class="{ 'is-embedded': embedded }">
+  <div ref="rootEl" class="wb-page pk-view" :class="{ 'is-embedded': embedded }">
     <!-- 页头：**只在独立页**（`embedded=false`）出现。内嵌进「发货台 › 拿货」时整块不渲染 ——
          标题由外层页签交代，而"导出 / 更多"两个动作移到下面的精简条上（不能随页头一起消失）。
          ⚠️ 2026-10-17：左导航的「拣货」一级入口已摘（同一份清单在「今天 › 拿货 › 按厂家」里，
@@ -325,12 +325,12 @@
       <template v-else>
         <p class="wb-empty__title">一行订单都没扫到</p>
         <p class="wb-empty__desc">
-          这批条件下一行订单都没扫到 —— 若还没导过订单，去「发货台」的「待发货」页采集（芒果为主），
+          这批条件下一行订单都没扫到 —— 若还没导过订单，去「发货台」的「订单」页采集（芒果为主），
           或展开那里的「Excel 导入（备选）」导一份订单报表。
         </p>
         <div class="wb-empty__actions">
           <button class="wb-btn wb-btn--primary" data-act="empty-import" @click="goImport">
-            去「待发货」页
+            去「订单」页
           </button>
         </div>
       </template>
@@ -396,6 +396,7 @@
               :class="{
                 'is-off': r.ignored,
                 'is-dragging': dragCode === r.styleCode && dragFrom === c.supplierId,
+                'is-focus': !!focusKey && r.key === focusKey,
               }"
               :title="rowTitle(r)"
               :draggable="moveAction && r.styleCode ? true : undefined"
@@ -867,6 +868,8 @@ const props = withDefaults(
     moveAction?: boolean;
     fixAction?: boolean;
     assignAction?: boolean;
+    /** 要**高亮并滚到眼前**的款色行键（`lib/picking.colorGroupKey` 的产物；'' = 不高亮） */
+    focusKey?: string;
   }>(),
   {
     embedded: false,
@@ -880,8 +883,11 @@ const props = withDefaults(
     moveAction: false,
     fixAction: false,
     assignAction: false,
+    focusKey: '',
   }
 );
+
+
 
 /**
  * `go-import`  空态里的「去导订单」（内嵌时外层接管；本组件不认识页签，只发一个意图）
@@ -957,6 +963,34 @@ const thumbs = ref<Record<string, string>>({});
 
 const EMPTY: PickingSummary = aggregatePicking([], { today: '' });
 const summary = ref<PickingSummary>(EMPTY);
+
+/**
+ * 「带着一款色进来」（2026-11-05，来自发货台「订单」屏的「带款色去拿货」）。
+ *
+ * 只做两件事：把那一行**高亮**（`.is-focus`）+ **滚到眼前**。不做过滤 ——
+ * 过滤会把同一家厂里其它也要拿的款色藏起来，而用户来这一页是"一次把几家拿完"。
+ *
+ * ⚠️ 找不到对应行时**静默**：款色可能已经拿齐（`shownRows` 只列还差 > 0 的行）或
+ *    还在草稿里 —— 这时页头的说明条仍然写着"来自哪一单、还差几件"，用户不会没头绪。
+ *    给它弹一个"找不到"的提示反而更吵。
+ * ⚠️ 滚动的时机等在清单渲染完（`nextTick`）；mount 时清单还没生成，所以要 immediate + 每次重算后再试。
+ */
+const rootEl = ref<HTMLElement | null>(null);
+function scrollToFocus(): void {
+  const k = props.focusKey;
+  if (!k || !rootEl.value) return;
+  const el = [...rootEl.value.querySelectorAll<HTMLElement>('[data-act="pu-srow"]')].find(
+    (x) => x.getAttribute('data-key') === k
+  );
+  el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+watch(
+  () => [props.focusKey, props.refreshToken, summary.value.groups.length] as const,
+  () => {
+    void nextTick(scrollToFocus);
+  },
+  { immediate: true }
+);
 
 /* ---- 未归类（2026-10-20）------------------------------------------------------------
  * 这些订单行没有款色归属：件数**照常进统计**（排除 = 悄悄少算，远比如实标注危险），
@@ -1432,7 +1466,7 @@ const emptyReason = computed<{ text: string; widen: boolean }>(() => {
     return {
       text:
         `都被「已终结」排除了：这 ${fin} 行是关闭 / 已完成的单，拣了也白拣，放宽条件也变不出来。` +
-        `若你确认它们还没终结，去「发货台」的「待发货」页展开「Excel 导入（备选）」核一下那份报表有没有「订单状态」列 ——` +
+        `若你确认它们还没终结，去「发货台」的「订单」页展开「Excel 导入（备选）」核一下那份报表有没有「订单状态」列 ——` +
         `没有这一列就判不出终结，也就不会误剔。`,
       widen: false,
     };
@@ -2471,6 +2505,15 @@ onMounted(async () => {
 /* 六点把手（评审 P1：把"这行能拖"从悬停 tooltip 里搬到界面上）。
    用 background 平铺画点，不引入图标组件 —— 它是**装饰**，读屏也不需要它（aria-hidden）。
    颜色走一个局部变量：默认取边框色（淡到扫视时不抢款名），行悬浮才提到次要文字色（可操作感）。 */
+/* 「带着款色进来」的那一行：主色描边 + 微微抬起。
+   只做**高亮**、不做过滤 —— 过滤会把同一家厂里其它也要拿的款色藏起来，
+   而用户来这一页是"一次把几家拿完"，不是"只看这一款"。
+   ⚠️ `inset` 阴影而不是 border：border 会改变行高，一屏几十行会整体跳一下。 */
+.pu-srow.is-focus {
+  box-shadow: inset 0 0 0 2px var(--wb-primary);
+  border-radius: var(--wb-radius-sm);
+}
+
 .pu-srow__grip {
   --grip-dot: var(--wb-border-strong);
 

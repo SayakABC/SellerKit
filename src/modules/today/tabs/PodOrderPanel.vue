@@ -164,7 +164,7 @@
           <template v-if="styleTotals.pieces <= 0">
             <p class="wb-empty__title">现在没有「等我发货」的订单</p>
             <p class="wb-empty__desc">
-              没有订单就没有要印的料 —— 先去「待发货」把单弄进来（芒果采集为主）。
+              没有订单就没有要印的料 —— 先去「订单」把单弄进来（芒果采集为主）。
             </p>
           </template>
           <template v-else>

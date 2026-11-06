@@ -7,6 +7,23 @@
 
     <p v-if="error" class="wb-notice wb-notice--error" data-act="pu-error">{{ error }}</p>
 
+    <!-- 「带着一款色进来」（2026-11-05，来自发货台「订单」屏的「带款色去拿货」）。
+         这一页是几十行款色宫格，只说"去拿货"等于把人丢进去自己找；所以说明条在这里交代
+         **哪一单、哪一款色、还差几件**，并把那一行高亮 + 滚到眼前（`focus-key`）。
+         ⚠️ 不做过滤：过滤会把同一家厂里其它也要拿的款色藏起来（用户是来"一次拿完"的）。
+         ⚠️ 不自动清空：清空了他就不知道自己为什么停在这一页了；要清就点「清除」。 -->
+    <p v-if="purchaseFocus" class="pu-focus" data-act="pu-focus">
+      <span class="pu-focus__tag">来自订单</span>
+      <b class="wb-mono">{{ purchaseFocus.orderNo || '（无单号）' }}</b>
+      <span class="pu-focus__key">{{ focusKeyText }}</span>
+      <span v-if="purchaseFocus.remaining > 0" class="pu-focus__gap">
+        还差 {{ purchaseFocus.remaining }} 件
+      </span>
+      <button class="wb-link" type="button" data-act="pu-focus-clear" @click="clearFocus">
+        清除
+      </button>
+    </p>
+
     <!-- 按单核对（2026-10-22 新增）：回答"拿完货了，哪些单可以发了"。
          以前这一页只能看到**款色码**级别的缺口 —— 拿齐的款色直接从卡上消失，没有"已齐"可回看，
          更说不出是哪张订单齐了（拿货明细没有订单号）。现在拿货单会把"这 N 件补给哪一行订单行"
@@ -179,7 +196,8 @@
       :supplier-orders="ordersBySupplier"
       :ignore-reasons="ignoreReasonMap"
       :supplier-phones="phoneMap"
-      @go-import="go('queue')"
+      :focus-key="focusKeyText"
+      @go-import="go('orders')"
       @generated="onPickRows"
       @ignore="askIgnore"
       @unignore="onUnignore"
@@ -380,6 +398,7 @@ import ProductPicker from '@/modules/goods/components/ProductPicker.vue';
 import { skuMap } from '@/modules/goods/api';
 import type { IgnoreRow, PurchaseOrder, Supplier } from '@/types';
 import {
+  colorGroupKey,
   ignoreKey,
   pendingOf,
   purchaseGateOf,
@@ -418,7 +437,22 @@ import {
   submitOrder,
 } from '../purchase';
 
-const { token, go, bump } = useShipping();
+const { token, go, bump, purchaseFocus } = useShipping();
+
+/**
+ * 页头说明条上那款色的一行字（空串 = 没有来源单，说明条不渲染）。
+ * ⚠️ 高亮键与这里都用 `colorGroupKey`（`lib/picking` 的唯一实现）——
+ *    自己拼一遍 `款 · 色` 的话，哪天回落词改了就会"点过去一行都没亮"，而两边各自看起来都对。
+ */
+const focusKeyText = computed(() => {
+  const f = purchaseFocus.value;
+  return f ? colorGroupKey(f.styleCode, f.color) : '';
+});
+
+/** 用户自己关掉说明条（高亮跟着一起消失：它俩是同一件事的两个表现） */
+function clearFocus(): void {
+  purchaseFocus.value = null;
+}
 
 const loading = ref(false);
 const error = ref('');
@@ -1021,6 +1055,41 @@ watch(showCover, (open) => {
 /* 面板区自己滚（外层 `.td-panels` 是 overflow:hidden），所以这里不要 flex:1 */
 .pu-view {
   gap: 12px;
+}
+
+/* 「带着一款色进来」的说明条（2026-11-05）。
+   做成一条**常驻**的说明，不是 toast：toast 几秒就走，用户滚到半路就忘了自己在找哪一款色。
+   配色用主色（不是警告色）—— 它陈述的是"你从哪来"，不是"出错了"。 */
+.pu-focus {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--wb-radius);
+  border-left: 3px solid var(--wb-primary);
+  background: color-mix(in srgb, var(--wb-primary) 8%, transparent);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--wb-text);
+}
+
+.pu-focus__tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--wb-primary);
+  color: var(--wb-surface);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.pu-focus__key {
+  font-weight: 600;
+}
+
+.pu-focus__gap {
+  color: var(--wb-warning);
 }
 
 /* 顶部读取中提示（2026-10-17 第五轮：概览文案与「新建空白单」都撤了，页级只剩这一行） */

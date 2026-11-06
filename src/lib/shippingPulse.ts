@@ -27,6 +27,14 @@ import { isWaitingShip } from './mangoStatus';
 
 /** 一行输入（`order-shipping-rows` 投影里本层要用的那几列） */
 export interface PulseRow {
+  /**
+   * 订单明细行 id（`oi_order_items.id`；0 / 缺省 = 没有行身份）。
+   *
+   * 2026-11-05 补：`orderStage` 要把这一批行喂给 `planCoverage` 算逐行覆盖度，
+   * 而精确归属的匹配键就是它。宿主投影一直带着这个字段（`SELECT oi.id`），
+   * 只是这一层之前没声明 —— 声明了才不会再有人"顺手"用单号去 join。
+   */
+  id?: number;
   orderNo: string;
   /** 平台状态原文（`oi_orders.biz_status`） */
   bizStatus: string;
@@ -43,8 +51,25 @@ export interface PulseRow {
   /** 款编码 / 款色（清单「图案」列的两段；都空 = 还没归类） */
   styleCode?: string;
   styleColor?: string;
+  /**
+   * 订单原文色 / 尺码（2026-11-05 补）。
+   *
+   * 「订单」屏要按**行**说清"还差什么"（款 · 色 · 码 × 件数），而颜色有回落顺序
+   * （款色优先 → 订单原文色），尺码只存在于订单行上。回落顺序只在
+   * `planCoverage` 里实现一次，这里只把两个原文都递下去。
+   */
+  color?: string;
+  size?: string;
   /** 款色**身份**（`oi_style_colors.id`；0 = 未归类）—— 「图案状态」靠它判"图知道印在哪个款色上" */
   styleColorId?: number;
+  /**
+   * 订单行原始字段（报表整行保真）。
+   *
+   * ⚠️ 本层与 `orderStage` **都不读它**：件数只认 `qty` 列（缺失按 1）。
+   * 让它参与件数计算就会出现"清单说 1 件、缺口按 3 件算"的分裂（见 `orderStage` 的注释）。
+   * 声明在这里是为了让"传进来了但故意不用"成为**看得见的事实**，而不是让人以为漏了什么。
+   */
+  rawFields?: Record<string, string> | null;
 }
 
 export interface ShippingPulse {
@@ -87,10 +112,17 @@ export const PATTERN_STATE_LABEL: Record<PatternState, string> = {
 
 /** 一行 = 一个订单商品行（一单多行会出现在多行，单号重复 —— 见 `ShippingQueue.orders`） */
 export interface QueueLine {
+  /** 订单明细行 id（`oi_order_items.id`；0 = 没有行身份）—— `orderStage` 拿它 join 覆盖度 */
+  orderItemId: number;
   orderNo: string;
   shop: string;
   styleCode: string;
   styleColor: string;
+  /** 款色身份（0 = 未归类）—— 与 `patternStateOf` 同一判据来源 */
+  styleColorId: number;
+  /** 订单原文色（款色为空时 `planCoverage` 回落用它；本层不自己回落） */
+  color: string;
+  size: string;
   /** 这一行的件数（`qty` 缺失按 1，并置 `assumedQty`） */
   pieces: number;
   assumedQty: boolean;
@@ -222,10 +254,14 @@ export function shippingQueue(
     const n = typeof q === 'number' && Number.isFinite(q) && q > 0 ? Math.round(q) : 0;
     const imageId = Number(r?.imageId) || 0;
     lines.push({
+      orderItemId: Number(r?.id) || 0,
       orderNo: no,
       shop: String(r?.shop ?? ''),
       styleCode: String(r?.styleCode ?? ''),
       styleColor: String(r?.styleColor ?? ''),
+      styleColorId: Number(r?.styleColorId) || 0,
+      color: String(r?.color ?? ''),
+      size: String(r?.size ?? ''),
       pieces: n || 1,
       assumedQty: !n,
       imageId,

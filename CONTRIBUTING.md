@@ -1,13 +1,13 @@
 # 贡献指南
 
-面向**人类贡献者**。如果你是用 AI 编码助手改这个项目，请先读 [`AGENTS.md`](AGENTS.md)——
-那是架构基线与编码红线的权威来源，本文件只补充"人"的协作流程。
+本文件补充协作流程。架构要点与目录说明见 [README.md](README.md)。
 
----
-
-## 1. 环境准备
+用 AI 编码助手改这个项目？请先读 [AGENTS.md](AGENTS.md)——那是架构基线与编码红线的权威来源；
+收工前更新 [AI_PROGRESS.md](AI_PROGRESS.md)（跨设备进度台账），换设备的人才能接得上。
 
 **要求**：Node.js 22+、Python 3（`better-sqlite3` 原生模块需从源码编译）、macOS 或 Windows。
+
+## 1. 环境准备
 
 ```bash
 git clone <repo-url> && cd SellerKit
@@ -79,12 +79,7 @@ npm run build                                 # 生产构建
 
 ```bash
 npm run plugins:sandbox:smoke                 # 改了插件沙箱 → 沙箱全链路：boot → command → call → deactivate → token 拒绝
-npm run verify:docs                           # 动了 docs/ 目录、删了任何 .md、改了引用路径 → 文档引用校验
 ```
-
-> `verify:docs` 挡的是"读者点开一个不存在的文件"。这类损伤 lint 与 tsc 都看不见：
-> 删一份文档不会让任何构建失败，只会让引用者踩空。其豁免表只承接**文档正在陈述
-> "该路径不存在"**的句子（如"`core/layout/ContentHeader.vue` 从未创建"），每项必写理由。
 
 **项目当前没有 CI**，以上全部靠本地手动执行——请如实执行，不要跳过。
 
@@ -94,9 +89,9 @@ npm run verify:docs                           # 动了 docs/ 目录、删了任�
 |---|---|
 | `electron/preload.ts` / `src/types.ts` / `src/**/*-handlers.ts` | 三者构成 IPC 契约，改一处必须同步另两处；`npm run verify` 会拦，但**报错时不要把差异项塞进豁免清单** |
 | `src/styles/index.css` 的 `--wb-*` | 令牌必须浅色/深色各定义一套；改令牌名要全局同步 |
-| 色值 | 界面配色必须令牌化；**业务数据色**（如款色色卡）例外，见 `AGENTS.md` §1.6 的判定表 |
+| 色值 | 界面配色必须令牌化；**业务数据色**（如款色色卡）例外，那是数据而非主题 |
 | `modules.config.json` / `vite.config.ts` | 构建期模块裁剪链路；`src/registry.generated.ts` 是自动生成的，**禁止手改** |
-| `src/core/plugin/**` 与沙箱双端协议 | 受保护内核，改动前先读 `AGENTS.md` §4.4 与红线（沙箱协议常量必须双端同源） |
+| `src/core/plugin/**` 与沙箱双端协议 | 受保护内核，沙箱协议常量必须双端同源，改动需格外谨慎 |
 
 ---
 
@@ -117,21 +112,20 @@ npm run verify:docs                           # 动了 docs/ 目录、删了任�
 
 - [ ] 六个门禁命令全部通过（见 §3），并在 PR 描述里贴出关键输出
 - [ ] 新增/变更的行为有对应测试，或明确说明为何无法自动化（并在 PR 里写出手工验证步骤）
-- [ ] 触及 IPC 契约、主题令牌、构建裁剪链路时，已同步更新对应文档
+- [ ] 触及 IPC 契约、主题令牌、构建裁剪链路时，已同步更新受影响的代码与注释
 - [ ] 提交信息写清了**动机**与**未覆盖项**
-- [ ] 文档中的引用路径为**仓库根相对路径**，且指向的文件确实在库内（无悬空引用）
-- [ ] 用户可见的行为变更已记入 [`CHANGELOG.md`](CHANGELOG.md) 的 `[Unreleased]`
 - [ ] 若改了模块启停 / 打包范围，已确认 `node scripts/select-build.js --list` 输出符合预期
 
 ---
 
 ## 6. 发布
 
-见 [`CHANGELOG.md`](CHANGELOG.md) 的「发布流程」与「发布前检查清单」。
+发布走 GitHub Releases：修改 `package.json` 的 `version`，提交并打 `vX.Y.Z` 标签，
+然后执行 `npm run release -- --publish always`，electron-builder 会构建双平台产物并上传
+（配置见 `electron-builder.yml` 的 `publish`；`npm run release` 不带参数只打包不上传）。
 
 ---
 
 ## 7. 授权
 
-本仓库尚无 `LICENSE` 文件——**对外分发或再发布前请先与维护者确认授权安排**
-（仓库为上游 fork，需先厘清上游许可与本仓库的许可关系，不要臆造许可类型）。
+本仓库为专有软件（见 [LICENSE](LICENSE)），未获授权不得分发或再发布。

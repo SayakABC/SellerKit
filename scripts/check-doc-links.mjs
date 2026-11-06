@@ -68,6 +68,23 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DOCS = join(ROOT, 'docs');
 
+/**
+ * docs/、CHANGELOG.md 已于 2026-11-06 起不入库（见 .gitignore）——只留在开发者本机。
+ * 克隆仓库里没有这些文件，指向它们的引用（无论出自代码注释还是 AGENTS.md / README）
+ * 按设计就是「本机路径」，不算悬空：无 docs/ 时跳过这类目标；
+ * README / CONTRIBUTING / AGENTS.md / AI_PROGRESS.md 等仓库内文档之间的引用照常校验。
+ */
+const LOCAL_DOC_BASENAMES = new Set(['CHANGELOG.md', 'AGENTS.local.md']);
+const DOCS_IN_REPO = existsSync(DOCS);
+
+/** 目标是否指向「仅本机」的文档（docs/ 树、CHANGELOG.md、AGENTS.local.md） */
+function isLocalOnlyTarget(target) {
+  if (DOCS_IN_REPO) return false;
+  const segments = target.split('/').filter((s) => s && s !== '.' && s !== '..');
+  if (segments[0] === 'docs') return true;
+  return LOCAL_DOC_BASENAMES.has(segments[segments.length - 1]);
+}
+
 /** 扫描时跳过的目录：产物、依赖、AI 工具本地数据、历史归档（归档内含失效引用属正常） */
 const SKIP_DIRS = new Set([
   'node_modules',
@@ -439,6 +456,7 @@ for (const file of mdFiles) {
   for (const m of text.matchAll(MD_LINK_RE)) {
     const target = m[1];
     if (/^(https?:|mailto:|tel:|data:)/.test(target)) continue;
+    if (isLocalOnlyTarget(target)) continue;
     stats.links++;
     const abs = target.startsWith('/') ? join(ROOT, target) : resolve(dirname(file), target);
     if (!existsSync(abs)) {
@@ -448,6 +466,7 @@ for (const file of mdFiles) {
 
   for (const m of text.matchAll(PATH_TOKEN_RE)) {
     const token = m[1].replace(/^\.\//, '');
+    if (isLocalOnlyTarget(token)) continue;
     stats.tokens++;
     if (NON_REPO_HEADS.has(token.split('/')[0])) continue;
 
@@ -480,6 +499,7 @@ for (const file of codeFiles) {
   const text = readFileSync(file, 'utf8');
   for (const m of text.matchAll(DOC_TOKEN_RE)) {
     const token = m[1];
+    if (isLocalOnlyTarget(token)) continue;
     stats.codeRefs++;
     if (!existsSync(resolve(ROOT, token))) {
       errors.push({ file: relOf(file), target: token, kind: '代码注释引用的文档不存在' });

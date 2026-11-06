@@ -26,14 +26,12 @@ Thumbs.db
 .workbuddy/
 .codebuddy/
 
-# ============ AI 协作文档：**已改为入库**（R4-5 / D-07，2026-09-16 决策） ============
-# 原策略只让「对外可共享」的文档入库，导致两类实际问题：
-#   1. AGENTS.md 是编码助手的强制约定入口，不入库等于"换机器/协作即失效"；
-#   2. PLUGIN_DEVELOPMENT.md（入库）大量引用 PLUGIN_ARCHITECTURE.md / AGENTS.md（不入库），
-#      克隆仓库者必然看到指向不存在文件的悬空引用。
-# 现策略：**全部文档入库**，理由是可追溯性优先于仓库整洁度。
-#   仍保持不入库的仅：.workbuddy/ / .codebuddy/（AI 工具本地数据，非项目文档）。
-# 入库前已扫描密钥/内网 IP/凭据：无命中。
+# ============ 本地协作文档（2026-11-06 决策，取代 R4-5 / D-07 的「全部入库」） ============
+# 多人多设备开发，AI 协作上下文需要跨设备同步：AGENTS.md（规则基线）与 AI_PROGRESS.md
+# （工作进度）入库；docs/ 与 CHANGELOG.md 只留在开发者本机，不再提交。
+# 仓库文档保持 GitHub 惯例：README.md / CONTRIBUTING.md / LICENSE / AGENTS.md / AI_PROGRESS.md。
+CHANGELOG.md
+/docs/
 
 # ============ 环境变量 ============
 # 本地/生产 API 地址与潜在密钥不入库；变量模板见 .env.example

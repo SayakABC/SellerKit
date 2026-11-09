@@ -17,6 +17,7 @@ export {};
 import { dbGet, dbQuery, dbRun, dbTransaction, tableExists } from './db';
 import {
   ensureShopSchema,
+  normalizeFundAmount,
   normalizeShopScore,
   normalizeShopUrl,
   toOpenableUrl,
@@ -83,6 +84,10 @@ export interface ShopAccountUpsertInput {
   openedAt?: string;
   /** 保证金到账时间（YYYY-MM-DD；退店时填写） */
   depositReceivedAt?: string;
+  /** 资金三项（元；≥ 0；缺省 = 保持原值，0 = 清为未记录） */
+  fundAvailable?: number;
+  fundPendingSettlement?: number;
+  fundFrozen?: number;
   tags?: string;
   note?: string;
   /** 非空值覆盖；空串 = 清除该字段；缺省 = 保持原值 */
@@ -118,6 +123,10 @@ export interface ShopAccountItem {
   openedAt: string;
   /** 保证金到账时间（YYYY-MM-DD；'' = 未填写） */
   depositReceivedAt: string;
+  /** 资金三项（单位元；0 = 未记录） */
+  fundAvailable: number;
+  fundPendingSettlement: number;
+  fundFrozen: number;
   tags: string;
   note: string;
   /** 已配置的敏感字段（仅徽标，不含明文） */
@@ -202,6 +211,9 @@ interface ShopRow {
   score: number;
   opened_at: string;
   deposit_received_at: string;
+  fund_available: number;
+  fund_pending_settlement: number;
+  fund_frozen: number;
   tags: string;
   note: string;
   secret_enc: Buffer | null;
@@ -219,7 +231,9 @@ export function ensureShopAccountSchema(): void {
 
 const LIST_COLS = `s.id, s.platform, s.name, s.name_key, s.platform_shop_id, s.shop_url,
   s.shop_url_raw, s.site, s.email, s.company_id, s.ziniao_account_id, s.erp_account_id,
-  s.status, s.score, s.opened_at, s.deposit_received_at, s.tags, s.note, s.secret_keys, s.created_at, s.updated_at,
+  s.status, s.score, s.opened_at, s.deposit_received_at,
+  s.fund_available, s.fund_pending_settlement, s.fund_frozen,
+  s.tags, s.note, s.secret_keys, s.created_at, s.updated_at,
   c.name AS company_name, c.contact_phone AS company_phone, c.alipay_account AS company_alipay,
   z.account AS ziniao_account, e.account AS erp_account`;
 
@@ -443,6 +457,21 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): {
     input?.depositReceivedAt === undefined
       ? String(existing?.deposit_received_at ?? '')
       : normalizeOpenedAt(input.depositReceivedAt);
+  // 资金三项：缺省 = 保持原值；传了就走唯一的归一（负数 / 非数 / 过大一律抛可读错误）。
+  // 注意不能复用 num() 直接落库 —— 那样负数、脏值会被静默写成钱，用户看不出来。
+  const fundAvailable =
+    input?.fundAvailable === undefined
+      ? num(existing?.fund_available)
+      : normalizeFundAmount(input.fundAvailable);
+  const fundPendingSettlement =
+    input?.fundPendingSettlement === undefined
+      ? num(existing?.fund_pending_settlement)
+      : normalizeFundAmount(input.fundPendingSettlement);
+  const fundFrozen =
+    input?.fundFrozen === undefined
+      ? num(existing?.fund_frozen)
+      : normalizeFundAmount(input.fundFrozen);
+
   const tags = (optStr(input?.tags, MAX.tags) ?? String(existing?.tags ?? '')).trim();
   const note = optStr(input?.note, MAX.note) ?? String(existing?.note ?? '');
 
@@ -488,7 +517,9 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): {
       `UPDATE sk_shops SET
          platform = ?, name = ?, name_key = ?, platform_shop_id = ?, shop_url = ?, shop_url_raw = ?,
          site = ?, email = ?, company_id = ?, ziniao_account_id = ?, erp_account_id = ?,
-         status = ?, score = ?, opened_at = ?, deposit_received_at = ?, tags = ?, note = ?, secret_enc = ?, secret_keys = ?,
+         status = ?, score = ?, opened_at = ?, deposit_received_at = ?,
+         fund_available = ?, fund_pending_settlement = ?, fund_frozen = ?,
+         tags = ?, note = ?, secret_enc = ?, secret_keys = ?,
          updated_at = datetime('now','localtime')
        WHERE id = ?`,
       [
@@ -507,6 +538,9 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): {
         score,
         openedAt,
         depositReceivedAt,
+        fundAvailable,
+        fundPendingSettlement,
+        fundFrozen,
         tags,
         note,
         secretEnc,
@@ -521,9 +555,9 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): {
     `INSERT INTO sk_shops
        (platform, name, name_key, platform_shop_id, shop_url, shop_url_raw, site, email,
         company_id, ziniao_account_id, erp_account_id, status, score, opened_at,
-        deposit_received_at, tags, note,
+        deposit_received_at, fund_available, fund_pending_settlement, fund_frozen, tags, note,
         secret_enc, secret_keys, created_at, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'),datetime('now','localtime'))`,
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'),datetime('now','localtime'))`,
     [
       platform,
       name,
@@ -540,6 +574,9 @@ export function upsertShopAccount(input: ShopAccountUpsertInput): {
       score,
       openedAt,
       depositReceivedAt,
+      fundAvailable,
+      fundPendingSettlement,
+      fundFrozen,
       tags,
       note,
       secretEnc,
@@ -828,6 +865,9 @@ function toItem(row: Record<string, unknown>): ShopAccountItem {
     score: num(row.score),
     openedAt: String(row.opened_at ?? ''),
     depositReceivedAt: String(row.deposit_received_at ?? ''),
+    fundAvailable: num(row.fund_available),
+    fundPendingSettlement: num(row.fund_pending_settlement),
+    fundFrozen: num(row.fund_frozen),
     tags: String(row.tags ?? ''),
     note: String(row.note ?? ''),
     secretKeys: parseSecretKeys(String(row.secret_keys ?? '')),

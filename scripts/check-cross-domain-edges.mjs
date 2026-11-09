@@ -119,11 +119,12 @@ const DB_EDGES = [
       'SHOP_STATUSES',
       'TOOL_ACCOUNT_KINDS',
       'ensureShopSchema',
+      'normalizeFundAmount',
       'normalizeShopScore',
       'normalizeShopUrl',
       'toOpenableUrl',
     ],
-    why: '账号域不再自建表：表 owner 是 shop-db（sk_shops 物理合并后的唯一表）；复用其建表/迁移、地址归一与记分分值归一，合并 upsert 直接写同一行的账号列',
+    why: '账号域不再自建表：表 owner 是 shop-db（sk_shops 物理合并后的唯一表）；复用其建表/迁移、地址归一、记分分值与资金金额归一（金额口径只允许一处实现），合并 upsert 直接写同一行的账号列',
   },
   {
     from: 'shop-db.ts',

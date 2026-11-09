@@ -140,6 +140,22 @@ handle('shop-account-upsert', (payload: any) => {
     input.score = Math.min(p.score, 2147483647);
   }
 
+  // 资金三项：只收 ≥ 0 的有限数。负数 / NaN / 字符串一律不进 input（= 保持原值），
+  // 避免把「用户输错」静默写成 0；上限由 db 层的 normalizeFundAmount 给可读错误。
+  if (typeof p.fundAvailable === 'number' && Number.isFinite(p.fundAvailable) && p.fundAvailable >= 0) {
+    input.fundAvailable = p.fundAvailable;
+  }
+  if (
+    typeof p.fundPendingSettlement === 'number' &&
+    Number.isFinite(p.fundPendingSettlement) &&
+    p.fundPendingSettlement >= 0
+  ) {
+    input.fundPendingSettlement = p.fundPendingSettlement;
+  }
+  if (typeof p.fundFrozen === 'number' && Number.isFinite(p.fundFrozen) && p.fundFrozen >= 0) {
+    input.fundFrozen = p.fundFrozen;
+  }
+
   const companyId = optNonNeg(p.companyId);
   if (companyId !== undefined) input.companyId = companyId;
   const ziniaoAccountId = optNonNeg(p.ziniaoAccountId);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 店铺编辑抽屉：新增 / 编辑一行（店铺 + 账号物理合并，见 SHOP_ACCOUNT_REDESIGN_PLAN.md §3.4）。
 // 五个区块一次保存：店铺 / 账号 / 企业（手机号·支付宝只读带出 + 国际支付宝密码）/
-// 工具账号（紫鸟·ERP 下拉，可就地新建）/ 其他（状态·保证金到账·开店时间·记分·标签·备注）。
+// 工具账号（紫鸟·ERP 下拉，可就地新建）/ 资金（可用·待结算·冻结，单位元）/ 其他（状态·保证金到账·开店时间·记分·标签·备注）。
 // 保证金到账时间仅「退店」状态有输入位——状态非退店时保留库里原值，只是不展示。
 // 校验底线：店名与邮箱至少填一个；邮箱填了就必须含 @。
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
@@ -32,6 +32,10 @@ const form = reactive({
   openedAt: '',
   /** 保证金到账日期（仅退店时有意义；状态非退店时保留原值但不展示） */
   depositReceivedAt: '',
+  /** 资金三项（单位元）：用字符串承接输入框，空串 = 未填（提交时按 0 / 未记录处理） */
+  fundAvailable: '',
+  fundPendingSettlement: '',
+  fundFrozen: '',
   status: 'active' as ShopAccountStatus,
   /** 记分分值（0 = 未记录） */
   score: 0,
@@ -70,9 +74,24 @@ const emailMissing = computed(() => isEdit.value && !(store.editorDetail?.email 
 const nameFilled = computed(() => !!form.name.trim());
 const emailFilled = computed(() => !!form.email.trim());
 const emailValid = computed(() => !emailFilled.value || (form.email.includes('@') && !!form.email.trim()));
-/** 底线：店名与邮箱至少填一个（两者都空拒绝保存） */
+/** 资金三项的输入合法性：空 = 未记录；填了就必须是 ≥ 0 的有限数（负数不许保存） */
+const FUND_KEYS = ['fundAvailable', 'fundPendingSettlement', 'fundFrozen'] as const;
+const fundsValid = computed(() =>
+  FUND_KEYS.every((key) => {
+    const raw = String(form[key] ?? '').trim();
+    if (!raw) return true;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0;
+  }),
+);
+
+/** 底线：店名与邮箱至少填一个（两者都空拒绝保存） + 资金不能为负 */
 const canSave = computed(
-  () => (nameFilled.value || emailFilled.value) && emailValid.value && !store.saving,
+  () =>
+    (nameFilled.value || emailFilled.value) &&
+    emailValid.value &&
+    fundsValid.value &&
+    !store.saving,
 );
 
 /** 开店时间的辅助说明：已填则回显开店天数，未填说明用途 */
@@ -157,6 +176,10 @@ function hydrate(): void {
   form.erpAccountId = Number(detail?.erpAccountId ?? store.lastUsed.erpAccountId ?? 0) || 0;
   form.openedAt = detail?.openedAt ?? '';
   form.depositReceivedAt = detail?.depositReceivedAt ?? '';
+  // 新增时留空（placeholder 0.00 说明「未记录」），编辑时回填库里的数
+  form.fundAvailable = detail ? String(detail.fundAvailable ?? 0) : '';
+  form.fundPendingSettlement = detail ? String(detail.fundPendingSettlement ?? 0) : '';
+  form.fundFrozen = detail ? String(detail.fundFrozen ?? 0) : '';
   form.status = detail?.status ?? 'active';
   form.score = Number(detail?.score ?? 0) || 0;
   form.tags = detail?.tags ?? '';
@@ -203,6 +226,9 @@ async function submit(): Promise<void> {
     score: Number(form.score) || 0,
     openedAt: form.openedAt,
     depositReceivedAt: form.depositReceivedAt,
+    fundAvailable: Number(form.fundAvailable) || 0,
+    fundPendingSettlement: Number(form.fundPendingSettlement) || 0,
+    fundFrozen: Number(form.fundFrozen) || 0,
     tags: form.tags.trim(),
     note: form.note.trim(),
     secrets: secretsPatch,
@@ -493,7 +519,61 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
           </p>
         </section>
 
-        <!-- ⑤ 其他 -->
+        <!-- ⑤ 资金：平台后台资金账户三项抄录（单位元；0 / 留空 = 未记录） -->
+        <section class="form-section">
+          <h3 class="section-title">资金</h3>
+          <div class="form-row">
+            <label class="form-label">可用资金</label>
+            <div class="field-wrap">
+              <input
+                v-model="form.fundAvailable"
+                class="wb-input"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                data-act="shop-fund-available"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">待结算资金</label>
+            <div class="field-wrap">
+              <input
+                v-model="form.fundPendingSettlement"
+                class="wb-input"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                data-act="shop-fund-pending"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">冻结资金</label>
+            <div class="field-wrap">
+              <input
+                v-model="form.fundFrozen"
+                class="wb-input"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                data-act="shop-fund-frozen"
+              />
+            </div>
+          </div>
+          <p :class="fundsValid ? 'field-hint' : 'field-error'" class="funds-hint">
+            {{
+              fundsValid
+                ? '单位：元。按平台后台资金账户填写；留空或 0 表示未记录。'
+                : '资金金额不能为负数，请核对后再保存'
+            }}
+          </p>
+        </section>
+
+        <!-- ⑥ 其他 -->
         <section class="form-section">
           <h3 class="section-title">其他</h3>
           <div class="form-row">

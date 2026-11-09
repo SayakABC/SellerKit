@@ -108,10 +108,11 @@ const FAKE_BRIDGE = `<script>
        · 13（无店名）：只有邮箱 us@example.com（店铺待建），状态 archived
      状态必须有两个取值（active/archived）才验得出状态筛选。
      记分分值（2026-10-23）：11 带 12 分（验列表显示与编辑器回填），其余 0（验「0 不占位」）。
+     资金三项（2026-11-09）：同样只有 11 号店录过值，12 / 13 号全 0 是「合格但应被淘汰」的干扰项。
      保证金（2026-10-25）：12 是退店 + 已到账（验「退店才显示、且不显示在别的行」）；
      11 是启用但库里留着日期（验非退店行**不显示**，光验"退店能显示"会漏掉这一半）。 */
   var SHOPS_INIT = [
-    { id: 11, platform: 'shopee', name: 'HK 优品店', nameKey: 'hk 优品店', platformShopId: '', shopUrl: '', site: 'MY', email: 'hk@example.com', companyId: 3, companyName: '示例企业', phone: '13800000000', alipay: 'hk-alipay@example.com', ziniaoAccountId: 1, erpAccountId: 2, ziniaoAccount: 'zn-main', erpAccount: 'erp-max', status: 'active', score: 12, openedAt: '2025-03-01', depositReceivedAt: '2026-01-05', tags: '主力店', note: '', secretKeys: ['shopPwd', 'emailPwd'], hasMailAccount: true, aliasCount: 1, createdAt: '2026-09-01 10:00', updatedAt: '' },
+    { id: 11, platform: 'shopee', name: 'HK 优品店', nameKey: 'hk 优品店', platformShopId: '', shopUrl: '', site: 'MY', email: 'hk@example.com', companyId: 3, companyName: '示例企业', phone: '13800000000', alipay: 'hk-alipay@example.com', ziniaoAccountId: 1, erpAccountId: 2, ziniaoAccount: 'zn-main', erpAccount: 'erp-max', status: 'active', score: 12, openedAt: '2025-03-01', depositReceivedAt: '2026-01-05', fundAvailable: 1234.56, fundPendingSettlement: 2000, fundFrozen: 50, tags: '主力店', note: '', secretKeys: ['shopPwd', 'emailPwd'], hasMailAccount: true, aliasCount: 1, createdAt: '2026-09-01 10:00', updatedAt: '' },
     { id: 12, platform: 'amazon', name: 'Aurora Store', nameKey: 'aurora store', platformShopId: 'A1B2C3D4', shopUrl: '', site: 'US', email: '', companyId: 0, companyName: '', phone: '', alipay: '', ziniaoAccountId: 0, erpAccountId: 0, ziniaoAccount: '', erpAccount: '', status: 'exited', score: 0, openedAt: '', depositReceivedAt: '2026-02-10', tags: '', note: '', secretKeys: [], hasMailAccount: false, aliasCount: 1, createdAt: '2026-09-02 10:00', updatedAt: '' },
     { id: 13, platform: 'aliexpress', name: '', nameKey: '', platformShopId: '', shopUrl: '', site: '', email: 'us@example.com', companyId: 0, companyName: '', phone: '', alipay: '', ziniaoAccountId: 0, erpAccountId: 0, ziniaoAccount: '', erpAccount: '', status: 'archived', score: 0, openedAt: '', depositReceivedAt: '', tags: '', note: '', secretKeys: [], hasMailAccount: false, aliasCount: 0, createdAt: '2026-09-03 10:00', updatedAt: '' },
   ];
@@ -119,7 +120,11 @@ const FAKE_BRIDGE = `<script>
     { key: '新奇怪物店', raw: '新奇怪物店', occurrences: 3, sources: ['order'], autoShopId: 12, autoShopName: 'Aurora Store', autoShopPlatform: 'amazon' },
     { key: 'gaia', raw: 'GAIA', occurrences: 5, sources: ['purchase'], autoShopId: 0, autoShopName: '', autoShopPlatform: '' },
   ];
-  var SHOPS = SHOPS_INIT.map(function (s) { return Object.assign({}, s); });
+  /* 资金三项默认 0：只有 11 号店录过值，另两家是干扰项（全 0 不该显示资金摘要）。
+     给默认值而不是让字段 undefined —— undefined 会让「不显示」这条断言恒绿，守不住零值语义。 */
+  var SHOPS = SHOPS_INIT.map(function (s) {
+    return Object.assign({ fundAvailable: 0, fundPendingSettlement: 0, fundFrozen: 0 }, s);
+  });
   var UNMAPPED_SHOPS = UNMAPPED_SHOPS_INIT.map(function (r) { return Object.assign({}, r); });
   var SHOP_STALE = 0;
   var SEQ = 950;
@@ -246,13 +251,13 @@ const FAKE_BRIDGE = `<script>
       var hit = null;
       for (var i = 0; i < SHOPS.length; i++) if (SHOPS[i].id === id) hit = SHOPS[i];
       if (!hit) {
-        hit = { id: ++SEQ, platform: 'aliexpress', name: '', nameKey: '', platformShopId: '', shopUrl: '', site: '', email: '', companyId: 0, companyName: '', phone: '', alipay: '', ziniaoAccountId: 0, erpAccountId: 0, ziniaoAccount: '', erpAccount: '', status: 'active', score: 0, openedAt: '', depositReceivedAt: '', tags: '', note: '', secretKeys: [], hasMailAccount: false, aliasCount: 0, createdAt: '2026-10-22 12:00', updatedAt: '' };
+        hit = { id: ++SEQ, platform: 'aliexpress', name: '', nameKey: '', platformShopId: '', shopUrl: '', site: '', email: '', companyId: 0, companyName: '', phone: '', alipay: '', ziniaoAccountId: 0, erpAccountId: 0, ziniaoAccount: '', erpAccount: '', status: 'active', score: 0, openedAt: '', depositReceivedAt: '', fundAvailable: 0, fundPendingSettlement: 0, fundFrozen: 0, tags: '', note: '', secretKeys: [], hasMailAccount: false, aliasCount: 0, createdAt: '2026-10-22 12:00', updatedAt: '' };
         SHOPS.push(hit);
       }
       // 局部语义镜像主进程：undefined = 保持原值；字符串（含空串）= 覆盖；数字 = 覆盖
       var STR_KEYS = ['platform', 'name', 'platformShopId', 'shopUrl', 'site', 'email', 'status', 'openedAt', 'depositReceivedAt', 'tags', 'note'];
       for (var k = 0; k < STR_KEYS.length; k++) if (p[STR_KEYS[k]] !== undefined) hit[STR_KEYS[k]] = p[STR_KEYS[k]];
-      var NUM_KEYS = ['companyId', 'ziniaoAccountId', 'erpAccountId', 'score'];
+      var NUM_KEYS = ['companyId', 'ziniaoAccountId', 'erpAccountId', 'score', 'fundAvailable', 'fundPendingSettlement', 'fundFrozen'];
       for (var n = 0; n < NUM_KEYS.length; n++) if (p[NUM_KEYS[n]] !== undefined) hit[NUM_KEYS[n]] = Number(p[NUM_KEYS[n]]) || 0;
       if (p.name !== undefined) hit.nameKey = String(p.name).toLowerCase();
       return { success: true, data: { id: hit.id, secureStorage: true } };
@@ -905,6 +910,22 @@ async function main() {
     report('店铺列表渲染 3 行（一家齐全 / 一家只有店名 / 一家只有邮箱）',
       all('.acct-panel .data-table tbody tr').length === 3,
       'rows=' + all('.acct-panel .data-table tbody tr').length);
+    /* 资金三项（2026-11-09）：列表与编辑器同源，且零值行必须「没有」这一行 ——
+       只验「有值的那行显示了」的话，全表都挂资金摘要也照样绿。 */
+    var shopRows = all('.acct-panel .data-table tbody tr');
+    var row11 = null, zeroRows = [];
+    for (var ri = 0; ri < shopRows.length; ri++) {
+      if (flat(shopRows[ri]).indexOf('HK 优品店') >= 0) row11 = shopRows[ri];
+      else zeroRows.push(shopRows[ri]);
+    }
+    var fundsCell11 = row11 ? row11.querySelector('[data-act="shop-funds"]') : null;
+    report('资金三项在列表按同口径显示（可用 / 待结算 / 冻结，两位小数）',
+      !!fundsCell11 && flat(fundsCell11).indexOf('1234.56') >= 0 &&
+        flat(fundsCell11).indexOf('2000.00') >= 0 && flat(fundsCell11).indexOf('50.00') >= 0,
+      'funds=' + flat(fundsCell11));
+    report('资金全零的店铺不显示资金摘要（干扰项：合格但应被淘汰）',
+      zeroRows.length === 2 && zeroRows.every(function (r) { return !r.querySelector('[data-act="shop-funds"]'); }),
+      'zeroRows=' + zeroRows.length);
 
     /* 邮箱接入态（2026-10-25）：冷启动直接落在本页时，邮件账号清单也必须就绪 ——
        此前只有「邮件」页会初始化邮件 store，直接进本页时每一行都报「未接入」，
@@ -1104,6 +1125,17 @@ async function main() {
     report('记分分值回填 12（详情取回后表单与列表同口径）',
       !!scoreInput && Number(scoreInput.value) === 12,
       'value=' + (scoreInput ? scoreInput.value : 'missing'));
+    /* 资金三项：详情取回后必须回填，且三个输入位各自独立（三个都绑到同一个字段也会回填对，
+       所以要靠下面的「分别改值 → 载荷三项不同」再钉一道）。 */
+    var fundInputs = [
+      document.querySelector('.editor-overlay [data-act="shop-fund-available"]'),
+      document.querySelector('.editor-overlay [data-act="shop-fund-pending"]'),
+      document.querySelector('.editor-overlay [data-act="shop-fund-frozen"]')
+    ];
+    var fundExpected = [1234.56, 2000, 50];
+    report('资金三项编辑器回填库里原值（详情 → 表单，不是空表单）',
+      fundInputs.every(function (el, i) { return !!el && Number(el.value) === fundExpected[i]; }),
+      fundInputs.map(function (el) { return el ? el.value : 'missing'; }).join('|'));
     var statusBtns = all('.editor-overlay .status-picker [data-status]');
     report('状态选择器四个选项都在（启用 / 停用 / 封店 / 退店，顺序固定）',
       statusBtns.map(function (b) { return flat(b); }).join('|') === '启用|停用|封店|退店',
@@ -1124,6 +1156,10 @@ async function main() {
     // 整条链验一次：编辑器改成封店 + 记分 20 → 局部更新载荷 → 列表立刻按新值显示。
     // 只验"选项渲染出来了"的话，status/score 没接进 payload 也照样绿。
     if (scoreInput) setVal(scoreInput, '20');
+    // 三项分别改不同的值：验证「输入框 → 载荷 → 列表」整条链，只验回填的话没接进 payload 也照样绿
+    if (fundInputs[0]) setVal(fundInputs[0], '888.88');
+    if (fundInputs[1]) setVal(fundInputs[1], '999.99');
+    if (fundInputs[2]) setVal(fundInputs[2], '12.34');
     var banBtn = document.querySelector('.editor-overlay .status-picker [data-status="banned"]');
     if (banBtn) banBtn.click();
     await settle(function () { return !document.querySelector('.editor-overlay [data-act="shop-deposit"]'); }, 4000);
@@ -1139,6 +1175,11 @@ async function main() {
     report('保证金日期也随表单提交（输入框 → 载荷，不是只在界面上摆着）',
       savedCall.depositReceivedAt === '2026-03-04',
       'depositReceivedAt=' + savedCall.depositReceivedAt);
+    report('资金三项随表单一起提交，且三项各自独立（不是三个输入共用一个字段）',
+      Number(savedCall.fundAvailable) === 888.88 &&
+        Number(savedCall.fundPendingSettlement) === 999.99 &&
+        Number(savedCall.fundFrozen) === 12.34,
+      JSON.stringify({ a: savedCall.fundAvailable, p: savedCall.fundPendingSettlement, f: savedCall.fundFrozen }));
     var refreshedRow = all('.acct-panel .data-table tbody tr')[0];
     report('保存后列表立即显示「封店 / 记分 20」（不用重进页面）',
       !!refreshedRow &&
@@ -1146,6 +1187,11 @@ async function main() {
         scoreSubOf(refreshedRow).indexOf('记分 20') >= 0,
       'status=' + (refreshedRow ? flat(refreshedRow.querySelector('.status-chip')) : 'missing') +
         ' | sub=' + scoreSubOf(refreshedRow));
+    var fundsAfter = refreshedRow ? refreshedRow.querySelector('[data-act="shop-funds"]') : null;
+    report('保存后列表立即显示新资金（可用 888.88 / 待结算 999.99 / 冻结 12.34）',
+      !!fundsAfter && flat(fundsAfter).indexOf('888.88') >= 0 &&
+        flat(fundsAfter).indexOf('999.99') >= 0 && flat(fundsAfter).indexOf('12.34') >= 0,
+      'funds=' + flat(fundsAfter));
     report('改成封店后保证金日期不再显示在列表（行状态决定可见性）',
       depositOf(refreshedRow) === '', 'deposit=' + depositOf(refreshedRow));
     var edClose2 = document.querySelector('.editor-overlay .editor-head .icon-btn');

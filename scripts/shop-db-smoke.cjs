@@ -25,6 +25,8 @@
 //     缺少 = 空串（未填写），非法日期归一为空串而不是写脏值
 //   · 删除保护（2026-10-26）：有记账引用（专属条目 / 公共分摊行 / 已作废条目）时**拒绝删除**
 //     并引导改用停用；判据在编排层 `shop-delete-guard.ts`，本脚本调线上同一份函数
+//   · 资金三项（2026-11-09）：单位元，`shop.columns` v4 一次补三列；写入归一到两位小数，
+//     负数 / 超大值抛错不静默归零，列表投影必须带出（列表不读详情）
 // 每个用例自带 reset()：避免上一条的种子数据让下一条"新增"报重复键，产生假失败。
 
 const assert = require('assert');
@@ -126,9 +128,10 @@ check('空库：未归一名单为空、汇总全零（源表为空）', () => {
 
 // `shop.main` 的整表合并迁移已随「未正式发布、无存量库」退役（现在只保留 v1 版本占位 +
 // v2 清掉 `sk_shop_sets`），老形状夹具（店铺行 + 账号套装 + 邮箱账号）不再需要。
-// `shop.columns`（score / deposit_received_at / erp_shop_id）仍要验：下面这条用例守的就是那几条补列分支。
+// `shop.columns`（score / deposit_received_at / erp_shop_id / 资金三项）仍要验：
+// 下面这条用例守的就是那几条补列分支，新增列必须同时进「新库建表」与「老库补列」两处断言。
 
-check('前置：当前库的表形状已含 score / deposit_received_at / erp_shop_id，shop.columns 账本记到 v3', () => {
+check('前置：当前库的表形状已含 score / deposit_received_at / erp_shop_id / 资金三项，shop.columns 账本记到 v4', () => {
   const cols = dbQuery(`PRAGMA table_info(sk_shops)`).map((r) => String(r.name));
   assert.ok(cols.includes('score'), '新库的建表语句必须自带 score —— 否则只有老库能补，新库反而缺列');
   assert.ok(
@@ -141,19 +144,25 @@ check('前置：当前库的表形状已含 score / deposit_received_at / erp_sh
     cols.includes('erp_shop_id'),
     '新库的建表语句必须自带 erp_shop_id（否则新装用户的芒果订单永远匹配不到店）',
   );
+  // v4（2026-11-09）：资金三项。合并 upsert 的 INSERT / UPDATE / SELECT 都点名这三列，
+  // 少了任意一列，新装用户一点「保存店铺」就报 no such column（不是显示少一个字段而已）。
+  for (const c of ['fund_available', 'fund_pending_settlement', 'fund_frozen']) {
+    assert.ok(cols.includes(c), '新库的建表语句必须自带 ' + c + '（否则新装用户保存店铺直接报缺列）');
+  }
   // 账本一 key 一行、只存**最新版本**（migrate 的 upsert 语义），不是每步一行
   assert.strictEqual(
     dbQuery(`SELECT version FROM sk_schema_migrations WHERE key = 'shop.columns'`)[0].version,
-    3,
-    'shop.columns 应记到 v3（v1 score + v2 deposit_received_at + v3 erp_shop_id；与 shop.main 的版本号互不影响）',
+    4,
+    'shop.columns 应记到 v4（v1 score + v2 deposit_received_at + v3 erp_shop_id + v4 资金三项；与 shop.main 的版本号互不影响）',
   );
 });
 
 // ⚠️ 本脚本的库是现建的，建表语句已含这几列 ⇒ ALTER 分支一次都不会执行。
-// 必须造一张「当前形状但既没有 score / deposit_received_at / erp_shop_id」的老表，并把 shop.columns 的账本倒回 0。
+// 必须造一张「当前形状但既没有 score / deposit_received_at / erp_shop_id / 资金三项」的老表，
+// 并把 shop.columns 的账本倒回 0。
 // 注意**不能只 DROP 表就调 ensure**：`dbMigrate(SCHEMA)` 会按新形状把表建出来（带这些列），
 // 补列分支照样恒绿。所以老表要自己按 DDL 建好，让 `CREATE TABLE IF NOT EXISTS` 变成空操作。
-check('老库补列：shop.columns v1/v2/v3 给 sk_shops 补 score / deposit_received_at / erp_shop_id，老行默认值正确、数据不丢、幂等', () => {
+check('老库补列：shop.columns v1/v2/v3/v4 给 sk_shops 补 score / deposit_received_at / erp_shop_id / 资金三项，老行默认值正确、数据不丢、幂等', () => {
   reset();
   dbRun(`DROP TABLE IF EXISTS sk_shops`);
   dbRun(`CREATE TABLE sk_shops (
@@ -193,6 +202,9 @@ check('老库补列：shop.columns v1/v2/v3 给 sk_shops 补 score / deposit_rec
   assert.ok(!before.includes('score'), '前置条件：老表本来就没有 score 列');
   assert.ok(!before.includes('deposit_received_at'), '前置条件：老表本来也没有 deposit_received_at 列');
   assert.ok(!before.includes('erp_shop_id'), '前置条件：老表更不可能有 erp_shop_id 列（v3）');
+  assert.ok(!before.includes('fund_available'), '前置条件：老表没有 fund_available 列（v4）');
+  assert.ok(!before.includes('fund_pending_settlement'), '前置条件：老表没有 fund_pending_settlement 列（v4）');
+  assert.ok(!before.includes('fund_frozen'), '前置条件：老表没有 fund_frozen 列（v4）');
 
   sdb.ensureShopSchema();
 
@@ -200,8 +212,13 @@ check('老库补列：shop.columns v1/v2/v3 给 sk_shops 补 score / deposit_rec
   assert.ok(after.includes('score'), 'shop.columns v1 必须把 score 补上');
   assert.ok(after.includes('deposit_received_at'), 'shop.columns v2 必须把 deposit_received_at 补上');
   assert.ok(after.includes('erp_shop_id'), 'shop.columns v3 必须把 erp_shop_id 补上');
+  // v4 三列必须**一次补齐**：漏一列，合并域的 UPDATE / SELECT 立刻报 no such column。
+  assert.ok(after.includes('fund_available'), 'shop.columns v4 必须把 fund_available 补上');
+  assert.ok(after.includes('fund_pending_settlement'), 'shop.columns v4 必须把 fund_pending_settlement 补上');
+  assert.ok(after.includes('fund_frozen'), 'shop.columns v4 必须把 fund_frozen 补上');
   const row = dbGet(
-    `SELECT name, site, status, note, score, deposit_received_at, erp_shop_id FROM sk_shops WHERE id = ?`,
+    `SELECT name, site, status, note, score, deposit_received_at, erp_shop_id,
+            fund_available, fund_pending_settlement, fund_frozen FROM sk_shops WHERE id = ?`,
     [seeded.lastInsertRowid],
   );
   assert.ok(row, '补列不许丢行');
@@ -213,12 +230,21 @@ check('老库补列：shop.columns v1/v2/v3 给 sk_shops 补 score / deposit_rec
   // v3 的默认值必须是空串：空 = "还没学到这个 authId"，落 NULL 会让
   // `WHERE erp_shop_id = ?` 与 `erp_shop_id = ''` 两套判断分叉
   assert.strictEqual(row.erp_shop_id, '', '老行没有任何 ERP 绑定 ⇒ 空串（未学到），不是 NULL');
+  // 资金三项的老行默认值必须是数字 0（不是 NULL、不是 ''）：列表用 Number(x) || 0 判「未记录」，
+  // 落 NULL 会让 hasFunds 与 SQL 的 SUM/比较口径分叉。
+  assert.strictEqual(Number(row.fund_available), 0, '老行没有资金记录 ⇒ 0（未记录），不是 NULL');
+  assert.strictEqual(Number(row.fund_pending_settlement), 0, '待结算资金同理');
+  assert.strictEqual(Number(row.fund_frozen), 0, '冻结资金同理');
 
   // 幂等：再 ensure 两次不重复 ALTER、不产生额外行
   sdb.ensureShopSchema();
   sdb.ensureShopSchema();
   assert.strictEqual(dbQuery(`SELECT COUNT(*) AS c FROM sk_shops`)[0].c, 1);
   assert.strictEqual(Number(sdb.getShop(Number(seeded.lastInsertRowid)).score), 0);
+  const merged = adb.getShopAccount(Number(seeded.lastInsertRowid));
+  assert.strictEqual(merged.fundAvailable, 0, '补列后合并域详情照常可读（SELECT 三列不报缺列）');
+  assert.strictEqual(merged.fundPendingSettlement, 0);
+  assert.strictEqual(merged.fundFrozen, 0);
   assert.strictEqual(
     dbQuery(`SELECT deposit_received_at FROM sk_shops WHERE id = ?`, [seeded.lastInsertRowid])[0]
       .deposit_received_at,
@@ -251,6 +277,47 @@ check('保证金到账：写入 / 列表带出 / 漏传保持 / 带时间只留�
   adb.upsertShopAccount({ id, depositReceivedAt: '2026-07-08' });
   adb.upsertShopAccount({ id, depositReceivedAt: '' });
   assert.strictEqual(adb.getShopAccount(id).depositReceivedAt, '', '空串 = 显式清空');
+});
+
+// 资金三项（2026-11-09，单位元 / 人工录入）：写入面与投影面必须同时验 ——
+// 只验详情能读的话，列表渲染读的是 list，漏一列 SELECT 会静默显示 0，用户以为钱没了。
+check('资金三项：写入 / 列表带出 / 漏传保持 / 两位小数 / 负数与超大值拒绝 / 0 清空', () => {
+  reset();
+  const { id } = adb.upsertShopAccount({
+    name: '资金店',
+    fundAvailable: 1234.567,
+    fundPendingSettlement: 2000,
+    fundFrozen: 50.5,
+  });
+  const detail = adb.getShopAccount(id);
+  assert.strictEqual(detail.fundAvailable, 1234.57, '金额归一到两位小数（不是整块浮点落库）');
+  assert.strictEqual(detail.fundPendingSettlement, 2000);
+  assert.strictEqual(detail.fundFrozen, 50.5);
+  const row = adb.listShopAccounts({ search: '资金店' })[0];
+  assert.strictEqual(row.fundAvailable, 1234.57, '列表投影必须带出可用资金');
+  assert.strictEqual(row.fundPendingSettlement, 2000, '列表投影必须带出待结算资金');
+  assert.strictEqual(row.fundFrozen, 50.5, '列表投影必须带出冻结资金');
+
+  adb.upsertShopAccount({ id, note: '只改备注' });
+  const kept = adb.getShopAccount(id);
+  assert.strictEqual(kept.fundAvailable, 1234.57, '漏传 = 保持原值（局部更新）');
+  assert.strictEqual(kept.fundPendingSettlement, 2000);
+  assert.strictEqual(kept.fundFrozen, 50.5);
+
+  assert.throws(
+    () => adb.upsertShopAccount({ id, fundAvailable: -1 }),
+    /必须是 0 或正数/,
+    '负数必须拒收，不能静默写成 0（用户会以为平台余额真是 0）',
+  );
+  assert.throws(
+    () => adb.upsertShopAccount({ id, fundFrozen: 1e13 }),
+    /过大/,
+    '超大值（多敲一位 / 单位填错）必须拦下来',
+  );
+  assert.strictEqual(adb.getShopAccount(id).fundAvailable, 1234.57, '拒收时不许改掉其它两项');
+
+  adb.upsertShopAccount({ id, fundFrozen: 0 });
+  assert.strictEqual(adb.getShopAccount(id).fundFrozen, 0, '0 = 显式清为未记录');
 });
 
 // ---- 两处文本的聚合 ----

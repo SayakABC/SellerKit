@@ -4,7 +4,7 @@
 > 只记"下一位接手需要知道的"，旧的完成项及时裁掉。深度笔记 / 计划 / 完整变更史在开发者本机的
 > `docs/` 与 `CHANGELOG.md`（不入库），本文件只留摘要。
 
-最后更新：2026-11-06
+最后更新：2026-11-09
 
 ## 进行中
 
@@ -16,6 +16,11 @@
 
 ## 最近完成（2026-11 上旬）
 
+- **店铺资金三项录入**（2026-11-09）：可用 / 待结算 / 冻结（单位元）落 `sk_shops` 三列
+  （新库 DDL + `shop.columns` v4 逐列幂等补列）；编辑抽屉「资金」区块 + 列表摘要（零值不占位）。
+  preload 白名单 → handler → 合并 upsert 全链路打通，`shop:smoke` / `master-data:ui` 各补守卫，
+  另做「LIST_COLS 漏列」变异确认守卫会红；tsc / vue-tsc / verify / verify:docs / build /
+  shop:smoke / master-data:ui / vitest（80 文件 1542 例）全绿。
 - `order-cost` 统计页 P0 口径门禁：默认全部、双轨并列、截断可见
 - `mango` 已发货回执：v14 物流列、回执专道与「收已发货回执」入口
 - `today` 订单维度状态跟踪：总览/待发货合并为「订单」、去步号、跨页焦点
@@ -27,6 +32,11 @@
 
 ## 关键决定
 
+- **2026-11-09 店铺资金**：三项只属**店铺账号域** —— 共享域 `ShopListItem` / `ShopUpsertInput`
+  刻意不投影（身份列表不该带资金，也少一条泄漏面）；金额口径只有 `shop-db.ts` 的
+  `normalizeFundAmount` 一处实现（≥0、两位小数、超大值抛中文错误），界面只判「能不能提交」、
+  不做四舍五入。0 = 未记录，列表零值不占位。加列必须同时同步新库 DDL + `shop.columns` 补列 +
+  合并域 SELECT / INSERT / UPDATE / toItem 四处，漏一处就是保存报缺列或列表静默显示 0。
 - **2026-11-06**：`docs/` 与 `CHANGELOG.md` 不再入库，跨设备上下文只靠本文件 + AGENTS.md；
   代码注释里的 `docs/**`、`CHANGELOG.md` 引用是本机路径，克隆后悬空属已知（`scripts/check-doc-links.mjs` 已适配）。
 - **2026-11-06 品牌标识**：界面用**固定色应用图标**（与 Dock / 安装包同一张脸），不新增

@@ -154,6 +154,15 @@ const sanitizeShopAccountInput = (payload: any) => {
   if (typeof payload?.score === 'number' && Number.isFinite(payload.score) && payload.score >= 0) {
     out.score = Math.min(payload.score, 2147483647);
   }
+  // 资金三项（可用 / 待结算 / 冻结）：只收 ≥ 0 的有限数，可带两位小数。
+  // ⚠️ 不做上限截断 —— 静默把用户填的大数改小比拒收更糟；上限由主进程给中文错误。
+  const fund = (key: string) => {
+    const value = payload?.[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
+  };
+  fund('fundAvailable');
+  fund('fundPendingSettlement');
+  fund('fundFrozen');
 
   // 敏感字段白名单：店铺密码 / 邮箱密码 / 国际支付宝密码 / IMAP 授权码
   const allowedSecretKeys = ['shopPwd', 'emailPwd', 'alipayPwd', 'mailAuthPwd'];

@@ -163,6 +163,21 @@ function depositText(item: ShopAccountItem): string {
   return date ? `保证金到账 ${date}` : '保证金到账时间未填';
 }
 
+/** 资金三项是否录过值：全 0 = 未记录，列表不占位（否则每家店都挂一行 0.00） */
+function hasFunds(item: ShopAccountItem): boolean {
+  return (
+    (Number(item.fundAvailable) || 0) > 0 ||
+    (Number(item.fundPendingSettlement) || 0) > 0 ||
+    (Number(item.fundFrozen) || 0) > 0
+  );
+}
+
+/** 列表资金摘要：三项同口径、固定两位小数；完整值同时进 title，窄列被省略时仍可查 */
+function fundsText(item: ShopAccountItem): string {
+  const yuan = (v: number): string => `¥${(Number(v) || 0).toFixed(2)}`;
+  return `可用 ${yuan(item.fundAvailable)} · 待结算 ${yuan(item.fundPendingSettlement)} · 冻结 ${yuan(item.fundFrozen)}`;
+}
+
 // ── 分组视图（左栏分组导航 + 右侧店铺列表）─────────────────────────────────
 
 /** 是否启用「左栏导航 + 右侧列表」的分组布局（空列表 / 加载中不启用） */
@@ -573,6 +588,14 @@ function batchEditCurrentGroup(): void {
                   <div v-if="item.platformShopId" class="cell-sub" :title="`平台店铺 ID：${item.platformShopId}`">
                     ID {{ item.platformShopId }}
                   </div>
+                  <div
+                    v-if="hasFunds(item)"
+                    class="cell-sub cell-funds"
+                    data-act="shop-funds"
+                    :title="`店铺资金（元）：${fundsText(item)}`"
+                  >
+                    {{ fundsText(item) }}
+                  </div>
                 </td>
                 <td>
                   <CopyableCell
@@ -666,6 +689,14 @@ function batchEditCurrentGroup(): void {
                     "
                   >
                     {{ depositText(item) }}
+                  </div>
+                  <div
+                    v-if="hasFunds(item)"
+                    class="cell-sub cell-funds"
+                    data-act="shop-funds"
+                    :title="`店铺资金（元）：${fundsText(item)}`"
+                  >
+                    {{ fundsText(item) }}
                   </div>
                 </div>
               </div>
@@ -1141,6 +1172,10 @@ function batchEditCurrentGroup(): void {
   font-size: 11px;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+/* 资金摘要：金额等宽对齐；颜色沿用次要文本，不与状态徽标抢视觉 */
+.cell-funds {
+  font-variant-numeric: tabular-nums;
 }
 /* 状态徽标跟在名称下方（2026-10-25 由独立「状态」列移入店铺格） */
 .cell-status {

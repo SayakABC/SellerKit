@@ -1849,6 +1849,10 @@ export interface ShopAccountItem {
   openedAt: string;
   /** 保证金到账时间（YYYY-MM-DD；退店时填写，空串 = 未填写） */
   depositReceivedAt: string;
+  /** 店铺资金账户三项（单位元，人工从平台后台录入；0 = 未记录） */
+  fundAvailable: number;
+  fundPendingSettlement: number;
+  fundFrozen: number;
   tags: string;
   note: string;
   /** 已配置值的敏感字段（仅供 UI 展示「已保存」徽标，不含任何明文） */
@@ -1898,6 +1902,12 @@ export interface ShopAccountUpsertInput {
   openedAt?: string;
   /** 保证金到账时间（YYYY-MM-DD）；字符串（含空串）= 覆盖，缺省 = 保持原值 */
   depositReceivedAt?: string;
+  /** 可用资金（元；≥ 0，缺省 = 保持原值，0 = 清为未记录） */
+  fundAvailable?: number;
+  /** 待结算资金（元；≥ 0，缺省 = 保持原值） */
+  fundPendingSettlement?: number;
+  /** 冻结资金（元；≥ 0，缺省 = 保持原值） */
+  fundFrozen?: number;
   tags?: string;
   note?: string;
   secrets?: Partial<Record<ShopAccountSecretKey, string>>;

@@ -223,6 +223,11 @@ function shopTableSql(table: string, ifNotExists = false): string {
     score REAL NOT NULL DEFAULT 0,
     opened_at TEXT NOT NULL DEFAULT '',
     deposit_received_at TEXT NOT NULL DEFAULT '',
+    -- 资金账户三项（2026-11-09）：可用 / 待结算 / 冻结，单位元，人工从平台后台抄录。
+    -- 三列同形 REAL + 默认 0（0 = 未记录）；只由「店铺账号」域读写，共享域投影刻意不带出。
+    fund_available REAL NOT NULL DEFAULT 0,
+    fund_pending_settlement REAL NOT NULL DEFAULT 0,
+    fund_frozen REAL NOT NULL DEFAULT 0,
     tags TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     secret_enc BLOB,
@@ -341,6 +346,27 @@ function ensureShopErpShopIdColumn(): void {
   dbRun(`ALTER TABLE sk_shops ADD COLUMN erp_shop_id TEXT NOT NULL DEFAULT ''`);
 }
 
+/**
+ * 老库补资金三项（2026-11-09）。
+ *
+ * 三列**一次补齐、逐列判存在**：漏补任何一列，下一次合并 upsert 的 UPDATE 会直接报
+ * `no such column`，整个店铺编辑器保存不了；只补一部分比一列都不补更隐蔽。
+ * 新库由 `shopTableSql` 建表时已含，这里幂等跳过。
+ */
+function ensureShopFundColumns(): void {
+  if (!tableExists('sk_shops')) return;
+  const cols = columnSet('sk_shops');
+  if (!cols.has('fund_available')) {
+    dbRun(`ALTER TABLE sk_shops ADD COLUMN fund_available REAL NOT NULL DEFAULT 0`);
+  }
+  if (!cols.has('fund_pending_settlement')) {
+    dbRun(`ALTER TABLE sk_shops ADD COLUMN fund_pending_settlement REAL NOT NULL DEFAULT 0`);
+  }
+  if (!cols.has('fund_frozen')) {
+    dbRun(`ALTER TABLE sk_shops ADD COLUMN fund_frozen REAL NOT NULL DEFAULT 0`);
+  }
+}
+
 function runShopColumnsMigration(): void {
   migrate(SHOP_COLUMNS_KEY, [
     { version: 1, name: 'sk_shops 补 score（记分分值）', up: ensureShopScoreColumn },
@@ -353,6 +379,11 @@ function runShopColumnsMigration(): void {
       version: 3,
       name: 'sk_shops 补 erp_shop_id（芒果 authId，订单→店铺的硬关联）',
       up: ensureShopErpShopIdColumn,
+    },
+    {
+      version: 4,
+      name: 'sk_shops 补 fund_available / fund_pending_settlement / fund_frozen（资金三项）',
+      up: ensureShopFundColumns,
     },
   ]);
 }
@@ -485,6 +516,20 @@ function num(v: unknown): number {
 export function normalizeShopScore(value: unknown): number {
   const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
   if (!Number.isFinite(n) || n < 0) throw new Error('记分分值必须是 0 或正数');
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * 资金金额归一（可用 / 待结算 / 冻结三项共用）：只接受 ≥ 0 的有限数，单位元、保留两位小数。
+ *
+ * 非法值**抛错**而不是静默归零 —— 抄错一个负号被写成 0，用户会以为平台余额真是 0。
+ * 上限 1e12 是「录入事故」的闸（多敲一位、把分当元），拦下来给中文原因比落一个天文数字好。
+ * ⚠️ 三项只允许有这一处实现：写入前全走它，界面只做「能不能提交」的提示。
+ */
+export function normalizeFundAmount(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (!Number.isFinite(n) || n < 0) throw new Error('资金金额必须是 0 或正数');
+  if (n > 1e12) throw new Error('资金金额过大，请核对单位（元）');
   return Math.round(n * 100) / 100;
 }
 

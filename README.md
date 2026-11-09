@@ -43,11 +43,38 @@ npm run dev:web                   # 只起 Vite，浏览器预览界面（无主
 
 ## 打包
 
+**原生模块决定了「一个平台只能打自己的包」**。`better-sqlite3` 是 C++ 插件，
+electron-builder 会按当前构建机重编（或复用）它，但**不会跨平台交叉编译**。
+在 macOS 上执行 `--win`，包里装的是 Mach-O：打包照样 `exit 0`、照样能上传 Releases，
+Windows 用户装完到主进程 `require('bindings')('better_sqlite3.node')` 才崩。
+
+实测 2026-09-04 那批 1.0.0 / 1.0.1 / 1.0.2 / 1.0.4 产物：8 个 mac 包的
+`better_sqlite3.node` 架构各自正确；**9 个 win-x64 包内嵌的却全是 Mach-O x86_64**，
+头 8 字节 `cffaedfe07000001`，不是 Windows PE。这些 Windows 包不要发布，
+需在 Windows x64 构建机上重打。
+
+| 目标产物 | 构建机 | 命令 |
+| --- | --- | --- |
+| mac arm64 + x64（dmg / zip 各两份） | macOS 13+，带能编译 C++20 的 Xcode CLT | `npm run dist:mac` |
+| win x64（nsis / portable） | Windows 10+ / x64，装好 MSVC 生成工具 | `npm run dist:win` |
+
+- 每台构建机都必须先 `npm install`（`postinstall` → `npm run rebuild`，编出该平台
+  Electron 44 / ABI 149 的二进制）再打包。mac 双架构可以一次打完：electron-builder
+  会按 target 分别重编，实测两个 zip 里的 `.node` 分别是 arm64 与 x86_64。
+- `npm run dist:all`（`--mac --win`）在单台机器上必然有一个平台是坏包。
+  `scripts/afterPack.js` 的原生模块门禁会在打包阶段**直接中止**，不让它悄悄产出。
+- 发布前复核：`npm run release:check` 扫描 `release/` 下所有 mac zip / win exe，
+  读出内嵌 `better_sqlite3.node` 的文件头比对目标平台，有坏包退出码 1。
+  `.dmg` 与同名 `.zip` 由同一次打包产出、内容同源，校验 zip 即可。
+
 ```bash
-npm run build        # 生产构建
-npm run dist         # 当前平台安装包，产物在 release/
-npm run dist:select  # 交互式勾选模块后打包
+npm run build         # 生产构建（不产出安装包）
+npm run dist          # 当前平台安装包，产物在 release/
+npm run dist:select   # 交互式勾选模块后打包
+npm run release:check # 发布前复核已有产物的原生模块平台
 ```
+
+> Electron 44 的 macOS 13+ 门槛见上文「快速开始」；Windows 侧为 Win10+ / 仅 x64。
 
 ## 目录结构
 

@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && tsc -p tsconfig.electron.json && electron .\"",
     "dev:web": "vite",
+    "release:check": "node scripts/check-release.mjs",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "build:minimal": "MODULE_PROFILE=minimal npm run build",
     "build:standard": "MODULE_PROFILE=standard npm run build",
